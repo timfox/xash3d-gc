@@ -13,7 +13,7 @@ def build(bld):
 
 	bld.stlib(
 		source = bld.path.ant_glob('*.c'),
-		target = 'client_stub',
+		target = 'menu',
 		includes = ['.', '../../engine', '../../engine/common', '../../engine/client', '../../engine/platform', '../../public'],
 		defines = ['ENGINE_DLL=1'],
 		use = ['engine_includes', 'public', 'werror'],
