@@ -1,5 +1,5 @@
 xash3d-gc disc hardware handoff
-iso=.ai/menu-test.iso
+iso=.ai/menu-font-test.iso
 iso_bytes=523501568
 dol=OUT/bin/boot.dol
 dol_bytes=5852032
