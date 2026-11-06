@@ -286,6 +286,161 @@ qboolean GC_BootArenaFree( void *ptr )
 	return true;
 }
 
+/*
+ * Gameplay region: ONE static block shared by every gameplay-only reserve
+ * (world nodes / hull0 / entities / submodels fallbacks, studio skin
+ * overflow, netchan emergency fragbufs).  Each was a separate worst-case
+ * BSS array or a heap block taken at boot (~982 KiB together), which left
+ * New Game's client init without heap.  Slots take exactly what the current
+ * map needs; the region is sized to what actually falls back (measured,
+ * docs/gamecube/MEM1_BUDGET.md): entities 104 KiB (c2a5f), hull0 46 KiB
+ * (c2a4e), submodels 14 KiB (c1a2), netchan emergency 2 x 35 KiB, and the
+ * rest for the skin overflow window (Nihilanth cast ~221 KiB on c4a3).
+ * Nodes (294 KiB worst) take a slot only when room remains; their primary
+ * fallback is the map-load arena / BSP scratch.
+ * See docs/gamecube/MEM1_BUDGET.md.  New reserves must be a slot here, not
+ * a new static array.
+ */
+#define GC_GAMEPLAY_REGION_BYTES ( 480u * 1024u )
+static byte gc_gameplay_region[GC_GAMEPLAY_REGION_BYTES] __attribute__(( aligned( 32 )));
+
+typedef struct gc_gp_blk_s
+{
+	uint32_t size;	/* whole block incl. header, multiple of 32 */
+	uint32_t used;
+	uint32_t pad[6];
+} gc_gp_blk_t;
+
+static const char *const gc_gp_names[GC_GP_COUNT] = {
+	"nodes", "hull0", "entities", "submodels", "skin", "frag0", "frag1"
+};
+static void *gc_gp_slot_ptr[GC_GP_COUNT];
+static size_t gc_gp_slot_cap[GC_GP_COUNT], gc_gp_slot_peak[GC_GP_COUNT];
+static size_t gc_gp_live, gc_gp_peak;
+static qboolean gc_gp_ready;
+
+static void GC_GameplayInit( void )
+{
+	gc_gp_blk_t *first = (gc_gp_blk_t *)gc_gameplay_region;
+
+	if( gc_gp_ready )
+		return;
+	gc_gp_ready = true;
+	first->size = GC_GAMEPLAY_REGION_BYTES;
+	first->used = 0;
+}
+
+static void GC_GameplayCoalesce( void )
+{
+	byte *cursor, *end = gc_gameplay_region + GC_GAMEPLAY_REGION_BYTES;
+
+	for( cursor = gc_gameplay_region; cursor < end; cursor += ((gc_gp_blk_t *)cursor)->size )
+	{
+		gc_gp_blk_t *cur = (gc_gp_blk_t *)cursor;
+		while( !cur->used && cursor + cur->size < end )
+		{
+			gc_gp_blk_t *next = (gc_gp_blk_t *)( cursor + cur->size );
+			if( next->used )
+				break;
+			cur->size += next->size;
+		}
+	}
+}
+
+size_t GC_GameplayLargestFree( void )
+{
+	byte *cursor, *end = gc_gameplay_region + GC_GAMEPLAY_REGION_BYTES;
+	size_t best = 0;
+
+	GC_GameplayInit();
+	for( cursor = gc_gameplay_region; cursor < end; cursor += ((gc_gp_blk_t *)cursor)->size )
+	{
+		gc_gp_blk_t *blk = (gc_gp_blk_t *)cursor;
+		if( !blk->used && blk->size - sizeof( gc_gp_blk_t ) > best )
+			best = blk->size - sizeof( gc_gp_blk_t );
+	}
+	return best;
+}
+
+void GC_GameplayRelease( gc_gp_slot_t slot )
+{
+	gc_gp_blk_t *blk;
+
+	if( slot < 0 || slot >= GC_GP_COUNT || !gc_gp_slot_ptr[slot] )
+		return;
+	blk = (gc_gp_blk_t *)((byte *)gc_gp_slot_ptr[slot] - sizeof( gc_gp_blk_t ));
+	blk->used = 0;
+	gc_gp_live -= blk->size;
+	gc_gp_slot_ptr[slot] = NULL;
+	gc_gp_slot_cap[slot] = 0;
+	GC_GameplayCoalesce();
+}
+
+/* Block for `slot` holding at least `bytes`; the slot's previous block is
+ * reused when big enough, otherwise replaced (contents not preserved — the
+ * caller re-initialises it, as with the old static arrays). */
+void *GC_GameplaySlot( gc_gp_slot_t slot, size_t bytes )
+{
+	size_t need;
+	byte *cursor, *end = gc_gameplay_region + GC_GAMEPLAY_REGION_BYTES;
+
+	if( slot < 0 || slot >= GC_GP_COUNT || bytes == 0 )
+		return NULL;
+	GC_GameplayInit();
+	if( gc_gp_slot_ptr[slot] && gc_gp_slot_cap[slot] >= bytes )
+		return gc_gp_slot_ptr[slot];
+	GC_GameplayRelease( slot );
+
+	need = ( sizeof( gc_gp_blk_t ) + bytes + 31u ) & ~(size_t)31u;
+	for( cursor = gc_gameplay_region; cursor < end; cursor += ((gc_gp_blk_t *)cursor)->size )
+	{
+		gc_gp_blk_t *blk = (gc_gp_blk_t *)cursor;
+
+		if( blk->used || blk->size < need )
+			continue;
+		if( blk->size - need >= 2u * sizeof( gc_gp_blk_t ))
+		{
+			gc_gp_blk_t *rest = (gc_gp_blk_t *)( cursor + need );
+			rest->size = blk->size - (uint32_t)need;
+			rest->used = 0;
+			blk->size = (uint32_t)need;
+		}
+		blk->used = 1;
+		gc_gp_live += blk->size;
+		if( gc_gp_live > gc_gp_peak )
+			gc_gp_peak = gc_gp_live;
+		gc_gp_slot_ptr[slot] = cursor + sizeof( gc_gp_blk_t );
+		gc_gp_slot_cap[slot] = blk->size - sizeof( gc_gp_blk_t );
+		if( bytes > gc_gp_slot_peak[slot] )
+			gc_gp_slot_peak[slot] = bytes;
+		Con_Reportf( "Xash3D GameCube: gameplay region %s %s (live %s peak %s of %s)\n",
+			gc_gp_names[slot], Q_memprint( bytes ), Q_memprint( gc_gp_live ),
+			Q_memprint( gc_gp_peak ), Q_memprint( GC_GAMEPLAY_REGION_BYTES ));
+		return gc_gp_slot_ptr[slot];
+	}
+	Con_Reportf( S_WARN "Xash3D GameCube: gameplay region full: %s need=%s largest=%s live=%s\n",
+		gc_gp_names[slot], Q_memprint( bytes ), Q_memprint( GC_GameplayLargestFree() ),
+		Q_memprint( gc_gp_live ));
+	return NULL;
+}
+
+qboolean GC_GameplayOwns( const void *ptr )
+{
+	const byte *p = (const byte *)ptr;
+	return p >= gc_gameplay_region && p < gc_gameplay_region + GC_GAMEPLAY_REGION_BYTES;
+}
+
+void GC_GameplayReport( const char *stage )
+{
+	Con_Reportf( "Xash3D GameCube: gameplay region stage=%s live=%s peak=%s cap=%s nodes=%u hull0=%u entities=%u submodels=%u skin=%u frag=%u/%u\n",
+		stage ? stage : "?", Q_memprint( gc_gp_live ), Q_memprint( gc_gp_peak ),
+		Q_memprint( GC_GAMEPLAY_REGION_BYTES ),
+		(unsigned)gc_gp_slot_peak[GC_GP_NODES], (unsigned)gc_gp_slot_peak[GC_GP_HULL0],
+		(unsigned)gc_gp_slot_peak[GC_GP_ENTITIES], (unsigned)gc_gp_slot_peak[GC_GP_SUBMODELS],
+		(unsigned)gc_gp_slot_peak[GC_GP_SKIN], (unsigned)gc_gp_slot_peak[GC_GP_FRAG0],
+		(unsigned)gc_gp_slot_peak[GC_GP_FRAG1] );
+}
+
 /* Linked with -Wl,--wrap=free,--wrap=realloc: any boot-arena block can be
  * released or resized through the C library entry points. */
 void __real_free( void *ptr );
@@ -862,6 +1017,11 @@ qboolean SV_GCEnsureStringArena( void );
 
 void GC_BeginMapLoadMemoryOpt( void )
 {
+	/* Budget telemetry: previous map's late peaks (skins, fragbufs). */
+	{
+		void SV_GCLogBudgetPrev( void );
+		SV_GCLogBudgetPrev();
+	}
 	/* First map load: take the session's world reserves before BSP staging. */
 	Mod_GCEnsureStaticReserves();
 	SV_GCEnsureStringArena();

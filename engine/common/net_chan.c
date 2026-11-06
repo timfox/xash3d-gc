@@ -15,6 +15,9 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "netchan.h"
+#if XASH_GAMECUBE
+#include "gamecube/mem_gamecube.h"
+#endif
 #include "xash3d_mathlib.h"
 #include "net_encode.h"
 #include "protocol.h"
@@ -52,13 +55,23 @@ void Netchan_AddBufferToList( fragbuf_t **pplist, fragbuf_t *pbuf );
 #define NETCHAN_GC_EMERGENCY_SLOTS 2
 #define NETCHAN_GC_EMERGENCY_PAYLOAD 34816
 
+/* Storage is a slot of the shared gameplay region (mem_gamecube.c), taken
+ * on first emergency instead of ~70 KiB of permanent BSS. */
+#define NETCHAN_GC_EMERGENCY_BYTES ( sizeof( fragbuf_t ) + NETCHAN_GC_EMERGENCY_PAYLOAD )
 typedef struct
 {
 	qboolean in_use;
-	byte storage[sizeof( fragbuf_t ) + NETCHAN_GC_EMERGENCY_PAYLOAD];
+	byte *storage;
 } netchan_gc_emergency_t;
 
 static netchan_gc_emergency_t s_gc_fragbuf_emergency[NETCHAN_GC_EMERGENCY_SLOTS];
+/* Session peaks (MEM1 budget telemetry). */
+static int s_gc_fragbuf_emergency_peak, s_gc_fragbuf_emergency_peak_size;
+void Netchan_GCEmergencyPeak( int *slots, int *size )
+{
+	if( slots ) *slots = s_gc_fragbuf_emergency_peak;
+	if( size ) *size = s_gc_fragbuf_emergency_peak_size;
+}
 static fragbufwaiting_t s_gc_waitlist_emergency;
 static qboolean s_gc_waitlist_emergency_in_use;
 
@@ -82,7 +95,7 @@ static void Netchan_FreeFragbuf( fragbuf_t *buf )
 
 	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
 	{
-		if( (void *)buf == (void *)s_gc_fragbuf_emergency[i].storage )
+		if( s_gc_fragbuf_emergency[i].storage && (void *)buf == (void *)s_gc_fragbuf_emergency[i].storage )
 		{
 			s_gc_fragbuf_emergency[i].in_use = false;
 			return;
@@ -591,7 +604,21 @@ static fragbuf_t *Netchan_AllocFragbuf( int fragment_size )
 		{
 			if( s_gc_fragbuf_emergency[i].in_use )
 				continue;
+			if( !s_gc_fragbuf_emergency[i].storage )
+				s_gc_fragbuf_emergency[i].storage = (byte *)GC_GameplaySlot(
+					(gc_gp_slot_t)( GC_GP_FRAG0 + i ), NETCHAN_GC_EMERGENCY_BYTES );
+			if( !s_gc_fragbuf_emergency[i].storage )
+				continue;
 			s_gc_fragbuf_emergency[i].in_use = true;
+			{
+				int j, used = 0;
+				for( j = 0; j < NETCHAN_GC_EMERGENCY_SLOTS; j++ )
+					used += s_gc_fragbuf_emergency[j].in_use ? 1 : 0;
+				if( used > s_gc_fragbuf_emergency_peak )
+					s_gc_fragbuf_emergency_peak = used;
+				if( fragment_size > s_gc_fragbuf_emergency_peak_size )
+					s_gc_fragbuf_emergency_peak_size = fragment_size;
+			}
 			buf = (fragbuf_t *)s_gc_fragbuf_emergency[i].storage;
 			memset( buf, 0, sizeof( fragbuf_t ) + fragment_size );
 			Con_Reportf( "Xash3D GameCube: emergency fragbuf slot %d size=%d\n",

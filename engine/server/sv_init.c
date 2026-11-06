@@ -627,6 +627,17 @@ void SV_FreeOldEntities( void )
 	for( ; ( ent = SV_EdictNum( svgame.numEntities - 1 )) && ent->free; svgame.numEntities-- );
 }
 
+#if XASH_GAMECUBE
+/* Budget telemetry hook for the next map load (mem_gamecube.c). */
+void SV_GCLogBudgetPrev( void )
+{
+	void Mod_GCLogWorldBudget( const char *mapname, const model_t *world );
+
+	if( sv.worldmodel )
+		Mod_GCLogWorldBudget( "prev", sv.worldmodel );
+}
+#endif
+
 /*
 ================
 SV_ActivateServer
@@ -751,6 +762,10 @@ void SV_ActivateServer( int runPhysics )
 	GC_RestoreVideoMemoryAfterMapLoad();
 	R_GcmapRestoreAfterMapLoad();
 	Con_Reportf( "Xash3D GameCube: map loaded %s\n", sv.name );
+	{
+		void Mod_GCLogWorldBudget( const char *mapname, const model_t *world );
+		Mod_GCLogWorldBudget( sv.name, sv.worldmodel );
+	}
 	GCube_AppendSwissEvidence( "map loaded %s", sv.name );
 	/* Watchdog: if entity spawn never finishes, still return to Swiss. */
 	GCube_ArmSwissQuit();

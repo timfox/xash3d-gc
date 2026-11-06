@@ -1178,6 +1178,16 @@ void R_InitCaches( void )
 #endif
 
 #if XASH_GAMECUBE
+	/* Retail Flipper renders the world and 2D in GX; the soft surface cache
+	 * is only used once a map is up (or with -gcsoftworld).  Before the first
+	 * map load it held 128-256 KiB of heap the startup video, menu and New
+	 * Game client init need.  R_GcmapRestoreAfterMapLoad calls back here. */
+	if( !sc_base && !gEngfuncs.Sys_CheckParm( "-gcsoftworld" )
+		&& !gEngfuncs.Sys_CheckParm( "-gcmap" ) && R_GcmapBootPadRegion( NULL ))
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: surface cache deferred until first map load\n" );
+		return;
+	}
 	if( gEngfuncs.Sys_CheckParm( "-gcmap" ))
 	{
 		if( sc_base )

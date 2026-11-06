@@ -28,6 +28,18 @@ void GC_MemSetMap( const char *mapname );
 void GC_MemSample( const char *stage );
 void GC_MemBreadcrumb( const char *stage );
 void GC_MemHeapMark( const char *stage );
+/* Shared gameplay-only region (world reserves, skin overflow, netchan
+ * emergency).  One owner: add a slot here, never a new static reserve. */
+typedef enum gc_gp_slot_e
+{
+	GC_GP_NODES = 0, GC_GP_HULL0, GC_GP_ENTITIES, GC_GP_SUBMODELS,
+	GC_GP_SKIN, GC_GP_FRAG0, GC_GP_FRAG1, GC_GP_COUNT
+} gc_gp_slot_t;
+void *GC_GameplaySlot( gc_gp_slot_t slot, size_t bytes );
+void GC_GameplayRelease( gc_gp_slot_t slot );
+qboolean GC_GameplayOwns( const void *ptr );
+size_t GC_GameplayLargestFree( void );
+void GC_GameplayReport( const char *stage );
 /* Boot arena over the idle map-load pad (before the first map load only). */
 void *GC_BootArenaAlloc( size_t size );
 qboolean GC_BootArenaFree( void *ptr );

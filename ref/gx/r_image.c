@@ -31,9 +31,16 @@ static unsigned gc_tiny_pixels_used;
  * live in gc_studio_bss — Mod_GCStudioBssTrimLast rewinds that bump and was
  * leaving ptexture indices dangling into recycled slots (*gc_sky_proc). */
 #define GC_STUDIO_SKIN_OVERFLOW_BYTES (256 * 1024)
-static byte gc_studio_skin_overflow[GC_STUDIO_SKIN_OVERFLOW_BYTES] __attribute__((aligned(32)));
+/* Window is a slot of the shared gameplay region (mem_gamecube.c): taken on
+ * first need, up to GC_STUDIO_SKIN_OVERFLOW_BYTES of what the current map's
+ * world tables leave free, and released when its last skin goes. */
+static byte *gc_studio_skin_overflow;
+static size_t gc_studio_skin_overflow_cap;
 static size_t gc_studio_skin_overflow_bump;
 static unsigned gc_studio_skin_overflow_live;
+/* Session high-water of the overflow bump (MEM1 budget telemetry). */
+static size_t gc_studio_skin_overflow_hw;
+size_t R_GCStudioSkinOverflowHighwater( void ) { return gc_studio_skin_overflow_hw; }
 extern qboolean r_gc_studio_skins_in_arena;
 
 static pixel_t *R_GCAllocStudioSkinOverflow( image_t *tex, size_t bytes )
@@ -43,12 +50,29 @@ static pixel_t *R_GCAllocStudioSkinOverflow( image_t *tex, size_t bytes )
 
 	if( !r_gc_studio_skins_in_arena || bytes == 0 )
 		return NULL;
+	if( !gc_studio_skin_overflow )
+	{
+		size_t want = GC_GameplayLargestFree();
+
+		if( want > GC_STUDIO_SKIN_OVERFLOW_BYTES )
+			want = GC_STUDIO_SKIN_OVERFLOW_BYTES;
+		want &= ~(size_t)31u;
+		if( want < bytes + 64u )
+			return NULL;
+		gc_studio_skin_overflow = (byte *)GC_GameplaySlot( GC_GP_SKIN, want );
+		if( !gc_studio_skin_overflow )
+			return NULL;
+		gc_studio_skin_overflow_cap = want;
+		gc_studio_skin_overflow_bump = 0;
+	}
 	off = ( gc_studio_skin_overflow_bump + 31u ) & ~(size_t)31u;
 	end = off + bytes + 31u;
-	if( end > sizeof( gc_studio_skin_overflow ))
+	if( end > gc_studio_skin_overflow_cap )
 		return NULL;
 	base = gc_studio_skin_overflow + off;
 	gc_studio_skin_overflow_bump = end;
+	if( end > gc_studio_skin_overflow_hw )
+		gc_studio_skin_overflow_hw = end;
 	gc_studio_skin_overflow_live++;
 	tex->gc_pixels_base = base;
 	return (pixel_t *)(((uintptr_t)base + 31u) & ~(uintptr_t)31u);
@@ -57,8 +81,8 @@ static pixel_t *R_GCAllocStudioSkinOverflow( image_t *tex, size_t bytes )
 static qboolean R_GCIsStudioSkinOverflow( const void *ptr )
 {
 	const byte *p = (const byte *)ptr;
-	return p >= gc_studio_skin_overflow
-		&& p < gc_studio_skin_overflow + sizeof( gc_studio_skin_overflow );
+	return gc_studio_skin_overflow && p >= gc_studio_skin_overflow
+		&& p < gc_studio_skin_overflow + gc_studio_skin_overflow_cap;
 }
 
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
@@ -107,7 +131,12 @@ void R_GCFreeMip( image_t *tex, uint level )
 			if( gc_studio_skin_overflow_live > 0 )
 				gc_studio_skin_overflow_live--;
 			if( gc_studio_skin_overflow_live == 0 )
+			{
 				gc_studio_skin_overflow_bump = 0;
+				GC_GameplayRelease( GC_GP_SKIN );
+				gc_studio_skin_overflow = NULL;
+				gc_studio_skin_overflow_cap = 0;
+			}
 			tex->gc_pixels_base = NULL;
 			return;
 		}

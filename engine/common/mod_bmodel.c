@@ -79,9 +79,9 @@ static mclipnode16_t gc_static_clipnodes[GC_STATIC_CLIPNODE_CAPACITY]
 /* Hull 0 as BSS (like clipnodes): heap memalign of even 26 KiB fails under
  * c4a3 smoke fragmentation (free≈50 Kb, probe 20261105-065947) after the
  * durable surfedges tail copy. 128 KiB fixed cost; never tip-fatal. */
-static mclipnode16_t gc_static_hull0_storage[GC_STATIC_HULL0_CAPACITY]
-	__attribute__((aligned( 32 )));
-static mclipnode16_t *gc_static_hull0 = gc_static_hull0_storage;
+/* hull0, nodes, entities and submodels fallbacks are slots of the shared
+ * gameplay region (mem_gamecube.c), sized per map. */
+static mclipnode16_t *gc_static_hull0;
 static qboolean gc_clipnodes_static_block;
 static qboolean gc_clipnodes_scratch_block; /* in-place normalized scratch lump */
 /* Submodel table is tiny (~64 B each) but tip-fatal / fragmented after denser
@@ -108,27 +108,12 @@ static qboolean gc_entities_static_block;
  * charged ~650 KiB to boot, the startup video and the menu, which never use
  * them.  Returns true once every reserve is held.
  */
-static void *Mod_GCTakeReserve( void **slot, size_t bytes, const char *name )
-{
-	if( *slot )
-		return *slot;
-	*slot = memalign( 32, bytes );
-	if( *slot )
-		Con_Reportf( "Xash3D GameCube: world reserve %s ready %s\n", name, Q_memprint( bytes ));
-	else
-		Con_Reportf( "Xash3D GameCube: world reserve %s deferred need=%s free=%s\n",
-			name, Q_memprint( bytes ), Q_memprint( GC_MemHeapFreeBytes() ));
-	return *slot;
-}
-
+/* World-table fallbacks live in the shared static gameplay region now, so
+ * nothing has to be pre-reserved from the heap (taking ~528 KiB at boot is
+ * what starved New Game's client init).  Kept for its callers. */
 qboolean Mod_GCEnsureStaticReserves( void )
 {
-	/* Smallest first so a tight heap still gets the cheap guarantees. */
-	Mod_GCTakeReserve( (void **)&gc_static_submodels, sizeof( dmodel_t ) * GC_STATIC_SUBMODEL_CAPACITY, "submodels" );
-	Mod_GCTakeReserve( (void **)&gc_static_entities, GC_STATIC_ENTITIES_BYTES, "entities" );
-	/* hull0 is BSS (gc_static_hull0_storage) — no heap reserve. */
-	Mod_GCTakeReserve( (void **)&gc_static_nodes, GC_STATIC_NODES_BYTES, "nodes" );
-	return gc_static_submodels && gc_static_entities && gc_static_hull0 && gc_static_nodes;
+	return true;
 }
 
 /*
@@ -142,18 +127,42 @@ qboolean Mod_GCEnsureStaticReserves( void )
  * BSP load let the 384 KiB get fragmented/consumed before CL_LoadProgs
  * (probe 091844: free only rose to 9 KiB and InitInput still hung).
  */
+/* One line per map load: what each gameplay reserve would need for this
+ * world, which ones actually served it, and the session high-waters of the
+ * other gameplay reserves.  Input for sizing the shared gameplay region. */
+size_t R_GCStudioSkinOverflowHighwater( void );
+void Netchan_GCEmergencyPeak( int *slots, int *size );
+void Mod_GCLogWorldBudget( const char *mapname, const model_t *world )
+{
+	int frag_slots = 0, frag_size = 0;
+
+	if( !world )
+		return;
+	Netchan_GCEmergencyPeak( &frag_slots, &frag_size );
+	Con_Reportf( "Xash3D GameCube: GC budget map=%s nodes=%u%s hull0=%u%s entities=%u%s submodels=%u%s skin_hw=%u frag_peak=%d/%d heap_free=%u\n",
+		mapname ? mapname : "?",
+		(unsigned)( world->numnodes * sizeof( mnode_t )), gc_nodes_static_block ? "[R]" : "",
+		(unsigned)( world->numnodes * sizeof( mclipnode16_t )),
+		( world->hulls[0].clipnodes16 && world->hulls[0].clipnodes16 == gc_static_hull0 ) ? "[R]" : "",
+		(unsigned)( world->entities ? Q_strlen( world->entities ) + 1 : 0 ), gc_entities_static_block ? "[R]" : "",
+		(unsigned)( world->numsubmodels * sizeof( dmodel_t )), gc_submodels_static_block ? "[R]" : "",
+		(unsigned)R_GCStudioSkinOverflowHighwater(), frag_slots, frag_size,
+		(unsigned)GC_MemHeapFreeBytes() );
+	GC_GameplayReport( mapname );
+}
+
 void Mod_GCReleaseUnusedWorldReserves( void )
 {
 	if( gc_static_nodes && !gc_nodes_static_block )
 	{
-		free( gc_static_nodes );
+		GC_GameplayRelease( GC_GP_NODES );
 		gc_static_nodes = NULL;
 		Con_Reportf( "Xash3D GameCube: released unused nodes reserve %s\n",
 			Q_memprint( GC_STATIC_NODES_BYTES ));
 	}
 	if( gc_static_submodels && !gc_submodels_static_block )
 	{
-		free( gc_static_submodels );
+		GC_GameplayRelease( GC_GP_SUBMODELS );
 		gc_static_submodels = NULL;
 		Con_Reportf( "Xash3D GameCube: released unused submodels reserve %s\n",
 			Q_memprint( sizeof( dmodel_t ) * GC_STATIC_SUBMODEL_CAPACITY ));
@@ -168,14 +177,14 @@ void Mod_GCReleaseWorldReservesForChangelevel( void )
 {
 	if( gc_static_nodes && !gc_nodes_static_block )
 	{
-		free( gc_static_nodes );
+		GC_GameplayRelease( GC_GP_NODES );
 		gc_static_nodes = NULL;
 		Con_Reportf( "Xash3D GameCube: changelevel released nodes reserve %s\n",
 			Q_memprint( GC_STATIC_NODES_BYTES ));
 	}
 	if( gc_static_submodels && !gc_submodels_static_block )
 	{
-		free( gc_static_submodels );
+		GC_GameplayRelease( GC_GP_SUBMODELS );
 		gc_static_submodels = NULL;
 		Con_Reportf( "Xash3D GameCube: changelevel released submodels reserve %s\n",
 			Q_memprint( sizeof( dmodel_t ) * GC_STATIC_SUBMODEL_CAPACITY ));
@@ -184,7 +193,7 @@ void Mod_GCReleaseWorldReservesForChangelevel( void )
 	 * already dropped mod->entities — reclaim the 128 KiB tip block. */
 	if( gc_static_entities )
 	{
-		free( gc_static_entities );
+		GC_GameplayRelease( GC_GP_ENTITIES );
 		gc_static_entities = NULL;
 		gc_entities_static_block = false;
 		Con_Reportf( "Xash3D GameCube: changelevel released entities reserve %s\n",
@@ -2923,7 +2932,7 @@ static void Mod_MakeHull0( model_t *mod, const dbspmodel_t *bmod )
 		if( !out )
 		{
 #if XASH_GAMECUBE
-			if( gc_static_hull0 && mod->numnodes <= GC_STATIC_HULL0_CAPACITY )
+			if(( gc_static_hull0 = (mclipnode16_t *)GC_GameplaySlot( GC_GP_HULL0, hull0_bytes )) != NULL )
 			{
 				out = gc_static_hull0;
 				Con_Reportf( "Xash3D GameCube: world hull0 using static normalized reserve %s\n",
@@ -3286,7 +3295,7 @@ static void Mod_LoadSubmodels( model_t *mod, dbspmodel_t *bmod )
 			Con_Reportf( "Xash3D GameCube: world submodels using malloc %s\n",
 				Q_memprint( sub_bytes ));
 		}
-		else if( gc_static_submodels && bmod->numsubmodels <= GC_STATIC_SUBMODEL_CAPACITY )
+		else if(( gc_static_submodels = (dmodel_t *)GC_GameplaySlot( GC_GP_SUBMODELS, sub_bytes )) != NULL )
 		{
 			out = gc_static_submodels;
 			gc_submodels_static_block = true;
@@ -3477,7 +3486,7 @@ static void Mod_LoadEntities( model_t *mod, const dbspmodel_t *bmod )
 		/* Prefer the boot-time heap reserve so tip is not double-charged
 		 * (c5a1: reserve 128 KiB + malloc 73 KiB left free≈1.6 KiB and HUD
 		 * ZIP alloc failed — probe 090419). */
-		if( gc_static_entities && need <= GC_STATIC_ENTITIES_BYTES )
+		if(( gc_static_entities = (char *)GC_GameplaySlot( GC_GP_ENTITIES, need )) != NULL )
 		{
 			mod->entities = gc_static_entities;
 			gc_entities_static_block = true;
@@ -5992,7 +6001,7 @@ static void Mod_LoadNodes( model_t *mod, dbspmodel_t *bmod )
 					Con_Reportf( "Xash3D GameCube: world nodes via malloc %s\n", Q_memprint( node_bytes ));
 				}
 			}
-			if( !out && gc_static_nodes && node_bytes <= GC_STATIC_NODES_BYTES )
+			if( !out && ( gc_static_nodes = (byte *)GC_GameplaySlot( GC_GP_NODES, node_bytes )) != NULL )
 			{
 				out = (mnode_t *)gc_static_nodes;
 				gc_nodes_static_block = true;
