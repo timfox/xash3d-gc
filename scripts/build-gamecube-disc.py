@@ -50,6 +50,10 @@ CRITICAL_ASSETS = (
 )
 
 # Assets that are either too large for GC memory budget or unsupported formats
+# Bootstrap pk3 entries are STORED except these small text formats, which
+# deflate well and open while MEM1 is still plentiful (see the writer).
+BOOTSTRAP_DEFLATE_TEXT = {".txt", ".cfg", ".lst", ".rc", ".res", ".scr", ".def", ".ini", ".gam"}
+
 UNSUPPORTED_EXTENSIONS = {
     ".wmv", ".mpg", ".mpeg",          # Video: unsupported or too heavy
     ".mp3", ".ogg",                   # Audio: streaming not yet stable on GC
@@ -323,10 +327,15 @@ def write_bootstrap_pk3(
 				and suffix not in BOOTSTRAP_EXCLUDED_EXTENSIONS
 				and child.stat().st_size <= size_cap
 			):
+				# STORED unless it is small text: a DEFLATE entry needs ~40 KiB
+				# of zlib state plus a compressed copy in MEM1 to open, and at
+				# c0a0 that failed for the world texture pack (inflateInit2 -4:
+				# every surface drew the missing-texture checkerboard), the HUD
+				# sheets and long sounds.  Binary GC media barely deflates.
 				compress_type = (
-					zipfile.ZIP_STORED
-					if suffix in (".bsp", ".mdl")
-					else zipfile.ZIP_DEFLATED
+					zipfile.ZIP_DEFLATED
+					if suffix in BOOTSTRAP_DEFLATE_TEXT
+					else zipfile.ZIP_STORED
 				)
 				archive.write(
 					child,
@@ -340,7 +349,7 @@ def write_bootstrap_pk3(
 		if menu_dir.is_dir() and not recursive:
 			for child in sorted(menu_dir.rglob("*")):
 				if child.is_file() and child.suffix.lower() not in BOOTSTRAP_EXCLUDED_EXTENSIONS:
-					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_DEFLATED)
+					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_STORED)
 		studio_count = inject_gc_studio_into_bootstrap(archive, data)
 		if studio_count:
 			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
@@ -2070,6 +2079,42 @@ def build_loading_spans(source: Path, output: Path) -> list[tuple[str, Path]]:
 	return [("media/gc_loading.spn", out)]
 
 
+def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
+	"""media/wd_<map>.gcd for a GoldSrc map: the whole BSP as GX display lists
+	per PVS cluster (scripts/bake_worlddl_goldsrc.py, runtime
+	ref/gx/r_gx_worlddl.c).  With it the world draws completely from any view,
+	streamed from ARAM, instead of the CapFaces subset captured for the
+	starting eye.  Cached by BSP size and mtime."""
+	cache.mkdir(parents=True, exist_ok=True)
+	st = bsp.stat()
+	out = cache / f"wd_{bsp.stem.lower()}.gcd"
+	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
+	key = f"{st.st_size}:{int(st.st_mtime)}:2"
+	if out.is_file() and stamp.is_file() and stamp.read_text() == key:
+		return out
+	sys.path.insert(0, str(Path(__file__).resolve().parent))
+	try:
+		import bake_worlddl_goldsrc  # type: ignore
+
+		bake_worlddl_goldsrc.bake(bsp, out)
+	except (Exception, SystemExit) as error:  # a map the baker cannot read keeps CapFaces
+		print(f"  world DL: bake failed for {bsp.name}: {error}")
+		return None
+	stamp.write_text(key)
+	return out
+
+
+def build_world_dl_overlays(source: Path, output: Path, cache: Path) -> list[tuple[str, Path]]:
+	"""World DL packs for every retail map (play disc)."""
+	overlays = []
+	for bsp in sorted((source / "maps").glob("*.bsp")):
+		wd = bake_world_dl(bsp, cache)
+		if wd:
+			overlays.append((f"media/{wd.name}", wd))
+	print(f"  world DL: {len(overlays)} map(s) baked/cached")
+	return overlays
+
+
 def build_music_overlays(source: Path, output: Path, cache: Path) -> list[tuple[str, Path]]:
 	"""CD tracks as 22 kHz stereo WAV, media/cdNN.wav, with the cdaudio.txt
 	playlist. The Gekko can't decode MP3 during play; a WAV streams from disc
@@ -3177,6 +3222,7 @@ def create_retail_boot_overlays(
 	)
 	overlays.extend(build_sky_cmpr_overlays(source, output))
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
+	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
 	# Offline CapFaces packs (media/cf_<map>.gcp) — load-time DL for 60 FPS Flipper.
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore
@@ -3601,6 +3647,10 @@ def stage_smoke_data(
 				src = cand
 				break
 		if src is None:
+			bsp = source / "maps" / f"{stem}.bsp"
+			if bsp.is_file():
+				src = bake_world_dl(bsp, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache")
+		if src is None:
 			print(f"  world DL: no {name} (CapFaces/live BSP fallback)")
 			continue
 		shutil.copy2(src, dest)
@@ -3608,6 +3658,18 @@ def stage_smoke_data(
 
 	# Changelevel / New Game loading plaque (retail gfx.wad art, ~3 KiB).
 	build_loading_spans(source, output)
+	# Retail AI node graphs (maps/graphs/*.nod, ~10-20 KiB each for the early
+	# maps; the game loads the one for the running map).  Without them every
+	# scripted walker logs "Graph not ready!" / "Failed to reach target!!!"
+	# each frame and stands still.  Retail staging copies them already.
+	graphs = source / "maps" / "graphs"
+	if graphs.is_dir():
+		(output / "maps" / "graphs").mkdir(parents=True, exist_ok=True)
+		count = 0
+		for nod in graphs.glob("*.nod"):
+			shutil.copy2(nod, output / "maps" / "graphs" / nod.name.lower())
+			count += 1
+		print(f"  node graphs: {count} staged")
 	(output / "custom").mkdir(exist_ok=True)
 	(output / "maps").mkdir(exist_ok=True)
 	return output
