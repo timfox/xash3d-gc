@@ -627,6 +627,14 @@ def configure(conf):
 			conf.define('XASH_DODGC_NETWORK', 1)
 			conf.define('DEFAULT_MAX_EDICTS', 460)
 			conf.define('GC_SP_EDICT_CAP', 460)
+		# Slim server client slots: more than two listen-server slots (bots), real
+		# clients still limited to two. Off unless asked for; see server.h.
+		if os.environ.get('XASH_GC_SLIM_CLIENTS', '').lower() in ('1', 'yes', 'true', 'on'):
+			conf.define('XASH_GC_SLIM_CLIENTS', 1)
+			conf.define('GC_SV_MAX_SLOTS', int(os.environ.get('XASH_GC_MAX_SLOTS', '4')))
+			# The slot count a listen server starts with (sv_gc_slots default); 2 = as before.
+			conf.define('GC_SV_DEFAULT_SLOTS_STR', os.environ.get('XASH_GC_DEFAULT_SLOTS', '2'))
+			Logs.info('GameCube slim client slots: table %s, default %s' % (os.environ.get('XASH_GC_MAX_SLOTS', '4'), os.environ.get('XASH_GC_DEFAULT_SLOTS', '2')))
 		if os.environ.get('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', 1)
 		# Broadband / eth2sp1: link -lbba and enable GC net headers when requested.
