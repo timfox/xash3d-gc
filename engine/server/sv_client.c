@@ -47,6 +47,25 @@ static void SV_ExecuteClientCommand( sv_client_t *cl, const char *s );
 #endif
 static client_frame_t gc_client_frames[GC_SV_STATIC_CLIENTS][MULTIPLAYER_BACKUP]
 	__attribute__((aligned( 32 )));
+#if XASH_GC_SLIM_CLIENTS
+/* Slim slots: only the first GC_SV_STATIC_CLIENTS slots can be real network
+ * clients. They own the 64 KiB of netchan staging and the 16 KiB datagram that
+ * the slot struct no longer embeds; every other slot is a bot, which never
+ * talks over the network, so its slot is ~9 KiB instead of ~89 KiB. */
+static byte gc_sv_netbuf[GC_SV_STATIC_CLIENTS][2][NET_MAX_MESSAGE] __attribute__((aligned( 32 )));
+static byte gc_sv_datagram[GC_SV_STATIC_CLIENTS][MAX_DATAGRAM] __attribute__((aligned( 32 )));
+
+void SV_GCBindClientBuffers( sv_client_t *cl )
+{
+	const int slot = (int)( cl - svs.clients );
+
+	if( slot < 0 || slot >= GC_SV_STATIC_CLIENTS )
+		return;
+	cl->netchan.message_buf = gc_sv_netbuf[slot][0];
+	cl->netchan.reliable_buf = gc_sv_netbuf[slot][1];
+	cl->datagram_buf = gc_sv_datagram[slot];
+}
+#endif
 #define gc_singleplayer_frames (gc_client_frames[0])
 static int SV_GetFragmentSize( void *pcl, fragsize_t mode );
 
@@ -165,6 +184,9 @@ client_ready:
 		memset( gc_singleplayer_frames, 0, sizeof( gc_singleplayer_frames ));
 		cl->frames = gc_singleplayer_frames;
 		cl->frames_malloced = false;
+#if XASH_GC_SLIM_CLIENTS
+		SV_GCBindClientBuffers( cl );
+#endif
 		if( !cl->netchan.message.pData )
 		{
 			Netchan_Setup( NS_SERVER, &cl->netchan, loopback, 0, cl,
@@ -178,8 +200,7 @@ client_ready:
 			Con_Reportf( "Xash3D GameCube: direct-map loopback netchan preserved seq=%u\n",
 				cl->netchan.outgoing_sequence );
 		}
-		MSG_Init( &cl->datagram, "Datagram", cl->datagram_buf,
-			sizeof( cl->datagram_buf ));
+		MSG_Init( &cl->datagram, "Datagram", cl->datagram_buf, MAX_DATAGRAM );
 		cl->delta_sequence = -1;
 		cl->connection_started = host.realtime;
 		cl->next_messageinterval = 0.05;
@@ -473,6 +494,56 @@ static sv_client_t *SV_FindEmptySlot( void )
 	return NULL;
 }
 
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+/*
+================
+SV_GCFindHumanSlot
+
+Slim slots only give network buffers and frames to the first
+GC_SV_STATIC_CLIENTS slots, so a real client can only sit there. When bots hold
+those slots, one is dropped to make room: a person always beats a bot.
+================
+*/
+static sv_client_t *SV_GCFindHumanSlot( void )
+{
+	for( int i = 0; i < svs.maxclients && i < GC_SV_STATIC_CLIENTS; i++ )
+	{
+		if( svs.clients[i].state == cs_free )
+			return &svs.clients[i];
+	}
+	for( int i = 0; i < svs.maxclients && i < GC_SV_STATIC_CLIENTS; i++ )
+	{
+		sv_client_t *cl = &svs.clients[i];
+
+		if( FBitSet( cl->flags, FCL_FAKECLIENT ) && cl->state != cs_free )
+		{
+			Con_Reportf( "Xash3D GameCube: dropping bot in slot %d for a player\n", i );
+			SV_DropClient( cl, false );
+			cl->state = cs_free;
+			return cl;
+		}
+	}
+	return NULL;
+}
+
+/*
+================
+SV_GCFindBotSlot
+
+Bots take the highest free slot so the first slots stay open for people.
+================
+*/
+static sv_client_t *SV_GCFindBotSlot( void )
+{
+	for( int i = svs.maxclients - 1; i >= 0; i-- )
+	{
+		if( svs.clients[i].state == cs_free )
+			return &svs.clients[i];
+	}
+	return NULL;
+}
+#endif
+
 /*
 ================
 SV_CountConnectingClients
@@ -659,7 +730,11 @@ static void SV_ConnectClient( netadr_t from )
 		}
 
 		// connect the client if there are empty slots.
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+		newcl = SV_GCFindHumanSlot();
+#else
 		newcl = SV_FindEmptySlot();
+#endif
 
 		if( !newcl )
 		{
@@ -681,7 +756,7 @@ static void SV_ConnectClient( netadr_t from )
 					const int slot = (int)( newcl - svs.clients );
 					client_frame_t *static_frames = NULL;
 
-					if( svs.maxclients <= GC_SV_STATIC_CLIENTS
+					if(( svs.maxclients <= GC_SV_STATIC_CLIENTS || XASH_GC_SLIM_CLIENTS )
 						&& SV_UPDATE_BACKUP <= MULTIPLAYER_BACKUP )
 						static_frames = SV_GCStaticClientFramesForSlot( slot );
 
@@ -755,6 +830,9 @@ static void SV_ConnectClient( netadr_t from )
 	// with server.dll without voice game manager
 	newcl->listeners = -1;
 
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	SV_GCBindClientBuffers( newcl );
+#endif
 	// initailize netchan
 	if( !Host_IsLocalClient( ))
 		SetBits( netchan_flags, NETCHAN_USE_LZSS );
@@ -763,7 +841,7 @@ static void SV_ConnectClient( netadr_t from )
 	Netchan_Setup( NS_SERVER, &newcl->netchan, from, qport, newcl, SV_GetFragmentSize, netchan_flags );
 	if( FBitSet( newcl->extensions, NET_EXT_NETCHAN_COOKIE ))
 		Netchan_SetCookie( &newcl->netchan, netchan_cookie );
-	MSG_Init( &newcl->datagram, "Datagram", newcl->datagram_buf, sizeof( newcl->datagram_buf )); // datagram buf
+	MSG_Init( &newcl->datagram, "Datagram", newcl->datagram_buf, MAX_DATAGRAM ); // datagram buf
 
 	Q_strncpy( newcl->hashedcdkey, Info_ValueForKey( protinfo, "uuid" ), 32 );
 	newcl->hashedcdkey[32] = '\0';
@@ -813,7 +891,11 @@ edict_t *GAME_EXPORT SV_FakeConnect( const char *netname )
 	sv_client_t *cl;
 
 	// find a client slot
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	cl = SV_GCFindBotSlot();
+#else
 	cl = SV_FindEmptySlot();
+#endif
 
 	if( !cl )
 		return NULL; // server is full
