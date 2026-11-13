@@ -51,6 +51,7 @@ void Mod_GCClearRetainedBspScratch( void );
 #include <ogc/aram.h>
 #include <ogc/lwp_watchdog.h>
 #include <ogc/pad.h>
+#include "gcmp.h"
 #endif
 
 typedef struct gc_video_s
@@ -10099,6 +10100,57 @@ float GC_GetLoadingProgress( void )
 	return gc_loading_progress;
 }
 
+/*
+ * Baked loading plaque (resource/gc_menu/loading.cmp, GCMP v1, see gcmp.h): the
+ * disc builder resamples loading.tga to the plaque size as GX CMPR, so this
+ * reads ~10 KiB one row of tiles at a time instead of a 225 KiB TGA into the
+ * FileSystem Pool. Any header problem returns false and the TGA path runs.
+ */
+static qboolean GC_LoadLoadingBackgroundCmp( void )
+{
+	static byte tile_row[( 640 / 8 ) * 32];
+	byte head[GC_GCMP_HEADER_BYTES];
+	gc_gcmp_header_t hdr;
+	file_t *f;
+	int ty, y, x;
+	uint32_t row_bytes;
+
+	f = FS_Open( "resource/gc_menu/loading.cmp", "rb", false );
+	if( !f )
+		return false;
+	if( FS_Read( f, head, sizeof( head )) != (fs_offset_t)sizeof( head )
+		|| !GC_GcmpParseHeader( head, sizeof( head ), &hdr )
+		|| hdr.version != GC_GCMP_VERSION || hdr.w > 640 || hdr.h > 480 )
+	{
+		FS_Close( f );
+		return false;
+	}
+	row_bytes = GC_GcmpTileRowBytes( hdr.w );
+	for( ty = 0; ty < hdr.h / 8; ty++ )
+	{
+		if( FS_Read( f, tile_row, row_bytes ) != (fs_offset_t)row_bytes )
+		{
+			FS_Close( f );
+			return false;
+		}
+		for( y = 0; y < GC_LOADING_BG_H; y++ )
+		{
+			const unsigned sy = ( (unsigned)y * hdr.h ) / GC_LOADING_BG_H;
+
+			if( sy / 8u != (unsigned)ty )
+				continue;
+			for( x = 0; x < GC_LOADING_BG_W; x++ )
+				gc_loading_bg[y * GC_LOADING_BG_W + x] =
+					GC_GcmpTexel( tile_row, ( (unsigned)x * hdr.w ) / GC_LOADING_BG_W, sy );
+		}
+	}
+	FS_Close( f );
+	gc_loading_bg_ready = true;
+	Con_Reportf( "Xash3D GameCube: HL1 loading plaque ready %dx%d (baked CMPR %dx%d)\n",
+		GC_LOADING_BG_W, GC_LOADING_BG_H, hdr.w, hdr.h );
+	return true;
+}
+
 static qboolean GC_LoadLoadingBackground( void )
 {
 	byte *file;
@@ -10109,6 +10161,8 @@ static qboolean GC_LoadLoadingBackground( void )
 	qboolean top_origin;
 
 	if( gc_loading_bg_ready )
+		return true;
+	if( GC_LoadLoadingBackgroundCmp( ))
 		return true;
 
 	file = FS_LoadFile( "resource/gc_menu/loading.tga", &size, false );

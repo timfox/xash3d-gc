@@ -893,6 +893,63 @@ GC_MENU_BANNER_SIZE = (640, 104)
 GC_MENU_BANNER_FRAME_SEC = 2.0
 
 
+GCMP_VERSION = 1  # keep equal to GC_GCMP_VERSION in engine/platform/gamecube/gcmp.h
+
+
+def gcmp_header(w: int, h: int, source: bytes, version: int = GCMP_VERSION, mips: int = 1) -> bytes:
+	"""32-byte GCMP header (see engine/platform/gamecube/gcmp.h).
+
+	Unlike the legacy header (zeros after the size) this records the format, the
+	cache version and the size and crc32 of the source file, so the engine can
+	tell a stale or foreign sidecar and fall back to the original image."""
+	import zlib
+
+	return (
+		b"GCMP"
+		+ struct.pack(">HHBBHII", w, h, 0, mips, version, len(source), zlib.crc32(source) & 0xFFFFFFFF)
+		+ bytes(12)
+	)
+
+
+def bake_gcmp_sidecar(image_path: Path, out_path: Path, out_w: int, out_h: int) -> bool:
+	"""Resample an opaque image to out_w x out_h (multiples of 8) and write it as
+	a versioned GCMP CMPR sidecar. Returns False (and writes nothing) if the
+	image cannot be read or the size is not CMPR-friendly."""
+	try:
+		import numpy as np
+		from PIL import Image
+	except ImportError:
+		print("Warning: numpy/Pillow missing; skipping CMPR sidecar bake.", file=sys.stderr)
+		return False
+	if out_w < 8 or out_h < 8 or out_w % 8 or out_h % 8:
+		return False
+	try:
+		source = image_path.read_bytes()
+		with Image.open(image_path) as im:
+			rgb = np.asarray(im.convert("RGB").resize((out_w, out_h), Image.LANCZOS))
+	except Exception as exc:  # unreadable or unsupported source: no sidecar
+		print(f"Warning: CMPR sidecar skipped for {image_path.name}: {exc}", file=sys.stderr)
+		return False
+	out_path.write_bytes(gcmp_header(out_w, out_h, source) + gx_cmpr_encode(rgb))
+	return True
+
+
+# resource/gc_menu/loading.tga is shown by the early loading screen at this size
+# (GC_LOADING_BG_W/H in vid_gamecube.c) and was read whole (225 KiB) to get it.
+GC_LOADING_CMP_SIZE = (160, 120)
+
+
+def _stage_gc_menu_loading_cmp(menu_dir: Path) -> None:
+	loading = menu_dir / "loading.tga"
+	if not loading.is_file():
+		return
+	if bake_gcmp_sidecar(loading, menu_dir / "loading.cmp", *GC_LOADING_CMP_SIZE):
+		print(
+			f"GameCube menu assets: loading.tga baked as loading.cmp "
+			f"{GC_LOADING_CMP_SIZE[0]}x{GC_LOADING_CMP_SIZE[1]} CMPR"
+		)
+
+
 def _stage_gc_menu_logo_banner(source: Path, menu_dir: Path) -> bool:
 	"""resource/gc_menu/logo_banner.{cmp,tga} from a frame of media/logo.avi."""
 	avi = source / "media" / "logo.avi"
@@ -945,6 +1002,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 			if child.is_file():
 				shutil.copy2(child, menu_dir / child.name)
 		_stage_gc_menu_btn_strips(source, menu_dir)
+		_stage_gc_menu_loading_cmp(menu_dir)
 		print(
 			f"GameCube menu assets: preserve Lost Coast retail title "
 			f"{(menu_dir / 'background.tga').relative_to(output)}"
@@ -1085,6 +1143,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 	# 640x480 menu.  Bake one frame as GX CMPR (640x104, CMPR needs multiples
 	# of 8) for the GX menu, plus a small TGA so mainui can load the picture.
 	_stage_gc_menu_logo_banner(source, menu_dir)
+	_stage_gc_menu_loading_cmp(menu_dir)
 
 	# Optional low-memory 3×3 preview tiles for probes that cannot hold the
 	# full 640×480 sheet; the live menu uses background.tga + logo.tga.
