@@ -1488,6 +1488,38 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	pixel_t *tex_pixels;
 	qboolean tex_alpha;
 
+	/* CMPR studio skins (r_gx_cmpr.c): already GX texels at their final size. */
+	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
+	{
+		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
+			|| r_gx_native_bound_pixels != img->pixels[0] )
+		{
+			r_gx_native_bound_pixels = img->pixels[0];
+			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
+				GX_TF_CMPR, GX_REPEAT, GX_REPEAT, GX_FALSE );
+			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
+			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
+			t->texnum = texnum;
+			t->w = img->width;
+			t->h = img->height;
+			t->fmt = GX_TF_CMPR;
+			t->valid = true;
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_bound_texnum = texnum;
+			r_gx_bound_fmt = GX_TF_CMPR;
+			r_gx_tex_loads++;
+		}
+		else
+		{
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_tex_reuses++;
+		}
+		R_GXSetTexAlphaTest( alpha );
+		return t;
+	}
+
 	/* Larger sides are box filtered down: without mipmaps they shimmer. */
 	while( img->width / step_x > cap )
 		step_x *= 2;
