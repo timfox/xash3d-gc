@@ -317,7 +317,9 @@ const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean
 	{
 		if( !r_skin_window )
 		{
-			r_skin_window = (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES );
+			/* Never take the last of the heap: the map load still needs it. */
+			r_skin_window = ( GC_MemHeapFreeBytes() >= GC_SKIN_WINDOW_BYTES + 512u * 1024u )
+				? (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES ) : NULL;
 			if( !r_skin_window )
 			{
 				static qboolean window_logged;
