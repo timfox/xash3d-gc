@@ -189,7 +189,7 @@ client_ready:
 #endif
 		if( !cl->netchan.message.pData )
 		{
-			Netchan_Setup( NS_SERVER, &cl->netchan, loopback, 0, cl,
+			Netchan_Setup( NS_SERVER, &cl->netchan, loopback, Cvar_VariableInteger( "net_qport" ), cl,
 				SV_GetFragmentSize, 0 );
 			Con_Reportf( "Xash3D GameCube: direct-map loopback netchan initialized\n" );
 		}
@@ -197,6 +197,7 @@ client_ready:
 		{
 			cl->netchan.client = cl;
 			cl->netchan.pfnBlockSize = SV_GetFragmentSize;
+			cl->netchan.qport = Cvar_VariableInteger( "net_qport" );
 			Con_Reportf( "Xash3D GameCube: direct-map loopback netchan preserved seq=%u\n",
 				cl->netchan.outgoing_sequence );
 		}
@@ -207,6 +208,17 @@ client_ready:
 		cl->state = cs_spawned;
 		cl->connecttime = host.realtime;
 		SetBits( cl->flags, FCL_RESEND_USERINFO|FCL_RESEND_MOVEVARS );
+		{
+			/* The direct-map route skips SV_SendServerdata, so the client never
+			 * learns the server's user message numbers. Queue them reliably so
+			 * the first HUD/train message after input starts flowing parses. */
+			int i, n = 0;
+
+			for( i = 1; i < MAX_USER_MESSAGES && svgame.msg[i].name[0]; i++, n++ )
+				SV_SendUserReg( &cl->netchan.message, &svgame.msg[i] );
+			Con_Reportf( "Xash3D GameCube: direct-map queued %d user message regs overflow=%d\n",
+				n, MSG_CheckOverflow( &cl->netchan.message ) ? 1 : 0 );
+		}
 		Con_Reportf( "Xash3D GameCube: direct-map client ready cs_spawned frames=%p\n",
 			cl->frames );
 	}
