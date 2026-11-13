@@ -1192,8 +1192,15 @@ int Platform_JoyInit( void )
 		"Retail menu UI readiness marker for synthetic GameCube probes" );
 	Cvar_Get( "gc_menu_probe_auto", "0", 0,
 		"Retail menu probe auto-opens Options once mainui reports ready" );
+	/* mainui reads this to skip the valve/mainui localisation files on the
+	 * menu New Game route (MenuStrings.cpp): their UTF-16 conversion needs a
+	 * C++ new that aborts at the menu's MEM1 tip, which hung the guest after
+	 * "localization begin resource/valve_english.txt".  Dropped in 69246f37ba. */
+	Cvar_Get( "gc_menuplaystart", "0", 0,
+		"1 when -gcmenuplaystart: lean menu art so New Game fits MEM1 tip" );
 	Cvar_SetValue( "gc_menu_ready", 0.0f );
 	Cvar_SetValue( "gc_menu_probe_auto", 0.0f );
+	Cvar_SetValue( "gc_menuplaystart", Sys_CheckParm( "-gcmenuplaystart" ) ? 1.0f : 0.0f );
 	gc_bindings_applied = false;
 	gc_probe_action_stage = 0;
 	gc_probe_action_time = 0.0;

@@ -40,7 +40,7 @@ if [[ "${RIDE_RECORD:-1}" == "1" ]] && command -v ffmpeg >/dev/null; then
 		--json-out "$out/playtest.txt" > "$out/playtest-record.log" 2>&1 &
 	rec_pid=$!
 fi
-"$DOLPHIN_EXE" -u "$user" -l -e "$iso" -v OGL > "$out/stdout.log" 2> "$out/stderr.log" &
+"$DOLPHIN_EXE" -u "$user" -l -e "$iso" -v "${RIDE_VIDEO:-OGL}" > "$out/stdout.log" 2> "$out/stderr.log" &
 dpid=$!
 echo "==> ride $out dolphin=$dpid until=${until_map:-time} ${minutes}m"
 end=$(( $(date +%s) + minutes * 60 ))
