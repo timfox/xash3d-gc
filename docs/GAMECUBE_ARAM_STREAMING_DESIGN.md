@@ -313,3 +313,33 @@ profile. Never write during gameplay: write at changelevel or menu time.
   each cache by those numbers, not by feel.
 - Boot-checked one cache at a time on Dolphin, because a wrong cache hit looks like
   random corruption.
+
+### Direction from Tim: draw once, fetch once, cache heavy, native compression
+
+Three rules that every cache above is judged by:
+
+1. **Fetch once.** A texture, mesh or display list is copied from ARAM (or the disc)
+   into its working place once and stays resident until the LRU needs the space.
+   Rebinding a resident texture costs no DMA and no wait for the GPU. The world
+   texture slot cache (CMPR bounce slots, PR #48) is the first piece; hit, miss and
+   stall counters say whether it works.
+2. **Draw once.** Work done per frame that depends only on static data is done once
+   and kept: per-texture draw batching in the world display list (the render thread's
+   bucket-by-material change), and display lists for static faces and props built on
+   first use or at disc build time.
+3. **Native compression.** Store textures in the GameCube's own formats so the
+   hardware decodes them and they take less ARAM and less bandwidth.
+   - CMPR (S3TC style, 4 bits per pixel) is the default for opaque and 1-bit-alpha
+     color: world textures are already packed this way. Extend it to the paletted
+     8-bit skins and HUD and menu images where the quality loss is acceptable, which
+     halves their size against 8 bits per pixel.
+   - Keep I4, IA4, IA8 and palette formats for what must stay exact: fonts, crosshairs,
+     masks, smooth alpha ramps. CMPR only has a 1-bit alpha.
+   - Build the CMPR data offline in the disc builder (tier 2), not on the console,
+     including the mip chain, so there is no conversion work at load. The disc
+     builder records the format and size in the cache header so the engine uploads
+     it without a decode step.
+   - Disc data that is not a texture (lump packs, studio data, display lists) can be
+     stored compressed with a fast decoder and expanded straight into ARAM through
+     the bounce slots. The decoder cost has to be measured against the saved DMA
+     bandwidth before it is turned on, because the CPU is slow.
