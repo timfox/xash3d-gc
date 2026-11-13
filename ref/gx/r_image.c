@@ -522,9 +522,20 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 
 		if( vm_skin )
 		{
-			/* Keep MDL's power-of-two decode (128²). Do not crush to 64. */
-			resampleWidth = Q_min( (int)pic->width, 128 );
-			resampleHeight = Q_min( (int)pic->height, 128 );
+			/* Keep MDL's power-of-two decode (128²) when the skin cannot be
+			 * streamed. With the ARAM skin stream the resident low mip is
+			 * only 64² (8 KiB): the source-resolution skin is attached to
+			 * ARAM by R_StudioLoadTexture, so seven Garand skins cost
+			 * ~56 KiB in the shared studio region and cannot OOM to 2x2. */
+			const int vm_cap = R_GXSkinLowCap();
+
+			resampleWidth = (int)pic->width;
+			resampleHeight = (int)pic->height;
+			while( resampleWidth > vm_cap || resampleHeight > vm_cap )
+			{
+				resampleWidth = Q_max( 1, resampleWidth >> 1 );
+				resampleHeight = Q_max( 1, resampleHeight >> 1 );
+			}
 			tex->width = resampleWidth;
 			tex->height = resampleHeight;
 			{
