@@ -1906,6 +1906,12 @@ static void R_EdgeDrawingGcmapProbe( void )
 		if( tr.framecount <= 1 )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: R_EdgeDrawing GX CapFaces drawn=%d\n",
 				cap_drawn );
+		else if(( tr.framecount % 300 ) == 0 )
+		{
+			/* Ride evidence: is the world still drawing as the view moves? */
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world draw frame=%d capfaces=%d view=(%.0f %.0f %.0f)\n",
+				tr.framecount, cap_drawn, RI.rvp.vieworigin[0], RI.rvp.vieworigin[1], RI.rvp.vieworigin[2] );
+		}
 		/* One Swiss FAT evidence line when CapFaces first produce geometry. */
 		if( cap_drawn > 0 )
 		{

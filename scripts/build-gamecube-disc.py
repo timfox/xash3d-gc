@@ -16,6 +16,14 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+	import pil_compat  # Pillow resize fallback (see pil_compat.py)
+
+	pil_compat.install()
+except ImportError:
+	pass
+
 # Sibling helpers live under scripts/ (bake_capfaces_pack, etc.).
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
@@ -42,6 +50,10 @@ CRITICAL_ASSETS = (
 )
 
 # Assets that are either too large for GC memory budget or unsupported formats
+# Bootstrap pk3 entries are STORED except these small text formats, which
+# deflate well and open while MEM1 is still plentiful (see the writer).
+BOOTSTRAP_DEFLATE_TEXT = {".txt", ".cfg", ".lst", ".rc", ".res", ".scr", ".def", ".ini", ".gam"}
+
 UNSUPPORTED_EXTENSIONS = {
     ".wmv", ".mpg", ".mpeg",          # Video: unsupported or too heavy
     ".mp3", ".ogg",                   # Audio: streaming not yet stable on GC
@@ -315,10 +327,15 @@ def write_bootstrap_pk3(
 				and suffix not in BOOTSTRAP_EXCLUDED_EXTENSIONS
 				and child.stat().st_size <= size_cap
 			):
+				# STORED unless it is small text: a DEFLATE entry needs ~40 KiB
+				# of zlib state plus a compressed copy in MEM1 to open, and at
+				# c0a0 that failed for the world texture pack (inflateInit2 -4:
+				# every surface drew the missing-texture checkerboard), the HUD
+				# sheets and long sounds.  Binary GC media barely deflates.
 				compress_type = (
-					zipfile.ZIP_STORED
-					if suffix in (".bsp", ".mdl")
-					else zipfile.ZIP_DEFLATED
+					zipfile.ZIP_DEFLATED
+					if suffix in BOOTSTRAP_DEFLATE_TEXT
+					else zipfile.ZIP_STORED
 				)
 				archive.write(
 					child,
@@ -332,7 +349,7 @@ def write_bootstrap_pk3(
 		if menu_dir.is_dir() and not recursive:
 			for child in sorted(menu_dir.rglob("*")):
 				if child.is_file() and child.suffix.lower() not in BOOTSTRAP_EXCLUDED_EXTENSIONS:
-					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_DEFLATED)
+					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_STORED)
 		studio_count = inject_gc_studio_into_bootstrap(archive, data)
 		if studio_count:
 			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
@@ -885,6 +902,63 @@ GC_MENU_BANNER_SIZE = (640, 104)
 GC_MENU_BANNER_FRAME_SEC = 2.0
 
 
+GCMP_VERSION = 1  # keep equal to GC_GCMP_VERSION in engine/platform/gamecube/gcmp.h
+
+
+def gcmp_header(w: int, h: int, source: bytes, version: int = GCMP_VERSION, mips: int = 1) -> bytes:
+	"""32-byte GCMP header (see engine/platform/gamecube/gcmp.h).
+
+	Unlike the legacy header (zeros after the size) this records the format, the
+	cache version and the size and crc32 of the source file, so the engine can
+	tell a stale or foreign sidecar and fall back to the original image."""
+	import zlib
+
+	return (
+		b"GCMP"
+		+ struct.pack(">HHBBHII", w, h, 0, mips, version, len(source), zlib.crc32(source) & 0xFFFFFFFF)
+		+ bytes(12)
+	)
+
+
+def bake_gcmp_sidecar(image_path: Path, out_path: Path, out_w: int, out_h: int) -> bool:
+	"""Resample an opaque image to out_w x out_h (multiples of 8) and write it as
+	a versioned GCMP CMPR sidecar. Returns False (and writes nothing) if the
+	image cannot be read or the size is not CMPR-friendly."""
+	try:
+		import numpy as np
+		from PIL import Image
+	except ImportError:
+		print("Warning: numpy/Pillow missing; skipping CMPR sidecar bake.", file=sys.stderr)
+		return False
+	if out_w < 8 or out_h < 8 or out_w % 8 or out_h % 8:
+		return False
+	try:
+		source = image_path.read_bytes()
+		with Image.open(image_path) as im:
+			rgb = np.asarray(im.convert("RGB").resize((out_w, out_h), Image.LANCZOS))
+	except Exception as exc:  # unreadable or unsupported source: no sidecar
+		print(f"Warning: CMPR sidecar skipped for {image_path.name}: {exc}", file=sys.stderr)
+		return False
+	out_path.write_bytes(gcmp_header(out_w, out_h, source) + gx_cmpr_encode(rgb))
+	return True
+
+
+# resource/gc_menu/loading.tga is shown by the early loading screen at this size
+# (GC_LOADING_BG_W/H in vid_gamecube.c) and was read whole (225 KiB) to get it.
+GC_LOADING_CMP_SIZE = (160, 120)
+
+
+def _stage_gc_menu_loading_cmp(menu_dir: Path) -> None:
+	loading = menu_dir / "loading.tga"
+	if not loading.is_file():
+		return
+	if bake_gcmp_sidecar(loading, menu_dir / "loading.cmp", *GC_LOADING_CMP_SIZE):
+		print(
+			f"GameCube menu assets: loading.tga baked as loading.cmp "
+			f"{GC_LOADING_CMP_SIZE[0]}x{GC_LOADING_CMP_SIZE[1]} CMPR"
+		)
+
+
 def _stage_gc_menu_logo_banner(source: Path, menu_dir: Path) -> bool:
 	"""resource/gc_menu/logo_banner.{cmp,tga} from a frame of media/logo.avi."""
 	avi = source / "media" / "logo.avi"
@@ -937,6 +1011,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 			if child.is_file():
 				shutil.copy2(child, menu_dir / child.name)
 		_stage_gc_menu_btn_strips(source, menu_dir)
+		_stage_gc_menu_loading_cmp(menu_dir)
 		print(
 			f"GameCube menu assets: preserve Lost Coast retail title "
 			f"{(menu_dir / 'background.tga').relative_to(output)}"
@@ -1077,6 +1152,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 	# 640x480 menu.  Bake one frame as GX CMPR (640x104, CMPR needs multiples
 	# of 8) for the GX menu, plus a small TGA so mainui can load the picture.
 	_stage_gc_menu_logo_banner(source, menu_dir)
+	_stage_gc_menu_loading_cmp(menu_dir)
 
 	# Optional low-memory 3×3 preview tiles for probes that cannot hold the
 	# full 640×480 sheet; the live menu uses background.tga + logo.tga.
@@ -1238,6 +1314,8 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 
 	menu_dir = output / "resource" / "gc_menu"
 	menu_dir.mkdir(parents=True, exist_ok=True)
+	# Changelevel / New Game "LOADING..." plaque (retail gfx.wad art).
+	build_loading_spans(source, output)
 
 	# Lost Coast CapFaces title: keep console/background01 loading+intro plates.
 	src_note = menu_dir / "SOURCE.txt"
@@ -1365,6 +1443,21 @@ GC_STUDIO_MODELS = (
 	"models/v_tommy.mdl",
 	"models/v_colt.mdl",
 	"models/v_luger.mdl",
+	# DoD hand grenades: viewmodels lean-stripped, thrown bodies mesh-only.
+	"models/v_grenade.mdl",
+	"models/v_stick.mdl",
+	"models/w_grenade.mdl",
+	"models/w_stick.mdl",
+	# The rest of the table-driven DoD gun set; rocket body is mesh-only.
+	"models/v_bren.mdl",
+	"models/v_mp44.mdl",
+	"models/v_spring.mdl",
+	"models/v_scoped98k.mdl",
+	"models/v_30cal.mdl",
+	"models/v_mg42.mdl",
+	"models/v_bazooka.mdl",
+	"models/v_panzerschreck.mdl",
+	"models/w_bazooka_rocket.mdl",
 	"models/w_crowbar.mdl",
 	# DoD CapFaces map props (env_model / dod_object).
 	# Tip: skip forts/kingtiger; caen unique order saturates 6 slots before bulb.
@@ -1883,6 +1976,145 @@ def wt_encode(w: int, h: int, pixels: bytes, palette: bytes, alpha: bool) -> tup
 	return tw, th, count, bytes(levels)
 
 
+def _wad_lump(wad: Path, name: str) -> bytes | None:
+	"""Raw lump bytes from a WAD3 file, or None."""
+	try:
+		data = wad.read_bytes()
+	except OSError:
+		return None
+	if data[:4] != b"WAD3":
+		return None
+	count, offset = struct.unpack_from("<ii", data, 4)
+	for i in range(count):
+		filepos, disksize, size, ltype, comp = struct.unpack_from("<iiibb", data, offset + i * 32)
+		lname = data[offset + i * 32 + 16: offset + i * 32 + 32].split(b"\0")[0].decode("latin1")
+		if lname.upper() == name.upper():
+			return data[filepos: filepos + disksize]
+	return None
+
+
+def build_loading_spans(source: Path, output: Path) -> list[tuple[str, Path]]:
+	"""media/gc_loading.spn: the changelevel / New Game loading plaque as
+	coloured horizontal spans the engine draws with plain Flipper quads over
+	the held frame (vid_gamecube.c GC_LoadingOverlayDraw).
+
+	The art is retail: gfx.wad lump LAMBDA is GoldSrc's own "LOADING..."
+	plaque (orange letters, black outline, index 255 transparent), drawn at
+	the centre of the screen.  Here at 2x for a TV, on a tight dark plate
+	(the overlay replaces a rectangle of the held frame), with a thin amber
+	progress line the engine fills through the load stages.
+
+	Big-endian, compact (MEM1 is that tight): 'GCLS', u8 w/16, h, ncolors,
+	0, u16 bar_x, bar_y, bar_w, bar_h, u32 bar_track, bar_fill, u16 nspans,
+	u16 0, ncolors x u32 rgba, then nspans x (u8 x, y, len, colour index).
+	"""
+	lump = _wad_lump(source / "gfx.wad", "LAMBDA")
+	if not lump or len(lump) < 8:
+		return []
+	lw, lh = struct.unpack_from("<II", lump, 0)
+	pixels = lump[8: 8 + lw * lh]
+	pal_off = 8 + lw * lh + 2
+	palette = lump[pal_off: pal_off + 768]
+	if len(pixels) < lw * lh or len(palette) < 768:
+		return []
+	opaque = [i for i, v in enumerate(pixels) if v != 255]
+	if not opaque:
+		return []
+	x0 = min(i % lw for i in opaque); x1 = max(i % lw for i in opaque)
+	y0 = min(i // lw for i in opaque); y1 = max(i // lw for i in opaque)
+	tw, th = x1 - x0 + 1, y1 - y0 + 1
+
+	scale = 2
+	pad_x, pad_top, bar_gap, bar_h, pad_bottom = 16, 10, 6, 3, 9
+	W = ( tw * scale + 2 * pad_x + 15 ) & ~15	# XFB copies are 16-pixel aligned
+	H = pad_top + th * scale + bar_gap + bar_h + pad_bottom
+	plate = (10, 9, 8)
+	edge = (70, 50, 14)
+	rows = [[plate] * W for _ in range(H)]
+	for x in range(W):
+		rows[0][x] = rows[H - 1][x] = edge
+	for y in range(H):
+		rows[y][0] = rows[y][W - 1] = edge
+	ox = ( W - tw * scale ) // 2
+	for y in range(th):
+		for x in range(tw):
+			v = pixels[( y0 + y ) * lw + x0 + x]
+			if v == 255:
+				continue
+			c = tuple(palette[3 * v: 3 * v + 3])
+			for sy in range(scale):
+				for sx in range(scale):
+					rows[pad_top + y * scale + sy][ox + x * scale + sx] = c
+	bar_x, bar_y = ox, pad_top + th * scale + bar_gap
+	bar_w = tw * scale
+
+	def rgba(c):
+		return (c[0] << 24) | (c[1] << 16) | (c[2] << 8) | 0xFF
+
+	spans = []
+	for y, row in enumerate(rows):
+		x = 0
+		while x < W:
+			run = 1
+			while x + run < W and row[x + run] == row[x]:
+				run += 1
+			spans.append((x, y, run, rgba(row[x])))
+			x += run
+	colours = sorted({c for _, _, _, c in spans})
+	if W > 255 * 16 or W > 255 or H > 255 or len(colours) > 255:
+		return []
+	cindex = {c: i for i, c in enumerate(colours)}
+	out = output / "media" / "gc_loading.spn"
+	out.parent.mkdir(parents=True, exist_ok=True)
+	blob = bytearray(b"GCLS")
+	blob += struct.pack(">BBBBHHHHIIHH", W // 16, H, len(colours), 0, bar_x, bar_y, bar_w, bar_h,
+		rgba((40, 32, 20)), rgba((255, 160, 0)), len(spans), 0)
+	for c in colours:
+		blob += struct.pack(">I", c)
+	for x, y, run, c in spans:
+		blob += struct.pack(">BBBB", x, y, run, cindex[c])
+	out.write_bytes(bytes(blob))
+	print(f"  loading plaque: retail LAMBDA {tw}x{th} at {scale}x, {W}x{H}, "
+		f"{len(spans)} spans, {len(blob)} bytes")
+	return [("media/gc_loading.spn", out)]
+
+
+def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
+	"""media/wd_<map>.gcd for a GoldSrc map: the whole BSP as GX display lists
+	per PVS cluster (scripts/bake_worlddl_goldsrc.py, runtime
+	ref/gx/r_gx_worlddl.c).  With it the world draws completely from any view,
+	streamed from ARAM, instead of the CapFaces subset captured for the
+	starting eye.  Cached by BSP size and mtime."""
+	cache.mkdir(parents=True, exist_ok=True)
+	st = bsp.stat()
+	out = cache / f"wd_{bsp.stem.lower()}.gcd"
+	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
+	key = f"{st.st_size}:{int(st.st_mtime)}:2"
+	if out.is_file() and stamp.is_file() and stamp.read_text() == key:
+		return out
+	sys.path.insert(0, str(Path(__file__).resolve().parent))
+	try:
+		import bake_worlddl_goldsrc  # type: ignore
+
+		bake_worlddl_goldsrc.bake(bsp, out)
+	except (Exception, SystemExit) as error:  # a map the baker cannot read keeps CapFaces
+		print(f"  world DL: bake failed for {bsp.name}: {error}")
+		return None
+	stamp.write_text(key)
+	return out
+
+
+def build_world_dl_overlays(source: Path, output: Path, cache: Path) -> list[tuple[str, Path]]:
+	"""World DL packs for every retail map (play disc)."""
+	overlays = []
+	for bsp in sorted((source / "maps").glob("*.bsp")):
+		wd = bake_world_dl(bsp, cache)
+		if wd:
+			overlays.append((f"media/{wd.name}", wd))
+	print(f"  world DL: {len(overlays)} map(s) baked/cached")
+	return overlays
+
+
 def build_music_overlays(source: Path, output: Path, cache: Path) -> list[tuple[str, Path]]:
 	"""CD tracks as 22 kHz stereo WAV, media/cdNN.wav, with the cdaudio.txt
 	playlist. The Gekko can't decode MP3 during play; a WAV streams from disc
@@ -2281,6 +2513,9 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 	dod_capfaces_stems = {
 		"v_garand", "v_mp40", "v_98k", "v_tommy", "v_colt", "v_luger",
 		"v_amerk", "v_spade", "v_crowbar", "w_crowbar",
+		"v_grenade", "v_stick", "w_grenade", "w_stick",
+		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
+		"v_bazooka", "v_panzerschreck", "w_bazooka_rocket",
 		# CapFaces map props (env_model) — pull from Expansion1 / content/dod.
 		"sandbags", "bulb", "hk_satchel", "furniture", "by_rubble_set",
 		"arc_xer_tree2", "horse_statue", "by_canopy",
@@ -2315,7 +2550,9 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 		# downsampled gc_studio/<stem>t.mdl companion (see below).
 		dod_capfaces_lean = {
 			"v_garand", "v_mp40", "v_98k", "v_tommy", "v_colt", "v_luger",
-			"v_amerk", "v_spade",
+			"v_amerk", "v_spade", "v_grenade", "v_stick",
+			"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
+			"v_bazooka", "v_panzerschreck",
 			# Other CapFaces map props stay lean-stripped for tip maps.
 			"bulb", "hk_satchel", "furniture", "by_rubble_set",
 			"arc_xer_tree2", "horse_statue", "by_canopy",
@@ -2831,6 +3068,14 @@ def build_logo_gcvid_companion(source: Path, output: Path) -> Path | None:
 	return output_movie
 
 
+# Mirror of GC_PREFETCH_MAX_ENTRIES / GC_PREFETCH_MAX_BYTES in mem_gamecube.c.
+GC_PREFETCH_MAX_ENTRIES = 32
+GC_PREFETCH_MAX_BYTES = 2 * 1024 * 1024
+# DoD manifests skip big files: every combat clip is cut to ~16 KiB, so anything
+# larger is a stray full-length sound that would only burn a prefetch slot.
+GC_PREFETCH_DOD_MAX_FILE = 64 * 1024
+
+
 def build_c0a0_prefetch_manifest(source: Path, output: Path) -> Path:
 	"""Emit a deterministic first-map read-ahead manifest.
 
@@ -2849,15 +3094,55 @@ def build_c0a0_prefetch_manifest(source: Path, output: Path) -> Path:
 		"sound/tride/c0a0_tr_time.wav",
 		"sound/plats/ttrain1.wav",
 	)
+	# Day of Defeat combat read-ahead: whatever weapon audio the staging step
+	# put on the disc, most important first (explosions, grenade handling,
+	# gunshots, reloads). Sounds are otherwise loaded on demand from disc in the
+	# middle of a fight. Models are cached in ARAM by the engine the first time
+	# they load, so they are not listed. Half-Life data keeps its manifest.
+	is_dod_source = (source / "models" / "v_garand.mdl").is_file() or any(
+		(source / "maps").glob("dod_*.bsp")
+	)
+	if is_dod_source:
+		weapon_sounds = source / "sound" / "weapons"
+		names = sorted(
+			item.name for item in weapon_sounds.iterdir()
+			if item.is_file() and item.suffix.lower() == ".wav"
+		) if weapon_sounds.is_dir() else []
+
+		def dod_rank(name: str) -> int:
+			lowered = name.lower()
+			if lowered.startswith("explode"):
+				return 0
+			if lowered in ("grenpinpull.wav", "grenthrow.wav"):
+				return 1
+			if lowered.endswith("_shoot.wav"):
+				return 2
+			if "reload" in lowered or lowered.startswith("bazooka"):
+				return 3
+			return 4
+
+		priority += tuple(
+			f"sound/weapons/{name}" for name in sorted(names, key=lambda n: (dod_rank(n), n.lower()))
+		)
 	entries: list[str] = []
 	seen: set[str] = set()
+	reserved = 0
 	for relative in priority:
 		path = source / relative
-		if path.is_file():
+		# DoD only (HL1's manifest stays as it was): the runtime reads at most 32
+		# entries and reserves at most 2 MiB of ARAM, so keep the ranked head.
+		size = path.stat().st_size if path.is_file() else 0
+		within_budget = not is_dod_source or (
+			len(entries) < GC_PREFETCH_MAX_ENTRIES
+			and size <= GC_PREFETCH_DOD_MAX_FILE
+			and reserved + size <= GC_PREFETCH_MAX_BYTES
+		)
+		if path.is_file() and within_budget:
 			entries.append(f"{relative} {path.stat().st_size}\n")
 			seen.add(relative)
+			reserved += path.stat().st_size
 	# Include nearby first-map assets in lexical order after the critical set.
-	for root_name in ("models", "sprites", "sound"):
+	for root_name in (() if is_dod_source else ("models", "sprites", "sound")):
 		root = source / root_name
 		if not root.is_dir():
 			continue
@@ -2937,6 +3222,7 @@ def create_retail_boot_overlays(
 	)
 	overlays.extend(build_sky_cmpr_overlays(source, output))
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
+	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
 	# Offline CapFaces packs (media/cf_<map>.gcp) — load-time DL for 60 FPS Flipper.
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore
@@ -3299,6 +3585,11 @@ def stage_smoke_data(
 	resources = smoke_map_resources(map_source)
 	for resource in sorted(resources):
 		copy_if_present(source, output, resource)
+	# Day of Defeat lean discs: ARAM read-ahead for the grenade audio that was
+	# actually staged above. Sizes come from the staged copies so the runtime
+	# size check matches; Half-Life smoke discs get no manifest.
+	if any((output / "maps").glob("dod_*.bsp")):
+		build_c0a0_prefetch_manifest(output, output)
 
 	if changelevel:
 		dest_stem = Path(changelevel).stem
@@ -3356,11 +3647,29 @@ def stage_smoke_data(
 				src = cand
 				break
 		if src is None:
+			bsp = source / "maps" / f"{stem}.bsp"
+			if bsp.is_file():
+				src = bake_world_dl(bsp, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache")
+		if src is None:
 			print(f"  world DL: no {name} (CapFaces/live BSP fallback)")
 			continue
 		shutil.copy2(src, dest)
 		print(f"  world DL: staged {name} ({dest.stat().st_size} bytes)")
 
+	# Changelevel / New Game loading plaque (retail gfx.wad art, ~3 KiB).
+	build_loading_spans(source, output)
+	# Retail AI node graphs (maps/graphs/*.nod, ~10-20 KiB each for the early
+	# maps; the game loads the one for the running map).  Without them every
+	# scripted walker logs "Graph not ready!" / "Failed to reach target!!!"
+	# each frame and stands still.  Retail staging copies them already.
+	graphs = source / "maps" / "graphs"
+	if graphs.is_dir():
+		(output / "maps" / "graphs").mkdir(parents=True, exist_ok=True)
+		count = 0
+		for nod in graphs.glob("*.nod"):
+			shutil.copy2(nod, output / "maps" / "graphs" / nod.name.lower())
+			count += 1
+		print(f"  node graphs: {count} staged")
 	(output / "custom").mkdir(exist_ok=True)
 	(output / "maps").mkdir(exist_ok=True)
 	return output

@@ -3744,6 +3744,38 @@ static void GAME_EXPORT pfnAlertMessage( ALERT_TYPE type, char *szFmt, ... )
 	Q_vsnprintf( buffer, sizeof( buffer ), szFmt, args );
 	va_end( args );
 
+#if XASH_GAMECUBE
+	/* Per-frame game alerts ("Gibbed monster is thinking!", "Graph not
+	 * ready!" / "Failed to reach target!!!" from every stuck monster) each go
+	 * through OSReport, which in Dolphin is slow enough to drop a ride to
+	 * ~15% speed.  Each distinct text (kept in a small ring, so alternating
+	 * spam is caught too) prints twice; after that only every 512th repeat
+	 * prints, with its count. */
+	{
+		static char ring[8][96];
+		static unsigned counts[8], next;
+		int i;
+
+		for( i = 0; i < 8; i++ )
+		{
+			if( ring[i][0] && !Q_strncmp( buffer, ring[i], sizeof( ring[i] ) - 1 ))
+				break;
+		}
+		if( i == 8 )
+		{
+			i = next++ & 7;
+			Q_strncpy( ring[i], buffer, sizeof( ring[i] ));
+			counts[i] = 0;
+		}
+		if( ++counts[i] > 2 )
+		{
+			if(( counts[i] & 511 ) == 0 )
+				Con_DPrintf( "(alert repeated %u times) %s", counts[i], buffer );
+			return;
+		}
+	}
+#endif
+
 	// check message for pass
 	switch( type )
 	{

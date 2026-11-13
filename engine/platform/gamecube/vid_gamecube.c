@@ -51,6 +51,7 @@ void Mod_GCClearRetainedBspScratch( void );
 #include <ogc/aram.h>
 #include <ogc/lwp_watchdog.h>
 #include <ogc/pad.h>
+#include "gcmp.h"
 #endif
 
 typedef struct gc_video_s
@@ -295,7 +296,9 @@ static GXRModeObj *GC_NetworkVideoMode( GXRModeObj *preferred )
  * GX flow control stalls the CPU when this FIFO fills. */
 static uint8_t gx_fifo[256 * 1024] __attribute__((aligned(32)));
 #else
-static uint8_t gx_fifo[512 * 1024] __attribute__((aligned(32)));
+/* 128 KiB. The other 384 KiB of the old 512 KiB FIFO is the world lightmap
+ * cache in r_gx_worlddl.c (192 full 32×32 pages). MEM1 stays the same size. */
+static uint8_t gx_fifo[128 * 1024] __attribute__((aligned(32)));
 #endif
 static unsigned int gc_present_count;
 
@@ -502,16 +505,86 @@ static int GC_LoadingGlyphQuads( const char *text, int x, int y, qboolean emit )
 	return n;
 }
 
+/* Retail loading plaque baked at disc build (build-gamecube-disc.py
+ * build_loading_spans): gfx.wad LAMBDA "LOADING..." at 2x on a dark plate,
+ * as coloured spans, plus a progress line.  Loaded once; without the file
+ * the old text box is drawn. */
+#define GC_LOADING_SPN_MAX	( 4 * 1024 )	/* MEM1: every KiB counts at c0a0 */
+static byte gc_loading_spn[GC_LOADING_SPN_MAX] __attribute__((aligned( 32 )));
+static int gc_loading_spn_state;	/* 0 untried, 1 ready, -1 missing */
+static u16 gc_spn_w, gc_spn_h, gc_spn_bar_x, gc_spn_bar_y, gc_spn_bar_w, gc_spn_bar_h, gc_spn_count, gc_spn_ncolors;
+static u32 gc_spn_track, gc_spn_fill;
+static float gc_loading_stage;		/* fraction reached by load stages */
+static float gc_loading_progress;	/* drawn fraction, creeps toward the next stage */
+
+static u16 GC_SpnU16( const byte *p ) { return (u16)(( p[0] << 8 ) | p[1] ); }
+static u32 GC_SpnU32( const byte *p ) { return ((u32)p[0] << 24 ) | ((u32)p[1] << 16 ) | ((u32)p[2] << 8 ) | p[3]; }
+
+static qboolean GC_LoadingSpansReady( void )
+{
+	file_t *f;
+	fs_offset_t len, got;
+
+	if( gc_loading_spn_state )
+		return gc_loading_spn_state > 0;
+	gc_loading_spn_state = -1;
+	f = FS_Open( "media/gc_loading.spn", "rb", false );
+	if( !f )
+		return false;
+	len = FS_FileLength( f );
+	got = ( len > 32 && len <= GC_LOADING_SPN_MAX ) ? FS_Read( f, gc_loading_spn, len ) : 0;
+	FS_Close( f );
+	if( got != len || memcmp( gc_loading_spn, "GCLS", 4 ))
+		return false;
+	/* 'GCLS', u8 w/16, h, ncolors, 0, u16 bar x/y/w/h, u32 track, fill,
+	 * u16 nspans, 0, ncolors x u32, nspans x (u8 x, y, len, colour). */
+	gc_spn_w = (u16)gc_loading_spn[4] * 16;
+	gc_spn_h = gc_loading_spn[5];
+	gc_spn_ncolors = gc_loading_spn[6];
+	gc_spn_bar_x = GC_SpnU16( gc_loading_spn + 8 );
+	gc_spn_bar_y = GC_SpnU16( gc_loading_spn + 10 );
+	gc_spn_bar_w = GC_SpnU16( gc_loading_spn + 12 );
+	gc_spn_bar_h = GC_SpnU16( gc_loading_spn + 14 );
+	gc_spn_track = GC_SpnU32( gc_loading_spn + 16 );
+	gc_spn_fill = GC_SpnU32( gc_loading_spn + 20 );
+	gc_spn_count = GC_SpnU16( gc_loading_spn + 24 );
+	if( !gc_spn_w || !gc_spn_h || !gc_spn_ncolors
+		|| 28 + (fs_offset_t)gc_spn_ncolors * 4 + (fs_offset_t)gc_spn_count * 4 > len )
+		return false;
+	gc_loading_spn_state = 1;
+	Con_Reportf( "Xash3D GameCube: loading plaque %ux%u spans=%u\n", gc_spn_w, gc_spn_h, gc_spn_count );
+	return true;
+}
+
+/* Load stages set a floor; pulses between them creep toward the next. */
+void GC_LoadingSetStage( float fraction )
+{
+	if( fraction > gc_loading_stage )
+		gc_loading_stage = fraction;
+	if( gc_loading_progress < gc_loading_stage )
+		gc_loading_progress = gc_loading_stage;
+}
+
+static void GC_LoadingCreep( void )
+{
+	const float cap = Q_min( gc_loading_stage + 0.2f, 0.97f );
+
+	if( gc_loading_progress < cap )
+		gc_loading_progress += ( cap - gc_loading_progress ) * 0.12f;
+}
+
 static void GC_LoadingOverlayDraw( void )
 {
 	const int cell = 6 * GC_LOADING_SCALE;
 	const u16 efb_h = rmode->efbHeight, xfb_h = rmode->xfbHeight, fb_w = rmode->fbWidth;
+	const qboolean plaque = GC_LoadingSpansReady() && gc_spn_w <= fb_w && gc_spn_h <= efb_h;
 	/* XFB lines are 32-byte aligned: x and width in 16-pixel steps. */
-	const u16 w = (u16)(((((int)sizeof( GC_LOADING_TEXT ) - 1 + GC_LOADING_DOTS ) * cell
+	const u16 w = plaque ? gc_spn_w : (u16)(((((int)sizeof( GC_LOADING_TEXT ) - 1 + GC_LOADING_DOTS ) * cell
 		+ 8 * GC_LOADING_SCALE ) + 15 ) & ~15 );
-	const u16 h = 15 * GC_LOADING_SCALE;
+	const u16 h = plaque ? gc_spn_h : 15 * GC_LOADING_SCALE;
 	const u16 x = (u16)((( fb_w - w ) / 2 ) & ~15 );
-	const u16 y = (u16)( efb_h - h - efb_h / 8 );
+	/* Retail draws the plaque at the centre of the screen. */
+	const u16 y = plaque ? (u16)(( efb_h - h ) / 2 ) : (u16)( efb_h - h - efb_h / 8 );
 	const int tx = x + 4 * GC_LOADING_SCALE, ty = y + 4 * GC_LOADING_SCALE;
 	char text[sizeof( GC_LOADING_TEXT ) + GC_LOADING_DOTS];
 	u32 dots = gc_loading_phase % ( GC_LOADING_DOTS + 1 ), i, lines;
@@ -522,7 +595,7 @@ static void GC_LoadingOverlayDraw( void )
 	Q_strncpy( text, GC_LOADING_TEXT, sizeof( text ));
 	for( i = 0; i < dots; i++ )
 		Q_strncat( text, ".", sizeof( text ));
-	quads = 1 + GC_LoadingGlyphQuads( text, tx, ty, false );
+	quads = plaque ? gc_spn_count + 2 : 1 + GC_LoadingGlyphQuads( text, tx, ty, false );
 
 	GX_SetViewport( 0.0f, 0.0f, fb_w, efb_h, 0.0f, 1.0f );
 	GX_SetScissor( 0, 0, fb_w, efb_h );
@@ -555,8 +628,28 @@ static void GC_LoadingOverlayDraw( void )
 	GX_InvVtxCache();
 
 	GX_Begin( GX_QUADS, GX_VTXFMT0, (u16)( quads * 4 ));
-	GC_LoadingQuad( x, y, w, h, 0x181818FF );
-	GC_LoadingGlyphQuads( text, tx, ty, true );
+	if( plaque )
+	{
+		const byte *colors = gc_loading_spn + 28;
+		const byte *sp = colors + gc_spn_ncolors * 4;
+		const float fill = Q_max( 0.0f, Q_min( gc_loading_progress, 1.0f ));
+		const f32 fw = (f32)gc_spn_bar_w * fill;
+		u32 i;
+
+		for( i = 0; i < gc_spn_count; i++, sp += 4 )
+		{
+			const u32 ci = sp[3] < gc_spn_ncolors ? sp[3] : 0;
+
+			GC_LoadingQuad( x + sp[0], y + sp[1], sp[2], 1, GC_SpnU32( colors + ci * 4 ));
+		}
+		GC_LoadingQuad( x + gc_spn_bar_x, y + gc_spn_bar_y, gc_spn_bar_w, gc_spn_bar_h, gc_spn_track );
+		GC_LoadingQuad( x + gc_spn_bar_x, y + gc_spn_bar_y, fw, gc_spn_bar_h, gc_spn_fill );
+	}
+	else
+	{
+		GC_LoadingQuad( x, y, w, h, 0x181818FF );
+		GC_LoadingGlyphQuads( text, tx, ty, true );
+	}
 	GX_End();
 
 	GX_SetDispCopySrc( x, y, w, h );
@@ -584,6 +677,7 @@ static void GC_LoadingOverlayBegin( void )
 		return;
 	gc_loading_fb = fb;
 	gc_loading_phase = 0;
+	gc_loading_stage = gc_loading_progress = 0.0f;
 	/* Menu New Game has no previous gameplay frame to preserve. Cover the
 	 * transition in black while the server, BSP and first Flipper frame settle;
 	 * changelevels retain the retail behavior of holding the prior frame.
@@ -615,6 +709,7 @@ void GC_LoadingOverlayPulse( void )
 	if( !gc_loading_fb || !GC_TransitionHoldActive() || Sys_FloatTime() < gc_loading_next )
 		return;
 	gc_loading_phase++;
+	GC_LoadingCreep();
 	GC_LoadingOverlayDraw();
 	gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
 }
@@ -1109,7 +1204,7 @@ static void GC_BakeTramSlotST( int slot, const msurface_t *src, const gc_tram_fa
 }
 /* G286: tip-safe Flipper water — baked turb verts (no live-pool tip / no draw walk hang).
  * Lost Coast Source water pack (media/gw_<map>.gcw) raises the sheet budget. */
-#define GC_WATER_MAX_FACES 24
+#define GC_WATER_MAX_FACES 96
 typedef struct
 {
 	byte		nverts;
@@ -1123,6 +1218,29 @@ typedef struct
 } gc_water_face_t;
 static gc_water_face_t gc_water_faces[GC_WATER_MAX_FACES];
 static int gc_water_face_count;
+/* The full coast pack is 494 records. The fat face struct would be ~80 KB
+ * if every sheet stayed in MEM1, so the records sit in ARAM and one 128-byte
+ * stage is decoded per draw. The frustum drops the rest. */
+#define GC_WATER_RAW_MAX 512
+static byte gc_water_stage[128] __attribute__(( aligned( 32 )));
+static int gc_water_stage_i = -1;
+static u32 gc_water_aram;
+static int gc_water_raw_count;
+static float gc_water_scroll2_u, gc_water_scroll2_v;
+static uint16_t GC_Be16( const byte *p );
+static uint32_t GC_Be32( const byte *p );
+
+static const byte *GC_WaterRec( int index )
+{
+	if( !gc_water_aram || index < 0 || index >= gc_water_raw_count )
+		return NULL;
+	if( gc_water_stage_i != index )
+	{
+		GC_AramTransfer( gc_water_aram + (u32)index * 128u, gc_water_stage, 128, false );
+		gc_water_stage_i = index;
+	}
+	return gc_water_stage;
+}
 static qboolean gc_g286_water_logged;
 /* GX scroll water CMPR (media/water_gx.cmp) — 64×64. */
 #define GC_WATER_TEX_SIZE	64
@@ -2319,14 +2437,48 @@ void GC_GetTramModelOrigin( float out[3] )
 
 int GC_GetWaterFaceCount( void )
 {
+	if( gc_water_raw_count > 0 )
+		return gc_water_raw_count;
 	return gc_water_face_count;
+}
+
+void GC_GetWaterScroll2( float *u, float *v )
+{
+	if( u ) *u = gc_water_scroll2_u;
+	if( v ) *v = gc_water_scroll2_v;
 }
 
 int GC_GetWaterFaceVerts( int index, float out[][3], int maxverts )
 {
 	const gc_water_face_t *src;
-	int n, i;
+	const byte *rec;
+	int n, i, zsum;
 
+	rec = GC_WaterRec( index );
+	if( rec )
+	{
+		if( !out || maxverts < 3 )
+			return 0;
+		n = rec[0];
+		if( n < 3 )
+			return 0;
+		if( n > GC_CAP_MAX_VERTS )
+			n = GC_CAP_MAX_VERTS;
+		if( n > maxverts )
+			n = maxverts;
+		zsum = 0;
+		for( i = 0; i < n; i++ )
+		{
+			out[i][0] = (float)(int16_t)GC_Be16( rec + 16 + i * 6 );
+			out[i][1] = (float)(int16_t)GC_Be16( rec + 16 + i * 6 + 2 );
+			out[i][2] = (float)(int16_t)GC_Be16( rec + 16 + i * 6 + 4 );
+			zsum += (int)out[i][2];
+		}
+		/* Sky-volume water sits thousands of units under the coast. */
+		if( zsum < -400 * n )
+			return 0;
+		return n;
+	}
 	if( !out || maxverts < 3 || index < 0 || index >= gc_water_face_count )
 		return 0;
 	src = &gc_water_faces[index];
@@ -2349,8 +2501,28 @@ int GC_GetWaterFaceVerts( int index, float out[][3], int maxverts )
 int GC_GetWaterFaceST( int index, float out_st[][2], int maxverts )
 {
 	const gc_water_face_t *src;
+	const byte *rec;
 	int n, i;
 
+	rec = GC_WaterRec( index );
+	if( rec )
+	{
+		if( !out_st || maxverts < 3 )
+			return 0;
+		n = rec[0];
+		if( n < 3 )
+			return 0;
+		if( n > GC_CAP_MAX_VERTS )
+			n = GC_CAP_MAX_VERTS;
+		if( n > maxverts )
+			n = maxverts;
+		for( i = 0; i < n; i++ )
+		{
+			out_st[i][0] = (float)(int16_t)GC_Be16( rec + 64 + i * 4 ) * ( 1.0f / 64.0f );
+			out_st[i][1] = (float)(int16_t)GC_Be16( rec + 64 + i * 4 + 2 ) * ( 1.0f / 64.0f );
+		}
+		return n;
+	}
 	if( !out_st || maxverts < 3 || index < 0 || index >= gc_water_face_count )
 		return 0;
 	src = &gc_water_faces[index];
@@ -2372,7 +2544,21 @@ int GC_GetWaterFaceST( int index, float out_st[][2], int maxverts )
 void GC_GetWaterFaceScroll( int index, float *scroll_u, float *scroll_v, u32 *tint )
 {
 	const gc_water_face_t *src;
+	const byte *rec;
+	union { uint32_t u; float f; } u2f;
 
+	rec = GC_WaterRec( index );
+	if( rec )
+	{
+		u2f.u = GC_Be32( rec + 8 );
+		if( scroll_u ) *scroll_u = u2f.f;
+		u2f.u = GC_Be32( rec + 12 );
+		if( scroll_v ) *scroll_v = u2f.f;
+		if( tint )
+			*tint = ( (u32)rec[112] << 24 ) | ( (u32)rec[113] << 16 )
+				| ( (u32)rec[114] << 8 ) | (u32)rec[115];
+		return;
+	}
 	if( index < 0 || index >= gc_water_face_count )
 	{
 		if( scroll_u ) *scroll_u = 0.04f;
@@ -2384,6 +2570,35 @@ void GC_GetWaterFaceScroll( int index, float *scroll_u, float *scroll_v, u32 *ti
 	if( scroll_u ) *scroll_u = src->scroll_u;
 	if( scroll_v ) *scroll_v = src->scroll_v;
 	if( tint ) *tint = src->tint ? src->tint : 0x408C90A8u;
+}
+
+/* VMT $fogcolor / $reflect from the .gcw extension (bytes 116–119).
+ * Body shading uses fogcolor — the packed teal tint is only a fallback. */
+qboolean GC_GetWaterFaceFog( int index, byte rgb[3], u8 *reflect_x100 )
+{
+	const byte *rec = GC_WaterRec( index );
+
+	if( !rec )
+	{
+		if( rgb )
+		{
+			rgb[0] = 20;
+			rgb[1] = 42;
+			rgb[2] = 37;
+		}
+		if( reflect_x100 )
+			*reflect_x100 = 150;
+		return false;
+	}
+	if( rgb )
+	{
+		rgb[0] = rec[116];
+		rgb[1] = rec[117];
+		rgb[2] = rec[118];
+	}
+	if( reflect_x100 )
+		*reflect_x100 = rec[119] ? rec[119] : 150;
+	return true;
 }
 
 qboolean GC_WaterTexReady( void )
@@ -2398,6 +2613,27 @@ void *GC_GetWaterTexObj( void )
 
 qboolean GC_WaterFacePlane( int index, mplane_t *out, int *out_flags )
 {
+	const byte *rec;
+	union { uint32_t u; float f; } u2f;
+
+	rec = GC_WaterRec( index );
+	if( rec )
+	{
+		if( !out )
+			return false;
+		memset( out, 0, sizeof( *out ));
+		u2f.u = GC_Be32( rec + 96 );
+		out->normal[0] = u2f.f;
+		u2f.u = GC_Be32( rec + 100 );
+		out->normal[1] = u2f.f;
+		u2f.u = GC_Be32( rec + 104 );
+		out->normal[2] = u2f.f;
+		u2f.u = GC_Be32( rec + 108 );
+		out->dist = u2f.f;
+		if( out_flags )
+			*out_flags = (int)rec[1];
+		return true;
+	}
 	if( !out || index < 0 || index >= gc_water_face_count )
 		return false;
 	*out = gc_water_faces[index].plane;
@@ -2424,6 +2660,15 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 	union { uint32_t u; float f; } u2f;
 
 	gc_water_face_count = 0;
+	gc_water_raw_count = 0;
+	gc_water_stage_i = -1;
+	gc_water_scroll2_u = 0.0f;
+	gc_water_scroll2_v = 0.0f;
+	if( gc_water_aram )
+	{
+		GC_AramFree( gc_water_aram );
+		gc_water_aram = 0;
+	}
 	gc_water_tex_ready = false;
 	gc_g286_water_logged = false;
 	memset( gc_water_faces, 0, sizeof( gc_water_faces ));
@@ -2463,6 +2708,49 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 		FS_Close( f );
 		return false;
 	}
+	/* Every coast sheet. The draw frustum throws out the ones off camera.
+	 * ARAM holds the records; a miss falls back to the nearest 96. */
+	gc_water_aram = GC_AramAllocTagged( GC_WATER_RAW_MAX * 128u, false, "water" );
+	if( gc_water_aram )
+	{
+		int kept = 0;
+		union { uint32_t u; float f; } sc;
+
+		sc.u = GC_Be32( hdr + 16 );
+		gc_water_scroll2_u = sc.f;
+		sc.u = GC_Be32( hdr + 20 );
+		gc_water_scroll2_v = sc.f;
+		for( i = 0; i < (int)face_n && kept < GC_WATER_RAW_MAX; i++ )
+		{
+			int nv, v, zsum;
+
+			if( FS_Read( f, gc_water_stage, 128 ) != 128 )
+			{
+				FS_Close( f );
+				GC_AramFree( gc_water_aram );
+				gc_water_aram = 0;
+				gc_water_raw_count = 0;
+				return false;
+			}
+			nv = gc_water_stage[0];
+			if( nv < 3 )
+				nv = 3;
+			if( nv > GC_CAP_MAX_VERTS )
+				nv = GC_CAP_MAX_VERTS;
+			zsum = 0;
+			for( v = 0; v < nv; v++ )
+				zsum += (int)(int16_t)GC_Be16( gc_water_stage + 16 + v * 6 + 4 );
+			if( zsum < -400 * nv )
+				continue;
+			DCFlushRange( gc_water_stage, 128 );
+			GC_AramTransfer( gc_water_aram + (u32)kept * 128u, gc_water_stage, 128, true );
+			kept++;
+		}
+		gc_water_stage_i = -1;
+		gc_water_raw_count = kept;
+		gc_water_face_count = kept;
+	}
+	else
 	{
 		float scores[GC_WATER_MAX_FACES];
 		/* Over the harbor sheet. The bank eye kept sheets that the sand covers. */
@@ -2576,8 +2864,9 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 		if( tf )
 			FS_Close( tf );
 	}
-	Con_Reportf( "Xash3D GameCube: water pack loaded %s faces=%d tex=%d\n",
-		path, gc_water_face_count, gc_water_tex_ready ? 1 : 0 );
+	Con_Reportf( "Xash3D GameCube: water pack loaded %s faces=%d tex=%d aram=%d scroll2=%.3f,%.3f\n",
+		path, GC_GetWaterFaceCount(), gc_water_tex_ready ? 1 : 0,
+		gc_water_aram ? 1 : 0, gc_water_scroll2_u, gc_water_scroll2_v );
 	return gc_water_face_count > 0;
 }
 
@@ -4321,6 +4610,8 @@ static void GC_CaptureWaterFacesFromSurfbits( model_t *wmodel, const byte *surfb
 	int pvs_hits = 0;
 
 	gc_water_face_count = 0;
+	gc_water_raw_count = 0;
+	gc_water_stage_i = -1;
 	gc_g286_water_logged = false;
 	memset( gc_water_faces, 0, sizeof( gc_water_faces ));
 	memset( scores, 0, sizeof( scores ));
@@ -9809,6 +10100,57 @@ float GC_GetLoadingProgress( void )
 	return gc_loading_progress;
 }
 
+/*
+ * Baked loading plaque (resource/gc_menu/loading.cmp, GCMP v1, see gcmp.h): the
+ * disc builder resamples loading.tga to the plaque size as GX CMPR, so this
+ * reads ~10 KiB one row of tiles at a time instead of a 225 KiB TGA into the
+ * FileSystem Pool. Any header problem returns false and the TGA path runs.
+ */
+static qboolean GC_LoadLoadingBackgroundCmp( void )
+{
+	static byte tile_row[( 640 / 8 ) * 32];
+	byte head[GC_GCMP_HEADER_BYTES];
+	gc_gcmp_header_t hdr;
+	file_t *f;
+	int ty, y, x;
+	uint32_t row_bytes;
+
+	f = FS_Open( "resource/gc_menu/loading.cmp", "rb", false );
+	if( !f )
+		return false;
+	if( FS_Read( f, head, sizeof( head )) != (fs_offset_t)sizeof( head )
+		|| !GC_GcmpParseHeader( head, sizeof( head ), &hdr )
+		|| hdr.version != GC_GCMP_VERSION || hdr.w > 640 || hdr.h > 480 )
+	{
+		FS_Close( f );
+		return false;
+	}
+	row_bytes = GC_GcmpTileRowBytes( hdr.w );
+	for( ty = 0; ty < hdr.h / 8; ty++ )
+	{
+		if( FS_Read( f, tile_row, row_bytes ) != (fs_offset_t)row_bytes )
+		{
+			FS_Close( f );
+			return false;
+		}
+		for( y = 0; y < GC_LOADING_BG_H; y++ )
+		{
+			const unsigned sy = ( (unsigned)y * hdr.h ) / GC_LOADING_BG_H;
+
+			if( sy / 8u != (unsigned)ty )
+				continue;
+			for( x = 0; x < GC_LOADING_BG_W; x++ )
+				gc_loading_bg[y * GC_LOADING_BG_W + x] =
+					GC_GcmpTexel( tile_row, ( (unsigned)x * hdr.w ) / GC_LOADING_BG_W, sy );
+		}
+	}
+	FS_Close( f );
+	gc_loading_bg_ready = true;
+	Con_Reportf( "Xash3D GameCube: HL1 loading plaque ready %dx%d (baked CMPR %dx%d)\n",
+		GC_LOADING_BG_W, GC_LOADING_BG_H, hdr.w, hdr.h );
+	return true;
+}
+
 static qboolean GC_LoadLoadingBackground( void )
 {
 	byte *file;
@@ -9819,6 +10161,8 @@ static qboolean GC_LoadLoadingBackground( void )
 	qboolean top_origin;
 
 	if( gc_loading_bg_ready )
+		return true;
+	if( GC_LoadLoadingBackgroundCmp( ))
 		return true;
 
 	file = FS_LoadFile( "resource/gc_menu/loading.tga", &size, false );
@@ -10899,6 +11243,18 @@ void GC_DrawLoadingStatus( const char *message, const char *details )
 		GC_BeginTransitionHold();
 	if( GC_TransitionHoldActive())
 	{
+		static const struct { const char *msg; float frac; } stages[] = {
+			{ "NEW GAME", 0.05f }, { "PREPARING MAP", 0.1f }, { "LOADING BSP", 0.25f },
+			{ "SPAWNING WORLD", 0.55f }, { "SPAWNING ENTITIES", 0.65f },
+			{ "MAP LOADED", 0.9f }, { "MAP READY", 1.0f },
+		};
+		int si;
+
+		for( si = 0; message && si < (int)ARRAYSIZE( stages ); si++ )
+		{
+			if( !Q_stricmp( message, stages[si].msg ))
+				GC_LoadingSetStage( stages[si].frac );
+		}
 		GC_LoadingOverlayPulse();
 		return;
 	}
@@ -17747,6 +18103,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				Con_Reportf( "Xash3D GameCube: CapFaces DumpFrames hold skipped (playerinput)\n" );
 			}
 		}
+		GC_CapFacesSoundscapeFrame();
 		if( sustained_frames == 8 || sustained_frames == 16
 			|| ( sustained_frames > 0 && ( sustained_frames % 32 ) == 0 ))
 		{

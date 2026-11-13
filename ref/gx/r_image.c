@@ -32,46 +32,42 @@ static unsigned gc_tiny_pixels_used;
  * 96→64→48 so both companions fit. Skins must NOT live in gc_studio_bss —
  * Mod_GCStudioBssTrimLast rewinds that bump and was leaving ptexture indices
  * dangling into recycled slots (*gc_sky_proc). */
-/* Crowbar+Garand at 96² ≈ 240 KiB; 256 KiB left no headroom for T.mdl. */
-#define GC_STUDIO_SKIN_OVERFLOW_BYTES (384 * 1024)
-static byte gc_studio_skin_overflow[GC_STUDIO_SKIN_OVERFLOW_BYTES] __attribute__((aligned(32)));
-static size_t gc_studio_skin_overflow_bump;
-static unsigned gc_studio_skin_overflow_live;
+/* The skin window now lives at the top of the engine's shared studio region
+ * (engine/common/model.c GC_STUDIO_BSS_BYTES): model files fill it from the
+ * bottom, skins from the top, so each gets what the other leaves. */
+byte *Mod_GCStudioSkinAlloc( size_t bytes );
+void Mod_GCStudioSkinFree( void );
+qboolean Mod_GCIsStudioSkin( const void *ptr );
+size_t Mod_GCStudioSkinUsed( void );
+size_t Mod_GCStudioSkinRemaining( void );
 extern qboolean r_gc_studio_skins_in_arena;
 
 size_t R_GCStudioSkinOverflowUsed( void )
 {
-	return gc_studio_skin_overflow_bump;
+	return Mod_GCStudioSkinUsed();
 }
 
 size_t R_GCStudioSkinOverflowCapacity( void )
 {
-	return sizeof( gc_studio_skin_overflow );
+	return Mod_GCStudioSkinUsed() + Mod_GCStudioSkinRemaining();
 }
 
 static pixel_t *R_GCAllocStudioSkinOverflow( image_t *tex, size_t bytes )
 {
-	size_t off, end;
 	byte *base;
 
 	if( !r_gc_studio_skins_in_arena || bytes == 0 )
 		return NULL;
-	off = ( gc_studio_skin_overflow_bump + 31u ) & ~(size_t)31u;
-	end = off + bytes + 31u;
-	if( end > sizeof( gc_studio_skin_overflow ))
+	base = Mod_GCStudioSkinAlloc( bytes );	/* 32-byte aligned */
+	if( !base )
 		return NULL;
-	base = gc_studio_skin_overflow + off;
-	gc_studio_skin_overflow_bump = end;
-	gc_studio_skin_overflow_live++;
 	tex->gc_pixels_base = base;
-	return (pixel_t *)(((uintptr_t)base + 31u) & ~(uintptr_t)31u);
+	return (pixel_t *)base;
 }
 
 static qboolean R_GCIsStudioSkinOverflow( const void *ptr )
 {
-	const byte *p = (const byte *)ptr;
-	return p >= gc_studio_skin_overflow
-		&& p < gc_studio_skin_overflow + sizeof( gc_studio_skin_overflow );
+	return Mod_GCIsStudioSkin( ptr );
 }
 
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
@@ -117,10 +113,7 @@ void R_GCFreeMip( image_t *tex, uint level )
 		}
 		if( R_GCIsStudioSkinOverflow( tex->gc_pixels_base ))
 		{
-			if( gc_studio_skin_overflow_live > 0 )
-				gc_studio_skin_overflow_live--;
-			if( gc_studio_skin_overflow_live == 0 )
-				gc_studio_skin_overflow_bump = 0;
+			Mod_GCStudioSkinFree();
 			tex->gc_pixels_base = NULL;
 			return;
 		}
@@ -529,9 +522,20 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 
 		if( vm_skin )
 		{
-			/* Keep MDL's power-of-two decode (128²). Do not crush to 64. */
-			resampleWidth = Q_min( (int)pic->width, 128 );
-			resampleHeight = Q_min( (int)pic->height, 128 );
+			/* Keep MDL's power-of-two decode (128²) when the skin cannot be
+			 * streamed. With the ARAM skin stream the resident low mip is
+			 * only 64² (8 KiB): the source-resolution skin is attached to
+			 * ARAM by R_StudioLoadTexture, so seven Garand skins cost
+			 * ~56 KiB in the shared studio region and cannot OOM to 2x2. */
+			const int vm_cap = R_GXSkinLowCap();
+
+			resampleWidth = (int)pic->width;
+			resampleHeight = (int)pic->height;
+			while( resampleWidth > vm_cap || resampleHeight > vm_cap )
+			{
+				resampleWidth = Q_max( 1, resampleWidth >> 1 );
+				resampleHeight = Q_max( 1, resampleHeight >> 1 );
+			}
 			tex->width = resampleWidth;
 			tex->height = resampleHeight;
 			{
@@ -553,9 +557,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		else if( r_gc_studio_skins_in_arena && !FBitSet( tex->flags, TF_FONT ))
 		{
 			int cap = 96;
-			size_t off = ( gc_studio_skin_overflow_bump + 31u ) & ~(size_t)31u;
-			size_t rem = ( off < sizeof( gc_studio_skin_overflow ))
-				? ( sizeof( gc_studio_skin_overflow ) - off ) : 0;
+			size_t rem = Mod_GCStudioSkinRemaining();
 
 			while( cap >= 48 )
 			{
@@ -573,6 +575,72 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			tex->height = resampleHeight;
 		}
 	}
+#endif
+
+#if XASH_GAMECUBE
+	/* (Studio skins carry TF_FONT on GameCube to skip resampling, so it is
+	 * not a test here: the "#models/" name already excludes fonts.)
+	 * Character skins as GX CMPR: a quarter of the RGB565 residency, so a
+	 * map's whole cast keeps retail-resolution skins (r_gx_cmpr.c).  Encoded
+	 * straight from the decoded source, resampled on the fly to the nearest
+	 * power of two (GX REPEAT), into the studio skin window.  Viewmodels keep
+	 * their own path (chromakey flood, ARAM full-res stream). */
+	if( r_gc_studio_skins_in_arena && tex->name[0] == '#'
+		&& Q_stristr( tex->name, "models/" ) && !Q_stristr( tex->name, "models/v_" )
+		&& pic->width >= 8 && pic->height >= 8
+		&& pic->depth <= 1 && !gEngfuncs.Sys_CheckParm( "-gcnocmprskins" ))
+	{
+		int cw, ch;
+		byte *dst;
+		size_t bytes;
+
+		R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
+		bytes = R_GXCmprBytes( cw, ch );
+		dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+		if( !dst )
+			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+		if( dst )
+		{
+			const qboolean masked = !sw_noalphabrushes.value && FBitSet( pic->flags, IMAGE_ONEBIT_ALPHA );
+
+			tex->width = cw;
+			tex->height = ch;
+			tex->depth = 1;
+			tex->alpha_pixels = NULL;
+			ClearBits( tex->flags, TF_HAS_ALPHA );
+			tex->gc_gx_native_alpha = R_GXEncodeCmprSkin( buf, pic->width, pic->height, cw, ch, masked, dst ) ? 1 : 0;
+			tex->pixels[0] = (pixel_t *)dst;
+			tex->gc_gx_native = true;
+			tex->gc_gx_cmpr = 1;
+			tex->numMips = 1;
+			tex->size = bytes;
+			{
+				static int cmpr_logged;
+
+				if( cmpr_logged++ < 4 )
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s %dx%d -> %dx%d (%s)\n",
+						tex->name, pic->width, pic->height, cw, ch, Q_memprint( bytes ));
+			}
+			return true;
+		}
+		{
+			static int cmpr_fail_logs;
+
+			if( cmpr_fail_logs++ < 4 )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s no room (%s, window left %s)\n",
+					tex->name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
+		}
+	}
+	else if( tex->name[0] == '#' && Q_stristr( tex->name, "models/" ))
+	{
+		static int cmpr_skip_logs;
+
+		if( cmpr_skip_logs++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin skip %s arena=%d font=%d %dx%d depth=%d\n",
+				tex->name, r_gc_studio_skins_in_arena ? 1 : 0, FBitSet( tex->flags, TF_FONT ) ? 1 : 0,
+				pic->width, pic->height, pic->depth );
+	}
+	tex->gc_gx_cmpr = 0;
 #endif
 
 	if((( pic->width != tex->width ) || ( pic->height != tex->height )))

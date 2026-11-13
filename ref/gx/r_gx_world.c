@@ -84,6 +84,8 @@ extern int GC_GetWaterFaceCount( void );
 extern int GC_GetWaterFaceVerts( int index, float out[][3], int maxverts );
 extern int GC_GetWaterFaceST( int index, float out_st[][2], int maxverts );
 extern void GC_GetWaterFaceScroll( int index, float *scroll_u, float *scroll_v, u32 *tint );
+extern qboolean GC_GetWaterFaceFog( int index, byte rgb[3], u8 *reflect_x100 );
+extern void GC_GetWaterScroll2( float *u, float *v );
 extern qboolean GC_WaterTexReady( void );
 extern void *GC_GetWaterTexObj( void );
 extern qboolean GC_WaterFacePlane( int index, mplane_t *out, int *out_flags );
@@ -549,6 +551,8 @@ static void R_GXReserveHudPool( void )
 	r_gx_hud_pool_ready = true;
 }
 
+void R_GCEnsureDurableHotWindow( unsigned prefer_bytes );
+
 /* Called at the end of R_Init, while MEM1 still has room. */
 void R_GXReserveHudPoolEarly( void )
 {
@@ -557,6 +561,13 @@ void R_GXReserveHudPoolEarly( void )
 	 * CapFaces GX DL can take heap now (or pin BSS) before map tip. */
 	if( gEngfuncs.Sys_CheckParm( "-gcworlddl" ))
 		(void)R_GXReserveCapDispList();
+	/* Harbor WorldDL needs the CMPR hot window before map spawn eats the tip
+	 * (LM BSS + studio + FS leave <35 KiB; late 96 KiB alloc then fails and
+	 * boats/towers stay on low mips / missing binds). */
+	if( gEngfuncs.Sys_CheckParm( "-gcworldrender" )
+		|| gEngfuncs.Sys_CheckParm( "-gccapfacessmoke" )
+		|| gEngfuncs.Sys_CheckParm( "-gcvst" ))
+		R_GCEnsureDurableHotWindow( 96u * 1024u );
 }
 
 /*
@@ -1369,6 +1380,8 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 	return (pixel_t *)r_gx_cinematic_tex.tiled;
 }
 
+static void R_GXCmprSlotsReset( void );
+
 static void R_GXTexCacheReset( void )
 {
 	int i;
@@ -1414,6 +1427,7 @@ static void R_GXTexCacheReset( void )
 	r_gx_cinematic_ready = false;
 	r_gx_tex_world = NULL;
 	r_gx_hud_pool_ready = false;
+	R_GXCmprSlotsReset();
 	if( !gc_mem003_world_pool_logged )
 	{
 		gc_mem003_world_pool_logged = true;
@@ -1473,6 +1487,38 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	u8 fmt;
 	pixel_t *tex_pixels;
 	qboolean tex_alpha;
+
+	/* CMPR studio skins (r_gx_cmpr.c): already GX texels at their final size. */
+	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
+	{
+		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
+			|| r_gx_native_bound_pixels != img->pixels[0] )
+		{
+			r_gx_native_bound_pixels = img->pixels[0];
+			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
+				GX_TF_CMPR, GX_REPEAT, GX_REPEAT, GX_FALSE );
+			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
+			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
+			t->texnum = texnum;
+			t->w = img->width;
+			t->h = img->height;
+			t->fmt = GX_TF_CMPR;
+			t->valid = true;
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_bound_texnum = texnum;
+			r_gx_bound_fmt = GX_TF_CMPR;
+			r_gx_tex_loads++;
+		}
+		else
+		{
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_tex_reuses++;
+		}
+		R_GXSetTexAlphaTest( alpha );
+		return t;
+	}
 
 	/* Larger sides are box filtered down: without mipmaps they shimmer. */
 	while( img->width / step_x > cap )
@@ -2036,16 +2082,41 @@ static void R_GXHotService( void )
  * Prefer ≤32 Kb so 256² CMPR always drops the base mip. On tip-tight maps
  * (dod_donner) borrow the world-array spill tail reserved for CapFaces. */
 #define GC_CMPR_BOUNCE_BYTES ( 24u * 1024u )
-static byte *r_gx_cmpr_bounce;
-static unsigned r_gx_cmpr_bounce_cap;
+/* The bounce is a small cache of GC_CMPR_BOUNCE_BYTES slots with LRU, not one
+ * buffer: a frame binds 200-400 packed textures and a single slot re-DMAed and
+ * fence-waited on every change of texture. A slot is keyed by what it holds
+ * (ARAM address, skipped bytes, size), so a texture that is still resident is
+ * bound again with no DMA and no wait. Each slot has its own fence: only the
+ * slot about to be overwritten is waited for, and that one was used longest ago.
+ * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
+#define GC_CMPR_SLOTS_MAX     8
+#define GC_CMPR_SLOTS_DEFAULT 6
+static byte *r_gx_cmpr_bounce;		/* base of all slots */
+static unsigned r_gx_cmpr_bounce_cap;	/* bytes per slot */
+static int r_gx_cmpr_nslots;
+static struct
+{
+	unsigned aram, skip, bytes;	/* what the slot holds */
+	u16      fence;			/* last draw that sampled it */
+	unsigned used;
+	qboolean valid;
+} r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
+static unsigned r_gx_cmpr_clock;
+static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
-static unsigned r_gx_cmpr_bounce_skip;
-/* Flipper samples bounce asynchronously — fence before DMA overwrite or
- * CapFaces walls flash to the next texture every bind (caen/charlie). */
-static u16 r_gx_cmpr_bounce_fence;
 static unsigned r_gx_cmpr_bounce_stalls;
+static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
+
+/* A new map reuses texnums and ARAM windows: forget what the slots hold. */
+static void R_GXCmprSlotsReset( void )
+{
+	memset( r_gx_cmpr_slot, 0, sizeof( r_gx_cmpr_slot ));
+	r_gx_cmpr_cur_slot = -1;
+	r_gx_cmpr_bounce_texnum = 0;
+}
 
 extern byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
+extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 
 static byte *R_GXCmprBounce( void )
 {
@@ -2054,33 +2125,38 @@ static byte *R_GXCmprBounce( void )
 		/* Prefer spill first — tip memalign(48/32 Kb) on flash starves
 		 * SV_LoadFromFile (bounce24 20261110-030600) while dense8's smaller
 		 * DOL left tip free and accidentally took 48 Kb → white/wash. */
-		r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
-		if( r_gx_cmpr_bounce )
-			r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
-		if( !r_gx_cmpr_bounce )
-		{
-			static const unsigned try_sizes[] = {
-				GC_CMPR_BOUNCE_BYTES, 24u * 1024u
-			};
-			unsigned i;
+		int want = GC_CMPR_SLOTS_DEFAULT, n;
 
-			for( i = 0; i < sizeof( try_sizes ) / sizeof( try_sizes[0] ); ++i )
+		if( gEngfuncs.Sys_CheckParm( "-gccmprslots" ))
+		{
+			char buf[8];
+
+			if( _Sys_GetParmFromCmdLine( "-gccmprslots", buf, sizeof( buf )) && buf[0] )
+				want = Q_atoi( buf );
+			want = bound( 1, want, GC_CMPR_SLOTS_MAX );
+		}
+		/* Ask for the most slots first, fewer if MEM1 / spill cannot give them
+		 * contiguously; one slot is the previous behaviour. */
+		for( n = want; n >= 1 && !r_gx_cmpr_bounce; n = ( n > 4 ) ? 4 : n - 1 )
+		{
+			r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( n * GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
+			if( !r_gx_cmpr_bounce )
+				r_gx_cmpr_bounce = (byte *)memalign( 32, n * GC_CMPR_BOUNCE_BYTES );
+			if( r_gx_cmpr_bounce )
 			{
-				r_gx_cmpr_bounce = (byte *)memalign( 32, try_sizes[i] );
-				if( r_gx_cmpr_bounce )
-				{
-					r_gx_cmpr_bounce_cap = try_sizes[i];
-					break;
-				}
+				r_gx_cmpr_nslots = n;
+				r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
 			}
 		}
+		R_GXCmprSlotsReset();
 		if( r_gx_cmpr_bounce )
 		{
 			extern void GCube_AppendSwissEvidence( const char *fmt, ... );
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce %u Kb\n",
-				r_gx_cmpr_bounce_cap / 1024u );
-			GCube_AppendSwissEvidence( "CMPR ARAM bounce %u Kb",
-				r_gx_cmpr_bounce_cap / 1024u );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce %d x %u Kb = %u Kb\n",
+				r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap / 1024u,
+				r_gx_cmpr_nslots * r_gx_cmpr_bounce_cap / 1024u );
+			GCube_AppendSwissEvidence( "CMPR ARAM bounce %d x %u Kb",
+				r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap / 1024u );
 		}
 		else
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce alloc failed\n" );
@@ -2092,6 +2168,56 @@ static byte *R_GXCmprBounce( void )
 void R_GXPreallocCmprBounce( void )
 {
 	(void)R_GXCmprBounce();
+}
+
+/*
+ * The slot holding `bytes` of ARAM at aram+skip, DMAing it in on a miss. Only
+ * the LRU slot being replaced is waited for (its own last draw), never the one
+ * the previous bind is sampling. Returns the slot's MEM1 address.
+ */
+static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
+{
+	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
+	int i, pick = -1;
+
+	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	{
+		if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
+			&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
+		{
+			r_gx_cmpr_slot[i].used = ++r_gx_cmpr_clock;
+			r_gx_cmpr_hits++;
+			*slot_out = i;
+			return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+		}
+	}
+	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	{
+		if( !r_gx_cmpr_slot[i].valid )
+		{
+			pick = i;
+			break;
+		}
+		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
+			pick = i;
+	}
+	/* Never replace the slot the texture bound right now is sampling when
+	 * another is free to take: with >1 slot the LRU is not it, but be exact. */
+	if( pick == r_gx_cmpr_cur_slot && r_gx_cmpr_nslots > 1 )
+		pick = ( pick + 1 ) % r_gx_cmpr_nslots;
+	if( r_gx_cmpr_slot[pick].valid && GC_GXFenceWait( r_gx_cmpr_slot[pick].fence ))
+		r_gx_cmpr_bounce_stalls++;
+	GC_AramTransfer( aram + skip, r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap,
+		bytes, false );
+	r_gx_cmpr_slot[pick].aram = aram;
+	r_gx_cmpr_slot[pick].skip = skip;
+	r_gx_cmpr_slot[pick].bytes = bytes;
+	r_gx_cmpr_slot[pick].valid = true;
+	r_gx_cmpr_slot[pick].used = ++r_gx_cmpr_clock;
+	r_gx_cmpr_misses++;
+	r_gx_cmpr_dma_bytes += bytes;
+	*slot_out = pick;
+	return r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap;
 }
 
 static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
@@ -2156,19 +2282,11 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				}
 				if( remain > 0 && remain <= r_gx_cmpr_bounce_cap && use_levels > 0 )
 				{
-					if( r_gx_cmpr_bounce_texnum != texnum
-						|| r_gx_cmpr_bounce_skip != skip )
-					{
-						/* Prior CapFaces still sample this MEM1 bounce via FIFO. */
-						if( r_gx_cmpr_bounce_texnum != 0
-							&& GC_GXFenceWait( r_gx_cmpr_bounce_fence ))
-							r_gx_cmpr_bounce_stalls++;
-						GC_AramTransfer( img->gc_packed_aram + skip, bounce,
-							remain, false );
-						r_gx_cmpr_bounce_texnum = texnum;
-						r_gx_cmpr_bounce_skip = skip;
-					}
-					data = bounce;
+					int slot = -1;
+
+					data = R_GXCmprSlotFor( img->gc_packed_aram, skip, remain, &slot );
+					r_gx_cmpr_cur_slot = slot;
+					r_gx_cmpr_bounce_texnum = texnum;
 					used_bounce = true;
 					shift = use_shift;
 					levels = use_levels;
@@ -2223,12 +2341,12 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 		else
 		{
 			r_gx_tex_reuses++;
-			/* Same CMPR still resident in bounce — advance fence past new draws. */
-			if( r_gx_cmpr_bounce_texnum == texnum && r_gx_cmpr_bounce )
+			/* Same CMPR still resident in its slot — advance its fence. */
+			if( r_gx_cmpr_bounce_texnum == texnum && r_gx_cmpr_bounce && r_gx_cmpr_cur_slot >= 0 )
 				used_bounce = true;
 		}
-		if( used_bounce )
-			r_gx_cmpr_bounce_fence = GC_GXFenceNext();
+		if( used_bounce && r_gx_cmpr_cur_slot >= 0 )
+			r_gx_cmpr_slot[r_gx_cmpr_cur_slot].fence = GC_GXFenceNext();
 	}
 	R_GXSetTexAlphaTest( img->gc_packed_alpha ? true : false );
 	return t;
@@ -2909,7 +3027,6 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 	/* G221/G285: use the desert clear only when a real skybox side exists.
 	 * A map hole/void is fog-black; blue here made missing geometry look like
 	 * an untextured outdoor sky and was especially visible through tram gaps.
-	 * Textured backdrop draws when lean sides are resident.
 	 * G348: tram tunnel (c0a0*) uses dark concrete — sky blue void fought retail.
 	 * Solo CapFaces (-gcworldrender, no skybox resident): outdoor sky clear so
 	 * dod_flash voids read as sky, not black letterbox (20261107-133054). */
@@ -2919,6 +3036,8 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 
 	if( GC_IsTramIntroMap())
 		sky = 0x2A2E32FFu;
+	else if( WORLDMODEL && Q_stristr( WORLDMODEL->name, "lostcoast" ))
+		sky = 0x97A6B5FFu; /* env_fog_controller fogcolor 151 166 181 */
 	else if( !R_GXHasSkyboxSide()
 		&& gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 		&& !gEngfuncs.Sys_CheckParm( "-gcconnect" ))
@@ -4399,10 +4518,23 @@ soft RecursiveWorldNode used to stamp surfaces during the edge walk).
 */
 static void R_GXMarkVisibleSurfaces( model_t *world )
 {
-	int i;
+	msurface_t **marks_lo, **marks_hi;
+	msurface_t *surf_lo, *surf_hi;
+	int i, rejected = 0;
+	static int reject_logs;
 
 	if( !world || !world->leafs || world->numleafs <= 0 )
 		return;
+	/* The pre-edge scratch reclaim can free the mark-face array under a tight
+	 * tip; leaf->firstmarksurface then dangles into reused memory and the
+	 * walk crashed or hung the first CapFaces frame (c0a0 after "CapFaces step
+	 * vis done").  Only follow marks that lie inside the world's arrays. */
+	if( !world->marksurfaces || world->nummarksurfaces <= 0 || !world->surfaces || world->numsurfaces <= 0 )
+		return;
+	marks_lo = world->marksurfaces;
+	marks_hi = world->marksurfaces + world->nummarksurfaces;
+	surf_lo = world->surfaces;
+	surf_hi = world->surfaces + world->numsurfaces;
 
 	for( i = 0; i < world->numleafs; i++ )
 	{
@@ -4416,12 +4548,28 @@ static void R_GXMarkVisibleSurfaces( model_t *world )
 		c = leaf->nummarksurfaces;
 		if( !mark || c <= 0 )
 			continue;
+		if( mark < marks_lo || mark >= marks_hi || c > marks_hi - mark )
+		{
+			rejected++;
+			continue;
+		}
 		do
 		{
-			( *mark )->visframe = tr.framecount;
+			msurface_t *surf = *mark;
+
+			if( surf >= surf_lo && surf < surf_hi )
+				surf->visframe = tr.framecount;
+			else
+				rejected++;
 			mark++;
 		}
 		while( --c );
+	}
+	if( rejected && reject_logs < 3 )
+	{
+		reject_logs++;
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: MarkVisible skipped %d stale marks on %s\n",
+			rejected, world->name );
 	}
 }
 
@@ -4931,6 +5079,7 @@ static int R_GXDrawNewGameCapFacesImpl( void );
  * eye → cluster → PVS → GX_CallDispList per material batch. */
 extern qboolean R_GXWorldDLActive( void );
 extern int R_GXWorldDLDraw( void );
+extern qboolean R_GXWorldDLSampleLight( const float *org, byte rgb[3] );
 
 qboolean R_GXWorldDLBindTex( unsigned texnum )
 {
@@ -4958,6 +5107,8 @@ static unsigned gc_prop_aram;
 static int gc_prop_state;	/* 0 untried, 1 ready, -1 absent */
 static u16 gc_prop_ninst;
 static u32 gc_prop_ntris, gc_prop_tris_ofs;
+static u16 gc_prop_flight_first, gc_prop_flight_count;
+static u16 gc_prop_walk_first, gc_prop_walk_count;
 static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST];
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
@@ -4998,6 +5149,42 @@ static float R_GXPropD2( const float *org, const s16 mins[3], const s16 maxs[3] 
 	return d;
 }
 
+/* Tall thin prop AABBs are WorldDL industrial stacks. Drawing them again
+ * stamps a second bloom hull. Keep this as tight as WorldDL IsTower so
+ * boats/wrecks (wide or short) still draw here as one surface. */
+static qboolean R_GXPropIsTowerish( const gc_prop_inst_t *in )
+{
+	const float hx = (float)in->maxs[0] - (float)in->mins[0];
+	const float hy = (float)in->maxs[1] - (float)in->mins[1];
+	const float hz = (float)in->maxs[2] - (float)in->mins[2];
+	const float horiz = hx > hy ? hx : hy;
+
+	if( hz <= 480.0f )
+		return false;
+	return horiz <= 280.0f && horiz < hz * 0.40f;
+}
+
+/* Wide static plates that duplicate WorldDL cliffs/shore — drawing them
+ * z-fights the baked world into jagged white/black tears. Boats stay
+ * (smaller AABB). Flat dock/pier slabs also fight the shore mesh. */
+static qboolean R_GXPropIsWorldPlate( const gc_prop_inst_t *in )
+{
+	const float hx = (float)in->maxs[0] - (float)in->mins[0];
+	const float hy = (float)in->maxs[1] - (float)in->mins[1];
+	const float hz = (float)in->maxs[2] - (float)in->mins[2];
+	const float horiz = hx > hy ? hx : hy;
+
+	/* Flat pier/dock runs: wide and short, overlap WorldDL shore. */
+	if( horiz >= 350.0f && hz <= 100.0f && horiz > hz * 3.5f )
+		return true;
+	if( horiz < 500.0f || hz < 150.0f )
+		return false;
+	/* Long thin wrecks: keep. Square-ish cliff plates: drop. */
+	if( horiz > hz * 2.5f && ( hx < 200.0f || hy < 200.0f ))
+		return false;
+	return true;
+}
+
 static void R_GXPropLoad( void )
 {
 	file_t *f;
@@ -5021,6 +5208,23 @@ static void R_GXPropLoad( void )
 	gc_prop_ninst = (u16)( hdr[2] >> 16 );
 	gc_prop_ntris = hdr[2] & 0xffffu;
 	gc_prop_tris_ofs = hdr[4];
+	gc_prop_flight_first = (u16)( hdr[5] >> 16 );
+	gc_prop_flight_count = (u16)( hdr[5] & 0xffffu );
+	if( gc_prop_flight_count
+		&& (u32)gc_prop_flight_first + (u32)gc_prop_flight_count > gc_prop_ntris )
+	{
+		gc_prop_flight_first = 0;
+		gc_prop_flight_count = 0;
+	}
+	/* hdr[6]: CapFaces fisherman walk template (retail lead path). */
+	gc_prop_walk_first = (u16)( hdr[6] >> 16 );
+	gc_prop_walk_count = (u16)( hdr[6] & 0xffffu );
+	if( gc_prop_walk_count
+		&& (u32)gc_prop_walk_first + (u32)gc_prop_walk_count > gc_prop_ntris )
+	{
+		gc_prop_walk_first = 0;
+		gc_prop_walk_count = 0;
+	}
 	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST || gc_prop_ntris == 0 )
 	{
 		gEngfuncs.fsapi->Close( f );
@@ -5061,8 +5265,10 @@ static void R_GXPropLoad( void )
 		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
 	}
 	gc_prop_state = 1;
-	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack inst=%u tris=%u aram=%u Kb\n",
-		gc_prop_ninst, gc_prop_ntris, size / 1024u );
+	gEngfuncs.Con_Reportf(
+		"Xash3D GameCube: prop pack inst=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		gc_prop_ninst, gc_prop_ntris, size / 1024u, gc_prop_flight_count,
+		gc_prop_walk_count );
 	R_GXPropLoadTex();
 }
 
@@ -5190,13 +5396,52 @@ static int R_GXPropBind( u8 mat )
 	return 1;
 }
 
-/* The baked triangles, one material run at a time. The box stand-ins are
- * gone: the mesh is the mesh. */
-static int R_GXPropEmitReal( const gc_prop_inst_t *in )
+/* Prop lighting from the streamed WorldDL lightmap page under the
+ * instance (same 192-slot RGB565 cache as world draw). No N·L bake. */
+static u32 gc_prop_lit = 0xB8B298FFu;
+
+static void R_GXPropSetLitAt( const float *org )
 {
-	u32 left = in->count;
-	u32 tri = in->first;
+	byte rgb[3];
+	int r, g, b;
+	/* Harbor daytime ambient — matches the pre-SampleLight hull look. */
+	const int ar = 0xB8, ag = 0xB2, ab = 0x98;
+
+	/* Source LM scales ambient (128 = identity). Floor above mid-grey so
+	 * MODULATE hulls stay readable under dark waterline luxels. */
+	if( org && R_GXWorldDLSampleLight( org, rgb ))
+	{
+		int lr = rgb[0], lg = rgb[1], lb = rgb[2];
+
+		if( lr < 160 ) lr = 160;
+		if( lg < 160 ) lg = 160;
+		if( lb < 160 ) lb = 160;
+		r = ( ar * lr ) / 128;
+		g = ( ag * lg ) / 128;
+		b = ( ab * lb ) / 128;
+		if( r > 255 ) r = 255;
+		if( g > 255 ) g = 255;
+		if( b > 255 ) b = 255;
+		gc_prop_lit = ( (u32)r << 24 ) | ( (u32)g << 16 ) | ( (u32)b << 8 ) | 255u;
+	}
+	else
+		gc_prop_lit = 0xB8B298FFu;
+}
+
+/* The baked triangles, one material run at a time. The box stand-ins are
+ * gone: the mesh is the mesh. ox/oy/oz shift a local-space template into
+ * world (canister flight / fisherman walk); pass zeros for ordinary instances.
+ * yaw_rad rotates around Z before the translate (Source yaw: 0 = +X). */
+static int R_GXPropEmitRangeYaw( u32 first, u32 count, int ox, int oy, int oz,
+	float yaw_rad )
+{
+	u32 left = count;
+	u32 tri = first;
 	int drawn = 0;
+	const float cs = cosf( yaw_rad );
+	const float sn = sinf( yaw_rad );
+	const qboolean spin = ( yaw_rad != 0.0f );
+	const u32 col = gc_prop_lit;
 
 	while( left )
 	{
@@ -5225,8 +5470,30 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 
 				for( v = 0; v < 3; v++, p += 5, uv += 5 )
 				{
-					GX_Position3s16( p[0], p[1], p[2] );
-					GX_Color1u32( 0xFFFFFFFFu );
+					int x, y, z;
+					float lx = (float)p[0];
+					float ly = (float)p[1];
+
+					if( spin )
+					{
+						x = (int)( lx * cs - ly * sn ) + ox;
+						y = (int)( lx * sn + ly * cs ) + oy;
+					}
+					else
+					{
+						x = (int)lx + ox;
+						y = (int)ly + oy;
+					}
+					z = (int)p[2] + oz;
+
+					if( x < -32767 ) x = -32767;
+					else if( x > 32767 ) x = 32767;
+					if( y < -32767 ) y = -32767;
+					else if( y > 32767 ) y = 32767;
+					if( z < -32767 ) z = -32767;
+					else if( z > 32767 ) z = 32767;
+					GX_Position3s16( (s16)x, (s16)y, (s16)z );
+					GX_Color1u32( col );
 					GX_TexCoord2u16( uv[3], uv[4] );
 				}
 			}
@@ -5240,6 +5507,193 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	return drawn;
 }
 
+static int R_GXPropEmitRange( u32 first, u32 count, int ox, int oy, int oz )
+{
+	return R_GXPropEmitRangeYaw( first, count, ox, oy, oz, 0.0f );
+}
+
+static int R_GXPropEmitReal( const gc_prop_inst_t *in )
+{
+	float mid[3];
+
+	mid[0] = 0.5f * ( (float)in->mins[0] + (float)in->maxs[0] );
+	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
+	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
+	R_GXPropSetLitAt( mid );
+	return R_GXPropEmitRange( in->first, in->count, 0, 0, 0 );
+}
+
+/* CapFaces: Lost Coast fisherman walks the retail lead-to-gate path
+ * (ss_Fisherman_Intro → mark_fisherman_gateLead* → OpenGate → SitDown).
+ * No Source AI/VCD on tip — real fisherman.mdl slides along lead marks. */
+static void R_GXFishermanWalkDraw( const float *org )
+{
+	/* Retail scripted_sequence / lead marks. First point is open beach so
+	 * he is not buried in the intro cliff solid. */
+	static const float path[][3] = {
+		{ 1510.0f, 2248.0f, -38.0f },     /* open beach near intro */
+		{ 1458.36f, 2271.21f, -40.3f },   /* ss_Fisherman_Intro */
+		{ 1212.63f, 2234.45f, -52.41f },  /* mark_fisherman_gateLead01 */
+		{ 900.0f, 2800.0f, -20.0f },      /* climb toward monastery gate */
+		{ 643.0f, 2764.0f, -24.0f },      /* npc_fisherman spawn */
+		{ 823.0f, 3699.0f, 28.37f },      /* mark_fisherman_gateLead02 */
+		{ 817.58f, 3772.0f, 16.0f },      /* ss_Fisherman_OpenGate */
+		{ 695.58f, 3744.0f, 16.0f },      /* ss_Fisherman_SitDown */
+	};
+	enum { NPATH = (int)( sizeof( path ) / sizeof( path[0] )) };
+	/* DumpFrames starts late after map load — hold so still eyes catch him. */
+	static const float hold_at_intro = 20.0f;
+	static const float hold_at_sit = 4.0f;
+	static const float walk_ups = 80.0f;
+	float seg_len[NPATH];
+	float total = 0.0f;
+	float walk_span, loop, t, along, yaw, d2;
+	float pos[3], dirx, diry, len;
+	int i, ox, oy, oz;
+	static qboolean logged;
+
+	if( gc_prop_state != 1 || !gc_prop_walk_count || !org )
+		return;
+	d2 = ( org[0] - 1100.0f ) * ( org[0] - 1100.0f )
+		+ ( org[1] - 2800.0f ) * ( org[1] - 2800.0f );
+	if( d2 > ( 4200.0f * 4200.0f ))
+		return;
+
+	for( i = 0; i < NPATH - 1; i++ )
+	{
+		dirx = path[i + 1][0] - path[i][0];
+		diry = path[i + 1][1] - path[i][1];
+		seg_len[i] = sqrtf( dirx * dirx + diry * diry
+			+ ( path[i + 1][2] - path[i][2] ) * ( path[i + 1][2] - path[i][2] ));
+		if( seg_len[i] < 1.0f )
+			seg_len[i] = 1.0f;
+		total += seg_len[i];
+	}
+	seg_len[NPATH - 1] = 0.0f;
+	walk_span = total / walk_ups;
+	{
+		static u32 walk_frames;
+
+		walk_frames++;
+		t = (float)walk_frames * ( 1.0f / 60.0f );
+	}
+	loop = hold_at_intro + walk_span + hold_at_sit;
+	t = (float)fmod( (double)t, (double)loop );
+	if( t < 0.0f )
+		t = 0.0f;
+
+	if( t < hold_at_intro )
+	{
+		/* Face the player start (yaw ~200). Mannequin faces +X. */
+		pos[0] = path[0][0];
+		pos[1] = path[0][1];
+		pos[2] = path[0][2];
+		yaw = 200.0f * ( 3.14159265f / 180.0f );
+	}
+	else if( t >= hold_at_intro + walk_span )
+	{
+		pos[0] = path[NPATH - 1][0];
+		pos[1] = path[NPATH - 1][1];
+		pos[2] = path[NPATH - 1][2];
+		yaw = 180.0f * ( 3.14159265f / 180.0f );
+	}
+	else
+	{
+		along = ( t - hold_at_intro ) * walk_ups;
+		for( i = 0; i < NPATH - 1; i++ )
+		{
+			if( along <= seg_len[i] )
+				break;
+			along -= seg_len[i];
+		}
+		if( i >= NPATH - 1 )
+			i = NPATH - 2;
+		{
+			float u = along / seg_len[i];
+
+			if( u < 0.0f ) u = 0.0f;
+			else if( u > 1.0f ) u = 1.0f;
+			pos[0] = path[i][0] + ( path[i + 1][0] - path[i][0] ) * u;
+			pos[1] = path[i][1] + ( path[i + 1][1] - path[i][1] ) * u;
+			pos[2] = path[i][2] + ( path[i + 1][2] - path[i][2] ) * u;
+			dirx = path[i + 1][0] - path[i][0];
+			diry = path[i + 1][1] - path[i][1];
+			len = sqrtf( dirx * dirx + diry * diry );
+			if( len < 1.0f )
+			{
+				dirx = 1.0f;
+				diry = 0.0f;
+				len = 1.0f;
+			}
+			yaw = atan2f( diry / len, dirx / len );
+		}
+	}
+
+	ox = (int)( pos[0] + ( pos[0] >= 0.0f ? 0.5f : -0.5f ));
+	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
+	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
+	R_GXPropSetLitAt( pos );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	R_GXPropEmitRangeYaw( gc_prop_walk_first, gc_prop_walk_count, ox, oy, oz, yaw );
+	if( !logged )
+	{
+		logged = true;
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: fisherman walk tris=%u path=%d at %d %d %d\n",
+			gc_prop_walk_count, NPATH, ox, oy, oz );
+	}
+}
+
+/* CapFaces demo: headcrab canister arcs from the monastery gun into the
+ * church courtyard, looping so DumpFrames / still eyes catch mid-flight. */
+static void R_GXCanisterFlightDraw( const float *org )
+{
+	/* target_gun → church courtyard (expl_gun near ambient_music). */
+	static const float launch[3] = { 1106.0f, 3352.0f, 3523.0f };
+	static const float impact[3] = { 1408.0f, 3776.0f, 2680.0f };
+	float t, omt, pos[3], peak_z, d2;
+	int ox, oy, oz;
+	static qboolean logged;
+
+	if( gc_prop_state != 1 || !gc_prop_flight_count || !org )
+		return;
+	/* Only when the eye can see the monastery flight corridor. */
+	d2 = ( org[0] - impact[0] ) * ( org[0] - impact[0] )
+		+ ( org[1] - impact[1] ) * ( org[1] - impact[1] )
+		+ ( org[2] - impact[2] ) * ( org[2] - impact[2] );
+	if( d2 > ( 3500.0f * 3500.0f ))
+		return;
+	{
+		float sec = gp_cl ? (float)gp_cl->time : 0.0f;
+		static u32 flight_frames;
+
+		flight_frames++;
+		/* Prefer client time; DumpFrames still advances a phase if time stalls. */
+		t = (float)fmod( (double)sec + (double)flight_frames * ( 1.0 / 60.0 ), 5.0 );
+	}
+	if( t < 0.0f )
+		t = 0.0f;
+	t *= 0.2f; /* 0..1 over 5 seconds */
+	omt = 1.0f - t;
+	peak_z = ( launch[2] > impact[2] ? launch[2] : impact[2] ) + 900.0f;
+	pos[0] = omt * launch[0] + t * impact[0];
+	pos[1] = omt * launch[1] + t * impact[1];
+	pos[2] = omt * omt * launch[2] + 2.0f * omt * t * peak_z + t * t * impact[2];
+	ox = (int)( pos[0] + ( pos[0] >= 0.0f ? 0.5f : -0.5f ));
+	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
+	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
+	R_GXPropSetLitAt( pos );
+	R_GXPropEmitRange( gc_prop_flight_first, gc_prop_flight_count, ox, oy, oz );
+	if( !logged )
+	{
+		logged = true;
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: canister flight tris=%u\n", gc_prop_flight_count );
+	}
+}
+
 static qboolean R_GXPropOutside( const gc_prop_inst_t *in )
 {
 	vec3_t mins, maxs;
@@ -5249,43 +5703,25 @@ static qboolean R_GXPropOutside( const gc_prop_inst_t *in )
 	return R_GXBoxOutsideFrustum( mins, maxs );
 }
 
-/* Props past the world far plane. Real triangles, and only the ones inside
- * the view. Depth is on so a mesh hides its own far side, then the clear
- * below drops that depth so the boats stay one hull. */
+/* Props past the near reach. Called after the world, in the world's view,
+ * so a nearer cliff hides the mesh behind it and the mesh hides its own
+ * far side. Both windings stay: the tower sheets are visible from either side. */
 void R_GXPropDrawHorizon( const float *org )
 {
-	vec3_t forward, right, up;
-	Mtx mv;
-	Mtx44 proj;
-	f32 fov_y, fov_x, y_max, x_max;
-	int i, ninst = 0, drawn = 0;
+	static u16 order[GC_PROP_MAX_INST];
+	static float key[GC_PROP_MAX_INST];
+	int i, n = 0, ninst = 0, drawn = 0, a, b;
+	u16 tmp;
+	float ftmp;
 
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
 		return;
-	AngleVectors( RI.rvp.viewangles, forward, right, up );
-	fov_y = RI.rvp.fov_y > 1.0f ? RI.rvp.fov_y : 90.0f;
-	fov_x = RI.rvp.fov_x > 1.0f ? RI.rvp.fov_x : 90.0f;
-	mv[0][0] = right[0];
-	mv[0][1] = right[1];
-	mv[0][2] = right[2];
-	mv[0][3] = -( right[0] * org[0] + right[1] * org[1] + right[2] * org[2] );
-	mv[1][0] = up[0];
-	mv[1][1] = up[1];
-	mv[1][2] = up[2];
-	mv[1][3] = -( up[0] * org[0] + up[1] * org[1] + up[2] * org[2] );
-	mv[2][0] = -forward[0];
-	mv[2][1] = -forward[1];
-	mv[2][2] = -forward[2];
-	mv[2][3] = forward[0] * org[0] + forward[1] * org[1] + forward[2] * org[2];
-	y_max = 4.0f * tanf( fov_y * 3.14159265f / 360.0f );
-	x_max = 4.0f * tanf( fov_x * 3.14159265f / 360.0f );
-	guFrustum( proj, y_max, -y_max, -x_max, x_max, 4.0f, 20000.0f );
-	GX_LoadProjectionMtx( proj, GX_PERSPECTIVE );
-	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetZCompLoc( GX_TRUE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetNumChans( 1 );
 	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
@@ -5315,11 +5751,35 @@ void R_GXPropDrawHorizon( const float *org )
 		/* The near pass draws anything inside the reach. */
 		if( R_GXPropD2( org, in->mins, in->maxs ) <= GC_PROP_REACH2 )
 			continue;
+		if( R_GXWorldDLActive() && ( R_GXPropIsTowerish( in )
+			|| R_GXPropIsWorldPlate( in )))
+			continue;
 		mins[0] = in->mins[0]; mins[1] = in->mins[1]; mins[2] = in->mins[2];
 		maxs[0] = in->maxs[0]; maxs[1] = in->maxs[1]; maxs[2] = in->maxs[2];
 		if( R_GXBoxOutsideFrustum( mins, maxs ))
 			continue;
-		drawn += R_GXPropEmitReal( in );
+		order[n] = (u16)i;
+		key[n] = R_GXPropD2( org, in->mins, in->maxs );
+		n++;
+	}
+	/* Far first so a nearer sheet of the same tower hides the one behind it. */
+	for( a = 1; a < n; a++ )
+	{
+		tmp = order[a];
+		ftmp = key[a];
+		b = a - 1;
+		while( b >= 0 && key[b] < ftmp )
+		{
+			order[b + 1] = order[b];
+			key[b + 1] = key[b];
+			b--;
+		}
+		order[b + 1] = tmp;
+		key[b + 1] = ftmp;
+	}
+	for( i = 0; i < n; i++ )
+	{
+		drawn += R_GXPropEmitReal( &gc_prop_inst[order[i]] );
 		ninst++;
 	}
 	if( drawn > 0 )
@@ -5346,6 +5806,8 @@ static void R_GXPropDraw( const float *org )
 	R_GXBuildFrustum();
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetZCompLoc( GX_TRUE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetNumChans( 1 );
 	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
@@ -5373,6 +5835,9 @@ static void R_GXPropDraw( const float *org )
 			continue;
 		if( R_GXPropD2( org, in->mins, in->maxs ) > GC_PROP_REACH2 )
 			continue;
+		if( R_GXWorldDLActive() && ( R_GXPropIsTowerish( in )
+			|| R_GXPropIsWorldPlate( in )))
+			continue;
 		if( R_GXPropOutside( in ))
 			continue;
 		drawn += R_GXPropEmitReal( in );
@@ -5390,18 +5855,62 @@ static void R_GXPropDraw( const float *org )
 	}
 }
 
+/* Retail water_ati_cheap001: body from VMT $fogcolor, distance haze toward
+ * env_fog_controller. Flipper fog is not re-armed here (VAT hang). */
+static u32 R_GXWaterBodyTint( int wi, const float *pt )
+{
+	byte fog_rgb[3];
+	u8 reflect_x100 = 150;
+	float dx, dy, dz, dist, t;
+	int r, g, b, a;
+	const float *eye = RI.rvp.vieworigin;
+	/* env_fog_controller on d2_lostcoast */
+	const int er = 151, eg = 166, eb = 181;
+
+	(void)reflect_x100;
+	GC_GetWaterFaceFog( wi, fog_rgb, &reflect_x100 );
+	/* Lift $fogcolor slightly so near sheets read as deep harbor green, not ink. */
+	r = (int)fog_rgb[0] + ( (int)fog_rgb[0] >> 1 ) + 10;
+	g = (int)fog_rgb[1] + ( (int)fog_rgb[1] >> 1 ) + 10;
+	b = (int)fog_rgb[2] + ( (int)fog_rgb[2] >> 1 ) + 10;
+	if( r > 255 ) r = 255;
+	if( g > 255 ) g = 255;
+	if( b > 255 ) b = 255;
+	a = 255;
+	if( pt && eye )
+	{
+		dx = pt[0] - eye[0];
+		dy = pt[1] - eye[1];
+		dz = pt[2] - eye[2];
+		dist = sqrtf( dx * dx + dy * dy + dz * dz );
+		/* Match map fogstart/fogend feel inside the near harbor (1600..~8000). */
+		t = ( dist - 900.0f ) / 5000.0f;
+		if( t < 0.0f ) t = 0.0f;
+		else if( t > 1.0f ) t = 1.0f;
+		r = (int)( (float)r + ( (float)er - (float)r ) * t );
+		g = (int)( (float)g + ( (float)eg - (float)g ) * t );
+		b = (int)( (float)b + ( (float)eb - (float)b ) * t );
+	}
+	return ( (u32)r << 24 ) | ( (u32)g << 16 ) | ( (u32)b << 8 ) | (u32)a;
+}
+
 static void R_GXDrawPackedWater( void )
 {
 	int water_n = GC_GetWaterFaceCount();
 	int wi, water_drawn = 0;
 	const qboolean water_tex = GC_WaterTexReady() && GC_GetWaterTexObj() != NULL;
 	float time_sec = gp_cl ? (float)gp_cl->time : 0.0f;
+	float scroll2_u = 0.0f, scroll2_v = 0.0f;
+
+	GC_GetWaterScroll2( &scroll2_u, &scroll2_v );
 
 	if( water_n <= 0 )
 		return;
+	R_GXBuildFrustum();
 	GX_SetCullMode( GX_CULL_NONE );
-	/* Opaque teal first, then a grazing sheen. Depth stays unwritten so the
-	 * boats drawn after this remain one hull. */
+	/* Opaque body from VMT $fogcolor, then a soft grazing sheen. Depth is
+	 * tested but not written — props already stamped hull Z, so water fills
+	 * around boats instead of fighting WorldDL under them. */
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 	GX_SetNumChans( 1 );
@@ -5422,7 +5931,6 @@ static void R_GXDrawPackedWater( void )
 		float pts[32][3];
 		int nv, si;
 		float dot;
-		u32 tint;
 
 		if( !GC_WaterFacePlane( wi, &pl, NULL ))
 			continue;
@@ -5432,22 +5940,39 @@ static void R_GXDrawPackedWater( void )
 		nv = GC_GetWaterFaceVerts( wi, pts, 32 );
 		if( nv < 3 )
 			continue;
-		GC_GetWaterFaceScroll( wi, NULL, NULL, &tint );
-		/* Cheap-water body. The reflection is a second pass so this stays
-		 * one opaque sheet and does not cut the boats. */
-		if( !tint )
-			tint = 0x4C909CFFu;
+		{
+			vec3_t wmin, wmax;
+			int ax, vi;
+
+			for( ax = 0; ax < 3; ax++ )
+			{
+				wmin[ax] = pts[0][ax];
+				wmax[ax] = pts[0][ax];
+			}
+			for( vi = 1; vi < nv; vi++ )
+			{
+				for( ax = 0; ax < 3; ax++ )
+				{
+					if( pts[vi][ax] < wmin[ax] )
+						wmin[ax] = pts[vi][ax];
+					if( pts[vi][ax] > wmax[ax] )
+						wmax[ax] = pts[vi][ax];
+				}
+			}
+			if( R_GXBoxOutsideFrustum( wmin, wmax ))
+				continue;
+		}
 		GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
 		for( si = 0; si < nv; si++ )
 		{
 			GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
-			GX_Color1u32( tint );
+			GX_Color1u32( R_GXWaterBodyTint( wi, pts[si] ));
 		}
 		GX_End();
 		water_drawn++;
 	}
-	/* Grazing reflection. The normal map scrolls as a sheen on top of the
-	 * teal. It is not the water colour (that CMPR reads as a checker). */
+	/* Grazing sky reflection. Normal-map red is a mask; never modulate the
+	 * CMPR as albedo (that reads as cyan/magenta tiles). */
 	if( water_tex && water_drawn > 0 )
 	{
 		vec3_t forward, right, up;
@@ -5456,21 +5981,20 @@ static void R_GXDrawPackedWater( void )
 		(void)right;
 		(void)up;
 		GX_LoadTexObj( (GXTexObj *)GC_GetWaterTexObj(), GX_TEXMAP0 );
-		GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+		/* Soft add — full ONE+ONE was washing the harbor into cyan glow. */
+		GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 		GX_SetNumTexGens( 1 );
 		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
 		GX_SetNumTevStages( 1 );
 		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
-		/* The water CMPR is a normal map. Its green and blue read as cyan and
-		 * magenta if they are added as colour. Use the red channel as a mask
-		 * and let the constant supply the sky colour. */
-		GX_SetTevSwapModeTable( GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_ALPHA );
+		GX_SetTevSwapModeTable( GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_RED );
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1 );
 		GX_SetTevKColorSel( GX_TEVSTAGE0, GX_TEV_KCSEL_K0 );
+		GX_SetTevKAlphaSel( GX_TEVSTAGE0, GX_TEV_KASEL_K0_A );
 		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO );
 		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_TEXA, GX_CA_KONST, GX_CA_ZERO );
 		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
@@ -5480,7 +6004,8 @@ static void R_GXDrawPackedWater( void )
 			float pts[32][3];
 			float st[32][2];
 			int nv, si;
-			float dot, su, sv, nd, fres, ou, ov;
+			float dot, su, sv, nd, fres, ou, ov, refl;
+			u8 reflect_x100 = 150;
 			GXColor sheen;
 
 			if( !GC_WaterFacePlane( wi, &pl, NULL ))
@@ -5491,30 +6016,89 @@ static void R_GXDrawPackedWater( void )
 			nv = GC_GetWaterFaceVerts( wi, pts, 32 );
 			if( nv < 3 || GC_GetWaterFaceST( wi, st, 32 ) != nv )
 				continue;
+			{
+				vec3_t wmin, wmax;
+				int ax, vi;
+
+				for( ax = 0; ax < 3; ax++ )
+				{
+					wmin[ax] = pts[0][ax];
+					wmax[ax] = pts[0][ax];
+				}
+				for( vi = 1; vi < nv; vi++ )
+				{
+					for( ax = 0; ax < 3; ax++ )
+					{
+						if( pts[vi][ax] < wmin[ax] )
+							wmin[ax] = pts[vi][ax];
+						if( pts[vi][ax] > wmax[ax] )
+							wmax[ax] = pts[vi][ax];
+					}
+				}
+				if( R_GXBoxOutsideFrustum( wmin, wmax ))
+					continue;
+			}
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
 			fres = ( 1.0f - nd ) * ( 1.0f - nd );
-			if( fres < 0.04f )
+			if( fres < 0.06f )
 				continue;
-			sheen.r = (u8)( 36.0f * fres );
-			sheen.g = (u8)( 48.0f * fres );
-			sheen.b = (u8)( 64.0f * fres );
-			sheen.a = 255;
+			GC_GetWaterFaceFog( wi, NULL, &reflect_x100 );
+			refl = (float)reflect_x100 * ( 1.0f / 100.0f );
+			if( refl < 0.2f )
+				refl = 0.2f;
+			else if( refl > 2.0f )
+				refl = 2.0f;
+			/* Sky/fog tint for the sheen — not bright cyan. */
+			sheen.r = (u8)( 151.0f * fres * refl * 0.35f );
+			sheen.g = (u8)( 166.0f * fres * refl * 0.35f );
+			sheen.b = (u8)( 181.0f * fres * refl * 0.35f );
+			sheen.a = (u8)( 140.0f * fres );
 			GX_SetTevKColor( GX_KCOLOR0, sheen );
 			GC_GetWaterFaceScroll( wi, &su, &sv, NULL );
 			ou = time_sec * su;
 			ov = time_sec * sv;
 			ou = ou - (float)(int)ou;
 			ov = ov - (float)(int)ov;
+			/* Retail water_ati_cheap001 "$scale" "[1 1]" — use baked ST as-is.
+			 * The old 0.08 stretch made ~1600 wu/tile ripples (too large). */
 			GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
 			for( si = 0; si < nv; si++ )
 			{
 				GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
 				GX_Color1u32( 0xFFFFFFFFu );
-				GX_TexCoord2f32( st[si][0] * 0.12f + ou, st[si][1] * 0.12f + ov );
+				GX_TexCoord2f32( st[si][0] + ou, st[si][1] + ov );
 			}
 			GX_End();
+			/* Second normal layer. Retail scrolls two maps; keep it quieter. */
+			if( scroll2_u != 0.0f || scroll2_v != 0.0f )
+			{
+				GXColor sheen2;
+				float ou2, ov2;
+
+				sheen2.r = (u8)( sheen.r >> 1 );
+				sheen2.g = (u8)( sheen.g >> 1 );
+				sheen2.b = (u8)( sheen.b >> 1 );
+				sheen2.a = (u8)( sheen.a >> 1 );
+				GX_SetTevKColor( GX_KCOLOR0, sheen2 );
+				ou2 = time_sec * scroll2_u;
+				ov2 = time_sec * scroll2_v;
+				ou2 = ou2 - (float)(int)ou2;
+				ov2 = ov2 - (float)(int)ov2;
+				if( ou2 < 0.0f )
+					ou2 += 1.0f;
+				if( ov2 < 0.0f )
+					ov2 += 1.0f;
+				GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
+				for( si = 0; si < nv; si++ )
+				{
+					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
+					GX_Color1u32( 0xFFFFFFFFu );
+					GX_TexCoord2f32( st[si][0] + ou2, st[si][1] + ov2 );
+				}
+				GX_End();
+			}
 		}
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
 	}
@@ -5526,7 +6110,7 @@ static void R_GXDrawPackedWater( void )
 		if( !logged )
 		{
 			logged = true;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: harbor water emit=%d/%d tex=%d sheen=%d\n",
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: harbor water emit=%d/%d tex=%d sheen=%d fogcolor\n",
 				water_drawn, water_n, water_tex ? 1 : 0, water_tex ? 1 : 0 );
 		}
 	}
@@ -5545,8 +6129,17 @@ static int R_GXDrawWorldDLFrame( void )
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
 	drawn = R_GXWorldDLDraw();
-	R_GXDrawPackedWater();
+	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
+	 * prop VAT change hangs Dolphin's GP after the first frame. */
+	/* Props first (with coplanar bias) so hulls win WorldDL shore Z, then
+	 * water tests against that depth and fills around the boats. */
+	GX_SetCoPlanar( GX_ENABLE );
+	R_GXPropDrawHorizon( RI.rvp.vieworigin );
 	R_GXPropDraw( RI.rvp.vieworigin );
+	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
+	R_GXCanisterFlightDraw( RI.rvp.vieworigin );
+	GX_SetCoPlanar( GX_DISABLE );
+	R_GXDrawPackedWater();
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_cull_none = true;
 	R_GXInvalidateTriApiLayout();
@@ -5717,6 +6310,10 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gx tex passes=%d uploads=%u stalls=%u native=%u\n",
 				passes, r_gx_tex_uploads, r_gx_tex_fence_stalls + r_gx_cmpr_bounce_stalls,
 				r_gx_tex_native_conversions );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: cmpr bounce slots=%d hits=%u misses=%u dma=%u Kb stalls=%u\n",
+				r_gx_cmpr_nslots, r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes / 1024u,
+				r_gx_cmpr_bounce_stalls );
+			r_gx_cmpr_hits = r_gx_cmpr_misses = r_gx_cmpr_dma_bytes = 0;
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: hot window %u Kb resident=%d queued=%d uploads=%u bytes=%u evictions=%u deferred=%u\n",
 				r_gx_hot.size / 1024, r_gx_hot.count, r_gx_hot.queued, r_gx_hot.uploads, r_gx_hot.bytes, r_gx_hot.evictions, r_gx_hot.deferred );
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gx world per frame draws=%u verts=%u state_sets=%u tex_binds=%u\n",
@@ -5760,10 +6357,17 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				Q_memprint( GC_MemHeapFreeBytes() ));
 	}
 	R_GXHotService();
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step hot-service done tip=%s\n",
+			Q_memprint( GC_MemHeapFreeBytes() ));
 	R_GXSetupWorld3DState();
 	/* CapFaces lean: PVS + frustum before emit (no live marksurfaces). */
 	R_GXBuildFrustum();
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step frustum done\n" );
 	GC_BeginCapFaceVis( RI.rvp.vieworigin );
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step vis done\n" );
 
 	draw = GC_GetNewGameDrawSurfs();
 	n = GC_GetNewGameCapFaceCount();

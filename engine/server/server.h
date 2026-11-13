@@ -232,7 +232,11 @@ typedef struct sv_client_s
 
 	netchan_t netchan;
 	sizebuf_t datagram; // the datagram is written to by sound calls, prints, temp ents, etc.
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	byte      *datagram_buf;              // owned by the slot (sv_client.c); NULL for a bot
+#else
 	byte      datagram_buf[MAX_DATAGRAM]; // it can be harmlessly overflowed.
+#endif
 
 	int chokecount;     // number of messages rate supressed
 	int delta_sequence; // -1 = no compression.
@@ -275,6 +279,13 @@ typedef struct sv_client_s
 #endif
 	event_state_t  events;  // delta-updated events cycle
 } sv_client_t;
+
+#ifndef GC_SV_MAX_SLOTS
+#define GC_SV_MAX_SLOTS 2	// listen-server slot table size; slim slots allow more
+#endif
+#ifndef GC_SV_DEFAULT_SLOTS_STR
+#define GC_SV_DEFAULT_SLOTS_STR "2"	// slots a listen server starts with
+#endif
 
 /*
 =============================================================================
@@ -458,6 +469,9 @@ extern convar_t		sv_novis;
 extern convar_t		sv_hostmap;
 extern convar_t		sv_validate_changelevel;
 extern convar_t		sv_maxclients;
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+extern convar_t		sv_gc_slots;
+#endif
 extern convar_t		sv_userinfo_enable_penalty;
 extern convar_t		sv_userinfo_penalty_time;
 extern convar_t		sv_userinfo_penalty_multiplier;
@@ -665,6 +679,10 @@ void SV_StartSound( edict_t *ent, int chan, const char *sample, float vol, float
 qboolean SV_IsStaticClientFrames( const client_frame_t *frames );
 qboolean SV_IsStaticPacketEntities( const entity_state_t *ents );
 qboolean SV_IsStaticListenClients( const sv_client_t *clients );
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+/* Give a real client's slot its network buffers (after any memset of the slot). */
+void SV_GCBindClientBuffers( sv_client_t *cl );
+#endif
 qboolean SV_GCPrimeDirectMapPlayer( void );
 edict_t *SV_GCFindIntroTrain( void );
 void GC_LeanLandmarkProbePlantAmmo( void );
