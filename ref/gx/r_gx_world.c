@@ -4518,10 +4518,23 @@ soft RecursiveWorldNode used to stamp surfaces during the edge walk).
 */
 static void R_GXMarkVisibleSurfaces( model_t *world )
 {
-	int i;
+	msurface_t **marks_lo, **marks_hi;
+	msurface_t *surf_lo, *surf_hi;
+	int i, rejected = 0;
+	static int reject_logs;
 
 	if( !world || !world->leafs || world->numleafs <= 0 )
 		return;
+	/* The pre-edge scratch reclaim can free the mark-face array under a tight
+	 * tip; leaf->firstmarksurface then dangles into reused memory and the
+	 * walk crashed or hung the first CapFaces frame (c0a0 after "CapFaces step
+	 * vis done").  Only follow marks that lie inside the world's arrays. */
+	if( !world->marksurfaces || world->nummarksurfaces <= 0 || !world->surfaces || world->numsurfaces <= 0 )
+		return;
+	marks_lo = world->marksurfaces;
+	marks_hi = world->marksurfaces + world->nummarksurfaces;
+	surf_lo = world->surfaces;
+	surf_hi = world->surfaces + world->numsurfaces;
 
 	for( i = 0; i < world->numleafs; i++ )
 	{
@@ -4535,12 +4548,28 @@ static void R_GXMarkVisibleSurfaces( model_t *world )
 		c = leaf->nummarksurfaces;
 		if( !mark || c <= 0 )
 			continue;
+		if( mark < marks_lo || mark >= marks_hi || c > marks_hi - mark )
+		{
+			rejected++;
+			continue;
+		}
 		do
 		{
-			( *mark )->visframe = tr.framecount;
+			msurface_t *surf = *mark;
+
+			if( surf >= surf_lo && surf < surf_hi )
+				surf->visframe = tr.framecount;
+			else
+				rejected++;
 			mark++;
 		}
 		while( --c );
+	}
+	if( rejected && reject_logs < 3 )
+	{
+		reject_logs++;
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: MarkVisible skipped %d stale marks on %s\n",
+			rejected, world->name );
 	}
 }
 
@@ -6328,10 +6357,17 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				Q_memprint( GC_MemHeapFreeBytes() ));
 	}
 	R_GXHotService();
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step hot-service done tip=%s\n",
+			Q_memprint( GC_MemHeapFreeBytes() ));
 	R_GXSetupWorld3DState();
 	/* CapFaces lean: PVS + frustum before emit (no live marksurfaces). */
 	R_GXBuildFrustum();
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step frustum done\n" );
 	GC_BeginCapFaceVis( RI.rvp.vieworigin );
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step vis done\n" );
 
 	draw = GC_GetNewGameDrawSurfs();
 	n = GC_GetNewGameCapFaceCount();
