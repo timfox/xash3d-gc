@@ -94,6 +94,23 @@ static s16 *gc_wd_chunk_mins;	/* n_chunks * 3 */
 static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
+static byte gc_wd_pvs_good[512];	/* last PVS row that saw geometry */
+static int gc_wd_pvs_good_valid;
+
+/* True when some chunk in the given PVS row has geometry. */
+static int R_GXWorldDLRowHasChunks( const byte *row )
+{
+	u32 i;
+
+	for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
+	{
+		const u16 cl = gc_wd_chunk_cluster[i];
+
+		if( row[cl >> 3] & ( 1 << ( cl & 7 )))
+			return 1;
+	}
+	return 0;
+}
 static u32 gc_wd_cache_size, gc_wd_cache_head;
 static u32 gc_wd_aram;		/* entire file in ARAM */
 static file_t *gc_wd_file;
@@ -521,7 +538,22 @@ int R_GXWorldDLDraw( void )
 			org[0], org[1], org[2], cluster );
 	}
 	if( cluster >= 0 && cluster != gc_wd_pvs_cluster )
+	{
+		/* A cluster whose PVS row holds no geometry (an empty leaf next to the
+		 * courtyard) would blank the frame. Keep the last row that did see
+		 * chunks until the eye reaches a cluster that does. */
 		R_GXWorldDLLoadPVS( cluster );
+		if( !R_GXWorldDLRowHasChunks( gc_wd_pvs ))
+		{
+			if( gc_wd_pvs_good_valid )
+				memcpy( gc_wd_pvs, gc_wd_pvs_good, ( gc_wd_hdr.n_clusters + 7 ) >> 3 );
+		}
+		else
+		{
+			memcpy( gc_wd_pvs_good, gc_wd_pvs, ( gc_wd_hdr.n_clusters + 7 ) >> 3 );
+			gc_wd_pvs_good_valid = 1;
+		}
+	}
 	else if( gc_wd_pvs_cluster == -2 )
 		R_GXWorldDLLoadPVS( -1 );
 	R_GXWorldDLFrustum( normals );
