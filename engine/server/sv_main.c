@@ -740,6 +740,10 @@ void Host_ServerFrame( void )
 		sv.time += sv.frametime;
 		/* G87: player-only snapshots after think (skips UpdateClientData). */
 		SV_SendClientMessagesBoundedGC();
+		/* Autocampaign lives in the full ServerFrame path below; the lean
+		 * post-G36 early-return must still drive it or exits never fire. */
+		if( Sys_CheckParm( "-gcautocampaign" ))
+			SV_GCCampaignFrame();
 		if( gc_sf_bound_log < 4
 			|| ( GC_GetNewGamePresentCount() >= 20
 				&& ( gc_sf_bound_log < 12
