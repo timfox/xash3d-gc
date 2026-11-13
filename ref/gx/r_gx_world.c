@@ -1380,6 +1380,8 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 	return (pixel_t *)r_gx_cinematic_tex.tiled;
 }
 
+static void R_GXCmprSlotsReset( void );
+
 static void R_GXTexCacheReset( void )
 {
 	int i;
@@ -1425,6 +1427,7 @@ static void R_GXTexCacheReset( void )
 	r_gx_cinematic_ready = false;
 	r_gx_tex_world = NULL;
 	r_gx_hud_pool_ready = false;
+	R_GXCmprSlotsReset();
 	if( !gc_mem003_world_pool_logged )
 	{
 		gc_mem003_world_pool_logged = true;
@@ -2047,16 +2050,41 @@ static void R_GXHotService( void )
  * Prefer ≤32 Kb so 256² CMPR always drops the base mip. On tip-tight maps
  * (dod_donner) borrow the world-array spill tail reserved for CapFaces. */
 #define GC_CMPR_BOUNCE_BYTES ( 24u * 1024u )
-static byte *r_gx_cmpr_bounce;
-static unsigned r_gx_cmpr_bounce_cap;
+/* The bounce is a small cache of GC_CMPR_BOUNCE_BYTES slots with LRU, not one
+ * buffer: a frame binds 200-400 packed textures and a single slot re-DMAed and
+ * fence-waited on every change of texture. A slot is keyed by what it holds
+ * (ARAM address, skipped bytes, size), so a texture that is still resident is
+ * bound again with no DMA and no wait. Each slot has its own fence: only the
+ * slot about to be overwritten is waited for, and that one was used longest ago.
+ * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
+#define GC_CMPR_SLOTS_MAX     8
+#define GC_CMPR_SLOTS_DEFAULT 6
+static byte *r_gx_cmpr_bounce;		/* base of all slots */
+static unsigned r_gx_cmpr_bounce_cap;	/* bytes per slot */
+static int r_gx_cmpr_nslots;
+static struct
+{
+	unsigned aram, skip, bytes;	/* what the slot holds */
+	u16      fence;			/* last draw that sampled it */
+	unsigned used;
+	qboolean valid;
+} r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
+static unsigned r_gx_cmpr_clock;
+static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
-static unsigned r_gx_cmpr_bounce_skip;
-/* Flipper samples bounce asynchronously — fence before DMA overwrite or
- * CapFaces walls flash to the next texture every bind (caen/charlie). */
-static u16 r_gx_cmpr_bounce_fence;
 static unsigned r_gx_cmpr_bounce_stalls;
+static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
+
+/* A new map reuses texnums and ARAM windows: forget what the slots hold. */
+static void R_GXCmprSlotsReset( void )
+{
+	memset( r_gx_cmpr_slot, 0, sizeof( r_gx_cmpr_slot ));
+	r_gx_cmpr_cur_slot = -1;
+	r_gx_cmpr_bounce_texnum = 0;
+}
 
 extern byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
+extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 
 static byte *R_GXCmprBounce( void )
 {
@@ -2065,33 +2093,38 @@ static byte *R_GXCmprBounce( void )
 		/* Prefer spill first — tip memalign(48/32 Kb) on flash starves
 		 * SV_LoadFromFile (bounce24 20261110-030600) while dense8's smaller
 		 * DOL left tip free and accidentally took 48 Kb → white/wash. */
-		r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
-		if( r_gx_cmpr_bounce )
-			r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
-		if( !r_gx_cmpr_bounce )
-		{
-			static const unsigned try_sizes[] = {
-				GC_CMPR_BOUNCE_BYTES, 24u * 1024u
-			};
-			unsigned i;
+		int want = GC_CMPR_SLOTS_DEFAULT, n;
 
-			for( i = 0; i < sizeof( try_sizes ) / sizeof( try_sizes[0] ); ++i )
+		if( gEngfuncs.Sys_CheckParm( "-gccmprslots" ))
+		{
+			char buf[8];
+
+			if( _Sys_GetParmFromCmdLine( "-gccmprslots", buf, sizeof( buf )) && buf[0] )
+				want = Q_atoi( buf );
+			want = bound( 1, want, GC_CMPR_SLOTS_MAX );
+		}
+		/* Ask for the most slots first, fewer if MEM1 / spill cannot give them
+		 * contiguously; one slot is the previous behaviour. */
+		for( n = want; n >= 1 && !r_gx_cmpr_bounce; n = ( n > 4 ) ? 4 : n - 1 )
+		{
+			r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( n * GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
+			if( !r_gx_cmpr_bounce )
+				r_gx_cmpr_bounce = (byte *)memalign( 32, n * GC_CMPR_BOUNCE_BYTES );
+			if( r_gx_cmpr_bounce )
 			{
-				r_gx_cmpr_bounce = (byte *)memalign( 32, try_sizes[i] );
-				if( r_gx_cmpr_bounce )
-				{
-					r_gx_cmpr_bounce_cap = try_sizes[i];
-					break;
-				}
+				r_gx_cmpr_nslots = n;
+				r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
 			}
 		}
+		R_GXCmprSlotsReset();
 		if( r_gx_cmpr_bounce )
 		{
 			extern void GCube_AppendSwissEvidence( const char *fmt, ... );
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce %u Kb\n",
-				r_gx_cmpr_bounce_cap / 1024u );
-			GCube_AppendSwissEvidence( "CMPR ARAM bounce %u Kb",
-				r_gx_cmpr_bounce_cap / 1024u );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce %d x %u Kb = %u Kb\n",
+				r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap / 1024u,
+				r_gx_cmpr_nslots * r_gx_cmpr_bounce_cap / 1024u );
+			GCube_AppendSwissEvidence( "CMPR ARAM bounce %d x %u Kb",
+				r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap / 1024u );
 		}
 		else
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce alloc failed\n" );
@@ -2103,6 +2136,56 @@ static byte *R_GXCmprBounce( void )
 void R_GXPreallocCmprBounce( void )
 {
 	(void)R_GXCmprBounce();
+}
+
+/*
+ * The slot holding `bytes` of ARAM at aram+skip, DMAing it in on a miss. Only
+ * the LRU slot being replaced is waited for (its own last draw), never the one
+ * the previous bind is sampling. Returns the slot's MEM1 address.
+ */
+static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
+{
+	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
+	int i, pick = -1;
+
+	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	{
+		if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
+			&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
+		{
+			r_gx_cmpr_slot[i].used = ++r_gx_cmpr_clock;
+			r_gx_cmpr_hits++;
+			*slot_out = i;
+			return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+		}
+	}
+	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	{
+		if( !r_gx_cmpr_slot[i].valid )
+		{
+			pick = i;
+			break;
+		}
+		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
+			pick = i;
+	}
+	/* Never replace the slot the texture bound right now is sampling when
+	 * another is free to take: with >1 slot the LRU is not it, but be exact. */
+	if( pick == r_gx_cmpr_cur_slot && r_gx_cmpr_nslots > 1 )
+		pick = ( pick + 1 ) % r_gx_cmpr_nslots;
+	if( r_gx_cmpr_slot[pick].valid && GC_GXFenceWait( r_gx_cmpr_slot[pick].fence ))
+		r_gx_cmpr_bounce_stalls++;
+	GC_AramTransfer( aram + skip, r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap,
+		bytes, false );
+	r_gx_cmpr_slot[pick].aram = aram;
+	r_gx_cmpr_slot[pick].skip = skip;
+	r_gx_cmpr_slot[pick].bytes = bytes;
+	r_gx_cmpr_slot[pick].valid = true;
+	r_gx_cmpr_slot[pick].used = ++r_gx_cmpr_clock;
+	r_gx_cmpr_misses++;
+	r_gx_cmpr_dma_bytes += bytes;
+	*slot_out = pick;
+	return r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap;
 }
 
 static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
@@ -2167,19 +2250,11 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				}
 				if( remain > 0 && remain <= r_gx_cmpr_bounce_cap && use_levels > 0 )
 				{
-					if( r_gx_cmpr_bounce_texnum != texnum
-						|| r_gx_cmpr_bounce_skip != skip )
-					{
-						/* Prior CapFaces still sample this MEM1 bounce via FIFO. */
-						if( r_gx_cmpr_bounce_texnum != 0
-							&& GC_GXFenceWait( r_gx_cmpr_bounce_fence ))
-							r_gx_cmpr_bounce_stalls++;
-						GC_AramTransfer( img->gc_packed_aram + skip, bounce,
-							remain, false );
-						r_gx_cmpr_bounce_texnum = texnum;
-						r_gx_cmpr_bounce_skip = skip;
-					}
-					data = bounce;
+					int slot = -1;
+
+					data = R_GXCmprSlotFor( img->gc_packed_aram, skip, remain, &slot );
+					r_gx_cmpr_cur_slot = slot;
+					r_gx_cmpr_bounce_texnum = texnum;
 					used_bounce = true;
 					shift = use_shift;
 					levels = use_levels;
@@ -2234,12 +2309,12 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 		else
 		{
 			r_gx_tex_reuses++;
-			/* Same CMPR still resident in bounce — advance fence past new draws. */
-			if( r_gx_cmpr_bounce_texnum == texnum && r_gx_cmpr_bounce )
+			/* Same CMPR still resident in its slot — advance its fence. */
+			if( r_gx_cmpr_bounce_texnum == texnum && r_gx_cmpr_bounce && r_gx_cmpr_cur_slot >= 0 )
 				used_bounce = true;
 		}
-		if( used_bounce )
-			r_gx_cmpr_bounce_fence = GC_GXFenceNext();
+		if( used_bounce && r_gx_cmpr_cur_slot >= 0 )
+			r_gx_cmpr_slot[r_gx_cmpr_cur_slot].fence = GC_GXFenceNext();
 	}
 	R_GXSetTexAlphaTest( img->gc_packed_alpha ? true : false );
 	return t;
@@ -6174,6 +6249,10 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gx tex passes=%d uploads=%u stalls=%u native=%u\n",
 				passes, r_gx_tex_uploads, r_gx_tex_fence_stalls + r_gx_cmpr_bounce_stalls,
 				r_gx_tex_native_conversions );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: cmpr bounce slots=%d hits=%u misses=%u dma=%u Kb stalls=%u\n",
+				r_gx_cmpr_nslots, r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes / 1024u,
+				r_gx_cmpr_bounce_stalls );
+			r_gx_cmpr_hits = r_gx_cmpr_misses = r_gx_cmpr_dma_bytes = 0;
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: hot window %u Kb resident=%d queued=%d uploads=%u bytes=%u evictions=%u deferred=%u\n",
 				r_gx_hot.size / 1024, r_gx_hot.count, r_gx_hot.queued, r_gx_hot.uploads, r_gx_hot.bytes, r_gx_hot.evictions, r_gx_hot.deferred );
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gx world per frame draws=%u verts=%u state_sets=%u tex_binds=%u\n",
