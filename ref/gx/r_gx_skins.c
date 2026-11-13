@@ -26,6 +26,9 @@ See docs/GAMECUBE_ARAM_STREAMING_DESIGN.md (Stage 2b).
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 #include "../../engine/platform/gamecube/skin_stream.h"
 
+extern void *Image_GCAllocMdlDecode( size_t bytes );
+extern void Image_GCReleaseMdlDecode( void );
+
 #define GC_SKIN_MAX_DIM        256
 #define GC_SKIN_WINDOW_BYTES   ( 192 * 1024 )	/* a 256x256 body skin plus hands */
 #define GC_SKIN_FRAME_BUDGET   ( 160 * 1024 )	/* promoted per frame at most */
@@ -63,17 +66,12 @@ static qboolean R_GXSkinInit( void )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM off (no ARAM cache)\n" );
 		return false;
 	}
-	r_skin_window = (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES );
-	if( !r_skin_window )
-	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM off (no %uK MEM1 window)\n",
-			(unsigned)( GC_SKIN_WINDOW_BYTES / 1024 ));
-		return false;
-	}
-	GC_SkinStreamInit( &r_skin_stream, cache, r_skin_window, GC_SKIN_WINDOW_BYTES, GC_SKIN_FRAME_BUDGET );
+	/* The MEM1 window is allocated on the first promotion (R_GXSkinGet), not
+	 * here: this runs during texture load when MEM1 is at its tightest. */
+	GC_SkinStreamInit( &r_skin_stream, cache, NULL, GC_SKIN_WINDOW_BYTES, GC_SKIN_FRAME_BUDGET );
 	r_skin_ready = true;
 	r_skin_failed = false;
-	gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM ready window=%uK budget=%uK/frame\n",
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM ready (lazy) window=%uK budget=%uK/frame\n",
 		(unsigned)( GC_SKIN_WINDOW_BYTES / 1024 ), (unsigned)( GC_SKIN_FRAME_BUDGET / 1024 ));
 	return true;
 }
@@ -223,6 +221,13 @@ static void R_GXSkinBuildTiled( const byte *idx, const byte *pal, int w, int h,
 	DCFlushRange( pix, (u32)n * sizeof( u16 ));
 }
 
+/* Edge of the resident low mip of a viewmodel skin: 64 when the full skin
+ * can be streamed from ARAM (see R_GXSkinAttachVM), 128 otherwise. */
+int R_GXSkinLowCap( void )
+{
+	return R_GXSkinInit() ? 64 : 128;
+}
+
 static void R_GXSkinKey( const char *name, char *key, size_t size )
 {
 	unsigned h = 5381u;
@@ -258,10 +263,12 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 		return;
 	if( !R_GXSkinInit( ))
 		return;
-	pix = (u16 *)memalign( 32, (size_t)w * h * sizeof( u16 ));
+	/* Scratch is the idle MDL decode buffer (128 KiB, static): no MEM1 heap
+	 * is needed while textures are loading. */
+	pix = (u16 *)Image_GCAllocMdlDecode( (size_t)w * h * sizeof( u16 ));
 	if( !pix )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM skip %s (no %uK scratch)\n",
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM skip %s (decode scratch busy/small for %uK)\n",
 			img->name, (unsigned)( w * h * 2 / 1024 ));
 		return;
 	}
@@ -270,7 +277,7 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	R_GXSkinKey( img->name, key, sizeof( key ));
 	handle = GC_SkinStreamRegisterBpp( &r_skin_stream, key, (uint16_t)w, (uint16_t)h, pix,
 		(uint16_t)img->width, (uint16_t)img->height, img->pixels[0], 2 );
-	free( pix );
+	Image_GCReleaseMdlDecode();
 	if( handle < 0 )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM refused %s %dx%d (ARAM/table full)\n",
@@ -307,7 +314,30 @@ const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean
 	/* A promotion overwrites window bytes the GPU may still be reading for an
 	 * earlier draw: drain the pipe first, only on the frames that promote. */
 	if( k->win_off < 0 && r_skin_stream.budget_left >= k->full_bytes )
+	{
+		if( !r_skin_window )
+		{
+			r_skin_window = (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES );
+			if( !r_skin_window )
+			{
+				static qboolean window_logged;
+
+				if( !window_logged )
+				{
+					window_logged = true;
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM no %uK MEM1 window, low mip only\n",
+						(unsigned)( GC_SKIN_WINDOW_BYTES / 1024 ));
+				}
+				return NULL;
+			}
+			r_skin_stream.window = r_skin_window;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM window %uK allocated\n",
+				(unsigned)( GC_SKIN_WINDOW_BYTES / 1024 ));
+		}
 		GX_DrawDone();
+	}
+	else if( !r_skin_window )
+		return NULL;
 	before = r_skin_stream.promotions;
 	p = GC_SkinStreamGet( &r_skin_stream, handle, &sw, &sh, &is_full );
 	if( !p || !is_full )
