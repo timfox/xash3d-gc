@@ -251,3 +251,65 @@ by the 384 KiB overflow window (96/64/48 px). Wiring means registering each skin
 at upload (low mip into the existing overflow, full into ARAM), asking
 `GC_SkinStreamGet` per draw in `R_StudioDrawPoints`, and re-pointing the GX texture
 object on a size change. That needs a ceres build and a Dolphin run to verify.
+
+## Stage 7: caches that compound (design, not implemented)
+
+Direction from Tim: cache aggressively so the engine gets faster the longer it is
+used. Three tiers, from most to least reliable. Each keeps the existing rule that a
+cache is a ceiling, never a reservation, and every tier must be safe to lose.
+
+### Tier 1: session caches in ARAM (partly done)
+
+Raw file bytes by name (`GC_AssetCache*`, studio meshes and sequence groups today),
+skin pixels in the skin stream, world display lists in the stream class. Extend the
+same cache to what is still re-read from disc or rebuilt every load:
+
+- Map props read through the world-array spill (PR #43 stores their raw bytes), so a
+  respawn or changelevel is a DMA, not a disc read.
+- `resource/gc_menu/*.tga` and the HUD sheets after their first decode.
+- Parsed wad lump bodies for small, hot lumps (conchars, palettes, fonts).
+- Viewmodel meshes: all of them live here and a small number of MEM1 slots are
+  filled by DMA on weapon change (see the viewmodel slot plan).
+
+### Tier 2: baked caches on the disc (reliable, no writes)
+
+The disc builder already writes lean `gc_studio/` meshes and `wd_<map>.gcd` world
+display lists. Move more of the first-load work offline, keyed so a stale entry is
+detected:
+
+- Pre-converted textures in GX format (the 128x128 8-bit and its mips) so the
+  boot-time convert and upload go away.
+- Pre-swapped studio data, so the in-place byte swap at load disappears.
+- Per-map hot-lump packs (planes, nodes, leafs, clipnodes) in ARAM order, one
+  sequential read.
+
+Each file carries a header with `cache_version` (bumped by the engine whenever the
+layout changes) and the source file's size and hash. A mismatch means: ignore it and
+load the original, never crash.
+
+### Tier 3: persistent learning across boots (optional, small)
+
+ARAM is lost at power off, so a cache that improves "over time" across sessions needs
+storage that survives. The disc is read-only. Options, in the order to try:
+
+1. **Profile only, memory card.** A few hundred bytes per map: which assets were hot,
+   in what order, which clusters the player spent time in. Next boot uses it to order
+   the prefetch and to pick which models and skins to pin first. Cheap on card space,
+   safe to lose, works on real hardware and Dolphin.
+2. **Processed assets, SD card.** On Dolphin (virtual SD) and on hardware with an SD
+   adapter, store converted textures and display lists built on first use, same
+   header and version rule as tier 2. If no SD is present the engine behaves
+   exactly as tier 1.
+
+Memory cards are small (59 to 251 blocks of 8 KiB) and slow, so they only take the
+profile. Never write during gameplay: write at changelevel or menu time.
+
+### Rules for every tier
+
+- Key by content, not time: name + size + hash + `cache_version`.
+- Bounded: a byte cap per tier and per type, with least-recently-used eviction.
+- Verified: a short checksum on read; a bad entry is dropped and rebuilt.
+- Measured: add hit, miss and bytes-saved counters to the Stats section, and judge
+  each cache by those numbers, not by feel.
+- Boot-checked one cache at a time on Dolphin, because a wrong cache hit looks like
+  random corruption.
