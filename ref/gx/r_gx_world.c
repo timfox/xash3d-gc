@@ -2470,17 +2470,6 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 
 static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind );
 
-/* Prop materials are packed CMPR chains. The 8×8 is resident; HotService climbs. */
-static qboolean R_GXBindPropMat( int mat )
-{
-	int texnum = GC_PropMatTexnum( mat );
-
-	if( texnum <= 0 )
-		texnum = tr.whiteTexture;
-	if( texnum <= 0 )
-		return false;
-	return R_GXBindTexnum( (unsigned)texnum, false ) != NULL;
-}
 
 static int r_gx_prof_hud_uploads_logged;
 static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
@@ -3581,7 +3570,6 @@ static void R_GXSetupWorld3DState( void )
 		GX_SetNumTevStages( 1 );
 		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
 		GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
-	}
 	}
 
 	/* Optional camera-space marker: -gcmagenta (proved EFB→DumpFrames in G200). */
