@@ -926,8 +926,16 @@ void Host_Frame( double time )
 			{
 				/* CapFaces densify / HL newgame: one bounded native physics
 				 * bootstrap. Further full server ticks re-enter heavy scripted
-				 * entity work and starve the GX/input frame loop. */
-				if( !gc_direct_map_server_tick )
+				 * entity work and starve the GX/input frame loop.
+				 * Exception: -gcautocampaign needs continuous ServerFrame so
+				 * sv.time advances and SV_GCCampaignFrame can walk/force exits
+				 * (otherwise time sticks near ~1.3s after the bootstrap tick). */
+				if( Sys_CheckParm( "-gcautocampaign" ))
+				{
+					Host_ServerFrame ();
+					GC_ProfMark( "server frame" );
+				}
+				else if( !gc_direct_map_server_tick )
 				{
 					Host_ServerFrame ();
 					GC_ProfMark( "server frame" );
@@ -1737,30 +1745,42 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 #endif
 
 #if XASH_GAMECUBE
-	/* Keep a lean HTTP pool so Find servers / fastdl don't fatal with
-	 * POOL IS NULL. With -net (BBA/eth2sp1 already brought up in GCube_Init),
-	 * open multiplayer UDP; otherwise stay deferred/offline. */
-	HTTP_Init();
-	if( Sys_CheckParm( "-net" ))
+	/* Tip-tight retail menu boots: skip HTTP + soundlist so SCR_CheckStartupVids
+	 * can open media/valve.gcvid (BSS frame buffer) before MEM1 collapses.
+	 * Also defer whenever a startup cinematic is queued — same HL1 tip path.
+	 * Probe 20261113-022534 died here at avail≈232 with Cmd/Cvar soft-fails. */
+	if( GC_MemHeapFreeBytes() < 8192 || SCR_HaveStartupVids() )
 	{
-		Con_Reportf( "Xash3D GameCube: HTTP pool ready; enabling multiplayer sockets (-net)\n" );
-		NET_Config( true, true );
+		Con_Reportf(
+			"Xash3D GameCube: HTTP/soundlist deferred for intro (tip=%u)\n",
+			(unsigned)GC_MemHeapFreeBytes());
+		NET_Config( false, false );
 	}
 	else
 	{
-		Con_Reportf( "Xash3D GameCube: HTTP pool ready (sockets deferred)\n" );
-		NET_Config( false, false );
+		/* Keep a lean HTTP pool so Find servers / fastdl don't fatal with
+		 * POOL IS NULL. With -net, open multiplayer UDP; else deferred. */
+		HTTP_Init();
+		if( Sys_CheckParm( "-net" ))
+		{
+			Con_Reportf( "Xash3D GameCube: HTTP pool ready; enabling multiplayer sockets (-net)\n" );
+			NET_Config( true, true );
+		}
+		else
+		{
+			Con_Reportf( "Xash3D GameCube: HTTP pool ready (sockets deferred)\n" );
+			NET_Config( false, false );
+		}
+		if( Sys_CheckParm( "-gcmap" ))
+			Con_Reportf( "Xash3D GameCube: soundlist skipped\n" );
+		else
+			SoundList_Init();
 	}
 #else
 	HTTP_Init();
 	NET_Config( true, true );
+	SoundList_Init();
 #endif
-#if XASH_GAMECUBE
-	if( Sys_CheckParm( "-gcmap" ))
-		Con_Reportf( "Xash3D GameCube: soundlist skipped\n" );
-	else
-#endif
-		SoundList_Init();
 
 	if( Host_IsDedicated( ))
 	{
