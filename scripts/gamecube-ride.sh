@@ -24,6 +24,12 @@ DOLPHIN_EXE="$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin"
 out=".ai/logs/ride-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out/dolphin-user"
 cp -r "$probe_dir/dolphin-user/Config" "$out/dolphin-user/"
+# Smoke probes default to the deterministic interpreter (CPUCore 0), which
+# runs the guest at ~15% of real time.  A ride follows the campaign, so use
+# the JIT and CPU thread unless the caller asks otherwise.
+sed -i -e "s/^CPUCore = .*/CPUCore = ${RIDE_CPU_CORE:-1}/" \
+	-e "s/^CPUThread = .*/CPUThread = ${RIDE_CPU_THREAD:-True}/" \
+	"$out/dolphin-user/Config/Dolphin.ini"
 user="$ROOT/$out/dolphin-user"
 log="$user/Logs/dolphin.log"
 
