@@ -460,6 +460,18 @@ static u16 r_gx_tex_linear_small[GC_GX_TEX_WORLD_MAX_DIM * GC_GX_TEX_WORLD_MAX_D
 static u16 *r_gx_tex_linear = r_gx_tex_linear_small;
 static size_t r_gx_tex_linear_cap = GC_GX_TEX_WORLD_MAX_DIM * GC_GX_TEX_WORLD_MAX_DIM;
 
+/* The 128x32 lean credits/HUD font converts to an 8 KiB RGB565 tile.  After
+ * a map load the HUD slabs often cannot be refilled (G184 slot fails), and
+ * then every glyph bind failed: the intro credits drew only their dark
+ * backing.  Fonts that fit get this static tile as a last resort. */
+#define GC_GX_FONT_TILE_BYTES	( 128u * 32u * sizeof( u16 ))
+static u16 r_gx_font_tile[GC_GX_FONT_TILE_BYTES / sizeof( u16 )] __attribute__((aligned( 32 )));
+
+static void R_GXFreeTile( u16 *tiled )
+{
+	if( tiled && tiled != r_gx_font_tile )
+		free( tiled );
+}
 #define GC_GX_TEX_HUD_SLOT0	( GC_GX_TEX_SLOTS - GC_GX_TEX_HUD_RESERVE )
 /* HUD/menu textures may also take the slots between the world pool and the
  * reserved slabs, backed on demand: the retail menu binds ~10 distinct
@@ -528,7 +540,7 @@ static void R_GXReserveHudPool( void )
 			continue;
 		if( r_gx_tex[slot].tiled )
 		{
-			free( r_gx_tex[slot].tiled );
+			R_GXFreeTile( r_gx_tex[slot].tiled );
 			r_gx_tex[slot].tiled = NULL;
 			r_gx_tex[slot].alloc_bytes = 0;
 			r_gx_tex[slot].valid = false;
@@ -587,7 +599,7 @@ void R_GXReleaseHudPoolForMapLoad( void )
 	{
 		if( r_gx_tex[i].tiled )
 		{
-			free( r_gx_tex[i].tiled );
+			R_GXFreeTile( r_gx_tex[i].tiled );
 			r_gx_tex[i].tiled = NULL;
 		}
 		memset( &r_gx_tex[i], 0, sizeof( r_gx_tex[i] ));
@@ -1407,7 +1419,7 @@ static void R_GXTexCacheReset( void )
 			continue;
 		}
 		if( r_gx_tex[i].tiled && i >= GC_GX_TEX_WORLD_POOL )
-			free( r_gx_tex[i].tiled );
+			R_GXFreeTile( r_gx_tex[i].tiled );
 		memset( &r_gx_tex[i], 0, sizeof( r_gx_tex[i] ));
 		r_gx_tex_lru[i] = 0;
 		if( i < GC_GX_TEX_WORLD_POOL )
@@ -2705,6 +2717,26 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 			}
 			else if( !neu )
 			{
+				if(( !t->tiled || t->alloc_bytes < bytes )
+					&& hud_bind && FBitSet( img->flags, TF_FONT ) && bytes <= GC_GX_FONT_TILE_BYTES )
+				{
+					int j;
+
+					/* Take the static font tile from whichever slot held it. */
+					for( j = 0; j < GC_GX_TEX_SLOTS; j++ )
+					{
+						if( j != slot && r_gx_tex[j].tiled == r_gx_font_tile )
+						{
+							if( r_gx_tex[j].valid && GC_GXFenceWait( r_gx_tex_fence[j] ))
+								r_gx_tex_fence_stalls++;
+							memset( &r_gx_tex[j], 0, sizeof( r_gx_tex[j] ));
+							r_gx_tex_lru[j] = 0;
+						}
+					}
+					R_GXFreeTile( t->tiled );
+					t->tiled = r_gx_font_tile;
+					t->alloc_bytes = GC_GX_FONT_TILE_BYTES;
+				}
 				if( !t->tiled || t->alloc_bytes < bytes )
 				{
 					r_gx_hud_bind_fails++;
@@ -2714,7 +2746,7 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 			else
 			{
 				if( t->tiled )
-					free( t->tiled );
+					R_GXFreeTile( t->tiled );
 				t->tiled = neu;
 				t->alloc_bytes = want;
 			}

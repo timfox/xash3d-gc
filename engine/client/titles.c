@@ -523,6 +523,18 @@ static void CL_GCHudTextDrawOne( const client_textmessage_t *msg, float t )
 /* Map-load renderer trims free textures, so the credits font created at boot
  * can end up pointing at whatever reused its texture slot (that drew the
  * garbled glyphs). Recreate it when the slot no longer holds the font. */
+/* The slot still holds the font iff it resolves to the font's own texture
+ * name.  CL_GCLoadLeanHudFont makes the 128x32 lean atlas by default (the
+ * 256x64 one only on a high-memory profile); a size check against 256x64
+ * alone rejected every lean load, so no intro credit was ever drawn. */
+static qboolean CL_GCCreditsFontTextureOk( const cl_font_t *font )
+{
+	const int tex = font->hFontTexture;
+
+	return tex > 0 && ( tex == ref.dllFuncs.GL_FindTexture( "#gc_lean_hudfont" )
+		|| tex == ref.dllFuncs.GL_FindTexture( "#gc_full_hudfont" ));
+}
+
 static void CL_GCHudTextEnsureFont( void )
 {
 	cl_font_t *font = &cls.creditsFont;
@@ -532,9 +544,9 @@ static void CL_GCHudTextEnsureFont( void )
 
 	if( font->valid )
 	{
-		R_GetTextureParms( &w, &h, font->hFontTexture );
-		if( w == 256 && h == 64 )
+		if( CL_GCCreditsFontTextureOk( font ))
 			return;
+		R_GetTextureParms( &w, &h, font->hFontTexture );
 		Con_Reportf( "Xash3D GameCube: credits font texture %d is now %dx%d, reloading\n",
 			font->hFontTexture, w, h );
 		font->valid = false;
@@ -547,8 +559,7 @@ static void CL_GCHudTextEnsureFont( void )
 	CL_GCLoadLeanHudFont( font, hud_fontscale.value, &hud_fontrender );
 	if( font->valid )
 	{
-		R_GetTextureParms( &w, &h, font->hFontTexture );
-		if( w == 256 && h == 64 )
+		if( CL_GCCreditsFontTextureOk( font ))
 			retry_delay = 1.0;
 		else
 		{
