@@ -2093,6 +2093,7 @@ static void R_GXHotService( void )
  * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
 #define GC_CMPR_SLOTS_MAX     8
 #define GC_CMPR_SLOTS_DEFAULT 6
+#define GC_CMPR_HEAP_MARGIN ( 1024u * 1024u )	/* heap that must stay free after extra slots */
 static byte *r_gx_cmpr_bounce;		/* base of all slots */
 static unsigned r_gx_cmpr_bounce_cap;	/* bytes per slot */
 static int r_gx_cmpr_nslots;
@@ -2142,7 +2143,10 @@ static byte *R_GXCmprBounce( void )
 		for( n = want; n >= 1 && !r_gx_cmpr_bounce; n = ( n > 4 ) ? 4 : n - 1 )
 		{
 			r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( n * GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
-			if( !r_gx_cmpr_bounce )
+			/* Extra slots only take heap that leaves headroom for the map load;
+			 * one slot is the old behaviour. */
+			if( !r_gx_cmpr_bounce && ( n == 1
+				|| GC_MemHeapFreeBytes() >= n * GC_CMPR_BOUNCE_BYTES + GC_CMPR_HEAP_MARGIN ))
 				r_gx_cmpr_bounce = (byte *)memalign( 32, n * GC_CMPR_BOUNCE_BYTES );
 			if( r_gx_cmpr_bounce )
 			{
