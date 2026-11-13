@@ -37,7 +37,14 @@ void R_GXPropDrawHorizon( const float *org );
 #define GC_WD_WARMUP_BUDGET	( 1024u * 1024u )
 /* 192 full 32×32 RGB565 pages (384 KiB). Paid for by shrinking gx_fifo
  * 512→128 KiB in vid_gamecube.c (non-network). Enough for a whole view. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/* The DoD profile keeps the 256 KiB gx_fifo (vid_gamecube.c) because the
+ * 384 KiB below is not paid for there: it overflowed MEM1 at cvar init. v1
+ * world packs have no lightmap pages, so a handful of slots is enough. */
+#define GC_WD_LM_SLOTS		8
+#else
 #define GC_WD_LM_SLOTS		192
+#endif
 #define GC_WD_LM_PAGE_BYTES	2048u
 
 typedef struct
