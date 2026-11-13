@@ -30,6 +30,12 @@ cp -r "$probe_dir/dolphin-user/Config" "$out/dolphin-user/"
 sed -i -e "s/^CPUCore = .*/CPUCore = ${RIDE_CPU_CORE:-1}/" \
 	-e "s/^CPUThread = .*/CPUThread = ${RIDE_CPU_THREAD:-True}/" \
 	"$out/dolphin-user/Config/Dolphin.ini"
+# Retail probes dump every frame (DumpFrames/DumpFramesAsImages); a ride of
+# that config wrote 20 GB of stills and filled the disk.  Rides record video
+# through playtest-record.py instead.
+sed -i -e "s/^DumpFrames = .*/DumpFrames = False/" "$out/dolphin-user/Config/Dolphin.ini"
+[[ -f "$out/dolphin-user/Config/GFX.ini" ]] && \
+	sed -i -e "s/^DumpFramesAsImages = .*/DumpFramesAsImages = False/" "$out/dolphin-user/Config/GFX.ini"
 user="$ROOT/$out/dolphin-user"
 log="$user/Logs/dolphin.log"
 
