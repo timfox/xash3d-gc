@@ -48,7 +48,15 @@ static qboolean Mod_GCIsNewGameRoute( void )
  * first call so the cache slice is claimed before the first prop TryAlloc. */
 static qboolean Mod_GCMapModelSpillAfterWorldDL( void )
 {
-	return R_GXWorldDLActive();
+	/* Active() loads the map's WorldDL on first call, which claims its chunk
+	 * cache slice from the spill before the first prop allocates there. Its
+	 * result is not the gate: a map without a world DL (dod_avalanche on the
+	 * listen route) leaves the spill free, and the fallback is an FS_LoadFile
+	 * malloc that fails with the heap exhausted ("FS_LoadZIPFile: can't alloc
+	 * 50669 bytes" for by_banister, 94489 for sherman). If the spill is full
+	 * TryAlloc fails and the old heap path still runs. */
+	(void)R_GXWorldDLActive();
+	return true;
 }
 
 /* Real MDLs live in the 1 MiB studio BSS arena (lean meshes + viewweapons).
@@ -697,6 +705,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 					if( total == flen )
 					{
 						Mod_GCWorldArraySpillPinBase( slot, (size_t)flen );
+						/* raw file bytes, before the byte swap: reloads become DMA */
+						GC_AssetCacheStore( mirror, slot, (unsigned int)flen );
 						*length = flen;
 						if( from_bss )
 							*from_bss = true;
@@ -777,6 +787,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 							if( total == flen )
 							{
 								Mod_GCWorldArraySpillPinBase( slot, (size_t)flen );
+						/* raw file bytes, before the byte swap: reloads become DMA */
+						GC_AssetCacheStore( mirror, slot, (unsigned int)flen );
 								*length = flen;
 								if( from_bss )
 									*from_bss = true; /* don't free — spill-backed */
