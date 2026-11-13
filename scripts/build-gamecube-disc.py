@@ -350,18 +350,22 @@ def write_bootstrap_pk3(
 			if not path.is_file():
 				continue
 			name = path.name.lower()
-			# Tip-safe bootstrap: primary cf_<map>.gcp + skies only.
+			# Tip-safe bootstrap: primary cf_<map>.gcp + skies + intro natives.
 			# Spatial cells stay as loose ISO media/ (ship unpacks the pk3);
 			# injecting 60+ cells tip-starved escape before densify.
+			# valve.gcvid (~3 MiB RGB565) must ride bootstrap: overlay grafts are
+			# invisible to ISO9660 directory find (DoD intro-menu 20261113-023955).
 			is_sky = name.startswith("sky_") and name.endswith(".cmp")
 			is_primary_cf = (
 				name.startswith("cf_")
 				and name.endswith(".gcp")
 				and "_s" not in name[3:-4]
 			)
-			if not is_sky and not is_primary_cf:
+			is_intro_native = name.endswith(".gcvid") or name.endswith(".gcpcm")
+			if not is_sky and not is_primary_cf and not is_intro_native:
 				continue
-			if path.stat().st_size <= 0 or path.stat().st_size > 2 * 1024 * 1024:
+			size_cap = 4 * 1024 * 1024 if is_intro_native else 2 * 1024 * 1024
+			if path.stat().st_size <= 0 or path.stat().st_size > size_cap:
 				continue
 			arcname = f"media/{name}"
 			if arcname in archive.NameToInfo:
@@ -369,7 +373,10 @@ def write_bootstrap_pk3(
 			archive.write(path, arcname, compress_type=zipfile.ZIP_STORED)
 			extra_n += 1
 		if extra_n:
-			print(f"GameCube media mirror: injected {extra_n} overlay CapFaces/sky file(s) into bootstrap pk3")
+			print(
+				f"GameCube media mirror: injected {extra_n} overlay "
+				f"CapFaces/sky/intro-native file(s) into bootstrap pk3"
+			)
 		# G293 disc inject deferred — ISO early-exit while debugging tip-safe path.
 
 
@@ -455,6 +462,10 @@ def build_iso9660(
 				rel.startswith("media/cf_")
 				or rel.startswith("media/sky_")
 				or rel.endswith("_spatial.pk3")
+				# Intro natives: ISO9660 directory find misses overlay grafts
+				# (same class as CapFaces). Prefer bootstrap search hits.
+				or rel.endswith(".gcvid")
+				or rel.endswith(".gcpcm")
 			)
 		]
 		write_bootstrap_pk3(
@@ -1225,10 +1236,10 @@ def _stage_gc_menu_btn_strips(source: Path, menu_dir: Path) -> None:
 
 
 def stage_gc_loading_assets(source: Path, output: Path) -> bool:
-	"""Bake MEM1-friendly HL1 loading plaque: bald scientist + lambda motif.
+	"""Bake MEM1-friendly loading plaque for GC_DrawLoadingStatus.
 
-	Used by GC_DrawLoadingStatus (G60) so map load shows retail-themed art and
-	a progress bar instead of a flat debug color field.
+	Prefer Day of Defeat 800_*_loading splash tiles (BackgroundLayout.txt).
+	Fall back to HL HD loading layout + scientist motif when DoD tiles are absent.
 	"""
 	try:
 		from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
@@ -1247,33 +1258,72 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 		and (menu_dir / "loading.tga").is_file()
 		and (menu_dir / "background.tga").is_file()
 	):
-		# Ensure intro matches the title plate when the bake omitted a dedicated intro.
 		if not (menu_dir / "intro.tga").is_file():
 			shutil.copy2(menu_dir / "background.tga", menu_dir / "intro.tga")
-		if not (menu_dir / "loading.tga").is_file():
-			shutil.copy2(menu_dir / "background.tga", menu_dir / "loading.tga")
 		print(
 			f"GameCube loading assets: preserve Lost Coast retail title "
 			f"{(menu_dir / 'loading.tga').relative_to(output)}"
 		)
 		return True
 
-	# Distressed lambda wallpaper from HD loading tiles when present.
+	# Prefer dod-gc helper when present (DoD tile composite).
+	dod_helper_candidates = [
+		Path.cwd() / "scripts" / "bake_gc_loading_plaque.py",
+		Path(os.environ.get("DODGC_ROOT", "")) / "scripts" / "bake_gc_loading_plaque.py",
+		Path(__file__).resolve().parents[2] / "dod-gc" / "scripts" / "bake_gc_loading_plaque.py",
+	]
+	dod_helper = next((p for p in dod_helper_candidates if p.is_file()), None)
+	if dod_helper is not None:
+		dod_layout = source / "resource" / "BackgroundLayout.txt"
+		dod_tile = source / "resource" / "background" / "800_1_a_loading.tga"
+		if dod_layout.is_file() and dod_tile.is_file():
+			import importlib.util
+
+			spec = importlib.util.spec_from_file_location("bake_gc_loading_plaque", dod_helper)
+			mod = importlib.util.module_from_spec(spec)
+			assert spec.loader is not None
+			spec.loader.exec_module(mod)
+			if mod.bake(source, output) == 0:
+				print(
+					"GameCube loading assets: DoD splash tiles via bake_gc_loading_plaque.py"
+				)
+				return True
+
+	theme = "fallback"
 	bg = Image.new("RGB", (320, 240), (18, 16, 14))
-	layout = source / "resource" / "HD_BackgroundLoadingLayout.txt"
-	if layout.is_file():
+
+	# DoD retail splash (same layout lean staging writes).
+	for layout_name in (
+		"BackgroundLayout.txt",
+		"HD_BackgroundLoadingLayout.txt",
+		"HD_BackgroundLayout.txt",
+	):
+		layout = source / "resource" / layout_name
+		if not layout.is_file():
+			continue
 		bg_w, bg_h, tiles = _gc_menu_parse_layout(source, layout)
-		if tiles:
-			canvas = Image.new("RGB", (bg_w, bg_h), (0, 0, 0))
-			for tile_path, x, y in tiles:
-				try:
-					canvas.paste(Image.open(tile_path).convert("RGB"), (x, y))
-				except OSError:
-					continue
+		if not tiles:
+			continue
+		canvas = Image.new("RGB", (bg_w, bg_h), (0, 0, 0))
+		for tile_path, x, y in tiles:
+			try:
+				canvas.paste(Image.open(tile_path).convert("RGB"), (x, y))
+			except OSError:
+				continue
+		if "BackgroundLayout.txt" == layout_name and any(
+			"loading" in t[0].name for t in tiles
+		):
+			boosted = ImageEnhance.Brightness(canvas).enhance(1.15)
+			boosted = ImageEnhance.Contrast(boosted).enhance(1.1)
+			bg = boosted.resize((320, 240), Image.Resampling.LANCZOS)
+			theme = "dod-tiles"
+		else:
 			boosted = ImageEnhance.Contrast(canvas).enhance(3.2)
 			boosted = ImageEnhance.Brightness(boosted).enhance(3.8)
 			bg = boosted.resize((320, 240), Image.Resampling.LANCZOS)
 			bg = ImageEnhance.Color(bg).enhance(0.35)
+			theme = "hl-hd-tiles"
+		break
 
 	# Soft vignette + dark lower band reserved for status/progress UI.
 	vignette = Image.new("L", (320, 240), 0)
@@ -1285,13 +1335,12 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 	ImageDraw.Draw(band).rectangle((0, 168, 320, 240), fill=(10, 10, 12, 210))
 	bg = Image.alpha_composite(bg.convert("RGBA"), band).convert("RGB")
 
-	# Bald Black Mesa scientist (Walter) — the iconic HL1 "bald guy".
 	scientist = source / "models" / "player" / "scientist" / "Scientist.bmp"
 	if not scientist.is_file():
 		scientist = source / "models" / "player" / "scientist" / "scientist.bmp"
-	if scientist.is_file():
+	# Only composite HL scientist when we did not get DoD splash art.
+	if theme != "dod-tiles" and scientist.is_file():
 		char = Image.open(scientist).convert("RGBA")
-		# Drop near-black backdrop so he composites cleanly.
 		datas = char.getdata()
 		cleaned = []
 		for r, g, b, a in datas:
@@ -1304,50 +1353,29 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 		bg_rgba = bg.convert("RGBA")
 		bg_rgba.paste(char, (18, 28), char)
 		bg = bg_rgba.convert("RGB")
-
-	# Lambda watermark from retail gfx when available.
-	lam = source / "gfx" / "lambda.bmp"
-	if lam.is_file():
-		mark = Image.open(lam).convert("RGBA").resize((48, 48), Image.Resampling.NEAREST)
-		mark.putalpha(mark.split()[0].point(lambda v: 90 if v > 8 else 0))
-		layered = bg.convert("RGBA")
-		layered.paste(mark, (250, 28), mark)
-		bg = layered.convert("RGB")
+		theme = "hl-scientist"
+		lam = source / "gfx" / "lambda.bmp"
+		if lam.is_file():
+			mark = Image.open(lam).convert("RGBA").resize((48, 48), Image.Resampling.NEAREST)
+			mark.putalpha(mark.split()[0].point(lambda v: 90 if v > 8 else 0))
+			layered = bg.convert("RGBA")
+			layered.paste(mark, (250, 28), mark)
+			bg = layered.convert("RGB")
 
 	loading_path = menu_dir / "loading.tga"
 	bg.save(loading_path, format="TGA")
 
-	# Intro still: bald scientist plaque used for stage demos / boot hold.
-	intro = Image.new("RGB", (320, 240), (0, 0, 0))
-	if scientist.is_file():
-		char = Image.open(scientist).convert("RGBA")
-		datas = char.getdata()
-		cleaned = []
-		for r, g, b, a in datas:
-			if r < 12 and g < 12 and b < 12:
-				cleaned.append((0, 0, 0, 0))
-			else:
-				cleaned.append((r, g, b, 255))
-		char.putdata(cleaned)
-		char = char.resize((150, 184), Image.Resampling.NEAREST)
-		frame = Image.new("RGBA", (320, 240), (0, 0, 0, 255))
-		# Sepia-ish HL portrait plate.
-		plate = Image.new("RGB", (200, 200), (42, 32, 22))
-		plate_draw = ImageDraw.Draw(plate)
-		plate_draw.rectangle((2, 2, 197, 197), outline=(160, 110, 40), width=2)
-		frame.paste(plate, (60, 20))
-		frame.paste(char, (85, 28), char)
-		# Title strip under the plate.
-		td = ImageDraw.Draw(frame)
-		td.rectangle((60, 222, 260, 236), fill=(20, 16, 12))
-		td.text((96, 224), "HALF-LIFE", fill=(230, 170, 50))
-		intro = frame.convert("RGB")
+	intro = bg.copy()
+	td = ImageDraw.Draw(intro)
+	td.rectangle((40, 200, 280, 228), fill=(12, 14, 10))
+	label = "DAY OF DEFEAT" if theme == "dod-tiles" else "HALF-LIFE"
+	td.text((92 if theme == "dod-tiles" else 110, 208), label, fill=(220, 210, 170))
 	intro_path = menu_dir / "intro.tga"
 	intro.save(intro_path, format="TGA")
 
 	print(
 		f"GameCube loading assets: baked {loading_path.relative_to(output)} "
-		f"and {intro_path.relative_to(output)} (bald scientist + HL motif)"
+		f"and {intro_path.relative_to(output)} ({theme})"
 	)
 	return True
 
@@ -1541,14 +1569,22 @@ def _downsample_bmp_to_bytes(src: Path, size: int = 64) -> bytes | None:
 		return None
 	if not src.is_file():
 		return None
-	with Image.open(src) as img:
-		img = img.convert("P")
-		img = img.resize((size, size), Image.Resampling.NEAREST)
-		import io
+	try:
+		with Image.open(src) as img:
+			# Pillow on this host cannot resize some HL1 8-bit sky BMPs while
+			# they remain in mode "P" (resize returns NULL).  Go through RGB,
+			# then re-quantize so ImageLib still gets an 8-bit BMP.
+			img = img.convert("RGB")
+			img = img.resize((size, size), Image.Resampling.NEAREST)
+			img = img.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
+			import io
 
-		buf = io.BytesIO()
-		img.save(buf, format="BMP")
-		return buf.getvalue()
+			buf = io.BytesIO()
+			img.save(buf, format="BMP")
+			return buf.getvalue()
+	except Exception as exc:
+		print(f"  warning: sky downsample failed for {src}: {exc}")
+		return None
 
 
 def inject_gc_sky_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
@@ -1861,9 +1897,15 @@ def wt_encode(w: int, h: int, pixels: bytes, palette: bytes, alpha: bool) -> tup
 	opaque = idx != 255 if alpha else np.ones((h, w), bool)
 	tw, th = 1 << max(3, (w - 1).bit_length()), 1 << max(3, (h - 1).bit_length())
 	if (tw, th) != (w, h):
-		resample = Image.Resampling.NEAREST if alpha else Image.Resampling.BICUBIC
-		rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), resample))
-		opaque = np.asarray(Image.fromarray(opaque).resize((tw, th), Image.Resampling.NEAREST))
+		# Pillow 12.1 raises SystemError on any size-changing NEAREST resize (and on
+		# bool images), so do nearest-neighbour with index maps (PIL pixel-centre rule).
+		ys = np.minimum(((np.arange(th) + 0.5) * h / th).astype(np.int64), h - 1)
+		xs = np.minimum(((np.arange(tw) + 0.5) * w / tw).astype(np.int64), w - 1)
+		if alpha:
+			rgb = rgb[ys][:, xs]
+		else:
+			rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), Image.Resampling.BICUBIC))
+		opaque = opaque[ys][:, xs]
 	levels = bytearray()
 	count = 0
 	fcol = rgb.astype(np.float32)
@@ -2974,12 +3016,106 @@ def create_retail_boot_overlays(
 			if not source_movie.is_file():
 				continue
 			gcvid_name = Path(relative).with_suffix(".gcvid").name
-			gcvid_output = media / gcvid_name
-			build_gcvid_companion(source_movie, gcvid_output, rgb565=True)
-			overlays.append((f"media/{gcvid_name}", gcvid_output))
 			gcpcm_name = Path(relative).with_suffix(".gcpcm").name
+			prebaked_gcvid = source_movie.with_suffix(".gcvid")
+			prebaked_gcpcm = source_movie.with_suffix(".gcpcm")
+			gcvid_output = media / gcvid_name
 			gcpcm_output = media / gcpcm_name
-			if build_gcpcm_companion(source_movie, gcpcm_output):
+			if prebaked_gcvid.is_file():
+				shutil.copy2(prebaked_gcvid, gcvid_output)
+				print(f"Reusing staged native GCVID {gcvid_name}")
+			else:
+				build_gcvid_companion(source_movie, gcvid_output, rgb565=True)
+			overlays.append((f"media/{gcvid_name}", gcvid_output))
+			if prebaked_gcpcm.is_file():
+				shutil.copy2(prebaked_gcpcm, gcpcm_output)
+				print(f"Reusing staged native GCPCM {gcpcm_name}")
+				overlays.append((f"media/{gcpcm_name}", gcpcm_output))
+			elif build_gcpcm_companion(source_movie, gcpcm_output):
+				overlays.append((f"media/{gcpcm_name}", gcpcm_output))
+
+	return tuple(overlays)
+
+
+def create_intro_native_overlays(
+	source: Path,
+	output: Path,
+	include_startup_vids: bool = True,
+) -> tuple[tuple[str, Path], ...]:
+	"""DoD / non-HL1 lean boot: native GCVID/GCPCM + StartupVids only.
+
+	Skips HL1 campaign CapFaces, c0a0 prefetch, sky CMPR, and tram VO that
+	create_retail_boot_overlays always stages for valve. Prefer pre-baked
+	companions from stage-lean-dod (convert-avi-to-gcvid.py) when present.
+	"""
+	output.mkdir(parents=True, exist_ok=True)
+	media = output / "media"
+	media.mkdir(exist_ok=True)
+	overlays: list[tuple[str, Path]] = []
+
+	logo_src = source / "media/logo.avi"
+	logo_native = source / "media/logo.gcvid"
+	if logo_native.is_file():
+		dest = media / "logo.gcvid"
+		shutil.copy2(logo_native, dest)
+		overlays.append(("media/logo.gcvid", dest))
+		logo_pcm = source / "media/logo.gcpcm"
+		if logo_pcm.is_file():
+			pcm_dest = media / "logo.gcpcm"
+			shutil.copy2(logo_pcm, pcm_dest)
+			overlays.append(("media/logo.gcpcm", pcm_dest))
+	elif logo_src.is_file():
+		logo_gcvid = build_logo_gcvid_companion(source, output)
+		if logo_gcvid is not None:
+			overlays.append(("media/logo.gcvid", logo_gcvid))
+
+	startup_vids = media / "StartupVids.txt"
+	if not include_startup_vids:
+		startup_vids.write_text("", encoding="ascii")
+		overlays.append(("media/StartupVids.txt", startup_vids))
+		return tuple(overlays)
+
+	# Prefer the staged playlist when present (DoD forces media/valve.avi).
+	staged_playlist = source / "media/StartupVids.txt"
+	movies: list[str] = []
+	if staged_playlist.is_file():
+		for line in staged_playlist.read_text(encoding="ascii", errors="ignore").splitlines():
+			token = line.strip()
+			if not token or token.startswith("#"):
+				continue
+			if Path(token).suffix.lower() == ".avi" and (source / token).is_file():
+				movies.append(token)
+	if not movies:
+		movies = [
+			relative
+			for relative in SMOKE_INTRO_MEDIA
+			if (source / relative).is_file()
+		]
+
+	if movies:
+		startup_vids.write_text("".join(f"{movie}\n" for movie in movies), encoding="ascii")
+		overlays.append(("media/StartupVids.txt", startup_vids))
+		for relative in movies:
+			source_movie = source / relative
+			if not source_movie.is_file():
+				continue
+			gcvid_name = Path(relative).with_suffix(".gcvid").name
+			gcpcm_name = Path(relative).with_suffix(".gcpcm").name
+			prebaked_gcvid = source_movie.with_suffix(".gcvid")
+			prebaked_gcpcm = source_movie.with_suffix(".gcpcm")
+			gcvid_output = media / gcvid_name
+			gcpcm_output = media / gcpcm_name
+			if prebaked_gcvid.is_file():
+				shutil.copy2(prebaked_gcvid, gcvid_output)
+				print(f"Reusing staged native GCVID {gcvid_name}")
+			else:
+				build_gcvid_companion(source_movie, gcvid_output, rgb565=True)
+			overlays.append((f"media/{gcvid_name}", gcvid_output))
+			if prebaked_gcpcm.is_file():
+				shutil.copy2(prebaked_gcpcm, gcpcm_output)
+				print(f"Reusing staged native GCPCM {gcpcm_name}")
+				overlays.append((f"media/{gcpcm_name}", gcpcm_output))
+			elif build_gcpcm_companion(source_movie, gcpcm_output):
 				overlays.append((f"media/{gcpcm_name}", gcpcm_output))
 
 	return tuple(overlays)
@@ -2989,7 +3125,13 @@ def create_startup_vids_overlay(
 	source: Path,
 	output: Path,
 	include_startup_vids: bool = True,
+	*,
+	gamedir: str = "valve",
 ) -> tuple[tuple[str, Path], ...]:
+	# HL1 retail keeps campaign CapFaces / c0a0 prefetch overlays. DoD and other
+	# mods only need native intro companions (same convert-avi-to-gcvid path).
+	if gamedir != "valve":
+		return create_intro_native_overlays(source, output, include_startup_vids)
 	return create_retail_boot_overlays(source, output, include_startup_vids)
 
 
@@ -3004,6 +3146,15 @@ def build_gcvid_companion(
 	still_frame_index: int = GCVID_STILL_FRAME_INDEX,
 	rgb565: bool = False,
 ) -> None:
+	if (
+		output_movie.is_file()
+		and source_movie.is_file()
+		and output_movie.stat().st_mtime >= source_movie.stat().st_mtime
+		and output_movie.stat().st_size > 32
+	):
+		print(f"Reusing fresh GCVID {output_movie.name}")
+		return
+
 	ffmpeg = shutil.which("ffmpeg")
 	if ffmpeg is None:
 		raise FileNotFoundError("ffmpeg is required to build .gcvid intro companions")
@@ -3109,6 +3260,14 @@ def build_gcvid_companion(
 
 def build_gcpcm_companion(source_movie: Path, output_audio: Path) -> bool:
 	"""Convert movie audio to the GameCube mixer format: 48 kHz stereo s16le."""
+	if (
+		output_audio.is_file()
+		and source_movie.is_file()
+		and output_audio.stat().st_mtime >= source_movie.stat().st_mtime
+		and output_audio.stat().st_size > 16
+	):
+		print(f"Reusing fresh GCPCM {output_audio.name}")
+		return True
 	ffmpeg = shutil.which("ffmpeg")
 	if ffmpeg is None:
 		raise FileNotFoundError("ffmpeg is required to build .gcpcm intro companions")
@@ -4194,7 +4353,21 @@ def main() -> None:
 				args.data,
 				overlay_root,
 				include_startup_vids=not args.skip_startup_vids,
+				gamedir=primary_gamedir,
 			)
+			# HL1 retail keeps natives inside the gamedir tree. Overlay grafts alone
+			# are missed by ISO9660 directory find on DoD lean discs — also copy
+			# intro companions into staged_data so the primary graft sees them.
+			for relative, overlay in overlays:
+				if not (
+					relative.endswith(".gcvid")
+					or relative.endswith(".gcpcm")
+					or relative == "media/StartupVids.txt"
+				):
+					continue
+				dest = staged_data / relative
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				shutil.copy2(overlay, dest)
 			build_disc(
 				args.dol,
 				staged_data,
