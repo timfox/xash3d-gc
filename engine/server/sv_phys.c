@@ -1934,6 +1934,7 @@ void SV_GCPlaceNewGameTrackTrains( void )
 {
 	static qboolean done;
 	static char done_map[MAX_QPATH];
+	static int empty_frames;
 	int e, found = 0;
 	int first_world;
 
@@ -1942,7 +1943,10 @@ void SV_GCPlaceNewGameTrackTrains( void )
 	/* G345: re-place after changelevel — static done previously stuck across
 	 * maps so dest trains never snapped (c0a0b→c0a0c hung on stale G278). */
 	if( done && Q_stricmp( done_map, sv.name ))
+	{
 		done = false;
+		empty_frames = 0;
+	}
 	if( done )
 		return;
 	first_world = svs.maxclients + 1;
@@ -2035,9 +2039,23 @@ void SV_GCPlaceNewGameTrackTrains( void )
 		VectorAdd( ent->v.origin, ent->v.maxs, ent->v.absmax );
 		found++;
 	}
+	/* Tip-starved maps often never spawn *12. Without a latch, Place runs
+	 * every ServerFrame and floods Dolphin OSReport until the host dies
+	 * (c1a2 HLG-1 20261113-052718). Give early c0a0 a short window, then stop. */
+	if( found == 0 )
+	{
+		if( ++empty_frames >= 90 )
+		{
+			done = true;
+			Q_strncpy( done_map, sv.name, sizeof( done_map ));
+			Con_Reportf( "Xash3D GameCube: G277 train absent map=%s (latched)\n",
+				sv.name[0] ? sv.name : "?" );
+		}
+		return;
+	}
+	empty_frames = 0;
 	/* Only latch done on a real park — early menu Place with a null player
 	 * used to snap *12 to (0,0,-20) and permanently skip later eye parks. */
-	if( found > 0 )
 	{
 		qboolean parked = false;
 		int e2;
@@ -2068,7 +2086,18 @@ void SV_GCPlaceNewGameTrackTrains( void )
 			Q_strncpy( done_map, sv.name, sizeof( done_map ));
 		}
 	}
-	Con_Reportf( "Xash3D GameCube: G277 train=%d (G278 path-follow)\n", found );
+	{
+		static int log_n;
+		static char log_map[MAX_QPATH];
+
+		if( Q_stricmp( log_map, sv.name ))
+		{
+			log_n = 0;
+			Q_strncpy( log_map, sv.name, sizeof( log_map ));
+		}
+		if( ( ++log_n % 120 ) == 1 )
+			Con_Reportf( "Xash3D GameCube: G277 train=%d (G278 path-follow)\n", found );
+	}
 }
 
 /*

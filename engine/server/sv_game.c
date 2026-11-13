@@ -6527,8 +6527,12 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			 * Always allow worldspawn (entity 0) — kraftstoff/escape tip≈7 KiB
 			 * after CapFaces spat mount was aborting the whole map before
 			 * densify could run. */
+			/* Autocampaign FORCED hops only need the entity lump scan; keep
+			 * spawning a little longer on HL maps so landmarks/triggers exist
+			 * for walk-in when tip is in the 4–8 KiB band (Office Complex). */
 			if( entity_index > 1 && GC_MemHeapFreeBytes() <
-				( !Q_strnicmp( sv.name, "dod_", 4 ) ? 2u * 1024u : 8u * 1024u ))
+				( !Q_strnicmp( sv.name, "dod_", 4 ) ? 2u * 1024u
+					: ( Sys_CheckParm( "-gcautocampaign" ) ? 4u * 1024u : 8u * 1024u )))
 			{
 				Con_Reportf( S_WARN "Xash3D GameCube: %s tip-starved before spawn entity=%d class=%s tip=%s; stop entity load\n",
 					__func__, entity_index - 1, SV_ClassName( ent ),

@@ -2783,8 +2783,10 @@ def write_probe_newgame_override(
 ) -> None:
 	lines = []
 	# G68/G100: bake map so -gcmap+newgame early changelevel path can plant inventory.
-	if smoke_map:
-		lines.append(f"map {Path(smoke_map).stem}")
+	# HLG-1 resume: XASH_GC_PROBE_STARTMAP=c1a2 cold-starts mid-campaign.
+	start_map = smoke_map or os.environ.get("XASH_GC_PROBE_STARTMAP")
+	if start_map:
+		lines.append(f"map {Path(start_map).stem}")
 	lines.append("newgame")
 	if newsaveload:
 		lines.append("newsaveload")
