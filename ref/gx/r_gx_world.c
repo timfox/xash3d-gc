@@ -3150,6 +3150,7 @@ sky survives changelevels. Missing sides keep the solid clear colour.
 void R_GXInvalidateTriApiLayout( void );
 static u8 r_gx_sky_data[6][R_GX_SKY_BYTES] __attribute__(( aligned( 32 )));
 static char r_gx_sky_name[32];
+static qboolean r_gx_sky_quiet;
 /* r_gx_sky_obj / r_gx_sky_ready forward-declared near G285 backdrop. */
 static const model_t *r_gx_sky_world;
 static qboolean r_gx_sky_world_has_sky;
@@ -3200,6 +3201,21 @@ static void R_GXSkyLoad( void )
 
 	if( r_gx_sky_name[0] && !Q_stricmp( name, r_gx_sky_name ) && r_gx_sky_ready )
 		return;
+	/* A missing sky used to be retried (two disc opens per side) and
+	 * logged every frame: ~15k OSReports per c0a0 ride. Retry a failed
+	 * name at most every few seconds and report it once. */
+	{
+		static char failed_name[32];
+		static double failed_time;
+		const double now = gEngfuncs.pfnTime ? gEngfuncs.pfnTime() : 0.0;
+
+		if( failed_name[0] && !Q_stricmp( name, failed_name )
+			&& now >= failed_time && now - failed_time < 5.0 )
+			return;
+		r_gx_sky_quiet = failed_name[0] && !Q_stricmp( name, failed_name );
+		Q_strncpy( failed_name, name, sizeof( failed_name ));
+		failed_time = now;
+	}
 	/* Early CapFaces prefetch can miss before the disc pack settles; find-miss
 	 * then poisoned later opens. Clear and only commit the name on full success. */
 	FS_ClearFindMissCache();
@@ -3231,7 +3247,8 @@ static void R_GXSkyLoad( void )
 		}
 		if( len != R_GX_SKY_BYTES )
 		{
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: sky %s missing %s, using the clear colour\n", name, path );
+			if( !r_gx_sky_quiet )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: sky %s missing %s, using the clear colour\n", name, path );
 			r_gx_sky_ready = false;
 		}
 	}
