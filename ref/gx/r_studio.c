@@ -3179,6 +3179,39 @@ R_StudioDrawPlayer
 
 ===============
 */
+#if XASH_GAMECUBE
+/*
+ * Studio header of the current model, or NULL when its mesh is not resident
+ * (viewmodel meshes are evicted/refused under MEM1 pressure). Callers draw
+ * nothing for a NULL header instead of dereferencing it. -gcvmmiss forces the
+ * miss for every viewmodel (models/v_*) to exercise that path.
+ */
+static studiohdr_t *R_GCStudioHeader( void )
+{
+	static int force_miss = -1;
+	studiohdr_t *hdr;
+
+	if( force_miss < 0 )
+		force_miss = gEngfuncs.Sys_CheckParm( "-gcvmmiss" ) ? 1 : 0;
+	if( force_miss && RI.currentmodel && Q_stristr( RI.currentmodel->name, "models/v_" ))
+		hdr = NULL;
+	else
+		hdr = (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, RI.currentmodel );
+	if( !hdr )
+	{
+		static int miss_logged;
+
+		if( miss_logged < 4 )
+		{
+			miss_logged++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: studio draw skipped, no resident mesh for '%s'\n",
+				RI.currentmodel && RI.currentmodel->name[0] ? RI.currentmodel->name : "?" );
+		}
+	}
+	return hdr;
+}
+#endif
+
 static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 {
 	int      m_nPlayerIndex;
@@ -3194,7 +3227,13 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 	if( RI.currentmodel == NULL )
 		return 0;
 
+#if XASH_GAMECUBE
+	R_StudioSetHeader( R_GCStudioHeader( ));
+	if( !m_pStudioHeader )
+		return 0;
+#else
 	R_StudioSetHeader((studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, RI.currentmodel ));
+#endif
 
 	if( pplayer->gaitsequence )
 	{
@@ -3361,7 +3400,13 @@ static int R_StudioDrawModel( int flags )
 		return result;
 	}
 
+#if XASH_GAMECUBE
+	R_StudioSetHeader( R_GCStudioHeader( ));
+	if( !m_pStudioHeader )
+		return 0;
+#else
 	R_StudioSetHeader((studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, RI.currentmodel ));
+#endif
 
 	R_StudioSetUpTransform( RI.currententity );
 
@@ -3725,6 +3770,11 @@ void R_DrawViewModel( void )
 
 	if( !RI.currententity->model )
 		return;
+#if XASH_GAMECUBE
+	/* Mesh not resident (refused/evicted viewmodel): nothing to draw. */
+	if( RI.currententity->model->type == mod_studio && !RI.currententity->model->cache.data )
+		return;
+#endif
 
 #if XASH_GAMECUBE
 capfaces_vm_pose:
