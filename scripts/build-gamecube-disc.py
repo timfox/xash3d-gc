@@ -2095,7 +2095,7 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	st = bsp.stat()
 	out = cache / f"wd_{bsp.stem.lower()}.gcd"
 	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
-	key = f"{st.st_size}:{int(st.st_mtime)}:2"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1"
 	if out.is_file() and stamp.is_file() and stamp.read_text() == key:
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))

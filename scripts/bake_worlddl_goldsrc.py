@@ -25,6 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 GX_DRAW_TRIFAN = 0xA0
 GX_VTXFMT = 6
 ST_FRAC = 9
+LM_FRAC = 8
+WD_VERSION = 2
+# Header flags: GoldSrc lightmaps are applied at x1 (Lost Coast pages use x2).
+WD_FLAG_LIGHT_X1 = 0x0001
+LM_PAGES_MAX = 512
 MAT_F_WATER = 0x01
 MAT_F_NOLIGHT = 0x02
 TEX_SPECIAL = 1
@@ -65,6 +70,78 @@ def rgb565(c) -> int:
 	return ((c[0] >> 3) << 11) | ((c[1] >> 2) << 5) | (c[2] >> 3)
 
 
+class LmPage:
+	"""32x32 RGB565 lightmap page per chunk (runtime TEXMAP2, TEV x2): each lit
+	face gets a square cell holding its retail lightmap.  Cell (0,0) is a
+	mid-grey 2x2 (1x light) for faces that found no room."""
+
+	def __init__(self) -> None:
+		self.pix = [[(128, 128, 128) for _ in range(32)] for _ in range(32)]
+		self.x = 2
+		self.y = self.row_h = 0
+		self.row_h = 2
+		self.used = False
+		self.failed = False
+
+	def _try(self, w: int, h: int):
+		x, y, rh = self.x, self.y, self.row_h
+		if x + w > 32:
+			x = 0
+			y += rh
+			rh = 0
+		if y + h > 32:
+			return None
+		self.x, self.y, self.row_h = x + w, y, max(rh, h)
+		return (x, y, w, h)
+
+	def alloc(self, w: int, h: int):
+		if self.failed:
+			return None
+		side = max(2, min(16, max(w, h)))
+		for sz in (side, 8, 4, 2):
+			if sz > side:
+				continue
+			rect = self._try(sz, sz)
+			if rect:
+				self.used = True
+				return rect
+		self.failed = True
+		return None
+
+	def blit(self, rect, samples) -> None:
+		x, y, w, h = rect
+		lh = len(samples)
+		lw = len(samples[0]) if lh else 1
+		for py in range(h):
+			for px in range(w):
+				sx = min(lw - 1, px * lw // w)
+				sy = min(lh - 1, py * lh // h)
+				self.pix[y + py][x + px] = samples[sy][sx]
+
+
+def rgb565_page(pix) -> bytes:
+	"""32x32 RGB565 in GX 4x4 tiles."""
+	out = bytearray()
+	for ty in range(0, 32, 4):
+		for tx in range(0, 32, 4):
+			for y in range(4):
+				for x in range(4):
+					r, g, b = pix[ty + y][tx + x]
+					out += struct.pack(">H", ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
+	return bytes(out)
+
+
+def cell_st(cell, u: float, v: float, lw: int, lh: int) -> tuple[float, float]:
+	"""Page UV (0..1) of luxel coordinate (u, v) of an lw x lh face lightmap."""
+	x, y, w, h = cell
+	un = min(1.0, max(0.0, u / max(lw - 1, 1)))
+	vn = min(1.0, max(0.0, v / max(lh - 1, 1)))
+	return (x + un * max(w - 1, 0) + 0.5) / 32.0, (y + vn * max(h - 1, 0) + 0.5) / 32.0
+
+
+GREY_UV = (1.0 / 32.0, 1.0 / 32.0)
+
+
 class Chunk:
 	def __init__(self) -> None:
 		self.pos: dict[tuple[int, int, int], int] = {}
@@ -72,6 +149,9 @@ class Chunk:
 		self.mins = [32767, 32767, 32767]
 		self.maxs = [-32768, -32768, -32768]
 		self.tris = 0
+		self.lm = LmPage()
+		self.lm_keep = False
+		self.lm_index = 0
 
 	def pos_index(self, p) -> int:
 		key = (
@@ -88,21 +168,27 @@ class Chunk:
 		return idx
 
 	def emit(self, mat: int, prim: int, verts: list) -> None:
+		"""verts: (pos, rgba, nrm, s, t, lm_u, lm_v) - file version 2 layout:
+		POS idx16, NRM s8x3 (6 fraction bits), CLR0 RGBA8, TEX0 s16 ST,
+		TEX1 u8 lightmap ST (8 fraction bits)."""
 		dl = self.batches.setdefault(mat, bytearray())
 		dl += struct.pack(">BH", prim | GX_VTXFMT, len(verts))
-		for p, c, s, t in verts:
+		for p, c, nrm, s, t, lu, lv in verts:
 			dl += struct.pack(
-				">HHhh",
+				">Hbbb4BhhBB",
 				self.pos_index(p),
-				rgb565(c),
+				*(int(max(-127, min(127, round(n * 64.0)))) for n in nrm),
+				max(0, min(255, c[0])), max(0, min(255, c[1])), max(0, min(255, c[2])), 255,
 				int(max(-32768, min(32767, round(s * (1 << ST_FRAC))))),
 				int(max(-32768, min(32767, round(t * (1 << ST_FRAC))))),
+				int(max(0, min(255, round(lu * (1 << LM_FRAC))))),
+				int(max(0, min(255, round(lv * (1 << LM_FRAC))))),
 			)
 		self.tris += len(verts) - 2
 
 	def encode(self) -> bytes:
 		mats = sorted(self.batches)
-		out = bytearray(8 + 12 * len(mats))
+		out = bytearray(16 + 12 * len(mats))
 		pad32(out)
 		pos_ofs = len(out)
 		for key in self.pos:
@@ -111,9 +197,11 @@ class Chunk:
 		for i, m in enumerate(mats):
 			dl = bytearray(self.batches[m])
 			pad32(dl)
-			struct.pack_into(">HHII", out, 8 + 12 * i, m, 0, len(out), len(dl))
+			struct.pack_into(">HHII", out, 16 + 12 * i, m, 0, len(out), len(dl))
 			out += dl
-		struct.pack_into(">HHI", out, 0, len(self.pos), len(mats), pos_ofs)
+		# Page index + 1 (0: no page, vertex colour lights the chunk).
+		struct.pack_into(">HHII", out, 0, len(self.pos), len(mats), pos_ofs,
+			self.lm_index + 1 if self.lm_keep else 0)
 		return bytes(out)
 
 
@@ -263,6 +351,14 @@ def light_at(bsp: Bsp, f, ti0, ti1, flags, pts, p) -> tuple[int, int, int]:
 	)
 
 
+def face_lightmap(bsp: Bsp, lightofs: int, lw: int, lh: int):
+	"""Style-0 retail lightmap of a face as rows of RGB, or None."""
+	lit = bsp.lighting
+	if lightofs < 0 or lw < 1 or lh < 1 or lw * lh > 65536 or lightofs + lw * lh * 3 > len(lit):
+		return None
+	return [[tuple(lit[lightofs + (y * lw + x) * 3: lightofs + (y * lw + x) * 3 + 3]) for x in range(lw)] for y in range(lh)]
+
+
 def bake(map_bsp: Path, out_path: Path) -> None:
 	bsp = Bsp(map_bsp)
 	stem = map_bsp.stem
@@ -326,11 +422,30 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 			continue
 
 		sts = st_for(ti0, ti1, tw, th, pts)
+		chunk = chunks.setdefault(cluster, Chunk())
+		pl = bsp.planes[f[0]]
+		nrm = (-pl[0], -pl[1], -pl[2]) if f[1] else (pl[0], pl[1], pl[2])
+		cell = None
+		lw = lh = 1
+		bmins = (0, 0)
+		if not water and not (flags & TEX_SPECIAL) and f[6] >= 0 and bsp.lighting:
+			bmins, (lw, lh) = face_extents(ti0, ti1, pts)
+			samples = face_lightmap(bsp, f[6], lw, lh)
+			if samples:
+				cell = chunk.lm.alloc(lw, lh)
+				if cell:
+					chunk.lm.blit(cell, samples)
 		verts = []
 		for p, (s, t) in zip(pts, sts):
 			col = (96, 132, 140) if water else light_at(bsp, f, ti0, ti1, flags, pts, p)
-			verts.append((p, col, s, t))
-		chunks.setdefault(cluster, Chunk()).emit(mat, GX_DRAW_TRIFAN, verts)
+			if cell:
+				u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
+				v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
+				lu, lv = cell_st(cell, u, v, lw, lh)
+			else:
+				lu, lv = GREY_UV
+			verts.append((p, col, nrm, s, t, lu, lv))
+		chunk.emit(mat, GX_DRAW_TRIFAN, verts)
 		n_faces += 1
 
 	# BSP tree for point-in-leaf → cluster (child encoding matches lostcoast)
@@ -381,8 +496,22 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		pvs_blob += bsp.vis[visofs:pos]
 
 	order = sorted(chunks)
+	# Lightmap pages: largest chunks first, up to the page budget.  The pages
+	# are a stream after the chunks; the runtime fetches one when its chunk
+	# is drawn (MEM1 page cache, ref/gx/r_gx_worlddl.c GC_WD_LM_SLOTS).
+	ranked = sorted(
+		((max(ch.maxs[a] - ch.mins[a] for a in range(3)), cl) for cl, ch in chunks.items() if ch.pos and ch.lm.used),
+		reverse=True,
+	)
+	lm_pages = bytearray()
+	for _span, cl in ranked[:LM_PAGES_MAX]:
+		chunks[cl].lm_keep = True
+	for cl in order:
+		if chunks[cl].lm_keep:
+			chunks[cl].lm_index = len(lm_pages) // 2048
+			lm_pages += rgb565_page(chunks[cl].lm.pix)
 	chunk_blobs = [chunks[c].encode() for c in order]
-	mats_blob = b"".join(struct.pack(">IBBH", h, tid, fl, 0) for h, tid, fl in mat_recs)
+	mats_blob = b"".join(struct.pack(">IIBBH", h, 0, tid, fl, 0) for h, tid, fl in mat_recs)
 	body = bytearray(64)
 	ofs_mats = len(body)
 	body += mats_blob
@@ -409,14 +538,16 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	ofs_chunks = len(body)
 	for blob in chunk_blobs:
 		body += blob
+	pad32(body)
+	body += lm_pages
 	max_chunk = max((len(b) for b in chunk_blobs), default=0)
 	struct.pack_into(
 		">4sHH13I",
 		body,
 		0,
 		b"GCwd",
-		1,
-		0,
+		WD_VERSION,
+		WD_FLAG_LIGHT_X1,
 		bsp.numclusters,
 		len(order),
 		len(mat_recs),
@@ -442,6 +573,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	print(f"  clusters={bsp.numclusters} chunks={len(order)} batches={batches} mats={len(mat_recs)}")
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)}")
 	print(f"  MEM1 resident={ofs_pvsdir // 1024} KB  ARAM chunks={run // 1024} KB (max {max_chunk // 1024} KB)")
+	print(f"  lightmap pages={len(lm_pages) // 2048} ({len(lm_pages) // 1024} KB)")
 	print(f"  wrote {out_path} ({len(body) // 1024} KB)")
 
 

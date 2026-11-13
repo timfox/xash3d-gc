@@ -84,6 +84,8 @@ static void NET_LoopFreeData( byte *data )
 			return;
 		}
 	}
+	if( Netchan_GCReturnEmergency( data ))
+		return;
 	Mem_Free( data );
 }
 #endif
@@ -1080,6 +1082,10 @@ static void NET_SendLoopPacket( netsrc_t sock, size_t length, const void *data, 
 		{
 			net_loop_fallback_busy[s] = true;
 			loop->msgs[i].data = net_loop_fallback[s];
+		}
+		else if(( loop->msgs[i].data = (byte *)Netchan_GCBorrowEmergency( length )) != NULL )
+		{
+			Con_Reportf( "Xash3D GameCube: loopback packet %zu in netchan emergency slot\n", length );
 		}
 		else
 		{
