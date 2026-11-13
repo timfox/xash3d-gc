@@ -233,7 +233,18 @@ void SV_GCCampaignFrame( void )
 				sv.name, t->map, t->model, t->landmark[0] ? t->landmark : "-" );
 		}
 		else
+		{
+			/* Tip-starved loads skip trigger edicts — force almost immediately. */
 			Con_Printf( "Xash3D GameCube: CAMPAIGN no trigger edict for %s -> %s\n", sv.name, t->map );
+			if( !gc_camp_forced )
+			{
+				gc_camp_forced = true;
+				SV_GCCampaignCenterPrint( va( "AUTOPILOT: forced level change -> %s", t->map ));
+				Con_Printf( "Xash3D GameCube: CAMPAIGN FORCED changelevel %s -> %s (landmark %s)\n",
+					sv.name, t->map, t->landmark[0] ? t->landmark : "-" );
+				SV_QueueChangeLevel( t->map, t->landmark[0] ? t->landmark : NULL );
+			}
+		}
 		return;
 	}
 	if( !gc_camp_forced && elapsed >= delay + GC_CAMPAIGN_FORCE_AFTER )
