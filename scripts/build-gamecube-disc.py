@@ -1954,9 +1954,15 @@ def wt_encode(w: int, h: int, pixels: bytes, palette: bytes, alpha: bool) -> tup
 	opaque = idx != 255 if alpha else np.ones((h, w), bool)
 	tw, th = 1 << max(3, (w - 1).bit_length()), 1 << max(3, (h - 1).bit_length())
 	if (tw, th) != (w, h):
-		resample = Image.Resampling.NEAREST if alpha else Image.Resampling.BICUBIC
-		rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), resample))
-		opaque = np.asarray(Image.fromarray(opaque).resize((tw, th), Image.Resampling.NEAREST))
+		# Pillow 12.1 raises SystemError on any size-changing NEAREST resize (and on
+		# bool images), so do nearest-neighbour with index maps (PIL pixel-centre rule).
+		ys = np.minimum(((np.arange(th) + 0.5) * h / th).astype(np.int64), h - 1)
+		xs = np.minimum(((np.arange(tw) + 0.5) * w / tw).astype(np.int64), w - 1)
+		if alpha:
+			rgb = rgb[ys][:, xs]
+		else:
+			rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), Image.Resampling.BICUBIC))
+		opaque = opaque[ys][:, xs]
 	levels = bytearray()
 	count = 0
 	fcol = rgb.astype(np.float32)
