@@ -26,6 +26,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include <stdlib.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
+#define GC_WD_FLAG_LIGHT_X1	0x0001	/* GoldSrc lighting: lightmap pages at x1 */
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
 #define GC_WD_MAT_ENVMAP	0x04
 #define GC_WD_MAT_BASEALPHA	0x08	/* $basealphaenvmapmask — no sand IndTex */
@@ -246,7 +247,7 @@ static void R_GXWorldDLSetupLit( int lightmap )
 		/* ×2 on the LM multiply restores cliff/tower mass now that SpecOn
 		 * is needle-tower only (wide plates no longer get the white fill).
 		 * Grey-pad luxels stay mid-grey so unset UVs don't fullbright. */
-		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, ( gc_wd_hdr.flags & GC_WD_FLAG_LIGHT_X1 ) ? GX_CS_SCALE_1 : GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV ); /* GoldSrc packs light at x1 */
 		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
 		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 		return;
@@ -611,7 +612,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
 
 	/* Whole pack → ARAM so tree/chunkdir/PVS/chunks share one store. */
-	gc_wd_aram = GC_AramMapReserve( gc_wd_hdr.file_size );
+	gc_wd_aram = GC_AramWorldDLReserve( gc_wd_hdr.file_size );
 	bounce = gc_wd_cache;
 	done = 0;
 	if( gc_wd_aram )
