@@ -1379,6 +1379,14 @@ static void Cmd_Exec_f( void )
 		return;
 	}
 
+	/* An argument whose pool copy failed (exhausted heap) reads back as NULL;
+	 * never hand that to the filesystem. */
+	if( COM_StringEmptyOrNULL( Cmd_Argv( 1 )))
+	{
+		Con_Printf( S_ERROR "exec: missing file name\n" );
+		return;
+	}
+
 	Q_strncpy( cfgpath, Cmd_Argv( 1 ), sizeof( cfgpath ));
 	COM_DefaultExtension( cfgpath, ".cfg", sizeof( cfgpath ));
 

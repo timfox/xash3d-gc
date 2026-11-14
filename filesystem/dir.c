@@ -274,6 +274,12 @@ static inline qboolean FS_AppendToPath( char *dst, size_t *pi, const size_t len,
 {
 	size_t i = *pi;
 
+	if( !src )
+	{
+		Con_Printf( S_ERROR "%s: NULL source while appending %s (%s)\n", __func__, path ? path : "(null)", err );
+		return false;
+	}
+
 	i += Q_strncpy( &dst[i], src, len - i );
 	*pi = i;
 
@@ -288,6 +294,9 @@ static inline qboolean FS_AppendToPath( char *dst, size_t *pi, const size_t len,
 qboolean FS_FixFileCase( dir_t *dir, const char *path, char *dst, const size_t len, qboolean createpath )
 {
 	size_t i = 0;
+
+	if( !dir || !dir->name || !path || !dst || !len )
+		return false;
 
 	if( !FS_AppendToPath( dst, &i, len, dir->name, path, "init" ))
 		return false;
