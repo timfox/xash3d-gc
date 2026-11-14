@@ -6578,11 +6578,19 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 				Con_Reportf( S_WARN "Xash3D GameCube: %s tip-starved before spawn entity=%d class=%s tip=%s; stop entity load\n",
 					__func__, entity_index - 1, SV_ClassName( ent ),
 					Q_memprint( GC_MemHeapFreeBytes() ));
+				{
+					/* PROOF EXPERIMENT (local): keep spawning the small essential
+					 * point entities (spawns, control points); skip the rest. */
+					const char *cn = SV_ClassName( ent );
+					if( !Q_strncmp( cn, "info_player_", 12 ) || !Q_strcmp( cn, "dod_control_point" ))
+						goto gc_spawn_essential;
+				}
 				if( ent && !ent->free && NUM_FOR_EDICT( ent ) != 0 )
 					SV_FreeEdict( ent );
 				inhibited++;
-				break;
+				continue;
 			}
+gc_spawn_essential:;
 #endif
 			spawn_result = svgame.dllFuncs.pfnSpawn( ent );
 #if XASH_GAMECUBE

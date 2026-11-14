@@ -1167,7 +1167,8 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	/* Network sessions must simulate movement; retain the offline capture
 	 * workaround only for routes that do not host or join a match. */
 	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw()
-		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" ))
+		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" )
+		&& !FBitSet( cl->flags, FCL_FAKECLIENT )) /* PROOF EXPERIMENT (local): let bots simulate */
 	{
 		static qboolean gc_pm_skip_logged;
 

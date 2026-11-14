@@ -1188,7 +1188,7 @@ void CL_ClearWorld( void )
  * from here is 1:1 libc heap on MEM1; build with -DGC_GCMAP_CLIENT_EDICTS=N once
  * the peak entity index of the target maps is known. Must match cl_parse.c. */
 #ifndef GC_GCMAP_CLIENT_EDICTS
-#define GC_GCMAP_CLIENT_EDICTS 460
+#define GC_GCMAP_CLIENT_EDICTS 300
 #endif
 #define GC_GCMAP_STATIC_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
 static cl_entity_t gc_gcmap_bootstrap_entities[GC_GCMAP_STATIC_CLIENT_EDICTS];

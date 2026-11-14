@@ -35,7 +35,7 @@ int CL_UPDATE_BACKUP = SINGLEPLAYER_BACKUP;
 
 #if XASH_GAMECUBE
 #ifndef GC_GCMAP_CLIENT_EDICTS
-#define GC_GCMAP_CLIENT_EDICTS 460	/* keep in sync with cl_game.c */
+#define GC_GCMAP_CLIENT_EDICTS 300	/* keep in sync with cl_game.c */
 #endif
 #define GC_GCMAP_DEFAULT_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
 
