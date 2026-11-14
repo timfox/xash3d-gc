@@ -208,7 +208,7 @@ typedef struct gc_boot_blk_s
  * from a bump zone at the TOP of the pad, so whatever is still live at the
  * first map load pins only the top of the pad (the map-load arena ends at the
  * pad's end) instead of the whole of it. */
-#define GC_BOOT_SMALL_ZONE ( 128u * 1024u )
+#define GC_BOOT_SMALL_ZONE ( 256u * 1024u )
 #define GC_BOOT_SMALL_MAX ( 32u * 1024u )	/* largest block the zone serves */
 
 static byte *gc_boot_base;
