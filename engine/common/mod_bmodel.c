@@ -188,10 +188,13 @@ qboolean Mod_GCEnsureStaticReserves( void )
 	/* Never consolation-seize leafs when nodes deferred (-gcmap boot tip). */
 	gc_leafs_highslot_carve = false;
 #if XASH_DODGC_NETWORK
+	/* Only once a map is being loaded (sv.name set): the boot and menu never
+	 * use the leafs block, and holding its ~292 KiB there ate the entire
+	 * headroom the BSS savings bought (engine_subsystems_ready free=1480). */
 	/* FULL avalanche mleafs (286 KiB) cannot share the ~390 KiB under-surface
 	 * hole with nodes (413 KiB). Hold static leafs for the listen FULL path
 	 * so PreallocWorldNodes can leave scratch to mnodes (ava-fullbsp21/22). */
-	if( !gc_static_leafs
+	if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 48u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
@@ -255,7 +258,7 @@ void Mod_GCReleaseUnusedWorldReserves( void )
 #if XASH_DODGC_NETWORK
 	/* After nodes reserve returns to the tip, seize leafs for FULL avalanche
 	 * (scratch hole fits mnodes only — ava-fullbsp21). */
-	if( !gc_static_leafs
+	if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 32u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
@@ -8697,19 +8700,13 @@ static size_t Mod_GCCollectWorldScratchBusy( model_t *mod, dbspmodel_t *bmod, gc
 	return busy_count;
 }
 
-static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lumpnum )
+/* Open (or keep) the single DVD handle used for every lump reload. Called
+ * early from Mod_LoadBrushModel for the world, while the heap still has room
+ * for the file_t and search-path lookups; by the time leafs/nodes reload the
+ * heap is ~0 and a late FS_Open misses ("find missed", 2.66 KB free). */
+static qboolean Mod_GCOpenBspReloadFile( model_t *mod, const char *what )
 {
-	const mlumpinfo_t *info = Mod_GCFindStdLumpInfo( lumpnum );
-	file_t *f;
-	dlump_t lump;
-	byte *lumpbuf;
-	size_t real_entrysize;
-	size_t numelems;
-	qboolean scratch_backed = false;
 	char bsppath[MAX_QPATH];
-
-	if( !info )
-		return false;
 
 	if( Q_stristr( mod->name, ".bsp" ))
 		Q_strncpy( bsppath, mod->name, sizeof( bsppath ));
@@ -8718,7 +8715,9 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 	/* Keep one DVD handle across faces/markfaces/leafs/nodes — repeated
 	 * FS_Open under post-carve MEM1 fails on real hardware and Dolphin. */
-	if( !gc_bsp_reload_file || Q_stricmp( gc_bsp_reload_path, bsppath ))
+	if( gc_bsp_reload_file && !Q_stricmp( gc_bsp_reload_path, bsppath ))
+		return true;
+
 	{
 		int retry;
 
@@ -8734,7 +8733,7 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 		if( !gc_bsp_reload_file )
 		{
-			Con_Reportf( S_ERROR "Xash3D GameCube: failed to reopen %s for lump %i\n", bsppath, lumpnum );
+			Con_Reportf( S_ERROR "Xash3D GameCube: failed to reopen %s for %s\n", bsppath, what );
 			return false;
 		}
 
@@ -8742,14 +8741,34 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 		if( FS_Read( gc_bsp_reload_file, &gc_bsp_reload_header, sizeof( gc_bsp_reload_header ))
 			!= sizeof( gc_bsp_reload_header ))
 		{
-			Con_Reportf( S_ERROR "Xash3D GameCube: header read failed for lump %s\n", info->loadname );
+			Con_Reportf( S_ERROR "Xash3D GameCube: header read failed for %s\n", what );
 			FS_Close( gc_bsp_reload_file );
 			gc_bsp_reload_file = NULL;
+			gc_bsp_reload_path[0] = '\0';
 			return false;
 		}
 		le_struct_swap( dheader_swap, &gc_bsp_reload_header );
 		gc_bsp_reload_header_ok = true;
 	}
+
+	return true;
+}
+
+static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lumpnum )
+{
+	const mlumpinfo_t *info = Mod_GCFindStdLumpInfo( lumpnum );
+	file_t *f;
+	dlump_t lump;
+	byte *lumpbuf;
+	size_t real_entrysize;
+	size_t numelems;
+	qboolean scratch_backed = false;
+
+	if( !info )
+		return false;
+
+	if( !Mod_GCOpenBspReloadFile( mod, info->loadname ))
+		return false;
 
 	f = gc_bsp_reload_file;
 
@@ -12312,6 +12331,15 @@ void Mod_LoadBrushModel( model_t *mod, void *buffer, size_t buffersize, qboolean
 
 	mod->mempool = Mem_AllocPool( poolname );
 	mod->type = mod_brush;
+
+#if XASH_GAMECUBE
+	/* Open the lump-reload DVD handle now, while the heap can still serve the
+	 * file_t and path lookup. The leafs/nodes reload runs after the BSP buffer
+	 * release with ~0 heap free, where FS_Open misses. Best effort: a failure
+	 * here only falls back to the late open. Closed in Mod_LoadBmodelLumps. */
+	if( world.loading )
+		Mod_GCOpenBspReloadFile( mod, "world load" );
+#endif
 
 	// loading all the lumps into heap
 	if( !Mod_LoadBmodelLumps( mod, buffer, buffersize, world.loading ))

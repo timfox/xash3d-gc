@@ -10132,7 +10132,13 @@ static qboolean gc_loading_bg_ready;
 static float gc_loading_progress;
 #define GC_EARLY_XFB_STAGE_W	320
 #define GC_EARLY_XFB_STAGE_H	240
-static unsigned short gc_early_xfb_stage[GC_EARLY_XFB_STAGE_W * GC_EARLY_XFB_STAGE_H];
+/* Boot/loading plaque stage shares the 150 KiB GX tile staging buffer instead of
+ * owning its own BSS: the two are never live together (the stage is only used
+ * when gc.buffer is gone or boot failed, and GC_PresentBufferViaGX waits for
+ * draw-done before returning). Frees 150 KiB of MEM1 for the libc heap. */
+typedef char gc_early_stage_fits_tile_buf[
+	( GC_EARLY_XFB_STAGE_W * GC_EARLY_XFB_STAGE_H <= GC_GX_TILE_MAX_W * GC_GX_TILE_MAX_H ) ? 1 : -1];
+#define gc_early_xfb_stage ((unsigned short *)gc_tiled_rgb565 )
 
 void GC_SetLoadingProgress( float progress )
 {
