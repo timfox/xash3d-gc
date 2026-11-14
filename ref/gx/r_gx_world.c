@@ -5616,7 +5616,8 @@ static int R_GXPropBind( u8 mat )
 			return 1;
 		}
 	}
-	if( !gc_prop_texmem_tried && GC_MapLoadBufferTailPeak() > 0 )
+	/* Only without the shared slot cache: its 96 KB went to far LODs. */
+	if( !gc_prop_texmem_tried && r_gx_cmpr_nslots <= 8 && GC_MapLoadBufferTailPeak() > 0 )
 	{
 		const u32 extra = (u32)( GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
 
@@ -5705,6 +5706,10 @@ static void R_GXPropSetLitAt( const float *org )
  * from ARAM through the bounce buffer and copied into the FIFO. The light
  * colour rides in the material register, so vertices carry no colour.
  * Angles are radians, Source order (pitch, yaw, roll). */
+/* Set per instance: a prop under 30 % of the view takes its texture from the
+ * small-mip pool, leaving the full-size slots to what is close. */
+static qboolean gc_prop_tex_far;
+
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
 	const gc_prop_model_t *m;
@@ -5750,7 +5755,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 				gc_prop_far_size / 1024u );
 		}
 	}
-	R_GXCmprSetFar( far_lod );
+	R_GXCmprSetFar( far_lod || gc_prop_tex_far );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
 	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
@@ -5778,9 +5783,26 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			break;
 		R_GXPropBind( (u8)( hdr[0] & 0x7f ));
 		GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)nverts );
-		p = (const u16 *)( hdr + 32 );
-		for( n = nverts * 5u; n; n-- )
-			wgPipe->U16 = *p++;
+		/* 10 bytes a vertex and nverts is a multiple of 3, so a triangle
+		 * is 30 bytes: seven words and a half-word into the FIFO instead
+		 * of fifteen half-words. The piece body is 32-byte aligned. */
+		{
+			const u32 *q = (const u32 *)( hdr + 32 );
+
+			(void)p;
+			for( n = nverts / 3u; n; n-- )
+			{
+				wgPipe->U32 = q[0];
+				wgPipe->U32 = q[1];
+				wgPipe->U32 = q[2];
+				wgPipe->U32 = q[3];
+				wgPipe->U32 = q[4];
+				wgPipe->U32 = q[5];
+				wgPipe->U32 = q[6];
+				wgPipe->U16 = *(const u16 *)( q + 7 );
+				q = (const u32 *)( (const u8 *)q + 30 );
+			}
+		}
 		GX_End();
 		drawn += (int)( nverts / 3u );
 		ofs += bytes;
@@ -5802,8 +5824,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
 	/* Size on screen = bounding radius over distance. Under 0.6 % it is a
-	 * few pixels: skip. Under 5 % draw the far level of detail (its welded UVs smear
-	 * a facade that is any closer). The
+	 * few pixels: skip. Under 12 % draw the far level of detail. The
 	 * harbor used to push all 368 far instances at full detail (88k
 	 * triangles a frame through ARAM). */
 	dx = (float)in->maxs[0] - (float)in->mins[0];
@@ -5829,8 +5850,15 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	org[0] = (float)in->org[0];
 	org[1] = (float)in->org[1];
 	org[2] = (float)in->org[2];
-	return R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
-		(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.05f * 0.05f );
+	{
+		int drawn;
+
+		gc_prop_tex_far = cover2 < 0.30f * 0.30f;
+		drawn = R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
+			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
+		gc_prop_tex_far = false;
+		return drawn;
+	}
 }
 
 /* CapFaces: Lost Coast fisherman walks the retail lead-to-gate path
