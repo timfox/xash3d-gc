@@ -1098,6 +1098,8 @@ static char gc_autocampaign_delay[16];
  * later chapter can be load-tested on the real route (not a playthrough). */
 static qboolean gc_startmap_configured;
 static char gc_startmap[32];
+static char gc_watchaddr[20];
+static qboolean gc_watchaddr_configured;
 static qboolean gc_modeltrace_configured;
 static qboolean gc_net_configured;
 static qboolean gc_netfast_configured;
@@ -1157,6 +1159,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_autohop_configured = false;
 	gc_autocampaign_configured = false;
 	gc_startmap_configured = false;
+	gc_watchaddr_configured = false;
 	gc_modeltrace_configured = false;
 	gc_phase_test[0] = '\0';
 	gc_changelevel_map[0] = '\0';
@@ -1303,6 +1306,25 @@ static void GCube_LoadDiscBootOverrides( void )
 				Q_strncpy( gc_autocampaign_delay, "20", sizeof( gc_autocampaign_delay ));
 			gc_autocampaign_configured = true;
 			SYS_Report( "Xash3D GameCube: disc boot override autocampaign %s\n", gc_autocampaign_delay );
+			continue;
+		}
+
+		if( !Q_strnicmp( cursor, "watchaddr", 9 ))
+		{
+			const char *arg = cursor + 9;
+			int n = 0;
+
+			while( *arg == ' ' || *arg == '\t' )
+				arg++;
+			while( arg[n] && arg[n] != ' ' && arg[n] != '\t' && arg[n] != '\r' && arg[n] != '\n'
+				&& n < (int)sizeof( gc_watchaddr ) - 1 )
+			{
+				gc_watchaddr[n] = arg[n];
+				n++;
+			}
+			gc_watchaddr[n] = '\0';
+			gc_watchaddr_configured = n > 0;
+			SYS_Report( "Xash3D GameCube: disc boot override watchaddr %s\n", gc_watchaddr );
 			continue;
 		}
 
@@ -2163,6 +2185,11 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	{
 		gc_argv[fake_argc++] = "-gcstartmap";
 		gc_argv[fake_argc++] = gc_startmap;
+	}
+	if( gc_watchaddr_configured )
+	{
+		gc_argv[fake_argc++] = "-gcwatchaddr";
+		gc_argv[fake_argc++] = gc_watchaddr;
 	}
 	if( gc_modeltrace_configured )
 		gc_argv[fake_argc++] = "-gcmodeltrace";
