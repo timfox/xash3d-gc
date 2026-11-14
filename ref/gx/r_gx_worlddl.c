@@ -1311,6 +1311,17 @@ static void R_GXWorldDLClearDepth( void )
 	GX_SetColorUpdate( GX_TRUE );
 }
 
+/* Map fog (env_fog_controller and sky_camera agree: 151 166 181,
+ * 1600..50000). GX fog is derived from the projection's near/far, so it is
+ * re-armed with each projection: the backdrop runs to 131072, the harbor
+ * to 16384+. With one shared range the backdrop had no haze at all. */
+static void R_GXWorldDLFog( f32 z_near, f32 z_far )
+{
+	const GXColor fog = { 151, 166, 181, 255 };
+
+	GX_SetFog( GX_FOG_PERSP_LIN, 1600.0f, 50000.0f, z_near, z_far, fog );
+}
+
 static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 {
 	/* zmax*1.73 stops near 7 km. The refinery brushes sit past that and were
@@ -1321,6 +1332,7 @@ static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 		if( zfar < 16384.0f )
 			zfar = 16384.0f;
 		R_GXWorldDLLoadView( mv, proj, org, 4.0f, zfar );
+		R_GXWorldDLFog( 4.0f, zfar );
 	}
 	GX_LoadProjectionMtx( proj, GX_PERSPECTIVE );
 	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
@@ -1368,6 +1380,7 @@ static void R_GXWorldDLDrawSkyline( void )
 	 * wall chunks are wide dark quads, not the ridge, so they stay out. */
 	cur_mat = -1;
 	R_GXWorldDLLoadView( mv, proj, org, 4.0f, 131072.0f );
+	R_GXWorldDLFog( 4.0f, 131072.0f );
 	guMtxTrans( trans, 0.0f, 0.0f, 5108.0f );
 	guMtxScale( scale, 16.0f, 16.0f, 16.0f );
 	guMtxConcat( scale, trans, placed );
@@ -1401,7 +1414,10 @@ static void R_GXWorldDLDrawSkyline( void )
 			R_GXWorldDLEmitChunk( slot, &cur_mat );
 			/* Pale industrial fill — without it the skyline reads as dark
 			 * prop slivers instead of one tower surface on the horizon. */
-			if( hz >= 100.0f )
+			/* Off by default: the fill also bleached the backdrop hills to
+			 * pale sand and the village to white boxes. Retail's distance
+			 * look is the map fog, not an additive glow. */
+			if( hz >= 100.0f && gEngfuncs.Sys_CheckParm( "-gcskyfill" ))
 			{
 				/* Stronger fill so horizon stacks read as one glowing
 				 * surface (frame_256 tower p90 ~255 vs ~229 without). */
