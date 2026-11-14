@@ -35,6 +35,10 @@ static qboolean gc_mapload_pressure_active;
 static byte *gc_mapload_buf;
 static size_t gc_mapload_buf_size;
 static size_t gc_mapload_tail_highwater;
+/* Highest end of any tail carve since this buffer was acquired. The
+ * highwater is lowered again during a lean map load while earlier carves
+ * (the world-texture low mips) stay live, so late users start above this. */
+static size_t gc_mapload_tail_peak;
 static qboolean gc_mapload_buf_in_use;
 static int gc_mapload_memopt_depth;
 static qboolean gc_mapload_memopt_session; /* stays on after playstart until cleared */
@@ -729,6 +733,7 @@ void *GC_BorrowMapLoadBuffer( size_t size )
 		{
 			gc_mapload_buf_size = static_capacity;
 			gc_mapload_tail_highwater = 0;
+			gc_mapload_tail_peak = 0;
 			gc_mapload_buf_in_use = true;
 			return gc_mapload_buf;
 		}
@@ -756,11 +761,13 @@ void *GC_BorrowMapLoadBuffer( size_t size )
 		}
 		gc_mapload_buf_size = alloc_size;
 		gc_mapload_tail_highwater = 0;
+		gc_mapload_tail_peak = 0;
 		Con_Reportf( "Xash3D GameCube: map-load buffer ready %s\n", Q_memprint( alloc_size ));
 	}
 
 	/* A released staging buffer starts a fresh sub-arena carve session. */
 	gc_mapload_tail_highwater = 0;
+	gc_mapload_tail_peak = 0;
 	gc_mapload_buf_in_use = true;
 	return gc_mapload_buf;
 }
@@ -805,6 +812,11 @@ size_t GC_MapLoadBufferTailHighwater( void )
 	return gc_mapload_tail_highwater;
 }
 
+size_t GC_MapLoadBufferTailPeak( void )
+{
+	return gc_mapload_tail_peak;
+}
+
 void GC_MapLoadBufferLowerTailHighwater( size_t highwater )
 {
 	if( highwater < gc_mapload_tail_highwater )
@@ -847,6 +859,8 @@ void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need )
 
 	remaining = gc_mapload_buf_size - ( off + need );
 	gc_mapload_tail_highwater = off + need;
+	if( gc_mapload_tail_peak < off + need )
+		gc_mapload_tail_peak = off + need;
 	Con_Reportf( "Xash3D GameCube: mem arena tail=PASS after_bytes=%lu carve_bytes=%lu remaining_bytes=%lu capacity_bytes=%lu\n",
 		(unsigned long)after_offset, (unsigned long)need, (unsigned long)remaining,
 		(unsigned long)gc_mapload_buf_size );

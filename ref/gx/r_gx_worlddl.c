@@ -24,10 +24,12 @@ void R_GXPropDrawHorizon( const float *org );
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <ogc/lwp_watchdog.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
 #define GC_WD_FLAG_LIGHT_X1	0x0001	/* GoldSrc lighting: lightmap pages at x1 */
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
+#define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
 #define GC_WD_MAT_BASEALPHA	0x08	/* $basealphaenvmapmask — no sand IndTex */
 #define GC_WD_MAX_MATS		512
@@ -90,6 +92,10 @@ extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
+extern int GC_GetWaterFaceCount( void );
+extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
+extern void R_GXCmprSetFar( qboolean far_pool );
+extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
 
 /* Bump relief and detail live in media/tevmat.gcm (I8 mod2x tiles). Sand
@@ -332,6 +338,12 @@ static s16 *gc_wd_chunk_mins;	/* n_chunks * 3 */
 static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
+static qboolean gc_wd_cache_in_arena;
+/* Flythrough profile of the draw loop (-gcvst), logged every 120 frames. */
+static u64 gc_wd_pf[6];
+static u32 gc_wd_pf_cnt[6];
+static int gc_wd_pf_on = -1, gc_wd_pf_frames;
+#define WD_PF( k, stmt ) do { if( gc_wd_pf_on > 0 ) { u64 pf_t = gettime(); stmt; gc_wd_pf[k] += gettime() - pf_t; gc_wd_pf_cnt[k]++; } else { stmt; } } while( 0 )
 static u32 gc_wd_cache_size, gc_wd_cache_head;
 static u32 gc_wd_aram;		/* entire file in ARAM */
 static file_t *gc_wd_file;
@@ -587,6 +599,63 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	 * CapFaces listen map props (lean sherman/jagd/…) need ~256 KiB of the
 	 * same spill after WorldDL; leave headroom (ava-prop-2 tip≈6 KiB heap). */
 	gc_wd_cache = NULL;
+	try_sz = 0;
+	gc_wd_cache_in_arena = false;
+	/* Large worlds (Lost Coast, 3.5 MB of lists): the renderer's static
+	 * map-load arena is idle once the BSP is in, with about 3 MB above its
+	 * tail highwater. Keeping the whole visible set resident there ends
+	 * the per-frame ARAM refetch of 800+ chunks that held the harbor at
+	 * 3 fps. 256 KB stays free above for entity overflow carves. */
+	if( gc_wd_hdr.file_size >= 1536u * 1024u && !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" ))
+	{
+		/* Start above every carve this map made, not above the highwater:
+		 * a lean load lowers the highwater to 0 while the world-texture low
+		 * mips it carved stay live (starting at 0 bleached them white). */
+		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
+		const size_t hw = ( live + 31u ) & ~(size_t)31u;
+		const size_t cap = GC_MapLoadBufferCapacity();
+		/* Left above the chunk ring: water table 34 KB, prop texture slots
+		 * 96 KB, prop far LODs about 170 KB, and entity overflow. */
+		const size_t keep = 352u * 1024u;
+
+		if( cap > hw + keep + 512u * 1024u )
+		{
+			size_t hw2 = hw;
+			size_t want;
+
+			/* Texture slots first: a near and a far pool; the near one holds a 128x128 CMPR chain
+			 * (a 256x256 drops its top mip) for every texture in view. */
+			GC_RetainMapLoadBufferBorrow();
+			if( cap > hw + keep + 2048u * 1024u )
+			{
+				/* 64 full slots (128x128 chain, 10944 bytes) for what is
+				 * close, 176 slots one mip down (64x64 chain, 2752 bytes)
+				 * for the rest: 1.16 MB holds 240 textures. */
+				const unsigned slot_bytes = 10944u, far_bytes = 2752u;
+				const int nslots = 64, far_n = 176;
+				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
+					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+
+				if( tex )
+				{
+					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
+				}
+			}
+			want = ( cap - hw2 - keep ) & ~(size_t)31u;
+			const size_t all = (( gc_wd_hdr.file_size + gc_wd_hdr.max_chunk + 63u ) & ~(size_t)31u );
+
+			if( want > all )
+				want = all;
+			gc_wd_cache = (byte *)GC_MapLoadBufferTailAlloc( hw2, want );
+			if( gc_wd_cache )
+			{
+				try_sz = (u32)want;
+				gc_wd_cache_in_arena = true;
+			}
+		}
+	}
+	if( !gc_wd_cache )
 	{
 		const unsigned cache_hi =
 			( gEngfuncs.Sys_CheckParm( "-gcworldrender" )
@@ -608,7 +677,10 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	}
 	gc_wd_cache_size = try_sz;
 	gc_wd_cache_head = 0;
-	Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
+	if( gc_wd_cache_in_arena )
+		Mod_GCWorldArraySpillPinBase( tbl, tables );
+	else
+		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
 
 	/* Whole pack → ARAM so tree/chunkdir/PVS/chunks share one store. */
@@ -1038,6 +1110,8 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 	guFrustum( proj, y_max, -y_max, -x_max, x_max, z_near, z_far );
 }
 
+static float gc_wd_sun_view[3];
+
 /* Lost Coast env_sun, same direction as the sky disc. View space, for the
  * specular light. The normal matrix is the view rotation: the bake stores
  * world-space normals. */
@@ -1068,6 +1142,9 @@ static void R_GXWorldDLSpecLight( void )
 	/* Parallel sun. A specular lobe against a 10-degree sun is black on flat
 	 * sand (the whole beach shares one half-angle). Diffuse N·L uses the
 	 * baked normals, so slopes facing the sun pick up the warm light. */
+	gc_wd_sun_view[0] = sun[0];
+	gc_wd_sun_view[1] = sun[1];
+	gc_wd_sun_view[2] = sun[2];
 	memset( &lit, 0, sizeof( lit ));
 	GX_InitLightPos( &lit, sun[0] * 1000000.0f, sun[1] * 1000000.0f, sun[2] * 1000000.0f );
 	GX_InitLightColor( &lit, sun_col );
@@ -1146,6 +1223,31 @@ static void R_GXWorldDLSpecOn( u16 strength, int indtex, int tev_id )
 	{
 		f32 imtx[2][3];
 		Mtx tm;
+
+		/* Wet sand is a mirror for the low sun: the glare path runs from
+		 * the eye toward env_sun and moves with the camera. That is the
+		 * hardware specular term (N.H to a power, per vertex), not N.L,
+		 * which only said which slopes face the sun. The displacement
+		 * mesh is dense enough to carry it. -gcsandnl keeps the old lift. */
+		if( !gEngfuncs.Sys_CheckParm( "-gcsandnl" ))
+		{
+			GXLightObj sl;
+			const GXColor sun_col = { 253, 236, 198, 255 };
+
+			memset( &sl, 0, sizeof( sl ));
+			GX_InitSpecularDir( &sl, -gc_wd_sun_view[0], -gc_wd_sun_view[1], -gc_wd_sun_view[2] );
+			GX_InitLightShininess( &sl, 20.0f );
+			GX_InitLightColor( &sl, sun_col );
+			GX_LoadLightObj( &sl, GX_LIGHT1 );
+			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+				GX_LIGHT1, GX_DF_NONE, GX_AF_SPEC );
+			/* The two TEV stages below each scale by 2; at full material
+			 * colour the lobe clipped to a flat white patch. */
+			mat.r = (u8)( mat.r * 2 / 5 );
+			mat.g = (u8)( mat.g * 2 / 5 );
+			mat.b = (u8)( mat.b * 2 / 5 );
+			GX_SetChanMatColor( GX_COLOR0A0, mat );
+		}
 
 		tm[0][0] = 8.0f; tm[0][1] = 0.0f; tm[0][2] = 0.0f; tm[0][3] = 0.0f;
 		tm[1][0] = 0.0f; tm[1][1] = 8.0f; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
@@ -1309,6 +1411,17 @@ static void R_GXWorldDLClearDepth( void )
 	GX_SetColorUpdate( GX_TRUE );
 }
 
+/* Map fog (env_fog_controller and sky_camera agree: 151 166 181,
+ * 1600..50000). GX fog is derived from the projection's near/far, so it is
+ * re-armed with each projection: the backdrop runs to 131072, the harbor
+ * to 16384+. With one shared range the backdrop had no haze at all. */
+static void R_GXWorldDLFog( f32 z_near, f32 z_far )
+{
+	const GXColor fog = { 151, 166, 181, 255 };
+
+	GX_SetFog( GX_FOG_PERSP_LIN, 1600.0f, 50000.0f, z_near, z_far, fog );
+}
+
 static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 {
 	/* zmax*1.73 stops near 7 km. The refinery brushes sit past that and were
@@ -1319,6 +1432,7 @@ static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 		if( zfar < 16384.0f )
 			zfar = 16384.0f;
 		R_GXWorldDLLoadView( mv, proj, org, 4.0f, zfar );
+		R_GXWorldDLFog( 4.0f, zfar );
 	}
 	GX_LoadProjectionMtx( proj, GX_PERSPECTIVE );
 	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
@@ -1366,6 +1480,7 @@ static void R_GXWorldDLDrawSkyline( void )
 	 * wall chunks are wide dark quads, not the ridge, so they stay out. */
 	cur_mat = -1;
 	R_GXWorldDLLoadView( mv, proj, org, 4.0f, 131072.0f );
+	R_GXWorldDLFog( 4.0f, 131072.0f );
 	guMtxTrans( trans, 0.0f, 0.0f, 5108.0f );
 	guMtxScale( scale, 16.0f, 16.0f, 16.0f );
 	guMtxConcat( scale, trans, placed );
@@ -1399,7 +1514,10 @@ static void R_GXWorldDLDrawSkyline( void )
 			R_GXWorldDLEmitChunk( slot, &cur_mat );
 			/* Pale industrial fill — without it the skyline reads as dark
 			 * prop slivers instead of one tower surface on the horizon. */
-			if( hz >= 100.0f )
+			/* Off by default: the fill also bleached the backdrop hills to
+			 * pale sand and the village to white boxes. Retail's distance
+			 * look is the map fog, not an additive glow. */
+			if( hz >= 100.0f && gEngfuncs.Sys_CheckParm( "-gcskyfill" ))
 			{
 				/* Stronger fill so horizon stacks read as one glowing
 				 * surface (frame_256 tower p90 ~255 vs ~229 without). */
@@ -1522,7 +1640,11 @@ int R_GXWorldDLDraw( void )
 	}
 	R_GXWorldDLSetupLit( 0 );
 	R_GXFogBegin();
-	R_GXWorldDLDrawSkyline();
+	if( gc_wd_pf_on < 0 )
+		gc_wd_pf_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	R_GXCmprSetFar( true );
+	WD_PF( 5, R_GXWorldDLDrawSkyline());
+	R_GXCmprSetFar( false );
 	gc_wd_chunk_lm = 0;
 	R_GXWorldDLSetupLit( 0 );
 
@@ -1534,6 +1656,8 @@ int R_GXWorldDLDraw( void )
 		const qboolean frustum_cull = !gEngfuncs.Sys_CheckParm( "-gcworlddlfull" );
 		int pvs_hits = 0, frustum_drop = 0, tower_chunks = 0, forced_n = 0;
 		static u16 order[GC_WD_MAX_CHUNKS];
+		const qboolean skip_water = GC_GetWaterFaceCount() > 0
+			&& !gEngfuncs.Sys_CheckParm( "-gcbakedwater" );
 		int norder = 0;
 		int oi, pass;
 		u32 tower_budget = 288u * 1024u;
@@ -1557,7 +1681,7 @@ int R_GXWorldDLDraw( void )
 		/* Spend the cache on the ground in front of the camera. Index order
 		 * filled it with whatever chunk id came first and left the shore out. */
 		gc_wd_sort_org = org;
-		qsort( order, (size_t)norder, sizeof( order[0] ), R_GXWorldDLChunkCmp );
+		WD_PF( 0, qsort( order, (size_t)norder, sizeof( order[0] ), R_GXWorldDLChunkCmp ));
 		/* Shore first so cliffs/boats lock cache slots; towers take the
 		 * reserved leftover (+ Force). Towers-first starved the cliff plates
 		 * when IsTower matched ~12 harbor chunks (gaps on the right wall). */
@@ -1585,10 +1709,13 @@ int R_GXWorldDLDraw( void )
 			i = order[oi];
 			if( R_GXWorldDLIsTower( i ) != want_tower )
 				continue;
-			chunk = R_GXWorldDLResident( i, bud );
+			/* Past 1400 units a 128x128 texture is already on its 64x64
+			 * mip; bind it from the small-slot pool. */
+			R_GXCmprSetFar( R_GXWorldDLChunkD2( (u16)i ) > 1400.0f * 1400.0f );
+			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{
-				chunk = R_GXWorldDLForce( i );
+				WD_PF( 2, chunk = R_GXWorldDLForce( i ));
 				forced = chunk != NULL;
 			}
 			if( !chunk )
@@ -1613,7 +1740,7 @@ int R_GXWorldDLDraw( void )
 					lm_ofs = *(const u32 *)( chunk + 8 );
 				if( lm_ofs && gc_wd_lm_stream )
 				{
-					lm_page = R_GXWorldDLLmPage( lm_ofs - 1u );
+					WD_PF( 3, lm_page = R_GXWorldDLLmPage( lm_ofs - 1u ));
 					if( lm_page )
 					{
 						GX_InitTexObj( &gc_wd_lm_obj, lm_page, 32, 32, GX_TF_RGB565,
@@ -1636,6 +1763,12 @@ int R_GXWorldDLDraw( void )
 				if( b->mat >= gc_wd_hdr.n_mats )
 					continue;
 				m = &gc_wd_mats[b->mat];
+				/* Harbor water is the transparent packed sheet. The baked
+				 * opaque copy sat on the same plane and Z-fought it into
+				 * dark polygons. The 3D-skybox ocean keeps its baked copy. */
+				if( ( m->flags & GC_WD_MAT_WATER ) && skip_water
+					&& gc_wd_chunk_maxs[i * 3 + 2] > -1024 )
+					continue;
 				if( (int)b->mat != cur_mat )
 				{
 					if( gc_wd_texnum[b->mat] < 0 )
@@ -1662,8 +1795,13 @@ int R_GXWorldDLDraw( void )
 							continue;
 						}
 					}
-					if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
-						continue;
+					{
+						qboolean bound;
+
+						WD_PF( 4, bound = R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ));
+						if( !bound )
+							continue;
+					}
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 					cur_mat = (int)b->mat;
 				}
@@ -1738,7 +1876,34 @@ int R_GXWorldDLDraw( void )
 				"Xash3D GameCube: world DL pvs=%d frustum_drop=%d cull=%d towers=%d forced=%d\n",
 				pvs_hits, frustum_drop, frustum_cull ? 1 : 0, tower_chunks, forced_n );
 	}
+	R_GXCmprSetFar( false );
 	R_GXFogEnd();
+	if( gc_wd_pf_on > 0 && ++gc_wd_pf_frames >= 120 )
+	{
+		const float k = 1.0f / ( 1000.0f * 120.0f );
+
+		{
+			static unsigned last_hits, last_misses;
+			unsigned hits, misses;
+
+			R_GXCmprStats( &hits, &misses );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: texture slots per frame hits=%u misses=%u\n",
+				( hits - last_hits ) / 120u, ( misses - last_misses ) / 120u );
+			last_hits = hits;
+			last_misses = misses;
+		}
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: worlddl ms/frame sort=%.1f resident=%.1f(%u) force=%.1f(%u) lmpage=%.1f(%u) bindtex=%.1f(%u) skyline=%.1f\n",
+			(float)ticks_to_microsecs( gc_wd_pf[0] ) * k,
+			(float)ticks_to_microsecs( gc_wd_pf[1] ) * k, gc_wd_pf_cnt[1] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[2] ) * k, gc_wd_pf_cnt[2] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
+		memset( gc_wd_pf, 0, sizeof( gc_wd_pf ));
+		memset( gc_wd_pf_cnt, 0, sizeof( gc_wd_pf_cnt ));
+		gc_wd_pf_frames = 0;
+	}
 	R_GXTevMatEndAlphaTest();
 	GX_SetNumTevStages( 1 );
 	GX_SetNumTexGens( 1 );
@@ -1853,7 +2018,10 @@ qboolean R_GXWorldDLSampleLight( const float *org, byte rgb[3] )
 {
 	int cluster, i, found = -1, x, y, tile, lx, ly;
 	u32 lm_ofs = 0;
-	byte hdr[32];
+	/* ARAM DMA needs a 32-byte aligned target. A plain stack array is not,
+	 * and the transfer landed on the aligned address below it: over this
+	 * frame's back chain and saved LR (the PC=0x40 crash on the ride). */
+	static byte hdr[32] __attribute__(( aligned( 32 )));
 	byte *page;
 	byte *resident;
 	u16 c;

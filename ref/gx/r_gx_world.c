@@ -44,6 +44,7 @@ Not feature-parity: full brush-mover lighting remains soft/diagnostic.
 #endif
 #include <gccore.h>
 #include <ogc/gx.h>
+#include <ogc/lwp_watchdog.h>
 #include <malloc.h>
 #include <string.h>
 #include <math.h>
@@ -2103,19 +2104,46 @@ static void R_GXHotService( void )
  * bound again with no DMA and no wait. Each slot has its own fence: only the
  * slot about to be overwritten is waited for, and that one was used longest ago.
  * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
-#define GC_CMPR_SLOTS_MAX     8
+#define GC_CMPR_SLOTS_MAX     240	/* 8 from the heap; a large world adopts more from the map arena */
 #define GC_CMPR_SLOTS_DEFAULT 6
 #define GC_CMPR_HEAP_MARGIN ( 1024u * 1024u )	/* heap that must stay free after extra slots */
 static byte *r_gx_cmpr_bounce;		/* base of all slots */
 static unsigned r_gx_cmpr_bounce_cap;	/* bytes per slot */
 static int r_gx_cmpr_nslots;
+/* Second pool for distant surfaces: the last r_gx_cmpr_far_n slots are
+ * r_gx_cmpr_far_cap bytes each and hold one mip less (64x64, 2.7 KB instead
+ * of 10.9 KB). The harbor shows about 200 world textures; 96 full slots
+ * missed 110 times a frame. The world DL says which pool a chunk wants. */
+static int r_gx_cmpr_far_n;
+static unsigned r_gx_cmpr_far_cap;
+static qboolean r_gx_cmpr_want_far;
+
+static byte *R_GXCmprSlotPtr( int i )
+{
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+
+	if( i < near_n )
+		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+	return r_gx_cmpr_bounce + (size_t)near_n * r_gx_cmpr_bounce_cap
+		+ (size_t)( i - near_n ) * r_gx_cmpr_far_cap;
+}
+
+void R_GXCmprSetFar( qboolean far_pool )
+{
+	r_gx_cmpr_want_far = far_pool && r_gx_cmpr_far_n > 0;
+}
 static struct
 {
 	unsigned aram, skip, bytes;	/* what the slot holds */
 	u16      fence;			/* last draw that sampled it */
 	unsigned used;
 	qboolean valid;
+	unsigned texnum;		/* texture whose object is cached below, 0 = none */
+	GXTexObj obj;			/* ready to load: a resident hit is one GX call */
 } r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
+/* texnum -> slot + 1. A bind of a resident texture skips the mip walk, the
+ * slot search and GX_InitTexObj (about 1000 binds a frame in the harbor). */
+static u8 r_gx_cmpr_hint[2][MAX_TEXTURES];	/* [far pool][texnum] */
 static unsigned r_gx_cmpr_clock;
 static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
@@ -2126,6 +2154,7 @@ static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
 static void R_GXCmprSlotsReset( void )
 {
 	memset( r_gx_cmpr_slot, 0, sizeof( r_gx_cmpr_slot ));
+	memset( r_gx_cmpr_hint, 0, sizeof( r_gx_cmpr_hint ));
 	r_gx_cmpr_cur_slot = -1;
 	r_gx_cmpr_bounce_texnum = 0;
 }
@@ -2148,7 +2177,7 @@ static byte *R_GXCmprBounce( void )
 
 			if( _Sys_GetParmFromCmdLine( "-gccmprslots", buf, sizeof( buf )) && buf[0] )
 				want = Q_atoi( buf );
-			want = bound( 1, want, GC_CMPR_SLOTS_MAX );
+			want = bound( 1, want, 8 );
 		}
 		/* Ask for the most slots first, fewer if MEM1 / spill cannot give them
 		 * contiguously; one slot is the previous behaviour. */
@@ -2182,6 +2211,41 @@ static byte *R_GXCmprBounce( void )
 	return r_gx_cmpr_bounce;
 }
 
+/* Cumulative slot hits and misses, for the flythrough profile line. */
+void R_GXCmprStats( unsigned *hits, unsigned *misses )
+{
+	*hits = r_gx_cmpr_hits;
+	*misses = r_gx_cmpr_misses;
+}
+
+/* A large world hands the texture cache a block of the idle map-load arena:
+ * enough slots that a frame's 150-odd world textures all stay resident. The
+ * default six 24 KB slots turned over on almost every bind (900 a frame in
+ * the Lost Coast harbor, 166 ms of DMA and fence waits). */
+void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes )
+{
+	if( !base || nslots < 1 || slot_bytes < 4096u || ( slot_bytes & 31u ))
+		return;
+	if( far_n < 0 || ( far_n && ( far_bytes < 1024u || ( far_bytes & 31u ))))
+		far_n = 0;
+	if( nslots + far_n > GC_CMPR_SLOTS_MAX || nslots + far_n > 254 )
+		return;
+	GX_DrawDone();
+	r_gx_cmpr_bounce = base;
+	r_gx_cmpr_nslots = nslots + far_n;
+	r_gx_cmpr_bounce_cap = slot_bytes;
+	r_gx_cmpr_far_n = far_n;
+	r_gx_cmpr_far_cap = far_bytes;
+	r_gx_cmpr_want_far = false;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u + %d x %u bytes = %u Kb (map arena)\n",
+		nslots, slot_bytes, far_n, far_bytes,
+		( nslots * slot_bytes + far_n * far_bytes ) / 1024u );
+}
+
 /* Call once after GX init / before map load while MEM1 tip is free. */
 void R_GXPreallocCmprBounce( void )
 {
@@ -2197,8 +2261,11 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 	int i, pick = -1;
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+	const int lo = r_gx_cmpr_want_far ? near_n : 0;
+	const int hi = r_gx_cmpr_want_far ? r_gx_cmpr_nslots : near_n;
 
-	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	for( i = lo; i < hi; i++ )
 	{
 		if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
 			&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
@@ -2206,10 +2273,10 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 			r_gx_cmpr_slot[i].used = ++r_gx_cmpr_clock;
 			r_gx_cmpr_hits++;
 			*slot_out = i;
-			return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+			return R_GXCmprSlotPtr( i );
 		}
 	}
-	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	for( i = lo; i < hi; i++ )
 	{
 		if( !r_gx_cmpr_slot[i].valid )
 		{
@@ -2221,12 +2288,13 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	}
 	/* Never replace the slot the texture bound right now is sampling when
 	 * another is free to take: with >1 slot the LRU is not it, but be exact. */
-	if( pick == r_gx_cmpr_cur_slot && r_gx_cmpr_nslots > 1 )
-		pick = ( pick + 1 ) % r_gx_cmpr_nslots;
+	if( pick == r_gx_cmpr_cur_slot && hi - lo > 1 )
+		pick = lo + ( pick - lo + 1 ) % ( hi - lo );
 	if( r_gx_cmpr_slot[pick].valid && GC_GXFenceWait( r_gx_cmpr_slot[pick].fence ))
 		r_gx_cmpr_bounce_stalls++;
-	GC_AramTransfer( aram + skip, r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap,
+	GC_AramTransfer( aram + skip, R_GXCmprSlotPtr( pick ),
 		bytes, false );
+	r_gx_cmpr_slot[pick].texnum = 0;
 	r_gx_cmpr_slot[pick].aram = aram;
 	r_gx_cmpr_slot[pick].skip = skip;
 	r_gx_cmpr_slot[pick].bytes = bytes;
@@ -2235,7 +2303,7 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	r_gx_cmpr_misses++;
 	r_gx_cmpr_dma_bytes += bytes;
 	*slot_out = pick;
-	return r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap;
+	return R_GXCmprSlotPtr( pick );
 }
 
 static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
@@ -2245,7 +2313,39 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 
 	img->gc_packed_used = r_gx_hot.frame;
-	if( img->gc_packed_bytes && !img->gc_packed_hot && !img->gc_packed_queued
+	if( !img->gc_packed_hot && texnum < MAX_TEXTURES && r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] )
+	{
+		const int hs = r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] - 1;
+
+		if( hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+			&& r_gx_cmpr_slot[hs].texnum == texnum )
+		{
+			if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR )
+			{
+				GX_LoadTexObj( &r_gx_cmpr_slot[hs].obj, GX_TEXMAP0 );
+				r_gx_bound_texnum = texnum;
+				r_gx_bound_fmt = GX_TF_CMPR;
+				r_gx_tex_loads++;
+			}
+			else
+				r_gx_tex_reuses++;
+			r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
+			r_gx_cmpr_slot[hs].fence = GC_GXFenceNext();
+			r_gx_cmpr_cur_slot = hs;
+			r_gx_cmpr_bounce_texnum = texnum;
+			r_gx_cmpr_hits++;
+			t->texnum = texnum;
+			t->w = img->width;
+			t->h = img->height;
+			t->fmt = GX_TF_CMPR;
+			t->valid = true;
+			R_GXSetTexAlphaTest( img->gc_packed_alpha ? true : false );
+			return t;
+		}
+	}
+	/* The hot window is a 96 KB stopgap; with adopted slots it only adds
+	 * per-frame DMA for textures that are already resident. */
+	if( r_gx_cmpr_nslots <= 8 && img->gc_packed_bytes && !img->gc_packed_hot && !img->gc_packed_queued
 		&& r_gx_hot.queued < GC_HOT_QUEUE_MAX )
 	{
 		img->gc_packed_queued = true;
@@ -2275,6 +2375,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				&& ( bounce = R_GXCmprBounce()) != NULL
 				&& r_gx_cmpr_bounce_cap > 0 )
 			{
+				const unsigned slot_cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 				unsigned skip = 0;
 				unsigned remain = img->gc_packed_bytes;
 				unsigned use_shift = 0;
@@ -2283,7 +2384,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				int mi;
 
 				for( mi = 0; mi < img->gc_packed_levels
-					&& remain > r_gx_cmpr_bounce_cap; ++mi )
+					&& remain > slot_cap; ++mi )
 				{
 					unsigned mw = (unsigned)Q_max( 1, img->width >> mi );
 					unsigned mh = (unsigned)Q_max( 1, img->height >> mi );
@@ -2298,7 +2399,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 					bw = Q_max( 1, img->width >> use_shift );
 					bh = Q_max( 1, img->height >> use_shift );
 				}
-				if( remain > 0 && remain <= r_gx_cmpr_bounce_cap && use_levels > 0 )
+				if( remain > 0 && remain <= slot_cap && use_levels > 0 )
 				{
 					int slot = -1;
 
@@ -2355,6 +2456,13 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 			r_gx_bound_texnum = texnum;
 			r_gx_bound_fmt = GX_TF_CMPR;
 			r_gx_tex_loads++;
+			if( used_bounce && r_gx_cmpr_cur_slot >= 0 && texnum < MAX_TEXTURES
+				&& r_gx_cmpr_cur_slot < 255 )
+			{
+				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].obj = t->obj;
+				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].texnum = texnum;
+				r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] = (u8)( r_gx_cmpr_cur_slot + 1 );
+			}
 		}
 		else
 		{
@@ -5152,28 +5260,69 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
 #define GC_PROP_TEX_BYTES	2048u
 #define GC_WT_MAGIC		0x47435754u
 
+/* Pack v3: a model is stored once (raw vertex pieces in ARAM) and each
+ * instance places it with an origin and Source angles through the GX
+ * position matrix. v2 stored every instance's triangles in world space. */
+#define GC_PROP_MAX_MODELS	192
+
 typedef struct
 {
-	u16	first, count;
-	s16	mins[3], maxs[3];
+	u16	model, count;	/* count = triangles in the model */
+	s16	mins[3], maxs[3];	/* world AABB */
+	s16	org[3];
+	s16	ang[3];		/* pitch yaw roll, 65536 = 360 degrees */
+	u32	pad;
 } gc_prop_inst_t;
+
+typedef struct
+{
+	u32	dl_ofs, first_bytes;
+	u16	tris;
+	u8	frac, pad;
+	/* Far level of detail: about a sixth of the triangles. Same piece
+	 * chain layout; equal to the full chain for tiny models. */
+	u32	far_ofs, far_bytes;
+	u16	far_tris, pad2;
+} gc_prop_model_t;
 
 static unsigned gc_prop_aram;
 static int gc_prop_state;	/* 0 untried, 1 ready, -1 absent */
 static u16 gc_prop_ninst;
-static u32 gc_prop_ntris, gc_prop_tris_ofs;
-static u16 gc_prop_flight_first, gc_prop_flight_count;
-static u16 gc_prop_walk_first, gc_prop_walk_count;
-static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST];
+static u32 gc_prop_ntris, gc_prop_dl_base;
+/* Far-LOD region: the tail of the pack. Kept resident in the map arena
+ * when a large world has opened it, so the horizon pass (368 instances in
+ * the harbor) draws without one ARAM read per piece. */
+static u32 gc_prop_far_base, gc_prop_far_size;
+static byte *gc_prop_far_mem;
+static qboolean gc_prop_far_tried;
+static u16 gc_prop_nmodels;
+static u16 gc_prop_flight_model, gc_prop_flight_count;
+static u16 gc_prop_walk_model, gc_prop_walk_count;
+/* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
+static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligned( 32 )));
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
 static u16 gc_prop_nmat;
-static u16 gc_prop_mat_w[96], gc_prop_mat_h[96];
-static u32 gc_prop_mat_ofs[96];
+static u16 gc_prop_mat_w[128], gc_prop_mat_h[128];
+static u32 gc_prop_mat_ofs[128];
 static byte gc_prop_texmem[GC_PROP_TEX_SLOTS * GC_PROP_TEX_BYTES] __attribute__(( aligned( 32 )));
-static s16 gc_prop_slot_mat[GC_PROP_TEX_SLOTS];
-static GXTexObj gc_prop_slot_obj[GC_PROP_TEX_SLOTS];
+/* 16 slots are static. A large world lends 48 more from the map arena: the
+ * pack has 106 materials and 16 slots re-read a texture on most binds. */
+#define GC_PROP_TEX_SLOTS_MAX	64
+static s16 gc_prop_slot_mat[GC_PROP_TEX_SLOTS_MAX];
+static GXTexObj gc_prop_slot_obj[GC_PROP_TEX_SLOTS_MAX];
 static int gc_prop_tex_cursor;
+static int gc_prop_tex_nslots = GC_PROP_TEX_SLOTS;
+static byte *gc_prop_texmem_extra;
+static qboolean gc_prop_texmem_tried;
+
+static byte *R_GXPropTexSlot( int s )
+{
+	if( s < GC_PROP_TEX_SLOTS )
+		return gc_prop_texmem + (u32)s * GC_PROP_TEX_BYTES;
+	return gc_prop_texmem_extra + (u32)( s - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
+}
 static byte gc_prop_grey[32] __attribute__(( aligned( 32 ))) = {
 	0x84, 0x10, 0x84, 0x10, 0, 0, 0, 0,
 	0x84, 0x10, 0x84, 0x10, 0, 0, 0, 0,
@@ -5254,43 +5403,33 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 2 )
+		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 5 )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v5)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
-	gc_prop_ninst = (u16)( hdr[2] >> 16 );
-	gc_prop_ntris = hdr[2] & 0xffffu;
-	gc_prop_tris_ofs = hdr[4];
-	gc_prop_flight_first = (u16)( hdr[5] >> 16 );
-	gc_prop_flight_count = (u16)( hdr[5] & 0xffffu );
-	if( gc_prop_flight_count
-		&& (u32)gc_prop_flight_first + (u32)gc_prop_flight_count > gc_prop_ntris )
+	gc_prop_ninst = (u16)( hdr[1] & 0xffffu );
+	gc_prop_nmodels = (u16)( hdr[2] >> 16 );
+	gc_prop_dl_base = hdr[5];
+	gc_prop_far_base = hdr[7];
+	gc_prop_far_mem = NULL;
+	gc_prop_far_tried = false;
+	gc_prop_flight_model = (u16)( hdr[6] >> 16 );
+	gc_prop_walk_model = (u16)( hdr[6] & 0xffffu );
+	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
+	size = (u32)gEngfuncs.fsapi->Tell( f );
+	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST
+		|| gc_prop_nmodels == 0 || gc_prop_nmodels > GC_PROP_MAX_MODELS
+		|| hdr[3] != 32u || ( hdr[4] & 31u ) || ( gc_prop_dl_base & 31u )
+		|| ( size & 31u ) || gc_prop_dl_base > size
+		|| ( gc_prop_far_base & 31u ) || gc_prop_far_base < gc_prop_dl_base || gc_prop_far_base > size )
 	{
-		gc_prop_flight_first = 0;
-		gc_prop_flight_count = 0;
-	}
-	/* hdr[6]: CapFaces fisherman walk template (retail lead path). */
-	gc_prop_walk_first = (u16)( hdr[6] >> 16 );
-	gc_prop_walk_count = (u16)( hdr[6] & 0xffffu );
-	if( gc_prop_walk_count
-		&& (u32)gc_prop_walk_first + (u32)gc_prop_walk_count > gc_prop_ntris )
-	{
-		gc_prop_walk_first = 0;
-		gc_prop_walk_count = 0;
-	}
-	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST || gc_prop_ntris == 0 )
-	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack bad layout\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
-	size = gc_prop_tris_ofs + gc_prop_ntris * 32u;
-	if( size < gc_prop_tris_ofs || ( size & 31u ))
-	{
-		gEngfuncs.fsapi->Close( f );
-		return;
-	}
+	gc_prop_far_size = size - gc_prop_far_base;
 	gc_prop_aram = GC_AramReserve( size );
 	if( !gc_prop_aram )
 	{
@@ -5315,15 +5454,25 @@ static void R_GXPropLoad( void )
 	}
 	gEngfuncs.fsapi->Close( f );
 	{
-		u32 bytes = ( gc_prop_ninst * sizeof( gc_prop_inst_t ) + 31u ) & ~31u;
+		u32 bytes = gc_prop_ninst * (u32)sizeof( gc_prop_inst_t );
+		u32 i;
 
 		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
+		bytes = ( gc_prop_nmodels * (u32)sizeof( gc_prop_model_t ) + 31u ) & ~31u;
+		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
+		gc_prop_ntris = 0;
+		for( i = 0; i < gc_prop_nmodels; i++ )
+			gc_prop_ntris += gc_prop_models[i].tris;
 	}
+	gc_prop_flight_count = gc_prop_flight_model < gc_prop_nmodels
+		? gc_prop_models[gc_prop_flight_model].tris : 0;
+	gc_prop_walk_count = gc_prop_walk_model < gc_prop_nmodels
+		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack inst=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
-		gc_prop_ninst, gc_prop_ntris, size / 1024u, gc_prop_flight_count,
-		gc_prop_walk_count );
+		"Xash3D GameCube: prop pack v5 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
+		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
 }
 
@@ -5345,7 +5494,7 @@ static void R_GXPropLoadTex( void )
 	if( !f )
 		return;
 	if( gEngfuncs.fsapi->Read( f, hdr, 12 ) != 12 || hdr[0] != GC_WT_MAGIC
-		|| hdr[1] == 0 || hdr[1] > 96 )
+		|| hdr[1] == 0 || hdr[1] > 127 )
 	{
 		gEngfuncs.fsapi->Close( f );
 		return;
@@ -5391,8 +5540,11 @@ static void R_GXPropLoadTex( void )
 		GC_AramTransfer( gc_prop_tex_aram + off, gc_prop_bounce, n, true );
 	}
 	gEngfuncs.fsapi->Close( f );
-	for( s = 0; s < GC_PROP_TEX_SLOTS; s++ )
+	for( s = 0; s < GC_PROP_TEX_SLOTS_MAX; s++ )
 		gc_prop_slot_mat[s] = -1;
+	gc_prop_tex_nslots = GC_PROP_TEX_SLOTS;
+	gc_prop_texmem_extra = NULL;
+	gc_prop_texmem_tried = false;
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tex mats=%u aram=%u Kb\n",
 		gc_prop_nmat, size / 1024u );
 }
@@ -5415,7 +5567,17 @@ static int R_GXPropBind( u8 mat )
 		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
 		return 0;
 	}
-	for( s = 0; s < GC_PROP_TEX_SLOTS; s++ )
+	if( !gc_prop_texmem_tried && GC_MapLoadBufferTailPeak() > 0 )
+	{
+		const u32 extra = (u32)( GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
+
+		gc_prop_texmem_tried = true;
+		gc_prop_texmem_extra = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), extra );
+		if( gc_prop_texmem_extra )
+			gc_prop_tex_nslots = GC_PROP_TEX_SLOTS_MAX;
+	}
+	for( s = 0; s < gc_prop_tex_nslots; s++ )
 	{
 		if( gc_prop_slot_mat[s] == (s16)mat )
 		{
@@ -5438,9 +5600,9 @@ static int R_GXPropBind( u8 mat )
 		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
 		return 0;
 	}
-	s = gc_prop_tex_cursor % GC_PROP_TEX_SLOTS;
+	s = gc_prop_tex_cursor % gc_prop_tex_nslots;
 	gc_prop_tex_cursor++;
-	dst = gc_prop_texmem + (u32)s * GC_PROP_TEX_BYTES;
+	dst = R_GXPropTexSlot( s );
 	GC_AramTransfer( gc_prop_tex_aram + gc_prop_mat_ofs[mat] + skip, dst,
 		( bytes + 31u ) & ~31u, false );
 	GX_InitTexObj( &gc_prop_slot_obj[s], dst, w, h, GX_TF_CMPR,
@@ -5483,99 +5645,135 @@ static void R_GXPropSetLitAt( const float *org )
 		gc_prop_lit = 0xB8B298FFu;
 }
 
-/* The baked triangles, one material run at a time. The box stand-ins are
- * gone: the mesh is the mesh. ox/oy/oz shift a local-space template into
- * world (canister flight / fisherman walk); pass zeros for ordinary instances.
- * yaw_rad rotates around Z before the translate (Source yaw: 0 = +X). */
-static int R_GXPropEmitRangeYaw( u32 first, u32 count, int ox, int oy, int oz,
-	float yaw_rad )
+/* One model through the position matrix. The pieces are raw vertex runs
+ * (s16 xyz at the model's fraction bits, s16 st), one material each, read
+ * from ARAM through the bounce buffer and copied into the FIFO. The light
+ * colour rides in the material register, so vertices carry no colour.
+ * Angles are radians, Source order (pitch, yaw, roll). */
+static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
-	u32 left = count;
-	u32 tri = first;
+	const gc_prop_model_t *m;
+	Mtx mv, mm, out;
+	GXColor col;
+	u32 ofs, bytes;
 	int drawn = 0;
-	const float cs = cosf( yaw_rad );
-	const float sn = sinf( yaw_rad );
-	const qboolean spin = ( yaw_rad != 0.0f );
-	const u32 col = gc_prop_lit;
+	const float sp = sinf( pitch ), cp = cosf( pitch );
+	const float sy = sinf( yaw ), cy = cosf( yaw );
+	const float sr = sinf( roll ), cr = cosf( roll );
 
-	while( left )
+	if( model >= gc_prop_nmodels )
+		return 0;
+	m = &gc_prop_models[model];
+	mm[0][0] = cp * cy; mm[0][1] = sr * sp * cy - cr * sy; mm[0][2] = cr * sp * cy + sr * sy; mm[0][3] = org[0];
+	mm[1][0] = cp * sy; mm[1][1] = sr * sp * sy + cr * cy; mm[1][2] = cr * sp * sy - sr * cy; mm[1][3] = org[1];
+	mm[2][0] = -sp; mm[2][1] = sr * cp; mm[2][2] = cr * cp; mm[2][3] = org[2];
+	R_GXBuildWorldModelview( mv );
+	guMtxConcat( mv, mm, out );
+	GX_LoadPosMtxImm( out, GX_PNMTX0 );
+	col.r = (u8)( gc_prop_lit >> 24 );
+	col.g = (u8)( gc_prop_lit >> 16 );
+	col.b = (u8)( gc_prop_lit >> 8 );
+	col.a = 255;
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetChanMatColor( GX_COLOR0A0, col );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
+	if( far_lod && !gc_prop_far_mem && !gc_prop_far_tried && gc_prop_far_size
+		&& GC_MapLoadBufferTailPeak() > 0 )
 	{
-		u32 n = left;
-		u32 start = 0;
-
-		if( n > sizeof( gc_prop_bounce ) / 32u )
-			n = sizeof( gc_prop_bounce ) / 32u;
-		GC_AramTransfer( gc_prop_aram + gc_prop_tris_ofs + tri * 32u,
-			gc_prop_bounce, n * 32u, false );
-		while( start < n )
+		gc_prop_far_tried = true;
+		gc_prop_far_mem = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), gc_prop_far_size );
+		if( gc_prop_far_mem )
 		{
-			const u8 mat = (u8)( gc_prop_bounce[start * 32u] & 0x7f );
-			u32 end = start + 1;
-			u32 b, v;
-
-			while( end < n && ( gc_prop_bounce[end * 32u] & 0x7f ) == mat )
-				end++;
-			R_GXPropBind( mat );
-			GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)(( end - start ) * 3u ));
-			for( b = start; b < end; b++ )
-			{
-				const u8 *rec = gc_prop_bounce + b * 32u;
-				const s16 *p = (const s16 *)( rec + 2 );
-				const u16 *uv = (const u16 *)p;
-
-				for( v = 0; v < 3; v++, p += 5, uv += 5 )
-				{
-					int x, y, z;
-					float lx = (float)p[0];
-					float ly = (float)p[1];
-
-					if( spin )
-					{
-						x = (int)( lx * cs - ly * sn ) + ox;
-						y = (int)( lx * sn + ly * cs ) + oy;
-					}
-					else
-					{
-						x = (int)lx + ox;
-						y = (int)ly + oy;
-					}
-					z = (int)p[2] + oz;
-
-					if( x < -32767 ) x = -32767;
-					else if( x > 32767 ) x = 32767;
-					if( y < -32767 ) y = -32767;
-					else if( y > 32767 ) y = 32767;
-					if( z < -32767 ) z = -32767;
-					else if( z > 32767 ) z = 32767;
-					GX_Position3s16( (s16)x, (s16)y, (s16)z );
-					GX_Color1u32( col );
-					GX_TexCoord2u16( uv[3], uv[4] );
-				}
-			}
-			GX_End();
-			start = end;
+			GC_AramTransfer( gc_prop_aram + gc_prop_far_base, gc_prop_far_mem, gc_prop_far_size, false );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop far LODs resident %u Kb\n",
+				gc_prop_far_size / 1024u );
 		}
-		tri += n;
-		left -= n;
-		drawn += (int)n;
 	}
-	return drawn;
-}
+	ofs = far_lod ? m->far_ofs : m->dl_ofs;
+	bytes = far_lod ? m->far_bytes : m->first_bytes;
+	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
+	{
+		const u8 *hdr;
+		const u16 *p;
+		u32 nverts, body, next, n;
 
-static int R_GXPropEmitRange( u32 first, u32 count, int ox, int oy, int oz )
-{
-	return R_GXPropEmitRangeYaw( first, count, ox, oy, oz, 0.0f );
+		if( far_lod && gc_prop_far_mem )
+		{
+			if( ofs + bytes > gc_prop_far_size )
+				break;
+			hdr = gc_prop_far_mem + ofs;
+		}
+		else
+		{
+			GC_AramTransfer( gc_prop_aram + ( far_lod ? gc_prop_far_base : gc_prop_dl_base ) + ofs,
+				gc_prop_bounce, bytes, false );
+			hdr = gc_prop_bounce;
+		}
+		nverts = *(const u16 *)( hdr + 2 );
+		body = *(const u32 *)( hdr + 4 );
+		next = *(const u32 *)( hdr + 8 );
+		if( !nverts || nverts * 10u > body || body + 32u != bytes )
+			break;
+		R_GXPropBind( (u8)( hdr[0] & 0x7f ));
+		GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)nverts );
+		p = (const u16 *)( hdr + 32 );
+		for( n = nverts * 5u; n; n-- )
+			wgPipe->U16 = *p++;
+		GX_End();
+		drawn += (int)( nverts / 3u );
+		ofs += bytes;
+		bytes = next;
+	}
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
+	return drawn;
 }
 
 static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 {
-	float mid[3];
+	float mid[3], org[3];
+	const float k = 6.2831853f / 65536.0f;
+	const float *eye = RI.rvp.vieworigin;
+	float dx, dy, dz, r2, d2, cover2;
 
 	mid[0] = 0.5f * ( (float)in->mins[0] + (float)in->maxs[0] );
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
-	R_GXPropSetLitAt( mid );
-	return R_GXPropEmitRange( in->first, in->count, 0, 0, 0 );
+	/* Size on screen = bounding radius over distance. Under 0.6 % it is a
+	 * few pixels: skip. Under 5 % draw the far level of detail (its welded UVs smear
+	 * a facade that is any closer). The
+	 * harbor used to push all 368 far instances at full detail (88k
+	 * triangles a frame through ARAM). */
+	dx = (float)in->maxs[0] - (float)in->mins[0];
+	dy = (float)in->maxs[1] - (float)in->mins[1];
+	dz = (float)in->maxs[2] - (float)in->mins[2];
+	r2 = 0.25f * ( dx * dx + dy * dy + dz * dz );
+	d2 = R_GXPropD2( eye, in->mins, in->maxs );
+	cover2 = d2 > 1.0f ? r2 / d2 : 1.0f;
+	if( cover2 < 0.006f * 0.006f )
+		return 0;
+	/* Static props: sample the world light once, keep it in the record's
+	 * spare word (low byte 1 = valid). The sample walks every chunk. */
+	{
+		gc_prop_inst_t *w = (gc_prop_inst_t *)in;
+
+		if(( w->pad & 0xffu ) != 1u )
+		{
+			R_GXPropSetLitAt( mid );
+			w->pad = ( gc_prop_lit & 0xffffff00u ) | 1u;
+		}
+		gc_prop_lit = ( w->pad & 0xffffff00u ) | 0xffu;
+	}
+	org[0] = (float)in->org[0];
+	org[1] = (float)in->org[1];
+	org[2] = (float)in->org[2];
+	return R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
+		(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.05f * 0.05f );
 }
 
 /* CapFaces: Lost Coast fisherman walks the retail lead-to-gate path
@@ -5691,7 +5889,7 @@ static void R_GXFishermanWalkDraw( const float *org )
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-	R_GXPropEmitRangeYaw( gc_prop_walk_first, gc_prop_walk_count, ox, oy, oz, yaw );
+	R_GXPropEmitModel( gc_prop_walk_model, pos, 0.0f, yaw, 0.0f, false );
 	if( !logged )
 	{
 		logged = true;
@@ -5740,7 +5938,7 @@ static void R_GXCanisterFlightDraw( const float *org )
 	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
 	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
 	R_GXPropSetLitAt( pos );
-	R_GXPropEmitRange( gc_prop_flight_first, gc_prop_flight_count, ox, oy, oz );
+	R_GXPropEmitModel( gc_prop_flight_model, pos, 0.0f, 0.0f, 0.0f, false );
 	if( !logged )
 	{
 		logged = true;
@@ -5923,17 +6121,35 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	float cheap_start = 500.0f, cheap_end = 1000.0f;
 	float dx, dy, dz, dist, t, fres, path, under_t;
 	int r, g, b, a;
-	const float *eye = RI.rvp.vieworigin;
+	const float *eye = tr.modelorg; /* the ride eye; rvp.vieworigin lags it */
 	/* env_fog_controller on d2_lostcoast — far-horizon lift only */
 	const int er = 151, eg = 166, eb = 181;
 	const qboolean underwater = ( eye_dot < 0.0f );
 
-	GC_GetWaterFaceFog( wi, fog_rgb, &reflect_x100 );
-	GC_GetWaterFaceFogRange( wi, &fog_start, &fog_end, &cheap_start, &cheap_end );
-	if( fog_end <= fog_start )
-		fog_end = fog_start + 1.0f;
-	if( cheap_end <= cheap_start )
-		cheap_end = cheap_start + 1.0f;
+	/* Material parameters are per face; this runs per vertex (up to 96 for
+	 * a subdivided near sheet). Keep the last face's values. */
+	{
+		static int c_wi = -1;
+		static byte c_rgb[3];
+		static u8 c_reflect;
+		static float c_fs, c_fe, c_cs, c_ce;
+
+		if( c_wi != wi )
+		{
+			c_reflect = 150;
+			c_fs = 1.0f; c_fe = 100.0f; c_cs = 500.0f; c_ce = 1000.0f;
+			GC_GetWaterFaceFog( wi, c_rgb, &c_reflect );
+			GC_GetWaterFaceFogRange( wi, &c_fs, &c_fe, &c_cs, &c_ce );
+			if( c_fe <= c_fs )
+				c_fe = c_fs + 1.0f;
+			if( c_ce <= c_cs )
+				c_ce = c_cs + 1.0f;
+			c_wi = wi;
+		}
+		fog_rgb[0] = c_rgb[0]; fog_rgb[1] = c_rgb[1]; fog_rgb[2] = c_rgb[2];
+		reflect_x100 = c_reflect;
+		fog_start = c_fs; fog_end = c_fe; cheap_start = c_cs; cheap_end = c_ce;
+	}
 
 	/* Keep VMT $fogcolor — the old 1.5× lift read as opaque cyan. */
 	r = (int)fog_rgb[0];
@@ -5963,25 +6179,52 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	}
 	else
 	{
-		/* Optical path through the sheet: longer when grazing (small nd). */
-		if( nd < 0.08f )
-			nd = 0.08f;
-		path = 1.0f / nd;
-		fres = ( 1.0f - nd ) * ( 1.0f - nd );
-		t = ( dist - cheap_start ) / ( cheap_end - cheap_start );
+		/* Per-vertex Fresnel against the eye ray. Retail cheap water is a
+		 * mirror at grazing angles and clear straight down; the old per-face
+		 * term made every sheet one flat tint. Reflection colour is the sky
+		 * at the horizon, warmed and lifted toward env_sun (yaw 137). */
+		float cosv = 1.0f, f, sun = 0.0f, refl;
+		int rr, rg, rb, ab;
+
+		(void)nd;
+		(void)path;
+		(void)fres;
+		if( dist > 1.0f )
+		{
+			cosv = fabsf( dz ) / dist;
+			sun = ( dx * -0.731f + dy * 0.682f ) / dist;
+		}
+		f = 1.0f - cosv;
+		f = f * f * f * f * f; /* Schlick */
+		refl = (float)reflect_x100 * ( 1.0f / 150.0f );
+		if( refl > 1.2f ) refl = 1.2f;
+		f *= refl;
+		if( f > 0.85f ) f = 0.85f;
+		if( sun < 0.0f ) sun = 0.0f;
+		sun = sun * sun;
+		sun = sun * sun;
+		sun = sun * sun * sun;
+		/* Measured off retail (playtests/reference/retail-cliff-sea.png):
+		 * near water is the VMT $fogcolor almost opaque (18,38,30), far
+		 * water climbs to the horizon sky (122,135,144). */
+		rr = 122 + (int)( 90.0f * sun );
+		rg = 135 + (int)( 75.0f * sun );
+		rb = 144 + (int)( 45.0f * sun );
+		(void)cheap_start;
+		(void)cheap_end;
+		t = ( dist - 150.0f ) / 600.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
-		/* Near + looking down → see bottom; grazing / far → denser fogcolor.
-		 * Keep mid alphas lean — one Z-winning sheet must not read solid. */
-		a = 48 + (int)( 50.0f * fres ) + (int)( 55.0f * t )
-			+ (int)( 35.0f * ( path - 1.0f ) / 4.0f );
-		if( a < 40 ) a = 40;
-		if( a > 190 ) a = 190;
-		/* Horizon haze toward env fog — soft, not a solid sheet. */
-		t = ( dist - 1200.0f ) / 6000.0f;
+		/* Body: shallows at the feet stay see-through, then the murk closes. */
+		ab = 110 + (int)( 125.0f * t );
+		r = (int)( (float)r + ( (float)rr - (float)r ) * f );
+		g = (int)( (float)g + ( (float)rg - (float)g ) * f );
+		b = (int)( (float)b + ( (float)rb - (float)b ) * f );
+		a = ab + (int)( ( 240.0f - (float)ab ) * f );
+		/* Far horizon melts into env fog. */
+		t = ( dist - 4000.0f ) / 12000.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
-		t *= 0.35f;
 		r = (int)( (float)r + ( (float)er - (float)r ) * t );
 		g = (int)( (float)g + ( (float)eg - (float)g ) * t );
 		b = (int)( (float)b + ( (float)eb - (float)b ) * t );
@@ -6009,11 +6252,11 @@ static void R_GXDrawPackedWater( void )
 	R_GXBuildFrustum();
 	GX_SetCullMode( GX_CULL_NONE );
 	/* Source-style transparent fogcolor body + grazing sheen.
-	 * Nearest-first + Z-write so overlapping sheets do not stack alpha to opaque
-	 * (155 fans used to composite into a solid teal wall). WorldDL sands show
-	 * through the winning sheet; props already stamped hull Z. */
+	 * Nearest-first + Z-write with LESS (not LEQUAL): overlapping sheets do
+	 * not stack alpha, and coplanar WorldDL rock/sand at the waterline is
+	 * not eaten by the sheet. Props draw after this pass (see frame order). */
 	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
-	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetZMode( GX_TRUE, GX_LESS, GX_TRUE );
 	GX_SetNumChans( 1 );
 	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
@@ -6123,13 +6366,65 @@ static void R_GXDrawPackedWater( void )
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
-			GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
-			for( si = 0; si < nv; si++ )
+			if( eye_dot > 0.0f && dists[a] < 3000.0f * 3000.0f && nv <= 8 )
 			{
-				GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
-				GX_Color1u32( R_GXWaterBodyTint( wi, pts[si], eye_dot, nd ));
+				/* Near sheets are 512-unit quads; Fresnel swings across one,
+				 * so split them and shade the pieces per vertex. */
+				const int n = dists[a] < 1400.0f * 1400.0f ? 4 : 2;
+				int ti, u, v, k;
+
+				GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)(( nv - 2 ) * n * n * 3 ));
+				for( ti = 1; ti + 1 < nv; ti++ )
+				{
+					const float *A = pts[0], *B = pts[ti], *C = pts[ti + 1];
+
+					for( u = 0; u < n; u++ )
+					{
+						for( v = 0; v < 2 * ( n - u ) - 1; v++ )
+						{
+							/* Row u holds n-u upright and n-u-1 inverted cells. */
+							const int col = v >> 1;
+							int bu[3], bv[3];
+							float q[3];
+
+							if( !( v & 1 ))
+							{
+								bu[0] = u; bv[0] = col;
+								bu[1] = u; bv[1] = col + 1;
+								bu[2] = u + 1; bv[2] = col;
+							}
+							else
+							{
+								bu[0] = u; bv[0] = col + 1;
+								bu[1] = u + 1; bv[1] = col + 1;
+								bu[2] = u + 1; bv[2] = col;
+							}
+							for( k = 0; k < 3; k++ )
+							{
+								const float fu = (float)bu[k] / (float)n;
+								const float fv = (float)bv[k] / (float)n;
+
+								q[0] = A[0] + ( B[0] - A[0] ) * fv + ( C[0] - A[0] ) * fu;
+								q[1] = A[1] + ( B[1] - A[1] ) * fv + ( C[1] - A[1] ) * fu;
+								q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
+								GX_Position3f32( q[0], q[1], q[2] );
+								GX_Color1u32( R_GXWaterBodyTint( wi, q, eye_dot, nd ));
+							}
+						}
+					}
+				}
+				GX_End();
 			}
-			GX_End();
+			else
+			{
+				GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
+				for( si = 0; si < nv; si++ )
+				{
+					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
+					GX_Color1u32( R_GXWaterBodyTint( wi, pts[si], eye_dot, nd ));
+				}
+				GX_End();
+			}
 			water_drawn++;
 		}
 	}
@@ -6203,6 +6498,15 @@ static void R_GXDrawPackedWater( void )
 				if( R_GXBoxOutsideFrustum( wmin, wmax ))
 					continue;
 			}
+			/* Ripple sparkle is a near-field detail; past 2500 units it is
+			 * below a texel and each face costs two ARAM reads. */
+			{
+				const float ddx = pts[0][0] - tr.modelorg[0];
+				const float ddy = pts[0][1] - tr.modelorg[1];
+
+				if( ddx * ddx + ddy * ddy > 2500.0f * 2500.0f )
+					continue;
+			}
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
@@ -6216,10 +6520,10 @@ static void R_GXDrawPackedWater( void )
 			else if( refl > 2.0f )
 				refl = 2.0f;
 			/* Sky/fog tint for the sheen — quieter over transparent body. */
-			sheen.r = (u8)( 151.0f * fres * refl * 0.28f );
-			sheen.g = (u8)( 166.0f * fres * refl * 0.28f );
-			sheen.b = (u8)( 181.0f * fres * refl * 0.28f );
-			sheen.a = (u8)( 110.0f * fres );
+			sheen.r = (u8)( 151.0f * fres * refl * 0.10f );
+			sheen.g = (u8)( 166.0f * fres * refl * 0.10f );
+			sheen.b = (u8)( 181.0f * fres * refl * 0.10f );
+			sheen.a = (u8)( 60.0f * fres );
 			GX_SetTevKColor( GX_KCOLOR0, sheen );
 			GC_GetWaterFaceScroll( wi, &su, &sv, NULL );
 			ou = time_sec * su;
@@ -6267,80 +6571,6 @@ static void R_GXDrawPackedWater( void )
 		}
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
 	}
-	/* Underwater volume fog: camera-facing fogcolor veil at ~$fogend so the
-	 * view fills like Source without re-arming Flipper HW fog. */
-	{
-		int under_wi = -1;
-		float best_abs = 1e30f;
-		mplane_t upl;
-		byte fog_rgb[3];
-		float fog_start = 1.0f, fog_end = 100.0f;
-		vec3_t forward, right, up, center;
-		float half, eye_dot;
-		u32 veil;
-
-		for( wi = 0; wi < water_n; wi++ )
-		{
-			if( !GC_WaterFacePlane( wi, &upl, NULL ))
-				continue;
-			eye_dot = DotProduct( tr.modelorg, upl.normal ) - upl.dist;
-			if( eye_dot >= 0.0f )
-				continue;
-			if( -eye_dot < best_abs )
-			{
-				best_abs = -eye_dot;
-				under_wi = wi;
-			}
-		}
-		if( under_wi >= 0 )
-		{
-			GC_GetWaterFaceFog( under_wi, fog_rgb, NULL );
-			GC_GetWaterFaceFogRange( under_wi, &fog_start, &fog_end, NULL, NULL );
-			if( fog_end < 8.0f )
-				fog_end = 8.0f;
-			AngleVectors( RI.rvp.viewangles, forward, right, up );
-			center[0] = tr.modelorg[0] + forward[0] * ( fog_end * 0.55f );
-			center[1] = tr.modelorg[1] + forward[1] * ( fog_end * 0.55f );
-			center[2] = tr.modelorg[2] + forward[2] * ( fog_end * 0.55f );
-			half = fog_end * 1.25f;
-			/* Dense but not ink — leave a little SpecOn sand through. */
-			veil = ( (u32)fog_rgb[0] << 24 ) | ( (u32)fog_rgb[1] << 16 )
-				| ( (u32)fog_rgb[2] << 8 ) | 200u;
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
-			GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
-			GX_SetNumTexGens( 0 );
-			GX_SetNumTevStages( 1 );
-			GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
-			GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
-			GX_ClearVtxDesc();
-			GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
-			GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
-			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
-			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
-			GX_Begin( GX_QUADS, GX_VTXFMT0, 4 );
-			GX_Position3f32(
-				center[0] + ( -right[0] - up[0] ) * half,
-				center[1] + ( -right[1] - up[1] ) * half,
-				center[2] + ( -right[2] - up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_Position3f32(
-				center[0] + ( right[0] - up[0] ) * half,
-				center[1] + ( right[1] - up[1] ) * half,
-				center[2] + ( right[2] - up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_Position3f32(
-				center[0] + ( right[0] + up[0] ) * half,
-				center[1] + ( right[1] + up[1] ) * half,
-				center[2] + ( right[2] + up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_Position3f32(
-				center[0] + ( -right[0] + up[0] ) * half,
-				center[1] + ( -right[1] + up[1] ) * half,
-				center[2] + ( -right[2] + up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_End();
-		}
-	}
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	{
@@ -6355,9 +6585,281 @@ static void R_GXDrawPackedWater( void )
 	}
 }
 
+/* Smoke columns (Source env_smokestack, media/fx_d2_lostcoast.gcf): camera
+ * facing quads with a soft round I8 blob, blended over the scene. A
+ * particle's age is a phase of the clock, so there is no per-particle
+ * state: position, size and fade all follow from (stack, index, time). */
+#define GC_FX_MAX_STACKS	16
+
+typedef struct
+{
+	float	org[3];
+	u8	rgba[4];
+	float	jet;
+	u16	start, end, speed, spread_speed, base_spread;
+	u8	rate, twist;
+} gc_fx_stack_t;
+
+static gc_fx_stack_t gc_fx_stack[GC_FX_MAX_STACKS];
+static int gc_fx_n = -1;	/* -1 untried */
+static byte gc_fx_blob[32 * 32] __attribute__(( aligned( 32 )));
+static GXTexObj gc_fx_obj;
+
+static void R_GXSmokeLoad( void )
+{
+	file_t *f;
+	u32 hdr[2];
+	int x, y;
+
+	gc_fx_n = 0;
+	f = gEngfuncs.fsapi->Open( "media/fx_d2_lostcoast.gcf", "rb", false );
+	if( !f )
+		return;
+	if( gEngfuncs.fsapi->Read( f, hdr, 8 ) == 8 && hdr[0] == 0x47436678u && ( hdr[1] >> 16 ) == 1 )
+	{
+		int n = (int)( hdr[1] & 0xffffu );
+
+		if( n > GC_FX_MAX_STACKS )
+			n = GC_FX_MAX_STACKS;
+		if( gEngfuncs.fsapi->Read( f, gc_fx_stack, n * 32 ) == (fs_offset_t)( n * 32 ))
+			gc_fx_n = n;
+	}
+	gEngfuncs.fsapi->Close( f );
+	/* I8, 8x4 texel tiles. Density falls off as (1 - r^2)^1.5. */
+	for( y = 0; y < 32; y++ )
+	{
+		for( x = 0; x < 32; x++ )
+		{
+			const float fx = ( (float)x - 15.5f ) / 15.5f;
+			const float fy = ( (float)y - 15.5f ) / 15.5f;
+			float d = 1.0f - ( fx * fx + fy * fy );
+			const int tile = ( y >> 2 ) * 4 + ( x >> 3 );
+
+			if( d < 0.0f )
+				d = 0.0f;
+			d = d * sqrtf( d );
+			gc_fx_blob[tile * 32 + ( y & 3 ) * 8 + ( x & 7 )] = (byte)( d * 255.0f );
+		}
+	}
+	DCFlushRange( gc_fx_blob, sizeof( gc_fx_blob ));
+	GX_InitTexObj( &gc_fx_obj, gc_fx_blob, 32, 32, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjFilterMode( &gc_fx_obj, GX_LINEAR, GX_LINEAR );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: smoke emitters=%d\n", gc_fx_n );
+}
+
+static void R_GXSmokeDraw( void )
+{
+	vec3_t forward, right, up;
+	const float *eye = RI.rvp.vieworigin;
+	const float now = gp_cl ? (float)gp_cl->time : 0.0f;
+	Mtx mv;
+	int si;
+
+	if( gc_fx_n < 0 )
+		R_GXSmokeLoad();
+	if( gc_fx_n <= 0 )
+		return;
+	AngleVectors( RI.rvp.viewangles, forward, right, up );
+	R_GXBuildWorldModelview( mv );
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetNumTexGens( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+	GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC );
+	GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_TEXA, GX_CA_RASA, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_LoadTexObj( &gc_fx_obj, GX_TEXMAP0 );
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
+	for( si = 0; si < gc_fx_n; si++ )
+	{
+		const gc_fx_stack_t *st = &gc_fx_stack[si];
+		const float speed = st->speed > 0 ? (float)st->speed : 30.0f;
+		const float life = st->jet / speed;
+		float dx = st->org[0] - eye[0], dy = st->org[1] - eye[1], dz = st->org[2] + st->jet * 0.5f - eye[2];
+		const float dist = sqrtf( dx * dx + dy * dy + dz * dz );
+		int n, i;
+
+		/* Under about three pixels at its widest, or behind the eye. */
+		if( dist < 1.0f || (float)st->end < dist * 0.006f )
+			continue;
+		if( dx * forward[0] + dy * forward[1] + dz * forward[2] < -st->jet )
+			continue;
+		n = (int)( (float)st->rate * life );
+		if( n < 6 ) n = 6;
+		if( n > 40 ) n = 40;
+		GX_Begin( GX_QUADS, GX_VTXFMT0, (u16)( n * 4 ));
+		for( i = 0; i < n; i++ )
+		{
+			/* Per-particle constants from a small integer hash. */
+			u32 h = (u32)( si * 7919 + i * 104729 + 12345 );
+			float t, ang, rad, size, fade, px, py, pz, a;
+			u32 col;
+
+			h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+			t = now / life + (float)i / (float)n;
+			t -= (float)(int)t;
+			ang = (float)( h & 1023u ) * ( 6.2831853f / 1024.0f )
+				+ ( st->twist ? t * 2.5f : 0.0f );
+			rad = (float)st->base_spread * 0.5f
+				+ (float)st->spread_speed * life * t * 0.5f * (float)(( h >> 10 ) & 255u ) * ( 1.0f / 255.0f );
+			/* The column leans with the wind as it rises. */
+			px = st->org[0] + cosf( ang ) * rad + st->jet * 0.22f * t * t;
+			py = st->org[1] + sinf( ang ) * rad;
+			pz = st->org[2] + st->jet * t;
+			size = (float)st->start + ( (float)st->end - (float)st->start ) * t;
+			fade = ( t < 0.1f ? t * 10.0f : 1.0f ) * ( 1.0f - t );
+			a = (float)st->rgba[3] * fade * 1.6f;
+			if( a > 255.0f ) a = 255.0f;
+			col = ( (u32)st->rgba[0] << 24 ) | ( (u32)st->rgba[1] << 16 )
+				| ( (u32)st->rgba[2] << 8 ) | (u32)a;
+			GX_Position3f32( px - ( right[0] + up[0] ) * size, py - ( right[1] + up[1] ) * size, pz - ( right[2] + up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 0.0f, 1.0f );
+			GX_Position3f32( px + ( right[0] - up[0] ) * size, py + ( right[1] - up[1] ) * size, pz + ( right[2] - up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 1.0f, 1.0f );
+			GX_Position3f32( px + ( right[0] + up[0] ) * size, py + ( right[1] + up[1] ) * size, pz + ( right[2] + up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 1.0f, 0.0f );
+			GX_Position3f32( px - ( right[0] - up[0] ) * size, py - ( right[1] - up[1] ) * size, pz - ( right[2] - up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 0.0f, 0.0f );
+		}
+		GX_End();
+	}
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+}
+
+/* Underwater volume fog after props so the veil is not punched by hulls. */
+static void R_GXDrawUnderwaterFog( void )
+{
+	int water_n = GC_GetWaterFaceCount();
+	int wi, under_wi = -1;
+	float best_abs = 1e30f;
+	mplane_t upl;
+	byte fog_rgb[3];
+	float fog_start = 1.0f, fog_end = 100.0f;
+	vec3_t forward, right, up, center;
+	float half, eye_dot;
+	u32 veil;
+
+	if( water_n <= 0 )
+		return;
+	for( wi = 0; wi < water_n; wi++ )
+	{
+		if( !GC_WaterFacePlane( wi, &upl, NULL ))
+			continue;
+		eye_dot = DotProduct( tr.modelorg, upl.normal ) - upl.dist;
+		if( eye_dot >= 0.0f )
+			continue;
+		if( -eye_dot < best_abs )
+		{
+			best_abs = -eye_dot;
+			under_wi = wi;
+		}
+	}
+	if( under_wi < 0 )
+		return;
+	GC_GetWaterFaceFog( under_wi, fog_rgb, NULL );
+	GC_GetWaterFaceFogRange( under_wi, &fog_start, &fog_end, NULL, NULL );
+	if( fog_end < 8.0f )
+		fog_end = 8.0f;
+	AngleVectors( RI.rvp.viewangles, forward, right, up );
+	center[0] = tr.modelorg[0] + forward[0] * ( fog_end * 0.55f );
+	center[1] = tr.modelorg[1] + forward[1] * ( fog_end * 0.55f );
+	center[2] = tr.modelorg[2] + forward[2] * ( fog_end * 0.55f );
+	half = fog_end * 1.25f;
+	veil = ( (u32)fog_rgb[0] << 24 ) | ( (u32)fog_rgb[1] << 16 )
+		| ( (u32)fog_rgb[2] << 8 ) | 200u;
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+	GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetNumTexGens( 0 );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
+	GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	GX_Begin( GX_QUADS, GX_VTXFMT0, 4 );
+	GX_Position3f32(
+		center[0] + ( -right[0] - up[0] ) * half,
+		center[1] + ( -right[1] - up[1] ) * half,
+		center[2] + ( -right[2] - up[2] ) * half );
+	GX_Color1u32( veil );
+	GX_Position3f32(
+		center[0] + ( right[0] - up[0] ) * half,
+		center[1] + ( right[1] - up[1] ) * half,
+		center[2] + ( right[2] - up[2] ) * half );
+	GX_Color1u32( veil );
+	GX_Position3f32(
+		center[0] + ( right[0] + up[0] ) * half,
+		center[1] + ( right[1] + up[1] ) * half,
+		center[2] + ( right[2] + up[2] ) * half );
+	GX_Color1u32( veil );
+	GX_Position3f32(
+		center[0] + ( -right[0] + up[0] ) * half,
+		center[1] + ( -right[1] + up[1] ) * half,
+		center[2] + ( -right[2] + up[2] ) * half );
+	GX_Color1u32( veil );
+	GX_End();
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+}
+
+/* Flythrough (-gcvst): name each stage of the frame from t=32.5 s, so the last line
+ * in the log before a crash is the stage that died. */
+static void R_GXTrace( const char *tag )
+{
+	static int on = -1;
+
+	if( on < 0 )
+		on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	if( on && gp_cl && gp_cl->time > 32.5 && gp_cl->time < 40.0 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: trace %s\n", tag );
+}
+
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	/* Flythrough stage timing: where the frame goes, every 120 frames. */
+	static u64 st_acc[6], st_last;
+	static int st_n, st_on = -1;
+	u64 st_t0 = 0, st_t;
+
+	if( st_on < 0 )
+		st_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	if( st_on )
+	{
+		st_t0 = gettime();
+		if( st_last )
+			st_acc[5] += st_t0 - st_last;
+		st_last = st_t0;
+	}
+#define ST_MARK( k ) do { if( st_on ) { st_t = gettime(); st_acc[k] += st_t - st_t0; st_t0 = st_t; } } while( 0 )
 
 	R_GXReserveHudPool();
 	R_GXPrefetchMapSkybox();
@@ -6367,22 +6869,54 @@ static int R_GXDrawWorldDLFrame( void )
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
+	ST_MARK( 0 );
+	R_GXTrace( "worlddl" );
 	drawn = R_GXWorldDLDraw();
+	ST_MARK( 1 );
+	R_GXTrace( "worlddl done" );
 	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
 	 * prop VAT change hangs Dolphin's GP after the first frame. */
-	/* Props first (with coplanar bias) so hulls win WorldDL shore Z, then
-	 * water tests against that depth and fills around the boats. */
-	GX_SetCoPlanar( GX_ENABLE );
+	/* Opaque first, then the transparent sheet. The baked opaque water
+	 * that used to bury hulls is gone from the world DL, so props sort by
+	 * plain depth: world, props, then water blended over whatever is
+	 * submerged. Underwater veil last so it covers props too. */
+	R_GXTrace( "horizon" );
 	R_GXPropDrawHorizon( RI.rvp.vieworigin );
+	R_GXTrace( "props" );
 	R_GXPropDraw( RI.rvp.vieworigin );
+	R_GXTrace( "fisherman" );
 	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
+	R_GXTrace( "canister" );
 	R_GXCanisterFlightDraw( RI.rvp.vieworigin );
-	GX_SetCoPlanar( GX_DISABLE );
+	ST_MARK( 2 );
+	R_GXTrace( "water" );
 	R_GXDrawPackedWater();
+	R_GXTrace( "smoke" );
+	R_GXSmokeDraw();
+	R_GXTrace( "underwater" );
+	R_GXDrawUnderwaterFog();
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_cull_none = true;
 	R_GXInvalidateTriApiLayout();
+	ST_MARK( 3 );
+	R_GXTrace( "frame end" );
 	GX_Flush();
+	ST_MARK( 4 );
+	if( st_on && ++st_n >= 120 )
+	{
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: stage ms/frame setup=%.1f worlddl=%.1f props=%.1f water=%.1f flush=%.1f frame=%.1f (%.1f fps)\n",
+			(float)ticks_to_microsecs( st_acc[0] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[1] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[2] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[3] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[4] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[5] ) / ( 1000.0f * st_n ),
+			st_acc[5] ? 1000000.0f * st_n / (float)ticks_to_microsecs( st_acc[5] ) : 0.0f );
+		memset( st_acc, 0, sizeof( st_acc ));
+		st_n = 0;
+	}
+#undef ST_MARK
 	r_gx_world_drew = true;
 	GC_MarkGxWorldEfbReady();
 	return drawn > 0 ? drawn : 1;
@@ -7143,7 +7677,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				if( !densify_done && pack_n > 1 )
 				{
 					extern void *GC_GetGxVideoMode( void );
-					const float *eye = RI.rvp.vieworigin;
+					const float *eye = tr.modelorg; /* the ride eye; rvp.vieworigin lags it */
 					int rank, extra_drawn = 0;
 					const int max_rank = pack_n;
 					GXRModeObj *rmode = (GXRModeObj *)GC_GetGxVideoMode();
@@ -7232,7 +7766,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 
 				if( !listen_densify_done && pack_n > 1 )
 				{
-					const float *eye = RI.rvp.vieworigin;
+					const float *eye = tr.modelorg; /* the ride eye; rvp.vieworigin lags it */
 					vec3_t forward, right, up;
 					int ranked[12];
 					int rn, ri, extra_drawn = 0;
