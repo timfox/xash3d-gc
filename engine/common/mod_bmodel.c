@@ -1001,6 +1001,13 @@ size_t Mod_GCBspScratchFloor( void )
 	return gc_bsp_scratch_size + gc_bsp_scratch_carve_high;
 }
 
+size_t Mod_GCWorldArraySpillFree( void )
+{
+	size_t cap = Mod_GCWorldArraySpillCap();
+
+	return cap > gc_world_array_spill_used ? cap - gc_world_array_spill_used : 0;
+}
+
 size_t Mod_GCWorldArraySpillUsed( void )
 {
 	return gc_world_array_spill_used;
