@@ -5289,6 +5289,12 @@ static unsigned gc_prop_aram;
 static int gc_prop_state;	/* 0 untried, 1 ready, -1 absent */
 static u16 gc_prop_ninst;
 static u32 gc_prop_ntris, gc_prop_dl_base;
+/* Far-LOD region: the tail of the pack. Kept resident in the map arena
+ * when a large world has opened it, so the horizon pass (368 instances in
+ * the harbor) draws without one ARAM read per piece. */
+static u32 gc_prop_far_base, gc_prop_far_size;
+static byte *gc_prop_far_mem;
+static qboolean gc_prop_far_tried;
 static u16 gc_prop_nmodels;
 static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
@@ -5397,15 +5403,18 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 4 )
+		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 5 )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v4)\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v5)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
 	gc_prop_ninst = (u16)( hdr[1] & 0xffffu );
 	gc_prop_nmodels = (u16)( hdr[2] >> 16 );
 	gc_prop_dl_base = hdr[5];
+	gc_prop_far_base = hdr[7];
+	gc_prop_far_mem = NULL;
+	gc_prop_far_tried = false;
 	gc_prop_flight_model = (u16)( hdr[6] >> 16 );
 	gc_prop_walk_model = (u16)( hdr[6] & 0xffffu );
 	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
@@ -5413,12 +5422,14 @@ static void R_GXPropLoad( void )
 	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST
 		|| gc_prop_nmodels == 0 || gc_prop_nmodels > GC_PROP_MAX_MODELS
 		|| hdr[3] != 32u || ( hdr[4] & 31u ) || ( gc_prop_dl_base & 31u )
-		|| ( size & 31u ) || gc_prop_dl_base > size )
+		|| ( size & 31u ) || gc_prop_dl_base > size
+		|| ( gc_prop_far_base & 31u ) || gc_prop_far_base < gc_prop_dl_base || gc_prop_far_base > size )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack bad layout\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
+	gc_prop_far_size = size - gc_prop_far_base;
 	gc_prop_aram = GC_AramReserve( size );
 	if( !gc_prop_aram )
 	{
@@ -5459,7 +5470,7 @@ static void R_GXPropLoad( void )
 		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack v4 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		"Xash3D GameCube: prop pack v5 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
 		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
 		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
@@ -5671,15 +5682,39 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
-	ofs = gc_prop_dl_base + ( far_lod ? m->far_ofs : m->dl_ofs );
+	if( far_lod && !gc_prop_far_mem && !gc_prop_far_tried && gc_prop_far_size
+		&& GC_MapLoadBufferTailPeak() > 0 )
+	{
+		gc_prop_far_tried = true;
+		gc_prop_far_mem = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), gc_prop_far_size );
+		if( gc_prop_far_mem )
+		{
+			GC_AramTransfer( gc_prop_aram + gc_prop_far_base, gc_prop_far_mem, gc_prop_far_size, false );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop far LODs resident %u Kb\n",
+				gc_prop_far_size / 1024u );
+		}
+	}
+	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
 	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
 	{
-		const u8 *hdr = gc_prop_bounce;
+		const u8 *hdr;
 		const u16 *p;
 		u32 nverts, body, next, n;
 
-		GC_AramTransfer( gc_prop_aram + ofs, gc_prop_bounce, bytes, false );
+		if( far_lod && gc_prop_far_mem )
+		{
+			if( ofs + bytes > gc_prop_far_size )
+				break;
+			hdr = gc_prop_far_mem + ofs;
+		}
+		else
+		{
+			GC_AramTransfer( gc_prop_aram + ( far_lod ? gc_prop_far_base : gc_prop_dl_base ) + ofs,
+				gc_prop_bounce, bytes, false );
+			hdr = gc_prop_bounce;
+		}
 		nverts = *(const u16 *)( hdr + 2 );
 		body = *(const u32 *)( hdr + 4 );
 		next = *(const u32 *)( hdr + 8 );
@@ -6091,12 +6126,30 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	const int er = 151, eg = 166, eb = 181;
 	const qboolean underwater = ( eye_dot < 0.0f );
 
-	GC_GetWaterFaceFog( wi, fog_rgb, &reflect_x100 );
-	GC_GetWaterFaceFogRange( wi, &fog_start, &fog_end, &cheap_start, &cheap_end );
-	if( fog_end <= fog_start )
-		fog_end = fog_start + 1.0f;
-	if( cheap_end <= cheap_start )
-		cheap_end = cheap_start + 1.0f;
+	/* Material parameters are per face; this runs per vertex (up to 96 for
+	 * a subdivided near sheet). Keep the last face's values. */
+	{
+		static int c_wi = -1;
+		static byte c_rgb[3];
+		static u8 c_reflect;
+		static float c_fs, c_fe, c_cs, c_ce;
+
+		if( c_wi != wi )
+		{
+			c_reflect = 150;
+			c_fs = 1.0f; c_fe = 100.0f; c_cs = 500.0f; c_ce = 1000.0f;
+			GC_GetWaterFaceFog( wi, c_rgb, &c_reflect );
+			GC_GetWaterFaceFogRange( wi, &c_fs, &c_fe, &c_cs, &c_ce );
+			if( c_fe <= c_fs )
+				c_fe = c_fs + 1.0f;
+			if( c_ce <= c_cs )
+				c_ce = c_cs + 1.0f;
+			c_wi = wi;
+		}
+		fog_rgb[0] = c_rgb[0]; fog_rgb[1] = c_rgb[1]; fog_rgb[2] = c_rgb[2];
+		reflect_x100 = c_reflect;
+		fog_start = c_fs; fog_end = c_fe; cheap_start = c_cs; cheap_end = c_ce;
+	}
 
 	/* Keep VMT $fogcolor — the old 1.5× lift read as opaque cyan. */
 	r = (int)fog_rgb[0];

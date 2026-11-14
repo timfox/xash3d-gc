@@ -614,7 +614,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
 		const size_t hw = ( live + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
-		const size_t keep = 256u * 1024u;
+		/* Left above the chunk ring: water table 34 KB, prop texture slots
+		 * 96 KB, prop far LODs about 170 KB, and entity overflow. */
+		const size_t keep = 352u * 1024u;
 
 		if( cap > hw + keep + 512u * 1024u )
 		{
