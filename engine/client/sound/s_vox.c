@@ -53,6 +53,33 @@ static qboolean S_ShouldTrimSample16( const int16_t *buf, int channels )
 	return true;
 }
 
+/* Pointer to frame `at` for the trim scans, which walk at most TRIM_SCAN_MAX
+ * frames from there (forward from start, back from end). ARAM-backed sounds
+ * bring frames [first, first + TRIM_SCAN_MAX] into a window first. */
+static const byte *S_TrimData( const wavdata_t *wav, int first, int at )
+{
+	const int frame = wav->channels * wav->width;
+#if XASH_GAMECUBE
+	if( FBitSet( wav->flags, GC_SOUND_ARAM_BACKED ))
+	{
+		static byte window[( TRIM_SCAN_MAX + 1 ) * 4];
+		int count = TRIM_SCAN_MAX + 1;
+		const byte *span;
+
+		if( first < 0 )
+			first = 0;
+		if( first + count > (int)wav->samples )
+			count = (int)wav->samples - first;
+		if( count <= 0 || at < first )
+			return window;
+		span = S_GCWavSpan( wav, first, &count );
+		memcpy( window, span, count * frame );
+		return window + ( at - first ) * frame;
+	}
+#endif
+	return &wav->buffer[frame * at];
+}
+
 static int S_TrimStart( const wavdata_t *wav, int start )
 {
 	size_t channels = wav->channels, width = wav->width;
@@ -62,7 +89,7 @@ static int S_TrimStart( const wavdata_t *wav, int start )
 
 	if( width == 1 )
 	{
-		const int8_t *data = (const int8_t *)&wav->buffer[channels * width * start];
+		const int8_t *data = (const int8_t *)S_TrimData( wav, start, start );
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && start < wav->samples; i++ )
 		{
@@ -75,7 +102,7 @@ static int S_TrimStart( const wavdata_t *wav, int start )
 	}
 	else if( width == 2 )
 	{
-		const int16_t *data = (const int16_t *)&wav->buffer[channels * width * start];
+		const int16_t *data = (const int16_t *)S_TrimData( wav, start, start );
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && start < wav->samples; i++ )
 		{
@@ -99,7 +126,7 @@ static int S_TrimEnd( const wavdata_t *wav, int end )
 
 	if( width == 1 )
 	{
-		const int8_t *data = (const int8_t *)&wav->buffer[channels * width * ( end - 1 )];
+		const int8_t *data = (const int8_t *)S_TrimData( wav, end - 1 - TRIM_SCAN_MAX, end - 1 );
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && end > 0; i++ )
 		{
@@ -112,7 +139,7 @@ static int S_TrimEnd( const wavdata_t *wav, int end )
 	}
 	else if( width == 2 )
 	{
-		const int16_t *data = (const int16_t *)&wav->buffer[channels * width * ( end - 1 )];
+		const int16_t *data = (const int16_t *)S_TrimData( wav, end - 1 - TRIM_SCAN_MAX, end - 1 );
 
 		for( size_t i = 0; i < TRIM_SCAN_MAX && end > 0; i++ )
 		{
@@ -334,6 +361,15 @@ static void GC_VoxInit( const char *path )
 		}
 	}
 	gc_vox_aram = GC_AramReserveTagged( (unsigned int)size + GC_VOX_LINE_MAX, "vox" );
+	if( !gc_vox_aram )
+	{
+		Con_Reportf( S_ERROR "Xash3D GameCube: sentences ARAM reserve failed (%s)\n", Q_memprint( size ));
+		free( gc_vox_offsets );
+		gc_vox_offsets = NULL;
+		gc_vox_count = 0;
+		Mem_Free( buf );
+		return;
+	}
 	GC_AramCopy( gc_vox_aram, buf, (unsigned int)size, true );
 	Mem_Free( buf );
 	Con_Reportf( "Xash3D GameCube: %d sentences in ARAM (%s)\n", gc_vox_count, Q_memprint( size ));

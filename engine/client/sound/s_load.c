@@ -303,6 +303,8 @@ static const gc_snd_stored_t *S_GCSoundStored( const sfx_t *sfx )
 	return NULL;
 }
 
+static void S_GCDropAramBackedIn( uint32_t lo, uint32_t hi );
+
 static void S_GCSoundStorePut( const sfx_t *sfx, wavdata_t *sc )
 {
 	const uint32_t bytes = (uint32_t)( sizeof( wavdata_t ) + sc->size );
@@ -321,6 +323,7 @@ static void S_GCSoundStorePut( const sfx_t *sfx, wavdata_t *sc )
 		if( e->hash && e->aram < s_gc_snd_head + bytes && e->aram + e->bytes > s_gc_snd_head )
 			e->hash = 0;
 	}
+	S_GCDropAramBackedIn( s_gc_snd_head, s_gc_snd_head + bytes );
 	e = &s_gc_snd_store[s_gc_snd_next];
 	s_gc_snd_next = ( s_gc_snd_next + 1 ) % GC_SND_ARAM_ENTRIES;
 	e->hash = S_GCSoundHash( sfx->name );
@@ -365,6 +368,225 @@ static wavdata_t *S_GCSoundFromStore( sfx_t *sfx )
 	S_GCTouchBudgetedLru( sfx );
 	s_gc_snd_restores++;
 	return sc;
+}
+#endif
+
+#if XASH_GAMECUBE
+/*
+=================
+ARAM-backed sounds
+
+Retail plays every sound at full length whatever its size. MEM1 cannot hold
+the large ones (tram start/brake, wading, long door moves, NPC speech), so
+they are streamed from disc straight into the ARAM sound store in small
+blocks, never as one file buffer, and the mixer DMAs only the span it is
+about to read. MEM1 keeps a header with the ARAM address.
+=================
+*/
+#define GC_SND_SPAN_BYTES 4096
+#define GC_SND_STREAM_BLOCK 2048
+
+const byte *S_GCWavSpan( const wavdata_t *wav, int first_frame, int *num_frames )
+{
+	static byte span[GC_SND_SPAN_BYTES] __attribute__(( aligned( 32 )));
+	const int frame = Q_max( 1, wav->width * wav->channels );
+	int count = *num_frames;
+
+	if( count * frame > (int)sizeof( span ))
+		count = (int)sizeof( span ) / frame;
+	if( count > 0 )
+		GC_AramCopy( S_GCWavAram( wav ) + (uint32_t)( first_frame * frame ), span,
+			(uint)( count * frame ), false );
+	*num_frames = count;
+	return span;
+}
+
+/* Drop ARAM-backed sounds whose samples a ring write is about to reuse. */
+static void S_GCDropAramBackedIn( uint32_t lo, uint32_t hi )
+{
+	uint i;
+	int ch;
+
+	for( i = 0; i < s_numSfx; i++ )
+	{
+		sfx_t *sfx = &s_knownSfx[i];
+		uint32_t a;
+
+		if( !sfx->cache || !FBitSet( sfx->cache->flags, GC_SOUND_ARAM_BACKED ))
+			continue;
+		a = S_GCWavAram( sfx->cache ) - s_gc_snd_base;
+		if( a >= hi || a + sfx->cache->size <= lo )
+			continue;
+		for( ch = 0; ch < snd.max_channels; ch++ )
+		{
+			if( snd.channels[ch].sfx == sfx )
+				snd.channels[ch].sfx = NULL;
+		}
+		FS_FreeSound( sfx->cache );
+		sfx->cache = NULL;
+	}
+}
+
+static wavdata_t *S_GCAramBackedHeader( const wavdata_t *hdr, uint32_t pcm_aram )
+{
+	wavdata_t *sc = Mem_TryMalloc( host.soundpool, sizeof( wavdata_t ) + sizeof( uint32_t ));
+
+	if( !sc )
+		return NULL;
+	*sc = *hdr;
+	sc->flags = ( hdr->flags & SOUND_LOOPED ) | GC_SOUND_ARAM_BACKED;
+	memcpy( sc->buffer, &pcm_aram, sizeof( pcm_aram ));
+	return sc;
+}
+
+static uint32_t S_GCFileLong( const byte *p )
+{
+	return (uint32_t)p[0] | ( (uint32_t)p[1] << 8 ) | ( (uint32_t)p[2] << 16 ) | ( (uint32_t)p[3] << 24 );
+}
+
+/* Same header rules as Sound_LoadWAV (PCM only), read chunk by chunk. */
+static wavdata_t *S_GCStreamSoundToAram( sfx_t *sfx )
+{
+	const char *name = sfx->name[0] == '*' ? sfx->name + 1 : sfx->name;
+	const gc_snd_stored_t *stored = S_GCSoundStored( sfx );
+	wavdata_t hdr;
+	byte buf[GC_SND_STREAM_BLOCK] __attribute__(( aligned( 32 )));
+	byte chunk[32];
+	fs_offset_t data_ofs = -1, pos;
+	uint32_t data_len = 0, mark_samples = 0, bytes, done;
+	qboolean have_fmt = false, have_cue = false;
+	file_t *f;
+	gc_snd_stored_t *e;
+	int i;
+
+	/* Already in ARAM from an earlier load: only the header comes back. */
+	if( stored && stored->bytes > sizeof( wavdata_t ))
+	{
+		GC_AramCopy( s_gc_snd_base + stored->aram, &hdr, sizeof( hdr ), false );
+		if( hdr.size == stored->bytes - sizeof( wavdata_t ))
+			return S_GCAramBackedHeader( &hdr, s_gc_snd_base + stored->aram + sizeof( wavdata_t ));
+	}
+	if( !s_gc_snd_base )
+		s_gc_snd_base = GC_AramReserveTagged( GC_SND_ARAM_BYTES, "sfx" );
+	if( !s_gc_snd_base )
+		return NULL;
+
+	f = FS_Open( va( "sound/%s", name ), "rb", false );
+	if( !f )
+		return NULL;
+	memset( &hdr, 0, sizeof( hdr ));
+	if( FS_Read( f, chunk, 12 ) != 12 || memcmp( chunk, "RIFF", 4 ) || memcmp( chunk + 8, "WAVE", 4 ))
+		goto fail;
+	for( pos = 12; FS_Seek( f, pos, SEEK_SET ) == 0 && FS_Read( f, chunk, 8 ) == 8; )
+	{
+		const uint32_t len = S_GCFileLong( chunk + 4 );
+		const fs_offset_t body = pos + 8;
+
+		if( !memcmp( chunk, "fmt ", 4 ) && len >= 16 && FS_Read( f, buf, 16 ) == 16 )
+		{
+			if( buf[0] != 1 || buf[1] != 0 ) // PCM only; mp3-in-wav stays on the file path
+				goto fail;
+			hdr.channels = buf[2];
+			hdr.rate = (word)S_GCFileLong( buf + 4 );
+			hdr.width = ( buf[14] | ( buf[15] << 8 )) / 8;
+			have_fmt = true;
+		}
+		else if( !memcmp( chunk, "cue ", 4 ) && len >= 28 && FS_Read( f, buf, 28 ) == 28 )
+		{
+			hdr.loop_start = S_GCFileLong( buf + 24 );
+			SetBits( hdr.flags, SOUND_LOOPED );
+			have_cue = true;
+		}
+		else if( !memcmp( chunk, "LIST", 4 ) && have_cue && !mark_samples && len >= 24
+			&& FS_Read( f, buf, 24 ) == 24 && !memcmp( buf + 20, "mark", 4 ))
+		{
+			mark_samples = hdr.loop_start + S_GCFileLong( buf + 16 );
+		}
+		else if( !memcmp( chunk, "data", 4 ))
+		{
+			data_ofs = body;
+			data_len = len;
+		}
+		pos = body + (( len + 1 ) & ~1u );
+	}
+	if( !have_fmt || data_ofs < 0 || ( hdr.channels != 1 && hdr.channels != 2 )
+		|| ( hdr.width != 1 && hdr.width != 2 ))
+		goto fail;
+
+	hdr.samples = data_len / hdr.width;
+	if( mark_samples )
+	{
+		if( hdr.samples < mark_samples )
+			goto fail;
+		hdr.samples = mark_samples;
+	}
+	hdr.samples /= hdr.channels;
+	if( !hdr.samples )
+		goto fail;
+	if( FBitSet( hdr.flags, SOUND_LOOPED ) && hdr.loop_start >= hdr.samples )
+	{
+		ClearBits( hdr.flags, SOUND_LOOPED );
+		hdr.loop_start = 0;
+	}
+	hdr.type = WF_PCMDATA;
+	hdr.size = hdr.samples * hdr.width * hdr.channels;
+	bytes = (uint32_t)( sizeof( wavdata_t ) + hdr.size );
+	if( bytes > GC_SND_ARAM_BYTES / 2 )
+		goto fail;
+
+	/* Claim ring space the way S_GCSoundStorePut does. */
+	if( s_gc_snd_head + bytes > GC_SND_ARAM_BYTES )
+		s_gc_snd_head = 0;
+	for( i = 0; i < GC_SND_ARAM_ENTRIES; i++ )
+	{
+		e = &s_gc_snd_store[i];
+		if( e->hash && e->aram < s_gc_snd_head + bytes && e->aram + e->bytes > s_gc_snd_head )
+			e->hash = 0;
+	}
+	S_GCDropAramBackedIn( s_gc_snd_head, s_gc_snd_head + bytes );
+
+	FS_Seek( f, data_ofs, SEEK_SET );
+	for( done = 0; done < hdr.size; )
+	{
+		const uint32_t n = Q_min( (uint32_t)sizeof( buf ), hdr.size - done );
+		uint32_t k;
+
+		if( FS_Read( f, buf, n ) != (fs_offset_t)n )
+			goto fail;
+		if( hdr.width == 2 )
+		{
+			for( k = 0; k + 1 < n; k += 2 )
+			{
+				const short v = (short)( buf[k] | ( buf[k + 1] << 8 ));
+				memcpy( buf + k, &v, sizeof( v ));
+			}
+		}
+		else
+		{
+			for( k = 0; k < n; k++ )
+				buf[k] = (byte)((int)buf[k] - 128 );
+		}
+		GC_AramCopy( s_gc_snd_base + s_gc_snd_head + sizeof( wavdata_t ) + done, buf, n, true );
+		done += n;
+	}
+	FS_Close( f );
+	f = NULL;
+	GC_AramCopy( s_gc_snd_base + s_gc_snd_head, &hdr, sizeof( hdr ), true );
+
+	e = &s_gc_snd_store[s_gc_snd_next];
+	s_gc_snd_next = ( s_gc_snd_next + 1 ) % GC_SND_ARAM_ENTRIES;
+	e->hash = S_GCSoundHash( sfx->name );
+	e->aram = s_gc_snd_head;
+	e->bytes = bytes;
+	s_gc_snd_head = ( s_gc_snd_head + bytes + 31u ) & ~31u;
+	Con_Reportf( "Xash3D GameCube: sound %s streamed to ARAM (%s)\n", sfx->name, Q_memprint( hdr.size ));
+	return S_GCAramBackedHeader( &hdr, s_gc_snd_base + e->aram + sizeof( wavdata_t ));
+
+fail:
+	if( f )
+		FS_Close( f );
+	Con_Reportf( S_WARN "Xash3D GameCube: sound %s could not stream to ARAM\n", sfx->name );
+	return NULL;
 }
 #endif
 
@@ -542,6 +764,17 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 	/* Announcer lines are streamed (S_GCStreamVoice), never cached. */
 	if( GC_MenuRunsServer() && !Q_strnicmp( sfx->name, "tride/", 6 ))
 		return NULL;
+	/* Larger than a MEM1 sound may be: play it from ARAM at full length. */
+	if( GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" )
+		&& FS_FileSize( va( "sound/%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name ), false ) > GC_SFX_MAX_FILE + 1024 )
+	{
+		if( (uint32_t)( host.realtime * 10.0 ) < s_gc_sfx_cooldown[sfx - s_knownSfx] )
+			return NULL;
+		sfx->cache = S_GCStreamSoundToAram( sfx );
+		if( !sfx->cache )
+			S_GCSfxCooldown( sfx, GC_SFX_REFUSE_COOLDOWN );
+		return sfx->cache;
+	}
 	if( GC_MapLoadMemoryOpt() && Q_stricmp( sfx->name, "*default" )
 		&& !S_GCAllowRuntimeSoundLoad() )
 	{

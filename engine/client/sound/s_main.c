@@ -132,6 +132,14 @@ int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer,
 	// calculate the size of each sample frame
 	int frame_size = Q_max( 1, source->width * source->channels );
 
+#if XASH_GAMECUBE
+	if( FBitSet( source->flags, GC_SOUND_ARAM_BACKED ))
+	{
+		*output_buffer = S_GCWavSpan( source, start_position, &num_samples );
+		return num_samples;
+	}
+#endif
+
 	// convert sample position to byte offset
 	start_position *= frame_size;
 
@@ -2267,7 +2275,7 @@ qboolean S_Init( void )
 	{
 		Con_Reportf( "Xash3D GameCube: vox init skipped for map-load memopt\n" );
 	}
-	else if( cls.state != ca_active )
+	else if( cls.state != ca_active && !GC_MenuRunsServer())
 	{
 		/* Speech data is not needed by the startup cinematic or main menu. */
 		Con_Reportf( "Xash3D GameCube: vox init deferred until active client\n" );
