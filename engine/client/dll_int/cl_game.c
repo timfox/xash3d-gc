@@ -1184,7 +1184,13 @@ void CL_ClearWorld( void )
 }
 
 #if XASH_GAMECUBE
-#define GC_GCMAP_STATIC_CLIENT_EDICTS 460
+/* BSS client entity table (cl_entity_t is ~1.6 KiB each). Every entity dropped
+ * from here is 1:1 libc heap on MEM1; build with -DGC_GCMAP_CLIENT_EDICTS=N once
+ * the peak entity index of the target maps is known. Must match cl_parse.c. */
+#ifndef GC_GCMAP_CLIENT_EDICTS
+#define GC_GCMAP_CLIENT_EDICTS 460
+#endif
+#define GC_GCMAP_STATIC_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
 static cl_entity_t gc_gcmap_bootstrap_entities[GC_GCMAP_STATIC_CLIENT_EDICTS];
 static entity_state_t gc_gcmap_bootstrap_packet_entities[128];
 remap_info_t *gc_gcmap_bootstrap_remap_info[GC_GCMAP_STATIC_CLIENT_EDICTS + 1];
