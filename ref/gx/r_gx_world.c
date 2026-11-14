@@ -5305,6 +5305,7 @@ static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
 static u16 gc_prop_nmat;
 static u16 gc_prop_mat_w[128], gc_prop_mat_h[128];
+static u8 gc_prop_mat_levels[128];
 static u32 gc_prop_mat_ofs[128];
 static byte gc_prop_texmem[GC_PROP_TEX_SLOTS * GC_PROP_TEX_BYTES] __attribute__(( aligned( 32 )));
 /* 16 slots are static. A large world lends 48 more from the map arena: the
@@ -5513,6 +5514,7 @@ static void R_GXPropLoadTex( void )
 
 		gc_prop_mat_w[i] = (u16)(( e[16] << 8 ) | e[17] );
 		gc_prop_mat_h[i] = (u16)(( e[18] << 8 ) | e[19] );
+		gc_prop_mat_levels[i] = e[20] ? e[20] : 1;
 		gc_prop_mat_ofs[i] = data_ofs + ((u32)e[24] << 24 | (u32)e[25] << 16 | (u32)e[26] << 8 | e[27] );
 	}
 	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
@@ -5566,6 +5568,53 @@ static int R_GXPropBind( u8 mat )
 	{
 		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
 		return 0;
+	}
+	/* With the adopted slot cache a prop texture is a full mip chain at up
+	 * to 128x128 (one mip less for a far instance), shared with the world
+	 * textures. The private slots below hold a single 64x64 level, which
+	 * turned the village atlas into mush. */
+	if( r_gx_cmpr_nslots > 8 )
+	{
+		const unsigned cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
+		const int levels_all = gc_prop_mat_levels[mat];
+		unsigned remain = 0, skip_b = 0;
+		int mi, shift = 0, slot = -1;
+		byte *data;
+		GXTexObj obj;
+
+		for( mi = 0; mi < levels_all; mi++ )
+			remain += R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> mi ),
+				(u16)Q_max( 1, gc_prop_mat_h[mat] >> mi ));
+		while( remain > cap && shift + 1 < levels_all )
+		{
+			const unsigned lb = R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> shift ),
+				(u16)Q_max( 1, gc_prop_mat_h[mat] >> shift ));
+
+			skip_b += lb;
+			remain -= lb;
+			shift++;
+		}
+		if( remain > 0 && remain <= cap && !( remain & 31u ))
+		{
+			const int lv = levels_all - shift;
+
+			data = R_GXCmprSlotFor( gc_prop_tex_aram + gc_prop_mat_ofs[mat], skip_b, remain, &slot );
+			GX_InitTexObj( &obj, data, (u16)Q_max( 8, gc_prop_mat_w[mat] >> shift ),
+				(u16)Q_max( 8, gc_prop_mat_h[mat] >> shift ), GX_TF_CMPR,
+				GX_REPEAT, GX_REPEAT, lv > 1 ? GX_TRUE : GX_FALSE );
+			if( lv > 1 )
+				GX_InitTexObjLOD( &obj, GX_LIN_MIP_LIN, GX_LINEAR, 0.0f, (f32)( lv - 1 ), 0.0f,
+					GX_FALSE, GX_TRUE, GX_ANISO_1 );
+			else
+				GX_InitTexObjFilterMode( &obj, GX_LINEAR, GX_LINEAR );
+			GX_LoadTexObj( &obj, GX_TEXMAP0 );
+			if( slot >= 0 )
+				r_gx_cmpr_slot[slot].fence = GC_GXFenceNext();
+			r_gx_cmpr_cur_slot = slot;
+			r_gx_bound_texnum = 0;
+			r_gx_bound_fmt = 0;
+			return 1;
+		}
 	}
 	if( !gc_prop_texmem_tried && GC_MapLoadBufferTailPeak() > 0 )
 	{
@@ -5630,12 +5679,18 @@ static void R_GXPropSetLitAt( const float *org )
 	{
 		int lr = rgb[0], lg = rgb[1], lb = rgb[2];
 
-		if( lr < 160 ) lr = 160;
-		if( lg < 160 ) lg = 160;
-		if( lb < 160 ) lb = 160;
-		r = ( ar * lr ) / 128;
-		g = ( ag * lg ) / 128;
-		b = ( ab * lb ) / 128;
+		/* The world light texel is gamma(light) / 2, so 128 is identity,
+		 * the same scale the world's x2 modulate uses. The old floor of
+		 * 160 lit every prop as if in full sun; a boat under the cliff now
+		 * darkens with the sand it sits on. A small floor keeps a prop in
+		 * deep shade from going to a silhouette. */
+		if( lr < 56 ) lr = 56;
+		if( lg < 56 ) lg = 56;
+		if( lb < 56 ) lb = 56;
+		(void)ar; (void)ag; (void)ab;
+		r = lr * 2;
+		g = lg * 2;
+		b = lb * 2;
 		if( r > 255 ) r = 255;
 		if( g > 255 ) g = 255;
 		if( b > 255 ) b = 255;
@@ -5695,6 +5750,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 				gc_prop_far_size / 1024u );
 		}
 	}
+	R_GXCmprSetFar( far_lod );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
 	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
@@ -5730,6 +5786,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		ofs += bytes;
 		bytes = next;
 	}
+	R_GXCmprSetFar( false );
 	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
 	return drawn;
 }
@@ -5961,6 +6018,7 @@ static qboolean R_GXPropOutside( const gc_prop_inst_t *in )
  * far side. Both windings stay: the tower sheets are visible from either side. */
 void R_GXPropDrawHorizon( const float *org )
 {
+	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	static u16 order[GC_PROP_MAX_INST];
 	static float key[GC_PROP_MAX_INST];
 	int i, n = 0, ninst = 0, drawn = 0, a, b;
@@ -6004,7 +6062,11 @@ void R_GXPropDrawHorizon( const float *org )
 		/* The near pass draws anything inside the reach. */
 		if( R_GXPropD2( org, in->mins, in->maxs ) <= GC_PROP_REACH2 )
 			continue;
-		if( R_GXWorldDLActive() && ( R_GXPropIsTowerish( in )
+		/* Size filters from the CapFaces era, when wide props doubled baked
+		 * world plates. The world DL is BSP only, so they dropped real
+		 * props: the docks, the village clusters on the hill, the wreck,
+		 * the dry-docked boat, monastery01 (37 instances). Opt-in now. */
+		if( prop_plate_cull && R_GXWorldDLActive() && ( R_GXPropIsTowerish( in )
 			|| R_GXPropIsWorldPlate( in )))
 			continue;
 		mins[0] = in->mins[0]; mins[1] = in->mins[1]; mins[2] = in->mins[2];
@@ -6050,6 +6112,7 @@ void R_GXPropDrawHorizon( const float *org )
 
 static void R_GXPropDraw( const float *org )
 {
+	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	int i, drawn = 0, near = 0;
 
 	if( gc_prop_state == 0 )
@@ -6088,7 +6151,11 @@ static void R_GXPropDraw( const float *org )
 			continue;
 		if( R_GXPropD2( org, in->mins, in->maxs ) > GC_PROP_REACH2 )
 			continue;
-		if( R_GXWorldDLActive() && ( R_GXPropIsTowerish( in )
+		/* Size filters from the CapFaces era, when wide props doubled baked
+		 * world plates. The world DL is BSP only, so they dropped real
+		 * props: the docks, the village clusters on the hill, the wreck,
+		 * the dry-docked boat, monastery01 (37 instances). Opt-in now. */
+		if( prop_plate_cull && R_GXWorldDLActive() && ( R_GXPropIsTowerish( in )
 			|| R_GXPropIsWorldPlate( in )))
 			continue;
 		if( R_GXPropOutside( in ))
@@ -6212,11 +6279,13 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 		rb = 144 + (int)( 45.0f * sun );
 		(void)cheap_start;
 		(void)cheap_end;
-		t = ( dist - 150.0f ) / 600.0f;
+		t = ( dist - 80.0f ) / 420.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
-		/* Body: shallows at the feet stay see-through, then the murk closes. */
-		ab = 110 + (int)( 125.0f * t );
+		/* Body: only the shallows at the feet stay see-through. Retail's
+		 * harbor is the fogcolor almost solid a few metres out; at 43 %
+		 * the pale seabed showed through and the whole cove read grey. */
+		ab = 140 + (int)( 105.0f * t );
 		r = (int)( (float)r + ( (float)rr - (float)r ) * f );
 		g = (int)( (float)g + ( (float)rg - (float)g ) * f );
 		b = (int)( (float)b + ( (float)rb - (float)b ) * f );
