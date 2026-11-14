@@ -4475,6 +4475,10 @@ def main() -> None:
 				if os.environ.get("XASH_GC_PROBE_AUTOHOP") == "1":
 					# Walk out of the tram on c0a0e into c1a0 (intro proof).
 					menu_lines.append("autohop")
+				if os.environ.get("XASH_GC_PROBE_STARTMAP"):
+					# Load test of a later chapter on the retail route: New Game
+					# starts this map instead of c0a0 (not a playthrough).
+					menu_lines.append("startmap " + os.environ["XASH_GC_PROBE_STARTMAP"])
 				if os.environ.get("XASH_GC_PROBE_AUTOCAMPAIGN"):
 					# Chapter sweep on the retail menu route: each map runs this
 					# many seconds, then the player is moved into the next
