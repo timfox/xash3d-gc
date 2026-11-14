@@ -5800,6 +5800,8 @@ static byte *R_GXPropCacheGet( unsigned model )
 /* Set per instance: a prop under 30 % of the view takes its texture from the
  * small-mip pool, leaving the full-size slots to what is close. */
 static qboolean gc_prop_tex_far;
+/* Rock glint colour for this frame; alpha 0 = off. */
+static GXColor gc_prop_glint_k;
 /* Flythrough profile of the prop passes: ticks and counts per stage. */
 static u64 gc_prop_pf[4];
 static u32 gc_prop_pf_cnt[4];
@@ -5919,6 +5921,50 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			/* Resident piece: a display list the GP reads in place. No
 			 * per-vertex CPU work at all for the horizon pass. */
 			GX_CallDispList( (void *)( hdr + 32 ), body );
+			/* Wet rock (piece flag 1): a second, additive draw that keeps
+			 * only the bright flecks and veins of the rock texture,
+			 * ( texel - 0.5 ) x 4, tinted with cool sky light. Retail gets
+			 * these from $envmap through the normal map; the texture's own
+			 * highlights are the cheapest stand-in. Stronger when looking
+			 * toward the sun. Resident pieces only: the list is in place. */
+			if(( hdr[1] & 1 ) && !additive && !far_lod && gc_prop_glint_k.a )
+			{
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+				GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+				/* The rock textures are dark (median 63, top 1 % at 100 of
+				 * 255), so: x2, then ( x - 0.5 ) x 2. Texels above about
+				 * 64 pass; the median lands on zero. */
+				GX_SetNumTevStages( 3 );
+				GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
+				/* Green as luminance: per-channel thresholds turned the glint
+				 * into green and yellow blotches on the mossy rock texture. */
+				GX_SetTevSwapModeTable( GX_TEV_SWAP2, GX_CH_GREEN, GX_CH_GREEN, GX_CH_GREEN, GX_CH_ALPHA );
+				GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP2 );
+				GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+				GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+				GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+				GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+				GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+				GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+				GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				GX_SetTevOrder( GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+				GX_SetTevKColor( GX_KCOLOR1, gc_prop_glint_k );
+				GX_SetTevKColorSel( GX_TEVSTAGE2, GX_TEV_KCSEL_K1 );
+				GX_SetTevColorIn( GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO );
+				GX_SetTevColorOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				GX_SetTevAlphaIn( GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+				GX_SetTevAlphaOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				GX_CallDispList( (void *)( hdr + 32 ), body );
+				/* Back to texture x light for the next piece. */
+				GX_SetNumTevStages( 1 );
+				GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+				GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+				GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
+				GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+				GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+				GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+			}
 		}
 		else
 		{
@@ -6200,6 +6246,19 @@ void R_GXPropDrawHorizon( const float *org )
 
 	gc_prop_cache_frame++;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
+	{
+		/* Glints read strongest with the low sun ahead (bearing yaw 137). */
+		vec3_t fw, rt, upv;
+		float toward, kf;
+
+		AngleVectors( RI.rvp.viewangles, fw, rt, upv );
+		toward = fw[0] * -0.731f + fw[1] * 0.682f;
+		kf = 0.45f + 0.55f * ( toward > 0.0f ? toward : 0.0f );
+		gc_prop_glint_k.r = (u8)( 62.0f * kf );
+		gc_prop_glint_k.g = (u8)( 70.0f * kf );
+		gc_prop_glint_k.b = (u8)( 78.0f * kf );
+		gc_prop_glint_k.a = gEngfuncs.Sys_CheckParm( "-gcnorockglint" ) ? 0 : 255;
+	}
 	static float key[GC_PROP_MAX_INST];
 	int i, n = 0, ninst = 0, drawn = 0, a, b;
 	u16 tmp;
