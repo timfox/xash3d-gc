@@ -6977,6 +6977,96 @@ static void R_GXSmokeDraw( void )
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 }
 
+/* Ropes and cables (Source move_rope / keyframe_rope, media/rp_d2_lostcoast.gcr):
+ * a baked 7-point sagging strip per span, drawn as GX lines. */
+#define GC_ROPE_MAX	64
+
+typedef struct
+{
+	s16	pts[7][3];
+	u8	width, pad;
+} gc_rope_t;
+
+static gc_rope_t gc_rope[GC_ROPE_MAX];
+static int gc_rope_n = -1;
+
+static void R_GXRopeDraw( void )
+{
+	const float *eye = RI.rvp.vieworigin;
+	Mtx mv;
+	int i, k, last_w = -1;
+
+	if( gc_rope_n < 0 )
+	{
+		file_t *f = gEngfuncs.fsapi->Open( "media/rp_d2_lostcoast.gcr", "rb", false );
+		u32 hdr[2];
+
+		gc_rope_n = 0;
+		if( f )
+		{
+			if( gEngfuncs.fsapi->Read( f, hdr, 8 ) == 8 && hdr[0] == 0x47437270u && ( hdr[1] >> 16 ) == 1 )
+			{
+				int n = (int)( hdr[1] & 0xffffu );
+
+				if( n > GC_ROPE_MAX )
+					n = GC_ROPE_MAX;
+				if( gEngfuncs.fsapi->Read( f, gc_rope, n * 44 ) == (fs_offset_t)( n * 44 ))
+					gc_rope_n = n;
+			}
+			gEngfuncs.fsapi->Close( f );
+		}
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: ropes=%d\n", gc_rope_n );
+	}
+	if( gc_rope_n <= 0 )
+		return;
+	R_GXBuildWorldModelview( mv );
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetNumTexGens( 0 );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
+	GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	for( i = 0; i < gc_rope_n; i++ )
+	{
+		const gc_rope_t *r = &gc_rope[i];
+		const float dx = (float)r->pts[3][0] - eye[0];
+		const float dy = (float)r->pts[3][1] - eye[1];
+		const float dz = (float)r->pts[3][2] - eye[2];
+		const float d2 = dx * dx + dy * dy + dz * dz;
+		int w;
+
+		if( d2 > 4500.0f * 4500.0f )
+			continue;
+		/* Line width is in sixths of a pixel. A cable is a couple of
+		 * pixels up close and thins with distance. */
+		w = (int)( (float)r->width * 9000.0f / ( sqrtf( d2 ) + 300.0f ));
+		if( w < 6 ) w = 6;
+		if( w > 30 ) w = 30;
+		if( w != last_w )
+		{
+			GX_SetLineWidth( (u8)w, GX_TO_ZERO );
+			last_w = w;
+		}
+		GX_Begin( GX_LINESTRIP, GX_VTXFMT0, 7 );
+		for( k = 0; k < 7; k++ )
+		{
+			GX_Position3s16( r->pts[k][0], r->pts[k][1], r->pts[k][2] );
+			GX_Color1u32( 0x1c1a18ffu );
+		}
+		GX_End();
+	}
+}
+
 /* Underwater volume fog after props so the veil is not punched by hulls. */
 static void R_GXDrawUnderwaterFog( void )
 {
@@ -7133,6 +7223,8 @@ static int R_GXDrawWorldDLFrame( void )
 	}
 	R_GXTrace( "water" );
 	R_GXDrawPackedWater();
+	R_GXTrace( "ropes" );
+	R_GXRopeDraw();
 	R_GXTrace( "smoke" );
 	R_GXSmokeDraw();
 	R_GXTrace( "underwater" );
