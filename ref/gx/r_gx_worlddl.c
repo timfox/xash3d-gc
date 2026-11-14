@@ -94,6 +94,9 @@ extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
+extern size_t Mod_GCWorldArraySpillFree( void );
+extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
@@ -715,8 +718,32 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				tex ? "adopted" : "carve FAILED", nslots, far_n, (unsigned)hw, (unsigned)cap, (unsigned)room );
 		}
 		else
+		{
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots skipped: budget %u < 8 slots, hw %u cap %u room %u\n",
 				(unsigned)budget, (unsigned)hw, (unsigned)cap, (unsigned)room );
+			/* Experimental (-gcslotsspill): the arena is full, so take the slots
+			 * from the world-array spill, leaving 48 KiB for props. */
+			if( gEngfuncs.Sys_CheckParm( "-gcslotsspill" ))
+			{
+				const size_t sfree = Mod_GCWorldArraySpillFree();
+				const size_t keep_props = 48u * 1024u;
+				const size_t sb = sfree > keep_props ? sfree - keep_props : 0;
+				const int sn = (int)Q_min( sb / slot_bytes, 64u );
+
+				if( sn >= 8 )
+				{
+					byte *st = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)sn * slot_bytes, "cmpr-slots" );
+
+					if( st )
+					{
+						Mod_GCWorldArraySpillPinBase( st, (size_t)sn * slot_bytes );
+						R_GXCmprBounceAdopt( st, sn, slot_bytes, 0, far_bytes );
+					}
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s from spill: %d near (spill free %u)\n",
+						st ? "adopted" : "carve FAILED", sn, (unsigned)sfree );
+				}
+			}
+		}
 	}
 	if( !gc_wd_cache )
 	{
