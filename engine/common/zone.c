@@ -17,6 +17,7 @@ GNU General Public License for more details.
 */
 
 #include "common.h"
+#include <malloc.h>
 #if XASH_GAMECUBE
 #include "gamecube/mem_gamecube.h"
 void R_GCTrimTextureMips( void );
@@ -1016,7 +1017,17 @@ static poolhandle_t Mem_InitPool( mempool_t *pool, const char *name, unsigned in
 		/* -gcmemwatch checkpoints bracket a boot-time Console Commands header
 		 * corruption seen between the arena log and the first FS realloc. */
 		GC_MemWatch( "fs pool: before arena malloc" );
+		{	/* local test: where does the 192K block come from? */
+			struct mallinfo mi0 = mallinfo();
+			Con_Reportf( "MALLINFO before arena: arena=%d fordblks=%d uordblks=%d keepcost=%d\n", mi0.arena, mi0.fordblks, mi0.uordblks, mi0.keepcost );
+		}
 		pool->gc_arena = Q_malloc( GC_FS_ARENA_SIZE );
+		{
+			struct mallinfo mi1 = mallinfo();
+			Con_Reportf( "MALLINFO after arena: ptr=%p end=%p arena=%d fordblks=%d uordblks=%d ref_cmdchain=0x815e78c0 inside=%d\n",
+				pool->gc_arena, (byte *)pool->gc_arena + GC_FS_ARENA_SIZE, mi1.arena, mi1.fordblks, mi1.uordblks,
+				pool->gc_arena && (uintptr_t)0x815e78c0 >= (uintptr_t)pool->gc_arena && (uintptr_t)0x815e78c0 < (uintptr_t)pool->gc_arena + GC_FS_ARENA_SIZE );
+		}
 		GC_MemWatch( "fs pool: after arena malloc" );
 		if( pool->gc_arena )
 		{
