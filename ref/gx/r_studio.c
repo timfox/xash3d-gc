@@ -3690,6 +3690,13 @@ void R_DrawViewModel( void )
 		&& ( GC_UseLowResWorldProbe() || GC_UseGxWorldDraw() ));
 #endif
 
+#if XASH_GAMECUBE
+	/* The video stress test flythrough has no weapon in hand. Its skin is
+	 * also not resident on this route, so it drew as a white hook. */
+	if( gEngfuncs.Sys_CheckParm( "-gcvst" ))
+		return;
+#endif
+
 	R_GatherPlayerLight( view );
 
 #if XASH_GAMECUBE

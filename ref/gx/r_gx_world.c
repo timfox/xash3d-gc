@@ -5870,6 +5870,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		const u8 *hdr;
 		const u16 *p;
 		u32 nverts, body, next, n;
+		qboolean additive;
 
 		if( resident )
 		{
@@ -5899,6 +5900,19 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			R_GXPropBind( (u8)( hdr[0] & 0x7f ));
 			gc_prop_pf[1] += gettime() - t0;
 			gc_prop_pf_cnt[1]++;
+		}
+		/* Bit 7 of the material byte: Source additive (the stained-glass
+		 * light shafts, the fisherman's glint). Drawn opaque they were
+		 * solid white sheets, and edge-on a white hook hanging in the
+		 * air. Add them faintly over the scene, without writing depth. */
+		additive = ( hdr[0] & 0x80 ) != 0;
+		if( additive )
+		{
+			const GXColor dim = { 70, 66, 54, 255 };
+
+			GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+			GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+			GX_SetChanMatColor( GX_COLOR0A0, dim );
 		}
 		if( hdr != gc_prop_bounce )
 		{
@@ -5932,6 +5946,12 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			GX_End();
 			gc_prop_pf[2] += gettime() - t0;
 			gc_prop_pf_cnt[2] += nverts / 3u;
+		}
+		if( additive )
+		{
+			GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+			GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+			GX_SetChanMatColor( GX_COLOR0A0, col );
 		}
 		drawn += (int)( nverts / 3u );
 		ofs += bytes;

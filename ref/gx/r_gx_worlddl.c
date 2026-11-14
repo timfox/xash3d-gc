@@ -1119,6 +1119,39 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 
 static float gc_wd_sun_view[3];
 
+/* 32x32 I8 soft blob for projected glare (sun on wet sand): (1 - r^2)^2. */
+static byte gc_wd_glare[32 * 32] __attribute__(( aligned( 32 )));
+static GXTexObj gc_wd_glare_obj;
+static qboolean gc_wd_glare_ready;
+
+static void R_GXWorldDLGlareTex( void )
+{
+	if( !gc_wd_glare_ready )
+	{
+		int x, y;
+
+		for( y = 0; y < 32; y++ )
+		{
+			for( x = 0; x < 32; x++ )
+			{
+				const float fx = ( (float)x - 15.5f ) / 15.5f;
+				const float fy = ( (float)y - 15.5f ) / 15.5f;
+				float d = 1.0f - ( fx * fx + fy * fy );
+				const int tile = ( y >> 2 ) * 4 + ( x >> 3 );
+
+				if( d < 0.0f )
+					d = 0.0f;
+				gc_wd_glare[tile * 32 + ( y & 3 ) * 8 + ( x & 7 )] = (byte)( d * d * 255.0f );
+			}
+		}
+		DCFlushRange( gc_wd_glare, sizeof( gc_wd_glare ));
+		GX_InitTexObj( &gc_wd_glare_obj, gc_wd_glare, 32, 32, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wd_glare_obj, GX_LINEAR, GX_LINEAR );
+		gc_wd_glare_ready = true;
+	}
+	GX_LoadTexObj( &gc_wd_glare_obj, GX_TEXMAP6 );
+}
+
 /* Lost Coast env_sun, same direction as the sky disc. View space, for the
  * specular light. The normal matrix is the view rotation: the bake stores
  * world-space normals. */
@@ -1226,6 +1259,75 @@ static void R_GXWorldDLSpecOn( u16 strength, int indtex, int tev_id )
 	}
 	/* Retail wet sand: sun disc looked up through the normal map, then
 	 * gated by the normal-map alpha. N·L keeps the broad warm lift. */
+	/* Wet sand (retail $envmap + $normalmapalphaenvmapmask): the sky's glare
+	 * off a wet surface. The hardware specular term (N.H to a power, per
+	 * vertex, infinite viewer) is bright when the camera faces the low sun
+	 * and fades as it turns away; the displacement normals break it up
+	 * across the beach and the sand's own texture gates it per texel, so
+	 * pebbles glint and the gaps stay dull. The previous recipe multiplied
+	 * by a sun-disc texture sampled at the sand's UVs, which is black almost
+	 * everywhere: no shine reached the screen. -gcsandnl keeps that path. */
+	else if( indtex && env_mask < 0 && !gEngfuncs.Sys_CheckParm( "-gcsandnl" ))
+	{
+		/* Sun glare on the wet beach, for a local viewer. On a level
+		 * surface the sun's mirror image sits where the eye ray reflects
+		 * up to it: eye height / tan(elevation) ahead along the sun's
+		 * bearing, so it slides with the camera and stretches toward it.
+		 * GX specular assumes an infinite viewer (one half-angle for the
+		 * whole beach: all or nothing), so the lobe is a soft blob texture
+		 * projected from world XY around that point instead, gated per
+		 * texel by the sand texture. */
+		const float *eye = RI.rvp.vieworigin;
+		const float sx = -0.731f, sy = 0.682f;	/* env_sun bearing, yaw 137 */
+		float h = eye[2] + 48.0f;		/* above the beach plane */
+		float d, lu, lv, cx, cy;
+		Mtx tm;
+		GXColor k;
+
+		if( h < 24.0f )
+			h = 24.0f;
+		d = h * 5.67f;				/* 1 / tan( 10 degrees ) */
+		lu = d * 1.5f + 500.0f;
+		lv = h * 1.6f + 200.0f;
+		cx = eye[0] + sx * d * 0.75f;
+		cy = eye[1] + sy * d * 0.75f;
+		tm[0][0] = sx / lu;  tm[0][1] = sy / lu;  tm[0][2] = 0.0f;
+		tm[0][3] = 0.5f - ( cx * sx + cy * sy ) / lu;
+		tm[1][0] = -sy / lv; tm[1][1] = sx / lv;  tm[1][2] = 0.0f;
+		tm[1][3] = 0.5f - ( cx * -sy + cy * sx ) / lv;
+		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 0.0f; tm[2][3] = 1.0f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX1, GX_MTX2x4 );
+		R_GXWorldDLGlareTex();
+		GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
+			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+		/* Sky glare is near white (retail's wet patches read 153,151,138);
+		 * the warm N.L material colour turned the beach yellow. */
+		k.r = (u8)( s * 118 / 200 );
+		k.g = (u8)( s * 116 / 200 );
+		k.b = (u8)( s * 104 / 200 );
+		k.a = 255;
+		GX_SetTevKColor( GX_KCOLOR0, k );
+		GX_SetNumIndStages( 0 );
+		GX_SetNumTexGens( 2 );
+		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+		GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX1 );
+		GX_SetNumTevStages( 2 );
+		GX_SetTevDirect( GX_TEVSTAGE0 );
+		GX_SetTevDirect( GX_TEVSTAGE1 );
+		/* Stage 0: the sand layer the batch just drew (TEXMAP0) x sun colour. */
+		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
+		GX_SetTevKColorSel( GX_TEVSTAGE0, GX_TEV_KCSEL_K0 );
+		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST );
+		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		/* Stage 1: x the projected glare blob. */
+		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD1, GX_TEXMAP6, GX_COLORNULL );
+		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	}
 	else if( indtex && env_mask < 0 && gc_nrm_ready && gc_sun_ready && gc_spec_ready && s >= 96 )
 	{
 		f32 imtx[2][3];
