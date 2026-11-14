@@ -676,39 +676,47 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		const size_t keep = 352u * 1024u;	/* water table, prop slots, entity overflow */
+		const size_t keep_tight = 64u * 1024u;	/* floor-limited arena: carves left above the slots */
 		const unsigned slot_bytes = 10944u, far_bytes = 2752u;
+		const size_t room = cap > hw ? cap - hw : 0;
+		size_t budget = 0;
+		int nslots, far_n = 0;
+		byte *tex;
 
-		if( cap > hw + keep + 192u * 1024u )
+		if( room > keep + 192u * 1024u )
 		{
-			size_t avail = cap - hw - keep;
-			size_t budget = avail / 2u;	/* leave half for later carves */
-			int nslots, far_n = 0;
-			byte *tex;
-
+			budget = ( room - keep ) / 2u;	/* leave half for later carves */
 			if( budget > 1190u * 1024u )
 				budget = 1190u * 1024u;
-			if( budget >= 760u * 1024u )
-			{
-				nslots = 64;
-				far_n = (int)(( budget - (size_t)nslots * slot_bytes ) / far_bytes );
-				if( far_n > 176 )
-					far_n = 176;
-			}
-			else
-			{
-				nslots = (int)( budget / slot_bytes );
-				if( nslots > 64 )
-					nslots = 64;
-			}
-			if( nslots >= 8 )
-			{
-				GC_RetainMapLoadBufferBorrow();
-				tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
-					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
-				if( tex )
-					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
-			}
 		}
+		else if( room > keep_tight )
+			budget = room - keep_tight;	/* live BSP scratch leaves only a tail */
+		if( budget >= 760u * 1024u )
+		{
+			nslots = 64;
+			far_n = (int)(( budget - (size_t)nslots * slot_bytes ) / far_bytes );
+			if( far_n > 176 )
+				far_n = 176;
+		}
+		else
+		{
+			nslots = (int)( budget / slot_bytes );
+			if( nslots > 64 )
+				nslots = 64;
+		}
+		if( nslots >= 8 )
+		{
+			GC_RetainMapLoadBufferBorrow();
+			tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
+				(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+			if( tex )
+				R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s: %d near + %d far, floor/hw %u cap %u room %u\n",
+				tex ? "adopted" : "carve FAILED", nslots, far_n, (unsigned)hw, (unsigned)cap, (unsigned)room );
+		}
+		else
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots skipped: budget %u < 8 slots, hw %u cap %u room %u\n",
+				(unsigned)budget, (unsigned)hw, (unsigned)cap, (unsigned)room );
 	}
 	if( !gc_wd_cache )
 	{
