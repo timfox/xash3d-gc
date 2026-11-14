@@ -917,14 +917,6 @@ static float R_GXWorldDLChunkD2( u32 i )
 	return d;
 }
 
-static int R_GXWorldDLChunkCmp( const void *pa, const void *pb )
-{
-	const float da = R_GXWorldDLChunkD2( *(const u16 *)pa );
-	const float db = R_GXWorldDLChunkD2( *(const u16 *)pb );
-
-	return ( da > db ) - ( da < db );
-}
-
 /*
  * PVS test for an entity box. The world DL now streams its BSP nodes and planes
  * from ARAM instead of keeping them resident, so walking the tree per entity
@@ -1790,7 +1782,41 @@ int R_GXWorldDLDraw( void )
 		/* Spend the cache on the ground in front of the camera. Index order
 		 * filled it with whatever chunk id came first and left the shore out. */
 		gc_wd_sort_org = org;
-		WD_PF( 0, qsort( order, (size_t)norder, sizeof( order[0] ), R_GXWorldDLChunkCmp ));
+		/* Key each chunk once (the distance has a sqrt for tall chunks and
+		 * qsort asked for it ~10 times per chunk: 2.5 to 4.8 ms a frame in
+		 * the harbor), then shell-sort the packed keys. Distances are
+		 * positive, so their float bits order like integers. */
+		{
+			static u64 keys[GC_WD_MAX_CHUNKS];
+			u64 pf_t = gc_wd_pf_on > 0 ? gettime() : 0;
+			int gap, a, bq;
+
+			for( a = 0; a < norder; a++ )
+			{
+				union { float f; u32 u; } d;
+
+				d.f = R_GXWorldDLChunkD2( order[a] );
+				keys[a] = ( (u64)d.u << 16 ) | order[a];
+			}
+			for( gap = norder / 2; gap > 0; gap = gap == 2 ? 1 : ( gap * 5 ) / 11 )
+			{
+				for( a = gap; a < norder; a++ )
+				{
+					const u64 kv = keys[a];
+
+					for( bq = a; bq >= gap && keys[bq - gap] > kv; bq -= gap )
+						keys[bq] = keys[bq - gap];
+					keys[bq] = kv;
+				}
+			}
+			for( a = 0; a < norder; a++ )
+				order[a] = (u16)( keys[a] & 0xffffu );
+			if( gc_wd_pf_on > 0 )
+			{
+				gc_wd_pf[0] += gettime() - pf_t;
+				gc_wd_pf_cnt[0]++;
+			}
+		}
 		/* Shore first so cliffs/boats lock cache slots; towers take the
 		 * reserved leftover (+ Force). Towers-first starved the cliff plates
 		 * when IsTower matched ~12 harbor chunks (gaps on the right wall). */
