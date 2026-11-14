@@ -6360,6 +6360,11 @@ static void R_GXPropDraw( const float *org )
  *  - above water: Fresnel + $cheapwater*distance opacity, mild horizon haze
  *  - underwater: dense $fogstart..$fogend volume fog (retail 1..100)
  * Flipper HW fog is not re-armed here (VAT hang). */
+/* With the depth map: the tint's alpha is the body only and this carries the
+ * reflection's share, emitted as the second vertex colour. */
+static qboolean gc_water_split;
+static int gc_water_refl_a;
+
 static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 {
 	byte fog_rgb[3];
@@ -6372,6 +6377,8 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	/* env_fog_controller on d2_lostcoast — far-horizon lift only */
 	const int er = 151, eg = 166, eb = 181;
 	const qboolean underwater = ( eye_dot < 0.0f );
+
+	gc_water_refl_a = 0;
 
 	/* Material parameters are per face; this runs per vertex (up to 96 for
 	 * a subdivided near sheet). Keep the last face's values. */
@@ -6470,6 +6477,12 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 		g = (int)( (float)g + ( (float)rg - (float)g ) * f );
 		b = (int)( (float)b + ( (float)rb - (float)b ) * f );
 		a = ab + (int)( ( 240.0f - (float)ab ) * f );
+		/* Split for the depth map: the reflection keeps its strength in
+		 * the shallows (a wet mirror over sand), only the murky body
+		 * thins with depth. body + reflection = the alpha above. */
+		gc_water_refl_a = (int)( 240.0f * f );
+		if( gc_water_split )
+			a -= gc_water_refl_a;
 		/* Far horizon melts into env fog. */
 		t = ( dist - 4000.0f ) / 12000.0f;
 		if( t < 0.0f ) t = 0.0f;
@@ -6484,6 +6497,60 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	if( b > 255 ) b = 255;
 	if( a > 255 ) a = 255;
 	return ( (u32)r << 24 ) | ( (u32)g << 16 ) | ( (u32)b << 8 ) | (u32)a;
+}
+
+/* Seabed depth under the harbor water plane (media/dp_d2_lostcoast.gcx,
+ * I4, baked top-down). The water body multiplies its alpha by it, so the
+ * sheet thins out over the shallows and vanishes at the shoreline instead of
+ * ending on a polygon edge. 16 KB from the map arena. */
+static byte *gc_wdepth_tex;
+static GXTexObj gc_wdepth_obj;
+static int gc_wdepth_state;	/* 0 untried, 1 ready, -1 absent */
+static float gc_wdepth_x0, gc_wdepth_y0, gc_wdepth_w, gc_wdepth_h;
+
+static qboolean R_GXWaterDepthReady( void )
+{
+	file_t *f;
+	u32 hdr[8];
+	u32 w, h, bytes;
+
+	if( gc_wdepth_state )
+		return gc_wdepth_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;	/* the arena is not open yet: ask again later */
+	gc_wdepth_state = -1;
+	f = gEngfuncs.fsapi->Open( "media/dp_d2_lostcoast.gcx", "rb", false );
+	if( !f )
+		return false;
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x47436470u )
+	{
+		float cell;
+
+		w = hdr[1] >> 16;
+		h = hdr[1] & 0xffffu;
+		bytes = w * h / 2u;
+		memcpy( &gc_wdepth_x0, &hdr[2], 4 );
+		memcpy( &gc_wdepth_y0, &hdr[3], 4 );
+		memcpy( &cell, &hdr[4], 4 );
+		if( w >= 8 && h >= 8 && !( w & 7u ) && !( h & 7u ) && bytes <= 64u * 1024u && cell > 0.0f )
+		{
+			gc_wdepth_tex = (byte *)GC_MapLoadBufferTailAlloc(
+				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes );
+			if( gc_wdepth_tex && gEngfuncs.fsapi->Read( f, gc_wdepth_tex, bytes ) == (fs_offset_t)bytes )
+			{
+				DCFlushRange( gc_wdepth_tex, bytes );
+				GX_InitTexObj( &gc_wdepth_obj, gc_wdepth_tex, (u16)w, (u16)h, GX_TF_I4,
+					GX_CLAMP, GX_CLAMP, GX_FALSE );
+				GX_InitTexObjFilterMode( &gc_wdepth_obj, GX_LINEAR, GX_LINEAR );
+				gc_wdepth_w = (float)w * cell;
+				gc_wdepth_h = (float)h * cell;
+				gc_wdepth_state = 1;
+			}
+		}
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: water depth map %s\n", gc_wdepth_state > 0 ? "ready" : "absent" );
+	return gc_wdepth_state > 0;
 }
 
 static void R_GXDrawPackedWater( void )
@@ -6513,11 +6580,59 @@ static void R_GXDrawPackedWater( void )
 	GX_SetNumTevStages( 1 );
 	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
 	GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
+	if( R_GXWaterDepthReady())
+	{
+		Mtx tm;
+
+		/* World XY -> depth map UV, straight from the vertex position. */
+		tm[0][0] = 1.0f / gc_wdepth_w; tm[0][1] = 0.0f; tm[0][2] = 0.0f;
+		tm[0][3] = -gc_wdepth_x0 / gc_wdepth_w;
+		tm[1][0] = 0.0f; tm[1][1] = 1.0f / gc_wdepth_h; tm[1][2] = 0.0f;
+		tm[1][3] = -gc_wdepth_y0 / gc_wdepth_h;
+		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 0.0f; tm[2][3] = 1.0f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX2, GX_MTX2x4 );
+		GX_LoadTexObj( &gc_wdepth_obj, GX_TEXMAP3 );
+		GX_SetNumTexGens( 1 );
+		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX2 );
+		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP3, GX_COLOR0A0 );
+		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC );
+		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		/* alpha = film + depth * ( vertex alpha - film ). The body thins
+		 * with depth, but a wet film stays: retail's shallows are a thin
+		 * mirror over the sand, not bare sand. */
+		{
+			const GXColor film = { 0, 0, 0, 60 };
+
+			GX_SetTevKColor( GX_KCOLOR0, film );
+			GX_SetTevKAlphaSel( GX_TEVSTAGE0, GX_TEV_KASEL_K0_A );
+		}
+		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_KONST, GX_CA_RASA, GX_CA_TEXA, GX_CA_ZERO );
+		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		/* Stage 1 adds the reflection's alpha from the second colour
+		 * channel, untouched by depth. */
+		GX_SetNumChans( 2 );
+		GX_SetChanCtrl( GX_COLOR1A1, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+		GX_SetNumTevStages( 2 );
+		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR1A1 );
+		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_APREV, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		gc_water_split = true;
+	}
+	else
+		gc_water_split = false;
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	if( gc_water_split )
+	{
+		GX_SetVtxDesc( GX_VA_CLR1, GX_DIRECT );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR1, GX_CLR_RGBA, GX_RGBA8, 0 );
+	}
 	{
 		vec3_t forward, right, up;
 		int order[320];
@@ -6658,6 +6773,8 @@ static void R_GXDrawPackedWater( void )
 								q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
 								GX_Position3f32( q[0], q[1], q[2] );
 								GX_Color1u32( R_GXWaterBodyTint( wi, q, eye_dot, nd ));
+								if( gc_water_split )
+									GX_Color1u32( (u32)gc_water_refl_a );
 							}
 						}
 					}
@@ -6671,6 +6788,8 @@ static void R_GXDrawPackedWater( void )
 				{
 					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
 					GX_Color1u32( R_GXWaterBodyTint( wi, pts[si], eye_dot, nd ));
+					if( gc_water_split )
+						GX_Color1u32( (u32)gc_water_refl_a );
 				}
 				GX_End();
 			}
@@ -6703,6 +6822,8 @@ static void R_GXDrawPackedWater( void )
 		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_TEXA, GX_CA_KONST, GX_CA_ZERO );
 		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetVtxDesc( GX_VA_CLR1, GX_NONE );
+		GX_SetNumChans( 1 );
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
 		for( wi = 0; wi < water_n; wi++ )
@@ -6820,6 +6941,9 @@ static void R_GXDrawPackedWater( void )
 		}
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
 	}
+	GX_SetNumChans( 1 );
+	GX_SetNumTevStages( 1 );
+	gc_water_split = false;
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	{
