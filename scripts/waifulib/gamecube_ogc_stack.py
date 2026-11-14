@@ -223,7 +223,7 @@ def engine_extra_ldflags(info: Optional[Dict[str, Any]] = None) -> List[str]:
 	# the idle map-load pad, whoever releases them. malloc/calloc are wrapped
 	# too so a refused small allocation anywhere (libiso9660, libfat, ...) can
 	# fall back to the boot pad's small zone instead of returning NULL.
-	flags.append("-Wl,--wrap=free,--wrap=realloc,--wrap=malloc,--wrap=calloc")
+	flags.append("-Wl,--wrap=free,--wrap=realloc,--wrap=malloc,--wrap=calloc,--wrap=__cxa_throw")
 	return flags
 
 
