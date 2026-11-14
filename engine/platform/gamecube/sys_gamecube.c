@@ -1086,6 +1086,7 @@ static void GCube_EnsureFatMounted( void )
 #endif
 }
 static qboolean gc_memreport_configured;
+static qboolean gc_memwatch_configured;
 static qboolean gc_profile_configured;
 static qboolean gc_nolivepvs_configured;
 static qboolean gc_nonativetex_configured;
@@ -1145,6 +1146,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_dumpframes_configured = false;
 	gc_swissquit_configured = false;
 	gc_memreport_configured = false;
+	gc_memwatch_configured = false;
 	gc_net_configured = false;
 	gc_netfast_configured = false;
 	gc_netstatic_configured = false;
@@ -1216,6 +1218,13 @@ static void GCube_LoadDiscBootOverrides( void )
 			cursor++;
 		if( cursor[0] == '#' || cursor[0] == '\0' || cursor[0] == '\r' || cursor[0] == '\n' )
 			continue;
+
+		if( !Q_strnicmp( cursor, "memwatch", 8 ))
+		{
+			gc_memwatch_configured = true;
+			SYS_Report( "Xash3D GameCube: disc boot override memwatch\n" );
+			continue;
+		}
 
 		if( !Q_strnicmp( cursor, "memreport", 9 ))
 		{
@@ -2115,6 +2124,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	}
 	if( gc_memreport_configured )
 		gc_argv[fake_argc++] = "-gcmemreport";
+	if( gc_memwatch_configured )
+		gc_argv[fake_argc++] = "-gcmemwatch";
 	if( gc_net_configured )
 		gc_argv[fake_argc++] = "-net";
 	if( gc_netfast_configured )
