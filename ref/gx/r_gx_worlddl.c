@@ -1863,7 +1863,10 @@ qboolean R_GXWorldDLSampleLight( const float *org, byte rgb[3] )
 {
 	int cluster, i, found = -1, x, y, tile, lx, ly;
 	u32 lm_ofs = 0;
-	byte hdr[32];
+	/* ARAM DMA needs a 32-byte aligned target. A plain stack array is not,
+	 * and the transfer landed on the aligned address below it: over this
+	 * frame's back chain and saved LR (the PC=0x40 crash on the ride). */
+	static byte hdr[32] __attribute__(( aligned( 32 )));
 	byte *page;
 	byte *resident;
 	u16 c;
