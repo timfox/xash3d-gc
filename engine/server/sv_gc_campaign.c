@@ -20,6 +20,7 @@ can be cut and labelled by map.
 #define GC_CAMPAIGN_MAX_TRIGGERS	16
 #define GC_CAMPAIGN_MAX_VISITED		160
 #define GC_CAMPAIGN_FORCE_AFTER		6.0
+#define GC_CAMPAIGN_SCRIPTED_WAIT	180.0
 
 typedef struct
 {
@@ -194,6 +195,21 @@ void SV_GCCampaignFrame( void )
 		return; /* map not scanned (loaded some other way) */
 	if( gc_camp_map_start < 0.0 )
 		gc_camp_map_start = sv.time;
+	/* Never pull the player off a ride the game is giving them (the c0a0
+	 * tram): the level change is the train's to make. Restart the clock
+	 * while they stand on a train. */
+	{
+		edict_t *pl = SV_EdictNum( 1 );
+		edict_t *ground = ( SV_IsValidEdict( pl ) && SV_IsValidEdict( pl->v.groundentity ))
+			? pl->v.groundentity : NULL;
+
+		if( ground && ( !Q_stricmp( SV_ClassName( ground ), "func_tracktrain" )
+			|| !Q_stricmp( SV_ClassName( ground ), "func_train" )))
+		{
+			gc_camp_map_start = sv.time;
+			return;
+		}
+	}
 	if( Sys_GetParmFromCmdLine( "-gcautocampaign", delay_arg ) && atof( delay_arg ) > 1.0 )
 		delay = atof( delay_arg );
 	elapsed = sv.time - gc_camp_map_start;
@@ -216,19 +232,43 @@ void SV_GCCampaignFrame( void )
 	t = &gc_camp_triggers[gc_camp_target];
 	player = SV_EdictNum( 1 );
 
+	/* A named trigger_changelevel is fired by the map itself (the c0a0 tram
+	 * path_tracks Use "transition"); its brush is a small marker the player
+	 * never stands in. Let the scripted ride finish, as in retail: walking
+	 * into the marker leaves the player inside the next map's matching
+	 * marker back, which bounces straight back. */
+	trig = SV_GCCampaignFindTrigger( t );
+	if( trig && trig->v.targetname && elapsed < delay + GC_CAMPAIGN_SCRIPTED_WAIT )
+		return;
+
 	if( !gc_camp_moved )
 	{
 		gc_camp_moved = true;
-		trig = SV_GCCampaignFindTrigger( t );
 		if( trig && SV_IsValidEdict( player ))
 		{
-			vec3_t center;
+			vec3_t entry;
+			int k;
 
-			VectorAverage( trig->v.absmin, trig->v.absmax, center );
-			VectorCopy( center, player->v.origin );
+			/* Step the player just across the trigger face nearest to
+			 * where they stand, as walking into it would. Dropping them at
+			 * the trigger centre put them deep in the next map's matching
+			 * trigger back (c0a0b -> c0a0c bounced straight back), which a
+			 * real crossing never does. */
+			for( k = 0; k < 3; k++ )
+			{
+				const float lo = trig->v.absmin[k] - player->v.maxs[k] + 2.0f;
+				const float hi = trig->v.absmax[k] - player->v.mins[k] - 2.0f;
+
+				entry[k] = player->v.origin[k];
+				if( lo <= hi )
+					entry[k] = bound( lo, entry[k], hi );
+				else
+					entry[k] = ( trig->v.absmin[k] + trig->v.absmax[k] ) * 0.5f;
+			}
+			VectorCopy( entry, player->v.origin );
 			VectorClear( player->v.velocity );
 			SV_LinkEdict( player, true );
-			SV_GCCampaignCenterPrint( va( "AUTOPILOT: teleport to exit -> %s", t->map ));
+			SV_GCCampaignCenterPrint( va( "AUTOPILOT: step into exit -> %s", t->map ));
 			Con_Printf( "Xash3D GameCube: CAMPAIGN walk-in %s -> %s via %s (landmark %s)\n",
 				sv.name, t->map, t->model, t->landmark[0] ? t->landmark : "-" );
 		}
@@ -236,7 +276,28 @@ void SV_GCCampaignFrame( void )
 			Con_Printf( "Xash3D GameCube: CAMPAIGN no trigger edict for %s -> %s\n", sv.name, t->map );
 		return;
 	}
-	if( !gc_camp_forced && elapsed >= delay + GC_CAMPAIGN_FORCE_AFTER )
+	/* Keep walking toward the trigger centre at running speed until its own
+	 * touch (and the game's transition-volume check) fires, as it would for
+	 * a player crossing it. */
+	if( !gc_camp_forced && SV_IsValidEdict( player )
+		&& ( trig = SV_GCCampaignFindTrigger( t )) != NULL )
+	{
+		vec3_t center, step;
+		float dist;
+
+		VectorAverage( trig->v.absmin, trig->v.absmax, center );
+		VectorSubtract( center, player->v.origin, step );
+		dist = VectorLength( step );
+		if( dist > 1.0f )
+		{
+			VectorScale( step, Q_min( dist, 320.0f * (float)sv.frametime ) / dist, step );
+			VectorAdd( player->v.origin, step, player->v.origin );
+			VectorClear( player->v.velocity );
+			SV_LinkEdict( player, true );
+		}
+	}
+	if( !gc_camp_forced && elapsed >= delay + GC_CAMPAIGN_FORCE_AFTER
+		+ (( trig && trig->v.targetname ) ? GC_CAMPAIGN_SCRIPTED_WAIT : 0.0 ))
 	{
 		gc_camp_forced = true;
 		SV_GCCampaignCenterPrint( va( "AUTOPILOT: forced level change -> %s", t->map ));
