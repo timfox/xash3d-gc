@@ -418,6 +418,24 @@ void *__wrap_malloc( size_t size )
 }
 
 #ifdef XASH_GC_MEMWATCH_DEBUG
+/* local diagnostic: caller of every operator new / new[] request >= 4 KiB */
+void *__real__Znwj( unsigned int size );
+void *__real__Znaj( unsigned int size );
+void *__wrap__Znwj( unsigned int size )
+{
+	if( size >= 4096u )
+		Con_Reportf( "THROWLOG new(%u) caller=%p heap_free=%s\n", size, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
+	return __real__Znwj( size );
+}
+void *__wrap__Znaj( unsigned int size )
+{
+	if( size >= 4096u )
+		Con_Reportf( "THROWLOG new[](%u) caller=%p heap_free=%s\n", size, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
+	return __real__Znaj( size );
+}
+#endif
+
+#ifdef XASH_GC_MEMWATCH_DEBUG
 /* local diagnostic: log every C++ throw (type name, caller) before terminate. */
 void __real___cxa_throw( void *obj, void *tinfo, void ( *dest )( void * )) __attribute__(( noreturn ));
 void __wrap___cxa_throw( void *obj, void *tinfo, void ( *dest )( void * )) __attribute__(( noreturn ));
