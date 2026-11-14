@@ -1084,6 +1084,10 @@ static byte *R_GXWorldDLSkySlot( void )
 	return slot;
 }
 
+extern qboolean r_gx_mirror;
+extern float r_gx_mirror_z;
+extern float r_gx_mirror_real_org[3];
+
 static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_near, f32 z_far )
 {
 	vec3_t forward, right, up;
@@ -1106,7 +1110,11 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 	mv[2][3] = DotProduct( forward, org );
 	y_max = z_near * tanf( fov_y * 3.14159265f / 360.0f );
 	x_max = z_near * tanf( fov_x * 3.14159265f / 360.0f );
-	guFrustum( proj, y_max, -y_max, -x_max, x_max, z_near, z_far );
+	/* Water mirror pass: the reflected camera's image is upside down. */
+	if( r_gx_mirror )
+		guFrustum( proj, -y_max, y_max, -x_max, x_max, z_near, z_far );
+	else
+		guFrustum( proj, y_max, -y_max, -x_max, x_max, z_near, z_far );
 }
 
 static float gc_wd_sun_view[3];
@@ -1684,6 +1692,11 @@ int R_GXWorldDLDraw( void )
 			org = org_local;
 		}
 	}
+	/* Mirror pass: the reflected eye is under the seabed. Visibility and
+	 * the cache order come from the real eye; the frustum test below uses
+	 * the reflected one. */
+	if( r_gx_mirror )
+		org = r_gx_mirror_real_org;
 	cluster = R_GXWorldDLEyeCluster( org );
 	if( cluster < 0 && WORLDMODEL )
 	{
@@ -1771,7 +1784,11 @@ int R_GXWorldDLDraw( void )
 			if( !( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))))
 				continue;
 			pvs_hits++;
-			if( frustum_cull && !R_GXWorldDLBoxVisible( i, normals, org ))
+			/* Nothing under the water reflects in it. */
+			if( r_gx_mirror && (float)gc_wd_chunk_maxs[i * 3 + 2] <= r_gx_mirror_z )
+				continue;
+			if( frustum_cull && !R_GXWorldDLBoxVisible( i, normals,
+				r_gx_mirror ? RI.rvp.vieworigin : org ))
 			{
 				frustum_drop++;
 				continue;
