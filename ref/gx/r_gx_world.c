@@ -2104,7 +2104,7 @@ static void R_GXHotService( void )
  * bound again with no DMA and no wait. Each slot has its own fence: only the
  * slot about to be overwritten is waited for, and that one was used longest ago.
  * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
-#define GC_CMPR_SLOTS_MAX     240	/* 8 from the heap; a large world adopts more from the map arena */
+#define GC_CMPR_SLOTS_MAX     304	/* 8 from the heap; a large world adopts more from the map arena */
 #define GC_CMPR_SLOTS_DEFAULT 6
 #define GC_CMPR_HEAP_MARGIN ( 1024u * 1024u )	/* heap that must stay free after extra slots */
 static byte *r_gx_cmpr_bounce;		/* base of all slots */
@@ -2143,7 +2143,7 @@ static struct
 } r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
 /* texnum -> slot + 1. A bind of a resident texture skips the mip walk, the
  * slot search and GX_InitTexObj (about 1000 binds a frame in the harbor). */
-static u8 r_gx_cmpr_hint[2][MAX_TEXTURES];	/* [far pool][texnum] */
+static u16 r_gx_cmpr_hint[2][MAX_TEXTURES];	/* [far pool][texnum] */
 static unsigned r_gx_cmpr_clock;
 static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
@@ -2228,7 +2228,7 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 		return;
 	if( far_n < 0 || ( far_n && ( far_bytes < 1024u || ( far_bytes & 31u ))))
 		far_n = 0;
-	if( nslots + far_n > GC_CMPR_SLOTS_MAX || nslots + far_n > 254 )
+	if( nslots + far_n > GC_CMPR_SLOTS_MAX )
 		return;
 	GX_DrawDone();
 	r_gx_cmpr_bounce = base;
@@ -2457,11 +2457,11 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 			r_gx_bound_fmt = GX_TF_CMPR;
 			r_gx_tex_loads++;
 			if( used_bounce && r_gx_cmpr_cur_slot >= 0 && texnum < MAX_TEXTURES
-				&& r_gx_cmpr_cur_slot < 255 )
+				&& r_gx_cmpr_cur_slot < GC_CMPR_SLOTS_MAX )
 			{
 				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].obj = t->obj;
 				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].texnum = texnum;
-				r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] = (u8)( r_gx_cmpr_cur_slot + 1 );
+				r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] = (u16)( r_gx_cmpr_cur_slot + 1 );
 			}
 		}
 		else
@@ -5295,6 +5295,19 @@ static u32 gc_prop_ntris, gc_prop_dl_base;
 static u32 gc_prop_far_base, gc_prop_far_size;
 static byte *gc_prop_far_mem;
 static qboolean gc_prop_far_tried;
+/* Full-detail chains of the models in view, kept in the idle middle of the
+ * studio-model arena (Lost Coast loads 150 KB of studio models into 976).
+ * Streaming them cost 17 ms a frame in the harbor: 85 ARAM reads for 34k
+ * triangles. A ring: a model that was not drawn this frame can be evicted. */
+#define GC_PROP_CACHE_LOAD_BUDGET	( 192u * 1024u )
+static byte *gc_prop_cache;
+static u32 gc_prop_cache_size, gc_prop_cache_head;
+static qboolean gc_prop_cache_tried;
+static s32 gc_prop_cache_ofs[GC_PROP_MAX_MODELS];
+static u32 gc_prop_cache_used[GC_PROP_MAX_MODELS];
+static u32 gc_prop_chain_bytes[GC_PROP_MAX_MODELS];
+static u32 gc_prop_cache_frame, gc_prop_cache_budget;
+extern byte *Mod_GCStudioSkinAlloc( size_t bytes );
 static u16 gc_prop_nmodels;
 static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
@@ -5404,9 +5417,9 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 5 )
+		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 6 )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v5)\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
@@ -5463,7 +5476,23 @@ static void R_GXPropLoad( void )
 		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
 		gc_prop_ntris = 0;
 		for( i = 0; i < gc_prop_nmodels; i++ )
+		{
+			u32 j, end = gc_prop_far_base - gc_prop_dl_base;
+
 			gc_prop_ntris += gc_prop_models[i].tris;
+			/* Full chains are back to back: a chain ends where the next
+			 * one in file order starts. */
+			for( j = 0; j < gc_prop_nmodels; j++ )
+			{
+				if( gc_prop_models[j].dl_ofs > gc_prop_models[i].dl_ofs
+					&& gc_prop_models[j].dl_ofs < end )
+					end = gc_prop_models[j].dl_ofs;
+			}
+			gc_prop_chain_bytes[i] = end - gc_prop_models[i].dl_ofs;
+			gc_prop_cache_ofs[i] = -1;
+			gc_prop_cache_used[i] = 0;
+		}
+		gc_prop_cache_head = 0;
 	}
 	gc_prop_flight_count = gc_prop_flight_model < gc_prop_nmodels
 		? gc_prop_models[gc_prop_flight_model].tris : 0;
@@ -5471,7 +5500,7 @@ static void R_GXPropLoad( void )
 		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack v5 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		"Xash3D GameCube: prop pack v6 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
 		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
 		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
@@ -5706,9 +5735,75 @@ static void R_GXPropSetLitAt( const float *org )
  * from ARAM through the bounce buffer and copied into the FIFO. The light
  * colour rides in the material register, so vertices carry no colour.
  * Angles are radians, Source order (pitch, yaw, roll). */
+/* Resident copy of a model's full chain, or NULL to stream it this frame. */
+static byte *R_GXPropCacheGet( unsigned model )
+{
+	const u32 bytes = gc_prop_chain_bytes[model];
+	u32 head, k;
+
+	if( !gc_prop_cache )
+	{
+		u32 try_sz;
+
+		/* Only beside the adopted texture cache: that marks a large world. */
+		if( gc_prop_cache_tried || r_gx_cmpr_nslots <= 8 )
+			return NULL;
+		gc_prop_cache_tried = true;
+		for( try_sz = 640u * 1024u; try_sz >= 256u * 1024u && !gc_prop_cache; try_sz -= 128u * 1024u )
+		{
+			gc_prop_cache = Mod_GCStudioSkinAlloc( try_sz );
+			if( gc_prop_cache )
+				gc_prop_cache_size = try_sz;
+		}
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb (studio arena)\n",
+			gc_prop_cache_size / 1024u );
+		if( !gc_prop_cache )
+			return NULL;
+	}
+	if( gc_prop_cache_ofs[model] >= 0 )
+	{
+		gc_prop_cache_used[model] = gc_prop_cache_frame;
+		return gc_prop_cache + gc_prop_cache_ofs[model];
+	}
+	if( bytes == 0 || ( bytes & 31u ) || bytes > gc_prop_cache_size || bytes > gc_prop_cache_budget )
+		return NULL;
+	head = gc_prop_cache_head;
+	if( head + bytes > gc_prop_cache_size )
+		head = 0;
+	for( k = 0; k < gc_prop_nmodels; k++ )
+	{
+		const s32 o = gc_prop_cache_ofs[k];
+
+		if( o < 0 || (u32)o + gc_prop_chain_bytes[k] <= head || (u32)o >= head + bytes )
+			continue;
+		/* The GP may still be reading a list drawn this frame. */
+		if( gc_prop_cache_used[k] == gc_prop_cache_frame )
+			return NULL;
+	}
+	for( k = 0; k < gc_prop_nmodels; k++ )
+	{
+		const s32 o = gc_prop_cache_ofs[k];
+
+		if( o < 0 || (u32)o + gc_prop_chain_bytes[k] <= head || (u32)o >= head + bytes )
+			continue;
+		gc_prop_cache_ofs[k] = -1;
+	}
+	GC_AramTransfer( gc_prop_aram + gc_prop_dl_base + gc_prop_models[model].dl_ofs,
+		gc_prop_cache + head, bytes, false );
+	gc_prop_cache_ofs[model] = (s32)head;
+	gc_prop_cache_used[model] = gc_prop_cache_frame;
+	gc_prop_cache_head = head + bytes;
+	gc_prop_cache_budget -= bytes;
+	return gc_prop_cache + head;
+}
+
 /* Set per instance: a prop under 30 % of the view takes its texture from the
  * small-mip pool, leaving the full-size slots to what is close. */
 static qboolean gc_prop_tex_far;
+/* Flythrough profile of the prop passes: ticks and counts per stage. */
+static u64 gc_prop_pf[4];
+static u32 gc_prop_pf_cnt[4];
+static int gc_prop_pf_frames;
 
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
@@ -5717,6 +5812,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	GXColor col;
 	u32 ofs, bytes;
 	int drawn = 0;
+	const byte *resident = NULL, *resident_end = NULL;
 	const float sp = sinf( pitch ), cp = cosf( pitch );
 	const float sy = sinf( yaw ), cy = cosf( yaw );
 	const float sr = sinf( roll ), cr = cosf( roll );
@@ -5758,52 +5854,85 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	R_GXCmprSetFar( far_lod || gc_prop_tex_far );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
+	if( far_lod && gc_prop_far_mem )
+	{
+		resident = gc_prop_far_mem + ofs;
+		resident_end = gc_prop_far_mem + gc_prop_far_size;
+	}
+	else if( !far_lod )
+	{
+		resident = R_GXPropCacheGet( model );
+		if( resident )
+			resident_end = resident + gc_prop_chain_bytes[model];
+	}
 	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
 	{
 		const u8 *hdr;
 		const u16 *p;
 		u32 nverts, body, next, n;
 
-		if( far_lod && gc_prop_far_mem )
+		if( resident )
 		{
-			if( ofs + bytes > gc_prop_far_size )
+			if( resident + bytes > resident_end )
 				break;
-			hdr = gc_prop_far_mem + ofs;
+			hdr = resident;
+			resident += bytes;
 		}
 		else
 		{
+			u64 t0 = gettime();
+
 			GC_AramTransfer( gc_prop_aram + ( far_lod ? gc_prop_far_base : gc_prop_dl_base ) + ofs,
 				gc_prop_bounce, bytes, false );
+			gc_prop_pf[0] += gettime() - t0;
+			gc_prop_pf_cnt[0]++;
 			hdr = gc_prop_bounce;
 		}
 		nverts = *(const u16 *)( hdr + 2 );
 		body = *(const u32 *)( hdr + 4 );
 		next = *(const u32 *)( hdr + 8 );
-		if( !nverts || nverts * 10u > body || body + 32u != bytes )
+		if( !nverts || nverts * 10u + 3u > body || body + 32u != bytes )
 			break;
-		R_GXPropBind( (u8)( hdr[0] & 0x7f ));
-		GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)nverts );
-		/* 10 bytes a vertex and nverts is a multiple of 3, so a triangle
-		 * is 30 bytes: seven words and a half-word into the FIFO instead
-		 * of fifteen half-words. The piece body is 32-byte aligned. */
 		{
-			const u32 *q = (const u32 *)( hdr + 32 );
+			u64 t0 = gettime();
+
+			R_GXPropBind( (u8)( hdr[0] & 0x7f ));
+			gc_prop_pf[1] += gettime() - t0;
+			gc_prop_pf_cnt[1]++;
+		}
+		if( hdr != gc_prop_bounce )
+		{
+			/* Resident piece: a display list the GP reads in place. No
+			 * per-vertex CPU work at all for the horizon pass. */
+			GX_CallDispList( (void *)( hdr + 32 ), body );
+		}
+		else
+		{
+			/* Streamed piece: the bounce is reused for the next one, so
+			 * the vertices are copied into the FIFO. 30 bytes a triangle:
+			 * seven words and a half-word. They start 3 bytes into the
+			 * body, after the list's own draw command. */
+			const u8 *q = hdr + 35;
+			u64 t0 = gettime();
 
 			(void)p;
+			GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)nverts );
 			for( n = nverts / 3u; n; n-- )
 			{
-				wgPipe->U32 = q[0];
-				wgPipe->U32 = q[1];
-				wgPipe->U32 = q[2];
-				wgPipe->U32 = q[3];
-				wgPipe->U32 = q[4];
-				wgPipe->U32 = q[5];
-				wgPipe->U32 = q[6];
-				wgPipe->U16 = *(const u16 *)( q + 7 );
-				q = (const u32 *)( (const u8 *)q + 30 );
+				wgPipe->U32 = *(const u32 *)( q );
+				wgPipe->U32 = *(const u32 *)( q + 4 );
+				wgPipe->U32 = *(const u32 *)( q + 8 );
+				wgPipe->U32 = *(const u32 *)( q + 12 );
+				wgPipe->U32 = *(const u32 *)( q + 16 );
+				wgPipe->U32 = *(const u32 *)( q + 20 );
+				wgPipe->U32 = *(const u32 *)( q + 24 );
+				wgPipe->U16 = *(const u16 *)( q + 28 );
+				q += 30;
 			}
+			GX_End();
+			gc_prop_pf[2] += gettime() - t0;
+			gc_prop_pf_cnt[2] += nverts / 3u;
 		}
-		GX_End();
 		drawn += (int)( nverts / 3u );
 		ofs += bytes;
 		bytes = next;
@@ -6048,6 +6177,9 @@ void R_GXPropDrawHorizon( const float *org )
 {
 	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	static u16 order[GC_PROP_MAX_INST];
+
+	gc_prop_cache_frame++;
+	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
 	static float key[GC_PROP_MAX_INST];
 	int i, n = 0, ninst = 0, drawn = 0, a, b;
 	u16 tmp;
@@ -6986,6 +7118,19 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GXTrace( "canister" );
 	R_GXCanisterFlightDraw( RI.rvp.vieworigin );
 	ST_MARK( 2 );
+	if( st_on && ++gc_prop_pf_frames >= 120 )
+	{
+		const float k = 1.0f / ( 1000.0f * 120.0f );
+
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris)\n",
+			(float)ticks_to_microsecs( gc_prop_pf[0] ) * k, gc_prop_pf_cnt[0] / 120u,
+			(float)ticks_to_microsecs( gc_prop_pf[1] ) * k, gc_prop_pf_cnt[1] / 120u,
+			(float)ticks_to_microsecs( gc_prop_pf[2] ) * k, gc_prop_pf_cnt[2] / 120u );
+		memset( gc_prop_pf, 0, sizeof( gc_prop_pf ));
+		memset( gc_prop_pf_cnt, 0, sizeof( gc_prop_pf_cnt ));
+		gc_prop_pf_frames = 0;
+	}
 	R_GXTrace( "water" );
 	R_GXDrawPackedWater();
 	R_GXTrace( "smoke" );

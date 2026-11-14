@@ -628,11 +628,11 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			GC_RetainMapLoadBufferBorrow();
 			if( cap > hw + keep + 2048u * 1024u )
 			{
-				/* 64 full slots (128x128 chain, 10944 bytes) for what is
-				 * close, 176 slots one mip down (64x64 chain, 2752 bytes)
-				 * for the rest: 1.16 MB holds 240 textures. */
+				/* 48 full slots (128x128 chain, 10944 bytes) for what is
+				 * close, 240 slots one mip down (64x64 chain, 2752 bytes)
+				 * for the rest and for props: 1.16 MB holds 288 textures. */
 				const unsigned slot_bytes = 10944u, far_bytes = 2752u;
-				const int nslots = 64, far_n = 176;
+				const int nslots = 48, far_n = 240;
 				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
 					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
 
