@@ -204,8 +204,19 @@ typedef struct gc_boot_blk_s
 	uint32_t pad[6];	/* keep the payload 32-byte aligned */
 } gc_boot_blk_t;
 
+/* Heap-pressure fallback: small allocations the libc heap refuses are served
+ * from a bump zone at the TOP of the pad, so whatever is still live at the
+ * first map load pins only the top of the pad (the map-load arena ends at the
+ * pad's end) instead of the whole of it. */
+#define GC_BOOT_SMALL_ZONE ( 256u * 1024u )
+#define GC_BOOT_SMALL_MAX ( 32u * 1024u )	/* largest block the zone serves */
+
 static byte *gc_boot_base;
 static size_t gc_boot_cap;
+static size_t gc_boot_large_cap;	/* first-fit region: cap minus the small zone */
+static byte *gc_boot_small_low, *gc_boot_small_top;
+static unsigned int gc_boot_small_live;
+static size_t gc_boot_small_live_bytes;
 static qboolean gc_boot_ready, gc_boot_closed;
 static unsigned int gc_boot_live;
 static size_t gc_boot_live_bytes, gc_boot_peak_bytes;
@@ -224,8 +235,14 @@ static qboolean GC_BootArenaInit( void )
 		gc_boot_base = NULL;
 		return false;
 	}
+	gc_boot_large_cap = gc_boot_cap;
+	if( gc_boot_cap > 4u * GC_BOOT_SMALL_ZONE )
+	{
+		gc_boot_large_cap = gc_boot_cap - GC_BOOT_SMALL_ZONE;
+		gc_boot_small_top = gc_boot_small_low = gc_boot_base + gc_boot_cap;
+	}
 	first = (gc_boot_blk_t *)gc_boot_base;
-	first->size = (uint32_t)gc_boot_cap;
+	first->size = (uint32_t)gc_boot_large_cap;
 	first->used = 0;
 	Con_Reportf( "Xash3D GameCube: boot arena ready capacity=%s\n", Q_memprint( gc_boot_cap ));
 	return true;
@@ -246,7 +263,7 @@ void *GC_BootArenaAlloc( size_t size )
 		return NULL;
 	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
 
-	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
 	{
 		gc_boot_blk_t *blk = (gc_boot_blk_t *)cursor;
 
@@ -271,6 +288,69 @@ void *GC_BootArenaAlloc( size_t size )
 	return NULL;
 }
 
+/* Last resort for a small allocation when the libc heap is exhausted. */
+void *GC_BootArenaAllocSmall( size_t size )
+{
+	size_t need;
+	gc_boot_blk_t *blk;
+
+	if( size == 0 || size > GC_BOOT_SMALL_MAX || ( gc_boot_closed && !gc_boot_small_top )
+		|| !GC_BootArenaInit() || !gc_boot_small_top )
+		return NULL;
+	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
+	/* Reuse a freed block first: realloc growth and short-lived allocations
+	 * otherwise leave holes the downward bump never revisits, and the whole
+	 * zone drains on churn with almost nothing live. */
+#ifndef GC_BOOT_SMALL_NOREUSE
+	{
+		byte *cursor;
+
+		for( cursor = gc_boot_small_low; cursor < gc_boot_small_top; cursor += ((gc_boot_blk_t *)cursor)->size )
+		{
+			gc_boot_blk_t *hole = (gc_boot_blk_t *)cursor;
+
+			if( hole->used || hole->size < need )
+				continue;
+			if( hole->size - need >= 2u * GC_BOOT_ARENA_ALIGN + sizeof( gc_boot_blk_t ))
+			{
+				gc_boot_blk_t *rest = (gc_boot_blk_t *)( cursor + need );
+
+				rest->size = hole->size - (uint32_t)need;
+				rest->used = 0;
+				hole->size = (uint32_t)need;
+			}
+			hole->used = 1;
+			gc_boot_small_live++;
+			gc_boot_small_live_bytes += hole->size;
+			return (byte *)hole + sizeof( gc_boot_blk_t );
+		}
+	}
+#endif
+	/* After the map load the pad below small_low belongs to the map loader, so
+	 * only the holes inside the pinned zone above may still be handed out. */
+	if( gc_boot_closed )
+		return NULL;
+	if( (size_t)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )) < need )
+		return NULL;
+	gc_boot_small_low -= need;
+	blk = (gc_boot_blk_t *)gc_boot_small_low;
+	blk->size = (uint32_t)need;
+	blk->used = 1;
+	gc_boot_small_live++;
+	gc_boot_small_live_bytes += need;
+	return (byte *)blk + sizeof( gc_boot_blk_t );
+}
+
+/* Lowest address that must stay out of the map-load arena, or NULL. */
+void *GC_BootArenaPinnedLow( void )
+{
+	if( gc_boot_live )
+		return gc_boot_base;
+	if( gc_boot_small_live )
+		return gc_boot_small_low;
+	return NULL;
+}
+
 qboolean GC_BootArenaFree( void *ptr )
 {
 	gc_boot_blk_t *blk;
@@ -284,16 +364,49 @@ qboolean GC_BootArenaFree( void *ptr )
 		Con_Reportf( S_ERROR "Xash3D GameCube: boot arena double free %p\n", ptr );
 		return true;
 	}
+	if( gc_boot_small_top && (byte *)blk >= gc_boot_base + gc_boot_large_cap )
+	{
+		blk->used = 0;
+		gc_boot_small_live--;
+		gc_boot_small_live_bytes -= blk->size;
+#ifdef GC_BOOT_SMALL_POISON
+		/* Stale users of freed small-zone memory read 0xDD and a later reuse
+		 * of the block is easy to spot in dumps. */
+		memset( (byte *)blk + sizeof( gc_boot_blk_t ), 0xDD, blk->size - sizeof( gc_boot_blk_t ));
+#endif
+#ifndef GC_BOOT_SMALL_NOREUSE
+		/* Merge runs of free neighbours so holes can serve larger blocks. */
+		{
+			byte *cursor = gc_boot_small_low;
+
+			while( cursor < gc_boot_small_top )
+			{
+				gc_boot_blk_t *cur = (gc_boot_blk_t *)cursor;
+				byte *next = cursor + cur->size;
+
+				if( !cur->used && next < gc_boot_small_top && !((gc_boot_blk_t *)next)->used )
+					cur->size += ((gc_boot_blk_t *)next)->size;
+				else
+					cursor = next;
+			}
+		}
+#endif
+		/* The zone is contiguous from small_low to its top: retreat past
+		 * freed blocks so a dead zone costs nothing at the map load. */
+		while( gc_boot_small_low < gc_boot_small_top && !((gc_boot_blk_t *)gc_boot_small_low)->used )
+			gc_boot_small_low += ((gc_boot_blk_t *)gc_boot_small_low)->size;
+		return true;
+	}
 	blk->used = 0;
 	gc_boot_live--;
 	gc_boot_live_bytes -= blk->size;
 
 	/* Coalesce every run of free neighbours (few blocks; a full walk is cheap). */
-	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
 	{
 		gc_boot_blk_t *cur = (gc_boot_blk_t *)cursor;
 
-		while( !cur->used && cursor + cur->size < gc_boot_base + gc_boot_cap )
+		while( !cur->used && cursor + cur->size < gc_boot_base + gc_boot_large_cap )
 		{
 			gc_boot_blk_t *next = (gc_boot_blk_t *)( cursor + cur->size );
 			if( next->used )
@@ -316,6 +429,33 @@ void __wrap_free( void *ptr )
 	__real_free( ptr );
 }
 
+void *__real_malloc( size_t size );
+void *__real_calloc( size_t nmemb, size_t size );
+
+/* Every libc/library allocation: when the heap refuses a small block before
+ * the first map load, serve it from the boot pad's small zone. */
+void *__wrap_malloc( size_t size )
+{
+	void *p = __real_malloc( size );
+
+	if( !p && size )
+		p = GC_BootArenaAllocSmall( size );
+	return p;
+}
+
+void *__wrap_calloc( size_t nmemb, size_t size )
+{
+	void *p = __real_calloc( nmemb, size );
+
+	if( !p && nmemb && size && nmemb <= GC_BOOT_SMALL_MAX / size )
+	{
+		p = GC_BootArenaAllocSmall( nmemb * size );
+		if( p )
+			memset( p, 0, nmemb * size );
+	}
+	return p;
+}
+
 void *__wrap_realloc( void *ptr, size_t size )
 {
 	gc_boot_blk_t *blk;
@@ -323,7 +463,30 @@ void *__wrap_realloc( void *ptr, size_t size )
 	void *neu;
 
 	if( !ptr || !GC_BootArenaOwns( ptr ))
-		return __real_realloc( ptr, size );
+	{
+		extern size_t malloc_usable_size( void *ptr );
+		void *r = __real_realloc( ptr, size );
+
+		/* Heap refused the grow: move the block into the boot pad's small
+		 * zone (the old block stays valid when realloc fails). */
+		if( !r && size )
+		{
+			if( !ptr )
+				r = GC_BootArenaAllocSmall( size );
+			else
+			{
+				size_t old = malloc_usable_size( ptr );
+
+				r = GC_BootArenaAllocSmall( size );
+				if( r )
+				{
+					memcpy( r, ptr, old < size ? old : size );
+					__real_free( ptr );
+				}
+			}
+		}
+		return r;
+	}
 	if( size == 0 )
 	{
 		GC_BootArenaFree( ptr );
@@ -350,7 +513,20 @@ void *__wrap_realloc( void *ptr, size_t size )
 static qboolean gc_boot_menu_scope;
 void GC_BootArenaSetMenuScope( qboolean on ) { gc_boot_menu_scope = on; }
 qboolean GC_BootArenaMenuScope( void ) { return gc_boot_menu_scope && !gc_boot_closed; }
-size_t GC_BootArenaLiveBytes( void ) { return gc_boot_live ? gc_boot_live_bytes : 0; }
+size_t GC_BootArenaLiveBytes( void ) { return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes; }
+
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* Where is the pad small zone and the sbrk break?  Compare with a corrupt block address. */
+extern void *sbrk( ptrdiff_t incr );
+void GC_BootDiagLog( const char *stage )
+{
+	struct mallinfo mi = mallinfo();
+	Con_Printf( "Xash3D GameCube: bootdiag %s pad=[%p,%p) large_end=%p small=[%p,%p) sbrk=%p arena1=[%p,%p) heap_used=%d heap_free=%d\n",
+		stage, (void *)gc_boot_base, (void *)( gc_boot_base + gc_boot_cap ),
+		(void *)( gc_boot_base + gc_boot_large_cap ), (void *)gc_boot_small_low, (void *)gc_boot_small_top,
+		sbrk( 0 ), SYS_GetArena1Lo(), SYS_GetArena1Hi(), mi.uordblks, mi.fordblks );
+}
+#endif
 
 /* First map load: no new boot allocations.  Returns the bytes still live. */
 size_t GC_BootArenaClose( void )
@@ -358,11 +534,14 @@ size_t GC_BootArenaClose( void )
 	if( !gc_boot_closed )
 	{
 		gc_boot_closed = true;
+#ifdef XASH_GC_MEMWATCH_DEBUG
+		GC_BootDiagLog( "boot arena closed" );
+#endif
 		if( gc_boot_base )
 			Con_Reportf( "Xash3D GameCube: boot arena closed live=%u bytes=%s peak=%s\n",
 				gc_boot_live, Q_memprint( gc_boot_live_bytes ), Q_memprint( gc_boot_peak_bytes ));
 	}
-	return gc_boot_live ? gc_boot_live_bytes : 0;
+	return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes;
 }
 
 /* Unconditional heap mark at fixed boot stages (MEM1 headroom telemetry). */

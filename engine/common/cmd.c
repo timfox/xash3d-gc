@@ -515,7 +515,13 @@ struct cmd_s
 	char       *name;
 	xcommand_t  function;
 	int         flags;
+#if XASH_GAMECUBE
+	/* Every caller passes a string literal, so keep a pointer instead of a
+	 * copy: the descriptions of a few hundred commands are tens of KB of heap. */
+	const char *desc;
+#else
 	char        desc[];
+#endif
 };
 
 int           cmd_argc;
@@ -679,8 +685,12 @@ int Cmd_AddCommandEx( const char *cmd_name, xcommand_t function, const char *cmd
 		// unfortunately, we lose original command this way
 		if( FBitSet( cmd->flags, CMD_OVERRIDABLE ))
 		{
+#if XASH_GAMECUBE
+			cmd->desc = cmd_desc;
+#else
 			desc_len = Q_strlen( cmd->desc ) + 1;
 			Q_strncpy( cmd->desc, cmd_desc, desc_len );
+#endif
 			cmd->function = function;
 			cmd->flags = iFlags;
 
@@ -695,7 +705,11 @@ int Cmd_AddCommandEx( const char *cmd_name, xcommand_t function, const char *cmd
 	}
 
 	// use a small malloc to avoid zone fragmentation
+#if XASH_GAMECUBE
+	desc_len = 0;
+#else
 	desc_len = Q_strlen( cmd_desc ) + 1;
+#endif
 	cmd = Mem_Malloc( cmd_pool, sizeof( cmd_t ) + desc_len );
 #if XASH_GAMECUBE
 	/* Soft-fail Console Commands under tip (New Game InitInput) — never Sys_Error
@@ -715,7 +729,11 @@ int Cmd_AddCommandEx( const char *cmd_name, xcommand_t function, const char *cmd
 		return 0;
 	}
 #endif
+#if XASH_GAMECUBE
+	cmd->desc = cmd_desc;
+#else
 	Q_strncpy( cmd->desc, cmd_desc, desc_len );
+#endif
 	cmd->function = function;
 	cmd->flags = iFlags;
 

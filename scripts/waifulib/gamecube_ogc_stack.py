@@ -220,8 +220,10 @@ def engine_extra_ldflags(info: Optional[Dict[str, Any]] = None) -> List[str]:
 		flags.append("-lfat")
 	flags.append("-Wl,--allow-multiple-definition")
 	# Boot arena (mem_gamecube.c): free/realloc must accept blocks lent from
-	# the idle map-load pad, whoever releases them.
-	flags.append("-Wl,--wrap=free,--wrap=realloc")
+	# the idle map-load pad, whoever releases them. malloc/calloc are wrapped
+	# too so a refused small allocation anywhere (libiso9660, libfat, ...) can
+	# fall back to the boot pad's small zone instead of returning NULL.
+	flags.append("-Wl,--wrap=free,--wrap=realloc,--wrap=malloc,--wrap=calloc")
 	return flags
 
 

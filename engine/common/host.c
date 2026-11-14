@@ -1676,6 +1676,12 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 		Mod_GCEnsureStaticReserves();
 		Mod_GCReleaseUnusedWorldReserves();
 		GC_MemSample( "pre-SV_Init boot reserve release" );
+#ifdef XASH_GC_MEMWATCH_DEBUG
+		{
+			extern void GC_BootDiagLog( const char *stage );
+			GC_BootDiagLog( "pre-SV_Init" );
+		}
+#endif
 	}
 #endif
 	NET_Init();

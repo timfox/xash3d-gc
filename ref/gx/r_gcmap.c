@@ -17,7 +17,7 @@ static qboolean gc_static_map_arena_dirty;
  * renderer is untrimmed, so the boot lend below is closed for the session. */
 static qboolean gc_static_map_arena_ever_used;
 /* Boot arena still had live blocks at the first map load: keep the pad out. */
-static qboolean gc_boot_pad_pinned;
+static size_t gc_boot_pad_pin_bytes;	/* top of the pad still held by boot allocations */
 /* Sized for New Game GX presents (and smaller gcmap probes).
  * G93: 320×240 is the default New Game world path; -gcnewgame160 keeps 160×120. */
 #define GC_GCMAP_STATIC_MAX_W 320
@@ -169,8 +169,7 @@ void *R_GCBorrowMapLoadStaticArena( size_t size, size_t *capacity )
 		+ sizeof( vid.addmap ) + sizeof( vid.modmap ) + sizeof( vid.alphamap )
 		+ sizeof( vid.mapload_pad );
 	arena_size -= (size_t)( base - raw );
-	if( gc_boot_pad_pinned )
-		arena_size -= sizeof( vid.mapload_pad );
+	arena_size -= gc_boot_pad_pin_bytes;
 
 	if( capacity )
 		*capacity = arena_size;
@@ -267,9 +266,17 @@ void R_GcmapTrimForMapLoad( void )
 		live = GC_BootArenaClose();
 		if( live )
 		{
-			gc_boot_pad_pinned = true;
-			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: boot arena still holds %lu bytes; map-load arena excludes the pad\n",
-				(unsigned long)live );
+			extern void *GC_BootArenaPinnedLow( void );
+			byte *low = (byte *)GC_BootArenaPinnedLow();
+			byte *pad_end = &vid.mapload_pad[0] + sizeof( vid.mapload_pad );
+
+			/* The pad ends the map-load arena, so only its top from the lowest
+			 * live block up is lost to the load. */
+			gc_boot_pad_pin_bytes = ( low && low < pad_end ) ? (size_t)( pad_end - low ) : sizeof( vid.mapload_pad );
+			if( gc_boot_pad_pin_bytes > sizeof( vid.mapload_pad ))
+				gc_boot_pad_pin_bytes = sizeof( vid.mapload_pad );
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: boot arena still holds %lu bytes; map-load arena excludes %lu bytes of the pad\n",
+				(unsigned long)live, (unsigned long)gc_boot_pad_pin_bytes );
 		}
 	}
 	gc_static_map_arena_ever_used = true;

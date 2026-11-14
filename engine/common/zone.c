@@ -424,6 +424,11 @@ void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const ch
 		size_t blocksize = sizeof( memheader_small_t ) + size + sizeof( byte );
 		memheader_small_t *mem = Q_malloc( blocksize );
 
+#if XASH_GAMECUBE
+		/* Heap exhausted at boot: the idle map-load pad takes it. */
+		if( mem == NULL )
+			mem = (memheader_small_t *)GC_BootArenaAllocSmall( blocksize );
+#endif
 		if( mem == NULL )
 			return NULL;
 
@@ -463,6 +468,8 @@ void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const ch
 			|| !Q_stricmp( pool->name, "FileSystem Pool" )
 			|| ( GC_BootArenaMenuScope() && !Q_stricmp( pool->name, "ref_gx zone" ))))
 			mem = (memheader_t *)GC_BootArenaAlloc( blocksize );
+		if( !mem )
+			mem = (memheader_t *)GC_BootArenaAllocSmall( blocksize );
 #endif
 
 		if( mem == NULL )
@@ -1273,10 +1280,54 @@ qboolean GC_MemCheckChains( const char *tag )
 /* Silent watch for heap corruption: checks every chain at each call until
  * the first break, then reports the last tag that was still clean so the
  * corrupting step is bracketed between two milestones. */
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* -gcwatchaddr 0xADDR: log the 48 bytes at ADDR whenever they change between
+ * GC_MemWatch calls, so the step that clobbers a known block is bracketed. */
+static void GC_MemWatchAddr( const char *tag )
+{
+	static unsigned char prev[48];
+	static uintptr_t addr;
+	static int state;	/* 0 unset, 1 armed, 2 off */
+	char arg[32];
+	unsigned char *p;
+
+	if( state == 2 )
+		return;
+	if( state == 0 )
+	{
+		if( !Sys_GetParmFromCmdLine( "-gcwatchaddr", arg ) || !arg[0] )
+		{
+			state = 2;
+			return;
+		}
+		addr = (uintptr_t)strtoul( arg, NULL, 0 );
+		state = 1;
+		memcpy( prev, (void *)addr, sizeof( prev ));
+		Con_Printf( "Xash3D GameCube: gcwatchaddr armed %p\n", (void *)addr );
+		return;
+	}
+	p = (unsigned char *)addr;
+	if( memcmp( prev, p, sizeof( prev )))
+	{
+		char hex[48 * 2 + 1];
+		int i;
+
+		for( i = 0; i < (int)sizeof( prev ); i++ )
+			Q_snprintf( hex + i * 2, 3, "%02x", p[i] );
+		Con_Printf( "Xash3D GameCube: gcwatchaddr %p changed at=%s now=%s\n", (void *)addr, tag, hex );
+		memcpy( prev, p, sizeof( prev ));
+	}
+}
+#endif
+
 void GC_MemWatch( const char *tag )
 {
 	static qboolean broken, busy;
 	static char last_ok[96] = "start";
+
+#ifdef XASH_GC_MEMWATCH_DEBUG
+	GC_MemWatchAddr( tag );
+#endif
 
 	if( !gc_mem_watch_enabled || broken || busy )
 		return;
