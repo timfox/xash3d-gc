@@ -5599,7 +5599,8 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
 	/* Size on screen = bounding radius over distance. Under 0.6 % it is a
-	 * few pixels: skip. Under 12 % draw the far level of detail. The
+	 * few pixels: skip. Under 5 % draw the far level of detail (its welded UVs smear
+	 * a facade that is any closer). The
 	 * harbor used to push all 368 far instances at full detail (88k
 	 * triangles a frame through ARAM). */
 	dx = (float)in->maxs[0] - (float)in->mins[0];
@@ -5626,7 +5627,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	org[1] = (float)in->org[1];
 	org[2] = (float)in->org[2];
 	return R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
-		(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
+		(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.05f * 0.05f );
 }
 
 /* CapFaces: Lost Coast fisherman walks the retail lead-to-gate path

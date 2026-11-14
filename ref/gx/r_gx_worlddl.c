@@ -1102,6 +1102,8 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 	guFrustum( proj, y_max, -y_max, -x_max, x_max, z_near, z_far );
 }
 
+static float gc_wd_sun_view[3];
+
 /* Lost Coast env_sun, same direction as the sky disc. View space, for the
  * specular light. The normal matrix is the view rotation: the bake stores
  * world-space normals. */
@@ -1132,6 +1134,9 @@ static void R_GXWorldDLSpecLight( void )
 	/* Parallel sun. A specular lobe against a 10-degree sun is black on flat
 	 * sand (the whole beach shares one half-angle). Diffuse N·L uses the
 	 * baked normals, so slopes facing the sun pick up the warm light. */
+	gc_wd_sun_view[0] = sun[0];
+	gc_wd_sun_view[1] = sun[1];
+	gc_wd_sun_view[2] = sun[2];
 	memset( &lit, 0, sizeof( lit ));
 	GX_InitLightPos( &lit, sun[0] * 1000000.0f, sun[1] * 1000000.0f, sun[2] * 1000000.0f );
 	GX_InitLightColor( &lit, sun_col );
@@ -1210,6 +1215,31 @@ static void R_GXWorldDLSpecOn( u16 strength, int indtex, int tev_id )
 	{
 		f32 imtx[2][3];
 		Mtx tm;
+
+		/* Wet sand is a mirror for the low sun: the glare path runs from
+		 * the eye toward env_sun and moves with the camera. That is the
+		 * hardware specular term (N.H to a power, per vertex), not N.L,
+		 * which only said which slopes face the sun. The displacement
+		 * mesh is dense enough to carry it. -gcsandnl keeps the old lift. */
+		if( !gEngfuncs.Sys_CheckParm( "-gcsandnl" ))
+		{
+			GXLightObj sl;
+			const GXColor sun_col = { 253, 236, 198, 255 };
+
+			memset( &sl, 0, sizeof( sl ));
+			GX_InitSpecularDir( &sl, -gc_wd_sun_view[0], -gc_wd_sun_view[1], -gc_wd_sun_view[2] );
+			GX_InitLightShininess( &sl, 20.0f );
+			GX_InitLightColor( &sl, sun_col );
+			GX_LoadLightObj( &sl, GX_LIGHT1 );
+			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+				GX_LIGHT1, GX_DF_NONE, GX_AF_SPEC );
+			/* The two TEV stages below each scale by 2; at full material
+			 * colour the lobe clipped to a flat white patch. */
+			mat.r = (u8)( mat.r * 2 / 5 );
+			mat.g = (u8)( mat.g * 2 / 5 );
+			mat.b = (u8)( mat.b * 2 / 5 );
+			GX_SetChanMatColor( GX_COLOR0A0, mat );
+		}
 
 		tm[0][0] = 8.0f; tm[0][1] = 0.0f; tm[0][2] = 0.0f; tm[0][3] = 0.0f;
 		tm[1][0] = 0.0f; tm[1][1] = 8.0f; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
