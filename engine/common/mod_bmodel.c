@@ -992,6 +992,15 @@ void *Mod_GCWorldArraySpillTryGrow( const void *ptr, size_t old_bytes, size_t ne
 	return (void *)p;
 }
 
+/* Bytes of the map-load arena the live BSP scratch (surface table, carves
+ * reserved above it) still occupies. Nothing else may be carved below it. */
+size_t Mod_GCBspScratchFloor( void )
+{
+	if( !gc_bsp_scratch_base || !GC_IsMapLoadBuffer( gc_bsp_scratch_base ))
+		return 0;
+	return gc_bsp_scratch_size + gc_bsp_scratch_carve_high;
+}
+
 size_t Mod_GCWorldArraySpillUsed( void )
 {
 	return gc_world_array_spill_used;
