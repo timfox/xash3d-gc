@@ -427,8 +427,25 @@ void *__wrap_malloc( size_t size )
 
 	if( !p && size )
 		p = GC_BootArenaAllocSmall( size );
+#ifdef XASH_GC_MEMWATCH_DEBUG
+	if( !p && size )
+		Con_Reportf( "THROWLOG malloc(%u) FAILED caller=%p heap_free=%s\n", (unsigned)size, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
+#endif
 	return p;
 }
+
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* local diagnostic: log every C++ throw (type name, caller) before terminate. */
+void __real___cxa_throw( void *obj, void *tinfo, void ( *dest )( void * )) __attribute__(( noreturn ));
+void __wrap___cxa_throw( void *obj, void *tinfo, void ( *dest )( void * )) __attribute__(( noreturn ));
+void __wrap___cxa_throw( void *obj, void *tinfo, void ( *dest )( void * ))
+{
+	const char *name = tinfo ? ((const char **)tinfo)[1] : "?";
+
+	Con_Reportf( "THROWLOG __cxa_throw type=%s tinfo=%p caller=%p heap_free=%s\n", name, tinfo, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
+	__real___cxa_throw( obj, tinfo, dest );
+}
+#endif
 
 void *__wrap_calloc( size_t nmemb, size_t size )
 {
