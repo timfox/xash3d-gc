@@ -30,10 +30,40 @@ byte *GL_ResampleTexture( const byte *source, int inWidth, int inHeight, int out
 
 	if( !source ) return NULL;
 
+#if XASH_GAMECUBE
+	byte *dest;
+
+	/* c1a1f: a 7 KiB grow here, while studio skins streamed in, was a fatal
+	 * Mem_Realloc OOM. The old contents are never reused, so drop them
+	 * first. With no MEM1 block left, a downscale runs in place: output
+	 * pixel i only reads source pixels at index >= i (both dims shrink),
+	 * so the full texture still uploads. */
+	{
+		static size_t scaledSize;
+		const size_t need = (size_t)outWidth * outHeight * 4;
+
+		if( need > scaledSize )
+		{
+			if( scaledImage )
+				Mem_Free( scaledImage );
+			scaledImage = Mem_TryMalloc( r_temppool, need );
+			scaledSize = scaledImage ? need : 0;
+		}
+		dest = scaledImage;
+		if( !dest )
+		{
+			if( outWidth > inWidth || outHeight > inHeight )
+				return NULL;
+			dest = (byte *)source;
+		}
+	}
+#else
 	scaledImage = Mem_Realloc( r_temppool, scaledImage, outWidth * outHeight * 4 );
+	byte *dest = scaledImage;
+#endif
 	const uint fracStep = inWidth * 0x10000 / outWidth;
 	uint *in = (uint *)source;
-	uint *out = (uint *)scaledImage;
+	uint *out = (uint *)dest;
 
 	uint frac = fracStep >> 2;
 	for( int i = 0; i < outWidth; i++ )
@@ -100,5 +130,5 @@ byte *GL_ResampleTexture( const byte *source, int inWidth, int inHeight, int out
 		}
 	}
 
-	return scaledImage;
+	return dest;
 }

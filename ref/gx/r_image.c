@@ -655,6 +655,15 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 	else
 		data = buf;
 
+#if XASH_GAMECUBE
+	if( !data )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: no MEM1 to resample %s %dx%d, upload skipped\n",
+			tex->name, pic->width, pic->height );
+		return false;
+	}
+#endif
+
 	// mips will be auto-generated if desired
 	// Low-memory/quality 0 path skips mips to save texture memory pressure
 	uint activeMips = mipCount;
