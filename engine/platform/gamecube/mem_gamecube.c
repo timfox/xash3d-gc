@@ -294,8 +294,8 @@ void *GC_BootArenaAllocSmall( size_t size )
 	size_t need;
 	gc_boot_blk_t *blk;
 
-	if( gc_boot_closed || size == 0 || size > GC_BOOT_SMALL_MAX || !GC_BootArenaInit()
-		|| !gc_boot_small_top )
+	if( size == 0 || size > GC_BOOT_SMALL_MAX || ( gc_boot_closed && !gc_boot_small_top )
+		|| !GC_BootArenaInit() || !gc_boot_small_top )
 		return NULL;
 	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
 	/* Reuse a freed block first: realloc growth and short-lived allocations
@@ -326,6 +326,10 @@ void *GC_BootArenaAllocSmall( size_t size )
 		}
 	}
 #endif
+	/* After the map load the pad below small_low belongs to the map loader, so
+	 * only the holes inside the pinned zone above may still be handed out. */
+	if( gc_boot_closed )
+		return NULL;
 	if( (size_t)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )) < need )
 		return NULL;
 	gc_boot_small_low -= need;
