@@ -348,6 +348,7 @@ static qboolean gc_wd_tex_overflow;
 static u64 gc_wd_pf[6];
 static u32 gc_wd_pf_cnt[6];
 static int gc_wd_pf_on = -1, gc_wd_pf_frames;
+static u32 gc_wd_pf_bytes, gc_wd_pf_bytes_max;	/* chunk bytes drawn this frame / peak */
 #define WD_PF( k, stmt ) do { if( gc_wd_pf_on > 0 ) { u64 pf_t = gettime(); stmt; gc_wd_pf[k] += gettime() - pf_t; gc_wd_pf_cnt[k]++; } else { stmt; } } while( 0 )
 static u32 gc_wd_cache_size, gc_wd_cache_head;
 static u32 gc_wd_aram;		/* entire file in ARAM */
@@ -1732,6 +1733,7 @@ int R_GXWorldDLDraw( void )
 			}
 			if( !forced )
 				gc_wd_slots[i].used_frame = gc_wd_frame;
+			gc_wd_pf_bytes += gc_wd_chunk_bytes[i];
 			nb = *(const u16 *)( chunk + 2 );
 			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
 			/* Version 2 header is 16 bytes: npos, nbatches, pos_ofs, lm_ofs. */
@@ -1885,6 +1887,9 @@ int R_GXWorldDLDraw( void )
 	}
 	R_GXCmprSetFar( false );
 	R_GXFogEnd();
+	if( gc_wd_pf_bytes > gc_wd_pf_bytes_max )
+		gc_wd_pf_bytes_max = gc_wd_pf_bytes;
+	gc_wd_pf_bytes = 0;
 	if( gc_wd_pf_on > 0 && ++gc_wd_pf_frames >= 120 )
 	{
 		const float k = 1.0f / ( 1000.0f * 120.0f );
@@ -1894,8 +1899,10 @@ int R_GXWorldDLDraw( void )
 			unsigned hits, misses;
 
 			R_GXCmprStats( &hits, &misses );
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: texture slots per frame hits=%u misses=%u\n",
-				( hits - last_hits ) / 120u, ( misses - last_misses ) / 120u );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: texture slots per frame hits=%u misses=%u; chunk ring peak %u of %u Kb\n",
+				( hits - last_hits ) / 120u, ( misses - last_misses ) / 120u,
+				gc_wd_pf_bytes_max / 1024u, gc_wd_cache_size / 1024u );
+			gc_wd_pf_bytes_max = 0;
 			last_hits = hits;
 			last_misses = misses;
 		}
