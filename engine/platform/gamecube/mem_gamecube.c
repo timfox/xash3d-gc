@@ -461,12 +461,28 @@ void GC_BootArenaSetMenuScope( qboolean on ) { gc_boot_menu_scope = on; }
 qboolean GC_BootArenaMenuScope( void ) { return gc_boot_menu_scope && !gc_boot_closed; }
 size_t GC_BootArenaLiveBytes( void ) { return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes; }
 
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* Where is the pad small zone and the sbrk break?  Compare with a corrupt block address. */
+extern void *sbrk( ptrdiff_t incr );
+void GC_BootDiagLog( const char *stage )
+{
+	struct mallinfo mi = mallinfo();
+	Con_Printf( "Xash3D GameCube: bootdiag %s pad=[%p,%p) large_end=%p small=[%p,%p) sbrk=%p arena1=[%p,%p) heap_used=%d heap_free=%d\n",
+		stage, (void *)gc_boot_base, (void *)( gc_boot_base + gc_boot_cap ),
+		(void *)( gc_boot_base + gc_boot_large_cap ), (void *)gc_boot_small_low, (void *)gc_boot_small_top,
+		sbrk( 0 ), SYS_GetArena1Lo(), SYS_GetArena1Hi(), mi.uordblks, mi.fordblks );
+}
+#endif
+
 /* First map load: no new boot allocations.  Returns the bytes still live. */
 size_t GC_BootArenaClose( void )
 {
 	if( !gc_boot_closed )
 	{
 		gc_boot_closed = true;
+#ifdef XASH_GC_MEMWATCH_DEBUG
+		GC_BootDiagLog( "boot arena closed" );
+#endif
 		if( gc_boot_base )
 			Con_Reportf( "Xash3D GameCube: boot arena closed live=%u bytes=%s peak=%s\n",
 				gc_boot_live, Q_memprint( gc_boot_live_bytes ), Q_memprint( gc_boot_peak_bytes ));
