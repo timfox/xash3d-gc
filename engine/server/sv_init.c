@@ -1110,17 +1110,8 @@ static void SV_SetupClients( void )
 	qboolean	changed_maxclients = false;
 
 	// check if clients count was really changed
-	{
-		int wanted = (int)sv_maxclients.value;
-#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
-		/* PROOF EXPERIMENT (local): compare against the slot-promoted count, or
-		 * every second start sees "changed" and runs a heap-corrupting shutdown. */
-		if( wanted > 1 && wanted < (int)sv_gc_slots.value )
-			wanted = bound( 2, (int)sv_gc_slots.value, GC_SV_MAX_SLOTS );
-#endif
-		if( svs.maxclients != wanted )
-			changed_maxclients = true;
-	}
+	if( svs.maxclients != (int)sv_maxclients.value )
+		changed_maxclients = true;
 
 	if( !changed_maxclients ) return; // nothing to change
 

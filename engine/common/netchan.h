@@ -33,7 +33,7 @@ GNU General Public License for more details.
  * buffers move out of netchan_t so a server slot that never talks over the
  * network (a bot) does not carry 64 KiB it cannot use. Off by default. */
 #ifndef XASH_GC_SLIM_CLIENTS
-#define XASH_GC_SLIM_CLIENTS 1 /* PROOF EXPERIMENT (local) */
+#define XASH_GC_SLIM_CLIENTS 0
 #endif
 
 // flow control bytes per second limits

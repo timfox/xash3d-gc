@@ -281,10 +281,10 @@ typedef struct sv_client_s
 } sv_client_t;
 
 #ifndef GC_SV_MAX_SLOTS
-#define GC_SV_MAX_SLOTS 3	// listen-server slot table size; slim slots allow more
+#define GC_SV_MAX_SLOTS 2	// listen-server slot table size; slim slots allow more
 #endif
 #ifndef GC_SV_DEFAULT_SLOTS_STR
-#define GC_SV_DEFAULT_SLOTS_STR "3"	// slots a listen server starts with
+#define GC_SV_DEFAULT_SLOTS_STR "2"	// slots a listen server starts with
 #endif
 
 /*
