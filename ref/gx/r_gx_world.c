@@ -5734,7 +5734,7 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	float cheap_start = 500.0f, cheap_end = 1000.0f;
 	float dx, dy, dz, dist, t, fres, path, under_t;
 	int r, g, b, a;
-	const float *eye = RI.rvp.vieworigin;
+	const float *eye = tr.modelorg; /* the ride eye; rvp.vieworigin lags it */
 	/* env_fog_controller on d2_lostcoast — far-horizon lift only */
 	const int er = 151, eg = 166, eb = 181;
 	const qboolean underwater = ( eye_dot < 0.0f );
@@ -5774,29 +5774,55 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	}
 	else
 	{
-		/* Optical path through the sheet: longer when grazing (small nd). */
-		if( nd < 0.08f )
-			nd = 0.08f;
-		path = 1.0f / nd;
-		fres = ( 1.0f - nd ) * ( 1.0f - nd );
-		t = ( dist - cheap_start ) / ( cheap_end - cheap_start );
+		/* Per-vertex Fresnel against the eye ray. Retail cheap water is a
+		 * mirror at grazing angles and clear straight down; the old per-face
+		 * term made every sheet one flat tint. Reflection colour is the sky
+		 * at the horizon, warmed and lifted toward env_sun (yaw 137). */
+		float cosv = 1.0f, f, sun = 0.0f, refl;
+		int rr, rg, rb, ab;
+
+		(void)nd;
+		(void)path;
+		(void)fres;
+		if( dist > 1.0f )
+		{
+			cosv = fabsf( dz ) / dist;
+			sun = ( dx * -0.731f + dy * 0.682f ) / dist;
+		}
+		f = 1.0f - cosv;
+		f = f * f * f * f * f; /* Schlick */
+		refl = (float)reflect_x100 * ( 1.0f / 150.0f );
+		if( refl > 1.2f ) refl = 1.2f;
+		f *= refl;
+		if( f > 0.85f ) f = 0.85f;
+		if( sun < 0.0f ) sun = 0.0f;
+		sun = sun * sun;
+		sun = sun * sun;
+		sun = sun * sun * sun;
+		/* Measured off retail (playtests/reference/retail-cliff-sea.png):
+		 * near water is the VMT $fogcolor almost opaque (18,38,30), far
+		 * water climbs to the horizon sky (122,135,144). */
+		rr = 122 + (int)( 90.0f * sun );
+		rg = 135 + (int)( 75.0f * sun );
+		rb = 144 + (int)( 45.0f * sun );
+		(void)cheap_start;
+		(void)cheap_end;
+		t = ( dist - 150.0f ) / 600.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
-		/* Near + looking down → see bottom; grazing / far → denser fogcolor.
-		 * Keep mid alphas lean — one Z-winning sheet must not read solid. */
-		a = 48 + (int)( 50.0f * fres ) + (int)( 55.0f * t )
-			+ (int)( 35.0f * ( path - 1.0f ) / 4.0f );
-		if( a < 40 ) a = 40;
-		if( a > 190 ) a = 190;
-		/* Horizon haze toward env fog — soft, not a solid sheet. */
-		t = ( dist - 1200.0f ) / 6000.0f;
+		/* Body: shallows at the feet stay see-through, then the murk closes. */
+		ab = 110 + (int)( 125.0f * t );
+		r = (int)( (float)r + ( (float)rr - (float)r ) * f );
+		g = (int)( (float)g + ( (float)rg - (float)g ) * f );
+		b = (int)( (float)b + ( (float)rb - (float)b ) * f );
+		a = ab + (int)( ( 240.0f - (float)ab ) * f );
+		/* Far horizon melts into env fog. */
+		t = ( dist - 4000.0f ) / 12000.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
-		t *= 0.35f;
 		r = (int)( (float)r + ( (float)er - (float)r ) * t );
 		g = (int)( (float)g + ( (float)eg - (float)g ) * t );
 		b = (int)( (float)b + ( (float)eb - (float)b ) * t );
-		(void)reflect_x100;
 	}
 	if( r > 255 ) r = 255;
 	if( g > 255 ) g = 255;
@@ -5934,13 +5960,65 @@ static void R_GXDrawPackedWater( void )
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
-			GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
-			for( si = 0; si < nv; si++ )
+			if( eye_dot > 0.0f && dists[a] < 3000.0f * 3000.0f && nv <= 8 )
 			{
-				GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
-				GX_Color1u32( R_GXWaterBodyTint( wi, pts[si], eye_dot, nd ));
+				/* Near sheets are 512-unit quads; Fresnel swings across one,
+				 * so split them and shade the pieces per vertex. */
+				const int n = dists[a] < 1400.0f * 1400.0f ? 4 : 2;
+				int ti, u, v, k;
+
+				GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)(( nv - 2 ) * n * n * 3 ));
+				for( ti = 1; ti + 1 < nv; ti++ )
+				{
+					const float *A = pts[0], *B = pts[ti], *C = pts[ti + 1];
+
+					for( u = 0; u < n; u++ )
+					{
+						for( v = 0; v < 2 * ( n - u ) - 1; v++ )
+						{
+							/* Row u holds n-u upright and n-u-1 inverted cells. */
+							const int col = v >> 1;
+							int bu[3], bv[3];
+							float q[3];
+
+							if( !( v & 1 ))
+							{
+								bu[0] = u; bv[0] = col;
+								bu[1] = u; bv[1] = col + 1;
+								bu[2] = u + 1; bv[2] = col;
+							}
+							else
+							{
+								bu[0] = u; bv[0] = col + 1;
+								bu[1] = u + 1; bv[1] = col + 1;
+								bu[2] = u + 1; bv[2] = col;
+							}
+							for( k = 0; k < 3; k++ )
+							{
+								const float fu = (float)bu[k] / (float)n;
+								const float fv = (float)bv[k] / (float)n;
+
+								q[0] = A[0] + ( B[0] - A[0] ) * fv + ( C[0] - A[0] ) * fu;
+								q[1] = A[1] + ( B[1] - A[1] ) * fv + ( C[1] - A[1] ) * fu;
+								q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
+								GX_Position3f32( q[0], q[1], q[2] );
+								GX_Color1u32( R_GXWaterBodyTint( wi, q, eye_dot, nd ));
+							}
+						}
+					}
+				}
+				GX_End();
 			}
-			GX_End();
+			else
+			{
+				GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
+				for( si = 0; si < nv; si++ )
+				{
+					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
+					GX_Color1u32( R_GXWaterBodyTint( wi, pts[si], eye_dot, nd ));
+				}
+				GX_End();
+			}
 			water_drawn++;
 		}
 	}
@@ -6027,10 +6105,10 @@ static void R_GXDrawPackedWater( void )
 			else if( refl > 2.0f )
 				refl = 2.0f;
 			/* Sky/fog tint for the sheen — quieter over transparent body. */
-			sheen.r = (u8)( 151.0f * fres * refl * 0.28f );
-			sheen.g = (u8)( 166.0f * fres * refl * 0.28f );
-			sheen.b = (u8)( 181.0f * fres * refl * 0.28f );
-			sheen.a = (u8)( 110.0f * fres );
+			sheen.r = (u8)( 151.0f * fres * refl * 0.10f );
+			sheen.g = (u8)( 166.0f * fres * refl * 0.10f );
+			sheen.b = (u8)( 181.0f * fres * refl * 0.10f );
+			sheen.a = (u8)( 60.0f * fres );
 			GX_SetTevKColor( GX_KCOLOR0, sheen );
 			GC_GetWaterFaceScroll( wi, &su, &sv, NULL );
 			ou = time_sec * su;
@@ -6174,6 +6252,18 @@ static void R_GXDrawUnderwaterFog( void )
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 }
 
+/* Flythrough (-gcvst): name each stage of the frame from t=32.5 s, so the last line
+ * in the log before a crash is the stage that died. */
+static void R_GXTrace( const char *tag )
+{
+	static int on = -1;
+
+	if( on < 0 )
+		on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	if( on && gp_cl && gp_cl->time > 32.5 && gp_cl->time < 40.0 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: trace %s\n", tag );
+}
+
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
@@ -6186,25 +6276,31 @@ static int R_GXDrawWorldDLFrame( void )
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
+	R_GXTrace( "worlddl" );
 	drawn = R_GXWorldDLDraw();
+	R_GXTrace( "worlddl done" );
 	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
 	 * prop VAT change hangs Dolphin's GP after the first frame. */
-	/* Transparent water Z-writes with LESS (not LEQUAL) so coplanar WorldDL
-	 * rock/sand at the waterline keeps its depth; nearest sheet still wins
-	 * against later water fans (no alpha stack). Props draw AFTER that stamp
-	 * with CoPlanar so hulls / fisherman win shore + water (LCG-5). Underwater
-	 * fog veil is last so it still covers props when submerged. */
-	R_GXDrawPackedWater();
-	GX_SetCoPlanar( GX_ENABLE );
+	/* Opaque first, then the transparent sheet. The baked opaque water
+	 * that used to bury hulls is gone from the world DL, so props sort by
+	 * plain depth: world, props, then water blended over whatever is
+	 * submerged. Underwater veil last so it covers props too. */
+	R_GXTrace( "horizon" );
 	R_GXPropDrawHorizon( RI.rvp.vieworigin );
+	R_GXTrace( "props" );
 	R_GXPropDraw( RI.rvp.vieworigin );
+	R_GXTrace( "fisherman" );
 	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
+	R_GXTrace( "canister" );
 	R_GXCanisterFlightDraw( RI.rvp.vieworigin );
-	GX_SetCoPlanar( GX_DISABLE );
+	R_GXTrace( "water" );
+	R_GXDrawPackedWater();
+	R_GXTrace( "underwater" );
 	R_GXDrawUnderwaterFog();
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_cull_none = true;
 	R_GXInvalidateTriApiLayout();
+	R_GXTrace( "frame end" );
 	GX_Flush();
 	r_gx_world_drew = true;
 	GC_MarkGxWorldEfbReady();
@@ -6955,7 +7051,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				if( !densify_done && pack_n > 1 )
 				{
 					extern void *GC_GetGxVideoMode( void );
-					const float *eye = RI.rvp.vieworigin;
+					const float *eye = tr.modelorg; /* the ride eye; rvp.vieworigin lags it */
 					int rank, extra_drawn = 0;
 					const int max_rank = pack_n;
 					GXRModeObj *rmode = (GXRModeObj *)GC_GetGxVideoMode();
@@ -7044,7 +7140,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 
 				if( !listen_densify_done && pack_n > 1 )
 				{
-					const float *eye = RI.rvp.vieworigin;
+					const float *eye = tr.modelorg; /* the ride eye; rvp.vieworigin lags it */
 					vec3_t forward, right, up;
 					int ranked[12];
 					int rn, ri, extra_drawn = 0;

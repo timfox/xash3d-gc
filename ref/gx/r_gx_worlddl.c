@@ -27,6 +27,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
+#define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
 #define GC_WD_MAT_BASEALPHA	0x08	/* $basealphaenvmapmask — no sand IndTex */
 #define GC_WD_MAX_MATS		512
@@ -82,6 +83,7 @@ extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
+extern int GC_GetWaterFaceCount( void );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
 
 /* Bump relief and detail live in media/tevmat.gcm (I8 mod2x tiles). Sand
@@ -1526,6 +1528,8 @@ int R_GXWorldDLDraw( void )
 		const qboolean frustum_cull = !gEngfuncs.Sys_CheckParm( "-gcworlddlfull" );
 		int pvs_hits = 0, frustum_drop = 0, tower_chunks = 0, forced_n = 0;
 		static u16 order[GC_WD_MAX_CHUNKS];
+		const qboolean skip_water = GC_GetWaterFaceCount() > 0
+			&& !gEngfuncs.Sys_CheckParm( "-gcbakedwater" );
 		int norder = 0;
 		int oi, pass;
 		u32 tower_budget = 288u * 1024u;
@@ -1628,6 +1632,12 @@ int R_GXWorldDLDraw( void )
 				if( b->mat >= gc_wd_hdr.n_mats )
 					continue;
 				m = &gc_wd_mats[b->mat];
+				/* Harbor water is the transparent packed sheet. The baked
+				 * opaque copy sat on the same plane and Z-fought it into
+				 * dark polygons. The 3D-skybox ocean keeps its baked copy. */
+				if( ( m->flags & GC_WD_MAT_WATER ) && skip_water
+					&& gc_wd_chunk_maxs[i * 3 + 2] > -1024 )
+					continue;
 				if( (int)b->mat != cur_mat )
 				{
 					if( gc_wd_texnum[b->mat] < 0 )
