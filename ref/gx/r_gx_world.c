@@ -6585,6 +6585,169 @@ static void R_GXDrawPackedWater( void )
 	}
 }
 
+/* Smoke columns (Source env_smokestack, media/fx_d2_lostcoast.gcf): camera
+ * facing quads with a soft round I8 blob, blended over the scene. A
+ * particle's age is a phase of the clock, so there is no per-particle
+ * state: position, size and fade all follow from (stack, index, time). */
+#define GC_FX_MAX_STACKS	16
+
+typedef struct
+{
+	float	org[3];
+	u8	rgba[4];
+	float	jet;
+	u16	start, end, speed, spread_speed, base_spread;
+	u8	rate, twist;
+} gc_fx_stack_t;
+
+static gc_fx_stack_t gc_fx_stack[GC_FX_MAX_STACKS];
+static int gc_fx_n = -1;	/* -1 untried */
+static byte gc_fx_blob[32 * 32] __attribute__(( aligned( 32 )));
+static GXTexObj gc_fx_obj;
+
+static void R_GXSmokeLoad( void )
+{
+	file_t *f;
+	u32 hdr[2];
+	int x, y;
+
+	gc_fx_n = 0;
+	f = gEngfuncs.fsapi->Open( "media/fx_d2_lostcoast.gcf", "rb", false );
+	if( !f )
+		return;
+	if( gEngfuncs.fsapi->Read( f, hdr, 8 ) == 8 && hdr[0] == 0x47436678u && ( hdr[1] >> 16 ) == 1 )
+	{
+		int n = (int)( hdr[1] & 0xffffu );
+
+		if( n > GC_FX_MAX_STACKS )
+			n = GC_FX_MAX_STACKS;
+		if( gEngfuncs.fsapi->Read( f, gc_fx_stack, n * 32 ) == (fs_offset_t)( n * 32 ))
+			gc_fx_n = n;
+	}
+	gEngfuncs.fsapi->Close( f );
+	/* I8, 8x4 texel tiles. Density falls off as (1 - r^2)^1.5. */
+	for( y = 0; y < 32; y++ )
+	{
+		for( x = 0; x < 32; x++ )
+		{
+			const float fx = ( (float)x - 15.5f ) / 15.5f;
+			const float fy = ( (float)y - 15.5f ) / 15.5f;
+			float d = 1.0f - ( fx * fx + fy * fy );
+			const int tile = ( y >> 2 ) * 4 + ( x >> 3 );
+
+			if( d < 0.0f )
+				d = 0.0f;
+			d = d * sqrtf( d );
+			gc_fx_blob[tile * 32 + ( y & 3 ) * 8 + ( x & 7 )] = (byte)( d * 255.0f );
+		}
+	}
+	DCFlushRange( gc_fx_blob, sizeof( gc_fx_blob ));
+	GX_InitTexObj( &gc_fx_obj, gc_fx_blob, 32, 32, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjFilterMode( &gc_fx_obj, GX_LINEAR, GX_LINEAR );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: smoke emitters=%d\n", gc_fx_n );
+}
+
+static void R_GXSmokeDraw( void )
+{
+	vec3_t forward, right, up;
+	const float *eye = RI.rvp.vieworigin;
+	const float now = gp_cl ? (float)gp_cl->time : 0.0f;
+	Mtx mv;
+	int si;
+
+	if( gc_fx_n < 0 )
+		R_GXSmokeLoad();
+	if( gc_fx_n <= 0 )
+		return;
+	AngleVectors( RI.rvp.viewangles, forward, right, up );
+	R_GXBuildWorldModelview( mv );
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetNumTexGens( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+	GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC );
+	GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_TEXA, GX_CA_RASA, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_LoadTexObj( &gc_fx_obj, GX_TEXMAP0 );
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
+	for( si = 0; si < gc_fx_n; si++ )
+	{
+		const gc_fx_stack_t *st = &gc_fx_stack[si];
+		const float speed = st->speed > 0 ? (float)st->speed : 30.0f;
+		const float life = st->jet / speed;
+		float dx = st->org[0] - eye[0], dy = st->org[1] - eye[1], dz = st->org[2] + st->jet * 0.5f - eye[2];
+		const float dist = sqrtf( dx * dx + dy * dy + dz * dz );
+		int n, i;
+
+		/* Under about three pixels at its widest, or behind the eye. */
+		if( dist < 1.0f || (float)st->end < dist * 0.006f )
+			continue;
+		if( dx * forward[0] + dy * forward[1] + dz * forward[2] < -st->jet )
+			continue;
+		n = (int)( (float)st->rate * life );
+		if( n < 6 ) n = 6;
+		if( n > 40 ) n = 40;
+		GX_Begin( GX_QUADS, GX_VTXFMT0, (u16)( n * 4 ));
+		for( i = 0; i < n; i++ )
+		{
+			/* Per-particle constants from a small integer hash. */
+			u32 h = (u32)( si * 7919 + i * 104729 + 12345 );
+			float t, ang, rad, size, fade, px, py, pz, a;
+			u32 col;
+
+			h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+			t = now / life + (float)i / (float)n;
+			t -= (float)(int)t;
+			ang = (float)( h & 1023u ) * ( 6.2831853f / 1024.0f )
+				+ ( st->twist ? t * 2.5f : 0.0f );
+			rad = (float)st->base_spread * 0.5f
+				+ (float)st->spread_speed * life * t * 0.5f * (float)(( h >> 10 ) & 255u ) * ( 1.0f / 255.0f );
+			/* The column leans with the wind as it rises. */
+			px = st->org[0] + cosf( ang ) * rad + st->jet * 0.22f * t * t;
+			py = st->org[1] + sinf( ang ) * rad;
+			pz = st->org[2] + st->jet * t;
+			size = (float)st->start + ( (float)st->end - (float)st->start ) * t;
+			fade = ( t < 0.1f ? t * 10.0f : 1.0f ) * ( 1.0f - t );
+			a = (float)st->rgba[3] * fade * 1.6f;
+			if( a > 255.0f ) a = 255.0f;
+			col = ( (u32)st->rgba[0] << 24 ) | ( (u32)st->rgba[1] << 16 )
+				| ( (u32)st->rgba[2] << 8 ) | (u32)a;
+			GX_Position3f32( px - ( right[0] + up[0] ) * size, py - ( right[1] + up[1] ) * size, pz - ( right[2] + up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 0.0f, 1.0f );
+			GX_Position3f32( px + ( right[0] - up[0] ) * size, py + ( right[1] - up[1] ) * size, pz + ( right[2] - up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 1.0f, 1.0f );
+			GX_Position3f32( px + ( right[0] + up[0] ) * size, py + ( right[1] + up[1] ) * size, pz + ( right[2] + up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 1.0f, 0.0f );
+			GX_Position3f32( px - ( right[0] - up[0] ) * size, py - ( right[1] - up[1] ) * size, pz - ( right[2] - up[2] ) * size );
+			GX_Color1u32( col );
+			GX_TexCoord2f32( 0.0f, 0.0f );
+		}
+		GX_End();
+	}
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+}
+
 /* Underwater volume fog after props so the veil is not punched by hulls. */
 static void R_GXDrawUnderwaterFog( void )
 {
@@ -6728,6 +6891,8 @@ static int R_GXDrawWorldDLFrame( void )
 	ST_MARK( 2 );
 	R_GXTrace( "water" );
 	R_GXDrawPackedWater();
+	R_GXTrace( "smoke" );
+	R_GXSmokeDraw();
 	R_GXTrace( "underwater" );
 	R_GXDrawUnderwaterFog();
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
