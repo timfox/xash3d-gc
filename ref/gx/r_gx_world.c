@@ -6499,6 +6499,11 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 	return ( (u32)r << 24 ) | ( (u32)g << 16 ) | ( (u32)b << 8 ) | (u32)a;
 }
 
+/* Defined with the smoke pass below; the water glare shares its blob. */
+static int gc_fx_n;
+static GXTexObj gc_fx_obj;
+static void R_GXSmokeLoad( void );
+
 /* Seabed depth under the harbor water plane (media/dp_d2_lostcoast.gcx,
  * I4, baked top-down). The water body multiplies its alpha by it, so the
  * sheet thins out over the shallows and vanishes at the shoreline instead of
@@ -6940,6 +6945,119 @@ static void R_GXDrawPackedWater( void )
 			}
 		}
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+	}
+	/* Sun glare on the water. Retail's harbor is dark water crossed by
+	 * bright, broken streaks: the sky around the sun mirrored in ripple
+	 * facets, strongest toward the sun and sliding with the player. Here:
+	 * two scrolling layers of the water normal map pick out the facets,
+	 * and a soft blob projected around the sun's mirror point on the water
+	 * plane says where they catch the light. */
+	if( water_drawn > 0 && water_tex && tr.modelorg[2] > -60.0f
+		&& !gEngfuncs.Sys_CheckParm( "-gcnowaterglare" ))
+	{
+		const float sx = -0.731f, sy = 0.682f;	/* env_sun bearing, yaw 137 */
+		const float h = tr.modelorg[2] + 64.0f;
+		const float d = h * 5.67f;		/* 1 / tan( 10 degrees ) */
+		const float lu = d * 2.2f + 1400.0f, lv = h * 3.0f + 800.0f;
+		const float cx = tr.modelorg[0] + sx * d * 0.9f;
+		const float cy = tr.modelorg[1] + sy * d * 0.9f;
+		const GXColor k = { 255, 250, 232, 255 };
+		float ta = time_sec * 0.035f, tb = time_sec * 0.027f;
+		Mtx tm;
+
+		ta -= (float)(int)ta;
+		tb -= (float)(int)tb;
+		if( gc_fx_n < 0 )
+			R_GXSmokeLoad();	/* builds the soft blob texture */
+		tm[0][0] = sx / lu;  tm[0][1] = sy / lu;  tm[0][2] = 0.0f;
+		tm[0][3] = 0.5f - ( cx * sx + cy * sy ) / lu;
+		tm[1][0] = -sy / lv; tm[1][1] = sx / lv;  tm[1][2] = 0.0f;
+		tm[1][3] = 0.5f - ( cx * -sy + cy * sx ) / lv;
+		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 0.0f; tm[2][3] = 1.0f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX3, GX_MTX2x4 );
+		/* Ripple layer A: long along the sun's bearing, so facets read as
+		 * streaks toward the light. */
+		tm[0][0] = sx / 420.0f;  tm[0][1] = sy / 420.0f;  tm[0][3] = ta;
+		tm[1][0] = -sy / 110.0f; tm[1][1] = sx / 110.0f;  tm[1][3] = 0.0f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX4, GX_MTX2x4 );
+		/* Ripple layer B: finer, across it, drifting the other way. */
+		tm[0][0] = 1.0f / 173.0f; tm[0][1] = 0.0f; tm[0][3] = -tb;
+		tm[1][0] = 0.0f; tm[1][1] = 1.0f / 131.0f; tm[1][3] = tb * 0.6f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX5, GX_MTX2x4 );
+		GX_LoadTexObj( &gc_fx_obj, GX_TEXMAP4 );
+		GX_LoadTexObj( (GXTexObj *)GC_GetWaterTexObj(), GX_TEXMAP0 );
+		r_gx_bound_texnum = 0;
+		r_gx_bound_fmt = 0;
+		GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+		GX_SetNumChans( 0 );
+		GX_SetNumTexGens( 3 );
+		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX3 );
+		GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX4 );
+		GX_SetTexCoordGen( GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX5 );
+		GX_SetNumTevStages( 4 );
+		/* The normal map's red channel is the facet tilt, 0.5 = flat. */
+		GX_SetTevSwapModeTable( GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_RED );
+		/* Stage 0: layer A, ( tilt - 0.5 ) x 4: only facets tipped one way. */
+		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD1, GX_TEXMAP0, GX_COLORNULL );
+		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1 );
+		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_4, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST );
+		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		/* Stage 1: x layer B, x2, so the streaks break up and shimmer. */
+		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD2, GX_TEXMAP0, GX_COLORNULL );
+		GX_SetTevSwapMode( GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP1 );
+		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		/* Stage 2: x the glare blob around the mirror point. */
+		GX_SetTevOrder( GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL );
+		GX_SetTevSwapMode( GX_TEVSTAGE2, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+		GX_SetTevColorIn( GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		/* Stage 3: x sky-at-the-sun colour. */
+		GX_SetTevOrder( GX_TEVSTAGE3, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+		GX_SetTevSwapMode( GX_TEVSTAGE3, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+		GX_SetTevKColor( GX_KCOLOR0, k );
+		GX_SetTevKColorSel( GX_TEVSTAGE3, GX_TEV_KCSEL_K0 );
+		GX_SetTevColorIn( GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_ClearVtxDesc();
+		GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+		for( wi = 0; wi < water_n; wi++ )
+		{
+			mplane_t pl;
+			float pts[32][3];
+			int nv, si;
+			float gx0, gy0, du, dv;
+
+			if( !GC_WaterFacePlane( wi, &pl, NULL ) || fabsf( pl.normal[2] ) < 0.85f )
+				continue;
+			nv = GC_GetWaterFaceVerts( wi, pts, 32 );
+			if( nv < 3 )
+				continue;
+			/* Only faces the blob can touch. */
+			gx0 = pts[0][0] - cx;
+			gy0 = pts[0][1] - cy;
+			du = gx0 * sx + gy0 * sy;
+			dv = gx0 * -sy + gy0 * sx;
+			if( fabsf( du ) > lu * 0.5f + 800.0f || fabsf( dv ) > lv * 0.5f + 800.0f )
+				continue;
+			GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
+			for( si = 0; si < nv; si++ )
+				GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
+			GX_End();
+		}
+		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+		GX_SetTevSwapMode( GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+		GX_SetNumChans( 1 );
 	}
 	GX_SetNumChans( 1 );
 	GX_SetNumTevStages( 1 );

@@ -1302,9 +1302,9 @@ static void R_GXWorldDLSpecOn( u16 strength, int indtex, int tev_id )
 			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
 		/* Sky glare is near white (retail's wet patches read 153,151,138);
 		 * the warm N.L material colour turned the beach yellow. */
-		k.r = (u8)( s * 118 / 200 );
-		k.g = (u8)( s * 116 / 200 );
-		k.b = (u8)( s * 104 / 200 );
+		k.r = (u8)( s * 74 / 200 );
+		k.g = (u8)( s * 74 / 200 );
+		k.b = (u8)( s * 68 / 200 );
 		k.a = 255;
 		GX_SetTevKColor( GX_KCOLOR0, k );
 		GX_SetNumIndStages( 0 );
