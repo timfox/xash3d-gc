@@ -28,7 +28,8 @@ extern void GC_AramCopy( unsigned int aram, void *buf, unsigned int len, qboolea
 #define GC_PROBE_SAVE_CAP     (160 * 1024) /* G94 save/load blobs */
 #define GC_PROBE_CONFIG_CAP   (12 * 1024)  /* G508 config-only (no malloc) */
 #define GC_PROBE_SAVE_FILES   48 /* transition saves: <map>.HL1/.HL2/.HL3 per level */
-#define GC_TRANSITION_ARAM_CAP ( 4 * 1024 * 1024 )
+#define GC_TRANSITION_ARAM_CAP ( 4u * 1024u * 1024u )
+#define GC_TRANSITION_ARAM_MIN ( 1u * 1024u * 1024u )
 #define GC_PROBE_SAVE_NAMESZ  96
 
 typedef struct gc_probe_save_file_s
@@ -53,6 +54,8 @@ static size_t gc_probe_save_used;
 static gc_probe_save_file_t gc_probe_save_files[GC_PROBE_SAVE_FILES];
 static int gc_probe_save_nfiles;
 static gc_probe_save_open_t gc_probe_save_opens[4];
+#define GC_PROBE_SAVE_HANDLE_BYTES ( offsetof( file_t, buff ))
+static byte gc_probe_save_handles[4][( GC_PROBE_SAVE_HANDLE_BYTES + 7 ) & ~7] __attribute__(( aligned( 8 )));
 /* Transition mode keeps file bodies in ARAM: GoldSrc writes every visited
  * level's save/<map>.HL? on each changelevel and MEM1 cannot hold them. */
 static unsigned int gc_probe_save_aram;
@@ -81,13 +84,25 @@ static qboolean GC_ProbeSaveEnsureBlob( void )
 		return true;
 	if( GC_ProbeSaveTransitionMode( ))
 	{
-		gc_probe_save_aram = GC_AramReserveTagged( GC_TRANSITION_ARAM_CAP, "saves" );
+		/* Retail New Game leaves ~3.8 MiB largest free once the World DL,
+		 * audio and sfx blocks are in: a flat 4 MiB ask failed on every
+		 * changelevel and NPCs/items never crossed a transition. Step down
+		 * to what fits; one HL1 level save is ~100-300 KiB. */
+		unsigned int cap;
+
+		for( cap = GC_TRANSITION_ARAM_CAP; cap >= GC_TRANSITION_ARAM_MIN; cap -= 512u * 1024u )
+		{
+			gc_probe_save_aram = GC_AramReserveTagged( cap, "saves" );
+			if( gc_probe_save_aram )
+				break;
+		}
 		if( !gc_probe_save_aram )
 		{
 			Con_Reportf( S_ERROR "Xash3D GameCube: transition save bank ARAM reserve failed\n" );
 			return false;
 		}
-		gc_probe_save_cap = GC_TRANSITION_ARAM_CAP;
+		gc_probe_save_cap = cap;
+		Con_Reportf( "Xash3D GameCube: transition save bank %u Kb in ARAM\n", cap / 1024u );
 		return true;
 	}
 	if( GC_ProbeSaveConfigOnly())
@@ -177,13 +192,55 @@ static int GC_ProbeSaveFindSlot( const char *basename )
 	return -1;
 }
 
+static void GC_ProbeSaveMove( size_t dst, size_t src, size_t len )
+{
+	byte tmp[512];
+
+	if( !gc_probe_save_aram )
+	{
+		memmove( gc_probe_save_blob + dst, gc_probe_save_blob + src, len );
+		return;
+	}
+	while( len > 0 ) // dst < src: a forward copy never overlaps unread data
+	{
+		const size_t n = len < sizeof( tmp ) ? len : sizeof( tmp );
+
+		GC_AramCopy( gc_probe_save_aram + (unsigned int)src, tmp, (unsigned int)n, false );
+		GC_AramCopy( gc_probe_save_aram + (unsigned int)dst, tmp, (unsigned int)n, true );
+		dst += n;
+		src += n;
+		len -= n;
+	}
+}
+
+static void GC_ProbeSaveCompactOut( int slot )
+{
+	const size_t gap_off = gc_probe_save_files[slot].offset;
+	const size_t gap_len = gc_probe_save_files[slot].length;
+	int i;
+
+	if( !gap_len || gap_off + gap_len > gc_probe_save_used )
+		return;
+	GC_ProbeSaveMove( gap_off, gap_off + gap_len, gc_probe_save_used - gap_off - gap_len );
+	for( i = 0; i < gc_probe_save_nfiles; i++ )
+	{
+		if( i != slot && gc_probe_save_files[i].used && gc_probe_save_files[i].offset > gap_off )
+			gc_probe_save_files[i].offset -= gap_len;
+	}
+	gc_probe_save_used -= gap_len;
+}
+
 static int GC_ProbeSaveAllocSlot( const char *basename )
 {
 	int i = GC_ProbeSaveFindSlot( basename );
 
 	if( i >= 0 )
 	{
-		/* Truncate for rewrite. */
+		/* Truncate for rewrite. Writes always append, so close the old
+		 * body's gap first: GoldSrc rewrites save/<map>.HL? on every
+		 * changelevel and an append-only bank filled up mid-campaign. */
+		GC_ProbeSaveCompactOut( i );
+		gc_probe_save_files[i].offset = gc_probe_save_used;
 		gc_probe_save_files[i].length = 0;
 		return i;
 	}
@@ -278,7 +335,12 @@ file_t *GC_ProbeSaveOpen( const char *filepath, const char *mode )
 	if( oi >= (int)( sizeof( gc_probe_save_opens ) / sizeof( gc_probe_save_opens[0] )))
 		return NULL;
 
-	file = (file_t *)Mem_Calloc( fs_mempool, sizeof( *file ));
+	/* The bank does its own I/O: nothing touches buff[] (or anything after
+	 * it) on these handles, so each open-table slot owns a static header.
+	 * A 2 KiB Mem_Calloc here returned NULL on c0a0e's tight heap and the
+	 * transition restore dereferenced it. */
+	file = (file_t *)gc_probe_save_handles[oi];
+	memset( file, 0, GC_PROBE_SAVE_HANDLE_BYTES );
 	file->handle = GC_PROBE_SAVE_FD;
 	file->ungetc = EOF;
 	file->filetime = 0;

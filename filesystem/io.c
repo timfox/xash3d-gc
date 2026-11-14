@@ -200,8 +200,7 @@ int FS_Close( file_t *file )
 #if XASH_GAMECUBE
 	if( GC_ProbeSaveIsHandle( file ))
 	{
-		GC_ProbeSaveClose( file );
-		Mem_Free( file );
+		GC_ProbeSaveClose( file ); // its file_t is a static open-table slot
 		return 0;
 	}
 #endif
