@@ -1447,6 +1447,10 @@ static void Cmd_Exec_f( void )
 #endif
 
 	Con_Printf( "execing " S_GREEN "%s" S_DEFAULT "\n", Cmd_Argv( 1 ));
+#ifdef XASH_GC_MEMWATCH_DEBUG
+	if( !Q_stricmp( Cmd_Argv( 1 ), "game.cfg" ))
+		GC_MemPoolDump( "exec_game_cfg(before new CHalfLifeDoD)" );
+#endif
 
 	Cmd_ExecScript( cfgpath );
 }

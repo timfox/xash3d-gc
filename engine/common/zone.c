@@ -1393,6 +1393,37 @@ void Mem_PrintStats( void )
 	Con_Printf( "total allocated size: ^1%s\n", Q_memprint( realsize ));
 }
 
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* local diagnostic: every pool, largest first, plus totals and heap numbers */
+void GC_MemPoolDump( const char *tag )
+{
+	size_t used[64], idx[64], n = 0, i, j, tot_total = 0, tot_real = 0;
+
+	for( i = 0; i < poolcount && n < 64; i++ )
+	{
+		if( !poolchain[i].filename )
+			continue;
+		idx[n] = i;
+		used[n] = poolchain[i].realsize;
+		tot_total += poolchain[i].totalsize;
+		tot_real += poolchain[i].realsize;
+		n++;
+	}
+	for( i = 0; i < n; i++ )
+		for( j = i + 1; j < n; j++ )
+			if( used[j] > used[i] )
+			{
+				size_t t = used[i]; used[i] = used[j]; used[j] = t;
+				t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+			}
+	Con_Reportf( "POOLSTAT %s begin pools=%u heap_free=%s\n", tag, (unsigned)n, Q_memprint( GC_MemHeapFreeBytes()));
+	for( i = 0; i < n; i++ )
+		Con_Reportf( "POOLSTAT %s %-24s real=%u total=%u%s\n", tag, poolchain[idx[i]].name, (unsigned)used[i],
+			(unsigned)poolchain[idx[i]].totalsize, used[i] >= 100u * 1024u ? "  <== >=100KB" : "" );
+	Con_Reportf( "POOLSTAT %s end pools_total=%u real_total=%u (%s)\n", tag, (unsigned)tot_total, (unsigned)tot_real, Q_memprint( tot_real ));
+}
+#endif
+
 size_t Mem_TotalRealSize( void )
 {
 	size_t realsize = 0;

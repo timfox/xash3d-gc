@@ -2235,6 +2235,9 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 	}
 	Con_Reportf( "Xash3D GameCube: host main loop begin status=%d\n", host.status );
 	GC_MemHeapMark( "host_main_loop_begin_status" );
+#ifdef XASH_GC_MEMWATCH_DEBUG
+	GC_MemPoolDump( "host_main_loop_begin" );
+#endif
 	/* Solo local match: Create Game equivalent without UI / peers.
 	 * deathmatch + maxplayers latch then map (not -gcmap smoke). */
 	{
