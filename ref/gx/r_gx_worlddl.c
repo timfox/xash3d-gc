@@ -669,6 +669,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	 * arena above its carves unused. Lend the texture cache a share of that
 	 * remainder, scaled to what is there; give the cache up to the old
 	 * full set only when the arena is large. */
+	qboolean want_spill_slots = false;
 	if( gc_wd_hdr.file_size < 1536u * 1024u && !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" )
 		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprarena" ))
 	{
@@ -721,37 +722,18 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		{
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots skipped: budget %u < 8 slots, hw %u cap %u room %u\n",
 				(unsigned)budget, (unsigned)hw, (unsigned)cap, (unsigned)room );
-			/* Experimental (-gcslotsspill): the arena is full, so take the slots
-			 * from the world-array spill, leaving 48 KiB for props. */
-			if( gEngfuncs.Sys_CheckParm( "-gcslotsspill" ))
-			{
-				const size_t sfree = Mod_GCWorldArraySpillFree();
-				const size_t keep_props = 48u * 1024u;
-				const size_t sb = sfree > keep_props ? sfree - keep_props : 0;
-				const int sn = (int)Q_min( sb / slot_bytes, 64u );
-
-				if( sn >= 8 )
-				{
-					byte *st = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)sn * slot_bytes, "cmpr-slots" );
-
-					if( st )
-					{
-						Mod_GCWorldArraySpillPinBase( st, (size_t)sn * slot_bytes );
-						R_GXCmprBounceAdopt( st, sn, slot_bytes, 0, far_bytes );
-					}
-					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s from spill: %d near (spill free %u)\n",
-						st ? "adopted" : "carve FAILED", sn, (unsigned)sfree );
-				}
-			}
+			want_spill_slots = true;
 		}
 	}
 	if( !gc_wd_cache )
 	{
-		const unsigned cache_hi =
+		unsigned cache_hi =
 			( gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 				&& gEngfuncs.Sys_CheckParm( "-gcplayerinput" ))
 			? ( 192u * 1024u ) : ( 512u * 1024u );
 
+		if( want_spill_slots && gEngfuncs.Sys_CheckParm( "-gcslotsspill" ) && cache_hi > 128u * 1024u )
+			cache_hi = 128u * 1024u;	/* leave spill for the CMPR slots below */
 		for( try_sz = cache_hi; try_sz >= 96u * 1024u; try_sz -= 32u * 1024u )
 		{
 			gc_wd_cache = (byte *)Mod_GCWorldArraySpillTryAlloc( try_sz, "world DL chunk cache" );
@@ -771,6 +753,33 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		Mod_GCWorldArraySpillPinBase( tbl, tables );
 	else
 		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
+	/* Experimental (-gcslotsspill): the arena had no room, so take the CMPR slots
+	 * from whatever spill is left after the chunk cache (which must come first),
+	 * keeping 48 KiB for props. */
+	if( want_spill_slots && gEngfuncs.Sys_CheckParm( "-gcslotsspill" ))
+	{
+		const unsigned slot_bytes = 10944u, far_bytes = 2752u;
+		const size_t sfree = Mod_GCWorldArraySpillFree();
+		const size_t keep_props = 48u * 1024u;
+		const size_t sb = sfree > keep_props ? sfree - keep_props : 0;
+		const int sn = (int)Q_min( sb / slot_bytes, 64u );
+
+		if( sn >= 8 )
+		{
+			byte *st = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)sn * slot_bytes, "cmpr-slots" );
+
+			if( st )
+			{
+				Mod_GCWorldArraySpillPinBase( st, (size_t)sn * slot_bytes );
+				R_GXCmprBounceAdopt( st, sn, slot_bytes, 0, far_bytes );
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s from spill: %d near (spill free %u)\n",
+				st ? "adopted" : "carve FAILED", sn, (unsigned)sfree );
+		}
+		else
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots from spill skipped: only %u free after chunk cache\n",
+				(unsigned)sfree );
+	}
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
 
 	/* Whole pack → ARAM so tree/chunkdir/PVS/chunks share one store. */
