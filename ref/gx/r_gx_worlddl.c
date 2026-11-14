@@ -93,6 +93,10 @@ extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
+extern size_t Mod_GCBspScratchFloor( void );
+extern size_t Mod_GCWorldArraySpillFree( void );
+extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
@@ -612,7 +616,10 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		 * a lean load lowers the highwater to 0 while the world-texture low
 		 * mips it carved stay live (starting at 0 bleached them white). */
 		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
-		const size_t hw = ( live + 31u ) & ~(size_t)31u;
+		/* The BSP surface table stays live inside the arena for the whole map and
+		 * the highwater does not cover it: slots carved there were overwritten by
+		 * its per-frame marks (and overwrote its records). */
+		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
 		 * 96 KB, prop far LODs about 170 KB, and entity overflow. */
@@ -652,6 +659,89 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			{
 				try_sz = (u32)want;
 				gc_wd_cache_in_arena = true;
+			}
+		}
+	}
+	/* Worlds whose lists are under 1.5 MB (the DoD maps) skipped the adoption
+	 * above, so the texture cache stayed at one heap slot: every packed bind
+	 * missed and fence-waited (about 200 binds, 45 ms, on the Avalanche
+	 * street). Their chunk cache comes from the spill, leaving the idle map
+	 * arena above its carves unused. Lend the texture cache a share of that
+	 * remainder, scaled to what is there; give the cache up to the old
+	 * full set only when the arena is large. */
+	if( gc_wd_hdr.file_size < 1536u * 1024u && !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" )
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprarena" ))
+	{
+		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
+		/* The BSP surface table stays live inside the arena for the whole map and
+		 * the highwater does not cover it: slots carved there were overwritten by
+		 * its per-frame marks (and overwrote its records). */
+		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
+		const size_t cap = GC_MapLoadBufferCapacity();
+		const size_t keep = 352u * 1024u;	/* water table, prop slots, entity overflow */
+		const size_t keep_tight = 64u * 1024u;	/* floor-limited arena: carves left above the slots */
+		const unsigned slot_bytes = 10944u, far_bytes = 2752u;
+		const size_t room = cap > hw ? cap - hw : 0;
+		size_t budget = 0;
+		int nslots, far_n = 0;
+		byte *tex;
+
+		if( room > keep + 192u * 1024u )
+		{
+			budget = ( room - keep ) / 2u;	/* leave half for later carves */
+			if( budget > 1190u * 1024u )
+				budget = 1190u * 1024u;
+		}
+		else if( room > keep_tight )
+			budget = room - keep_tight;	/* live BSP scratch leaves only a tail */
+		if( budget >= 760u * 1024u )
+		{
+			nslots = 64;
+			far_n = (int)(( budget - (size_t)nslots * slot_bytes ) / far_bytes );
+			if( far_n > 176 )
+				far_n = 176;
+		}
+		else
+		{
+			nslots = (int)( budget / slot_bytes );
+			if( nslots > 64 )
+				nslots = 64;
+		}
+		if( nslots >= 8 )
+		{
+			GC_RetainMapLoadBufferBorrow();
+			tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
+				(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+			if( tex )
+				R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s: %d near + %d far, floor/hw %u cap %u room %u\n",
+				tex ? "adopted" : "carve FAILED", nslots, far_n, (unsigned)hw, (unsigned)cap, (unsigned)room );
+		}
+		else
+		{
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots skipped: budget %u < 8 slots, hw %u cap %u room %u\n",
+				(unsigned)budget, (unsigned)hw, (unsigned)cap, (unsigned)room );
+			/* Experimental (-gcslotsspill): the arena is full, so take the slots
+			 * from the world-array spill, leaving 48 KiB for props. */
+			if( gEngfuncs.Sys_CheckParm( "-gcslotsspill" ))
+			{
+				const size_t sfree = Mod_GCWorldArraySpillFree();
+				const size_t keep_props = 48u * 1024u;
+				const size_t sb = sfree > keep_props ? sfree - keep_props : 0;
+				const int sn = (int)Q_min( sb / slot_bytes, 64u );
+
+				if( sn >= 8 )
+				{
+					byte *st = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)sn * slot_bytes, "cmpr-slots" );
+
+					if( st )
+					{
+						Mod_GCWorldArraySpillPinBase( st, (size_t)sn * slot_bytes );
+						R_GXCmprBounceAdopt( st, sn, slot_bytes, 0, far_bytes );
+					}
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s from spill: %d near (spill free %u)\n",
+						st ? "adopted" : "carve FAILED", sn, (unsigned)sfree );
+				}
 			}
 		}
 	}
