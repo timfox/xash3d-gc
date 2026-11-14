@@ -50,6 +50,10 @@ CRITICAL_ASSETS = (
 )
 
 # Assets that are either too large for GC memory budget or unsupported formats
+# Bootstrap pk3 entries are STORED except these small text formats, which
+# deflate well and open while MEM1 is still plentiful (see the writer).
+BOOTSTRAP_DEFLATE_TEXT = {".txt", ".cfg", ".lst", ".rc", ".res", ".scr", ".def", ".ini", ".gam"}
+
 UNSUPPORTED_EXTENSIONS = {
     ".wmv", ".mpg", ".mpeg",          # Video: unsupported or too heavy
     ".mp3", ".ogg",                   # Audio: streaming not yet stable on GC
@@ -323,10 +327,15 @@ def write_bootstrap_pk3(
 				and suffix not in BOOTSTRAP_EXCLUDED_EXTENSIONS
 				and child.stat().st_size <= size_cap
 			):
+				# STORED unless it is small text: a DEFLATE entry needs ~40 KiB
+				# of zlib state plus a compressed copy in MEM1 to open, and at
+				# c0a0 that failed for the world texture pack (inflateInit2 -4:
+				# every surface drew the missing-texture checkerboard), the HUD
+				# sheets and long sounds.  Binary GC media barely deflates.
 				compress_type = (
-					zipfile.ZIP_STORED
-					if suffix in (".bsp", ".mdl")
-					else zipfile.ZIP_DEFLATED
+					zipfile.ZIP_DEFLATED
+					if suffix in BOOTSTRAP_DEFLATE_TEXT
+					else zipfile.ZIP_STORED
 				)
 				archive.write(
 					child,
@@ -340,7 +349,7 @@ def write_bootstrap_pk3(
 		if menu_dir.is_dir() and not recursive:
 			for child in sorted(menu_dir.rglob("*")):
 				if child.is_file() and child.suffix.lower() not in BOOTSTRAP_EXCLUDED_EXTENSIONS:
-					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_DEFLATED)
+					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_STORED)
 		studio_count = inject_gc_studio_into_bootstrap(archive, data)
 		if studio_count:
 			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
@@ -893,6 +902,63 @@ GC_MENU_BANNER_SIZE = (640, 104)
 GC_MENU_BANNER_FRAME_SEC = 2.0
 
 
+GCMP_VERSION = 1  # keep equal to GC_GCMP_VERSION in engine/platform/gamecube/gcmp.h
+
+
+def gcmp_header(w: int, h: int, source: bytes, version: int = GCMP_VERSION, mips: int = 1) -> bytes:
+	"""32-byte GCMP header (see engine/platform/gamecube/gcmp.h).
+
+	Unlike the legacy header (zeros after the size) this records the format, the
+	cache version and the size and crc32 of the source file, so the engine can
+	tell a stale or foreign sidecar and fall back to the original image."""
+	import zlib
+
+	return (
+		b"GCMP"
+		+ struct.pack(">HHBBHII", w, h, 0, mips, version, len(source), zlib.crc32(source) & 0xFFFFFFFF)
+		+ bytes(12)
+	)
+
+
+def bake_gcmp_sidecar(image_path: Path, out_path: Path, out_w: int, out_h: int) -> bool:
+	"""Resample an opaque image to out_w x out_h (multiples of 8) and write it as
+	a versioned GCMP CMPR sidecar. Returns False (and writes nothing) if the
+	image cannot be read or the size is not CMPR-friendly."""
+	try:
+		import numpy as np
+		from PIL import Image
+	except ImportError:
+		print("Warning: numpy/Pillow missing; skipping CMPR sidecar bake.", file=sys.stderr)
+		return False
+	if out_w < 8 or out_h < 8 or out_w % 8 or out_h % 8:
+		return False
+	try:
+		source = image_path.read_bytes()
+		with Image.open(image_path) as im:
+			rgb = np.asarray(im.convert("RGB").resize((out_w, out_h), Image.LANCZOS))
+	except Exception as exc:  # unreadable or unsupported source: no sidecar
+		print(f"Warning: CMPR sidecar skipped for {image_path.name}: {exc}", file=sys.stderr)
+		return False
+	out_path.write_bytes(gcmp_header(out_w, out_h, source) + gx_cmpr_encode(rgb))
+	return True
+
+
+# resource/gc_menu/loading.tga is shown by the early loading screen at this size
+# (GC_LOADING_BG_W/H in vid_gamecube.c) and was read whole (225 KiB) to get it.
+GC_LOADING_CMP_SIZE = (160, 120)
+
+
+def _stage_gc_menu_loading_cmp(menu_dir: Path) -> None:
+	loading = menu_dir / "loading.tga"
+	if not loading.is_file():
+		return
+	if bake_gcmp_sidecar(loading, menu_dir / "loading.cmp", *GC_LOADING_CMP_SIZE):
+		print(
+			f"GameCube menu assets: loading.tga baked as loading.cmp "
+			f"{GC_LOADING_CMP_SIZE[0]}x{GC_LOADING_CMP_SIZE[1]} CMPR"
+		)
+
+
 def _stage_gc_menu_logo_banner(source: Path, menu_dir: Path) -> bool:
 	"""resource/gc_menu/logo_banner.{cmp,tga} from a frame of media/logo.avi."""
 	avi = source / "media" / "logo.avi"
@@ -945,6 +1011,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 			if child.is_file():
 				shutil.copy2(child, menu_dir / child.name)
 		_stage_gc_menu_btn_strips(source, menu_dir)
+		_stage_gc_menu_loading_cmp(menu_dir)
 		print(
 			f"GameCube menu assets: preserve Lost Coast retail title "
 			f"{(menu_dir / 'background.tga').relative_to(output)}"
@@ -1085,6 +1152,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 	# 640x480 menu.  Bake one frame as GX CMPR (640x104, CMPR needs multiples
 	# of 8) for the GX menu, plus a small TGA so mainui can load the picture.
 	_stage_gc_menu_logo_banner(source, menu_dir)
+	_stage_gc_menu_loading_cmp(menu_dir)
 
 	# Optional low-memory 3×3 preview tiles for probes that cannot hold the
 	# full 640×480 sheet; the live menu uses background.tga + logo.tga.
@@ -1886,9 +1954,15 @@ def wt_encode(w: int, h: int, pixels: bytes, palette: bytes, alpha: bool) -> tup
 	opaque = idx != 255 if alpha else np.ones((h, w), bool)
 	tw, th = 1 << max(3, (w - 1).bit_length()), 1 << max(3, (h - 1).bit_length())
 	if (tw, th) != (w, h):
-		resample = Image.Resampling.NEAREST if alpha else Image.Resampling.BICUBIC
-		rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), resample))
-		opaque = np.asarray(Image.fromarray(opaque).resize((tw, th), Image.Resampling.NEAREST))
+		# Pillow 12.1 raises SystemError on any size-changing NEAREST resize (and on
+		# bool images), so do nearest-neighbour with index maps (PIL pixel-centre rule).
+		ys = np.minimum(((np.arange(th) + 0.5) * h / th).astype(np.int64), h - 1)
+		xs = np.minimum(((np.arange(tw) + 0.5) * w / tw).astype(np.int64), w - 1)
+		if alpha:
+			rgb = rgb[ys][:, xs]
+		else:
+			rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), Image.Resampling.BICUBIC))
+		opaque = opaque[ys][:, xs]
 	levels = bytearray()
 	count = 0
 	fcol = rgb.astype(np.float32)
@@ -2009,6 +2083,42 @@ def build_loading_spans(source: Path, output: Path) -> list[tuple[str, Path]]:
 	print(f"  loading plaque: retail LAMBDA {tw}x{th} at {scale}x, {W}x{H}, "
 		f"{len(spans)} spans, {len(blob)} bytes")
 	return [("media/gc_loading.spn", out)]
+
+
+def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
+	"""media/wd_<map>.gcd for a GoldSrc map: the whole BSP as GX display lists
+	per PVS cluster (scripts/bake_worlddl_goldsrc.py, runtime
+	ref/gx/r_gx_worlddl.c).  With it the world draws completely from any view,
+	streamed from ARAM, instead of the CapFaces subset captured for the
+	starting eye.  Cached by BSP size and mtime."""
+	cache.mkdir(parents=True, exist_ok=True)
+	st = bsp.stat()
+	out = cache / f"wd_{bsp.stem.lower()}.gcd"
+	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1"
+	if out.is_file() and stamp.is_file() and stamp.read_text() == key:
+		return out
+	sys.path.insert(0, str(Path(__file__).resolve().parent))
+	try:
+		import bake_worlddl_goldsrc  # type: ignore
+
+		bake_worlddl_goldsrc.bake(bsp, out)
+	except (Exception, SystemExit) as error:  # a map the baker cannot read keeps CapFaces
+		print(f"  world DL: bake failed for {bsp.name}: {error}")
+		return None
+	stamp.write_text(key)
+	return out
+
+
+def build_world_dl_overlays(source: Path, output: Path, cache: Path) -> list[tuple[str, Path]]:
+	"""World DL packs for every retail map (play disc)."""
+	overlays = []
+	for bsp in sorted((source / "maps").glob("*.bsp")):
+		wd = bake_world_dl(bsp, cache)
+		if wd:
+			overlays.append((f"media/{wd.name}", wd))
+	print(f"  world DL: {len(overlays)} map(s) baked/cached")
+	return overlays
 
 
 def build_music_overlays(source: Path, output: Path, cache: Path) -> list[tuple[str, Path]]:
@@ -3118,6 +3228,7 @@ def create_retail_boot_overlays(
 	)
 	overlays.extend(build_sky_cmpr_overlays(source, output))
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
+	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
 	# Offline CapFaces packs (media/cf_<map>.gcp) — load-time DL for 60 FPS Flipper.
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore
@@ -3542,6 +3653,10 @@ def stage_smoke_data(
 				src = cand
 				break
 		if src is None:
+			bsp = source / "maps" / f"{stem}.bsp"
+			if bsp.is_file():
+				src = bake_world_dl(bsp, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache")
+		if src is None:
 			print(f"  world DL: no {name} (CapFaces/live BSP fallback)")
 			continue
 		shutil.copy2(src, dest)
@@ -3549,6 +3664,18 @@ def stage_smoke_data(
 
 	# Changelevel / New Game loading plaque (retail gfx.wad art, ~3 KiB).
 	build_loading_spans(source, output)
+	# Retail AI node graphs (maps/graphs/*.nod, ~10-20 KiB each for the early
+	# maps; the game loads the one for the running map).  Without them every
+	# scripted walker logs "Graph not ready!" / "Failed to reach target!!!"
+	# each frame and stands still.  Retail staging copies them already.
+	graphs = source / "maps" / "graphs"
+	if graphs.is_dir():
+		(output / "maps" / "graphs").mkdir(parents=True, exist_ok=True)
+		count = 0
+		for nod in graphs.glob("*.nod"):
+			shutil.copy2(nod, output / "maps" / "graphs" / nod.name.lower())
+			count += 1
+		print(f"  node graphs: {count} staged")
 	(output / "custom").mkdir(exist_ok=True)
 	(output / "maps").mkdir(exist_ok=True)
 	return output

@@ -55,6 +55,7 @@ void Netchan_AddBufferToList( fragbuf_t **pplist, fragbuf_t *pbuf );
 typedef struct
 {
 	qboolean in_use;
+	qboolean loop_owned; // lent to a queued loopback packet
 	byte storage[sizeof( fragbuf_t ) + NETCHAN_GC_EMERGENCY_PAYLOAD];
 } netchan_gc_emergency_t;
 
@@ -67,10 +68,49 @@ void Netchan_GCResetEmergency( void )
 	int i;
 
 	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
-		s_gc_fragbuf_emergency[i].in_use = false;
+	{
+		if( !s_gc_fragbuf_emergency[i].loop_owned )
+			s_gc_fragbuf_emergency[i].in_use = false;
+	}
 	s_gc_waitlist_emergency_in_use = false;
 	memset( &s_gc_waitlist_emergency, 0, sizeof( s_gc_waitlist_emergency ));
 	Con_Reportf( "Xash3D GameCube: netchan emergency reset\n" );
+}
+
+/* A big reliable (c1a0c spawn: 4.9 KiB of baselines) can meet a MEM1 heap
+ * with no block that size. Dropping it is not recoverable in practice: the
+ * resend is the same size and the client sat at signon 0 forever. Lend an
+ * idle emergency slot to the loopback queue until the client reads it. */
+void *Netchan_GCBorrowEmergency( size_t bytes )
+{
+	int i;
+
+	if( bytes > sizeof( s_gc_fragbuf_emergency[0].storage ))
+		return NULL;
+	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
+	{
+		if( s_gc_fragbuf_emergency[i].in_use )
+			continue;
+		s_gc_fragbuf_emergency[i].in_use = true;
+		s_gc_fragbuf_emergency[i].loop_owned = true;
+		return s_gc_fragbuf_emergency[i].storage;
+	}
+	return NULL;
+}
+
+qboolean Netchan_GCReturnEmergency( const void *data )
+{
+	int i;
+
+	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
+	{
+		if( data != s_gc_fragbuf_emergency[i].storage )
+			continue;
+		s_gc_fragbuf_emergency[i].loop_owned = false;
+		s_gc_fragbuf_emergency[i].in_use = false;
+		return true;
+	}
+	return false;
 }
 
 static void Netchan_FreeFragbuf( fragbuf_t *buf )
@@ -169,6 +209,10 @@ netadr_t	net_from;
 sizebuf_t	net_message;
 static poolhandle_t net_mempool;
 byte	net_message_buffer[NET_MAX_MESSAGE];
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+/* The local client's channel. Server slots bring their own (sv_client.c). */
+static byte gc_client_netchan_buf[2][NET_MAX_MESSAGE] __attribute__(( aligned( 32 )));
+#endif
 
 static const char *const ns_strings[NS_COUNT] =
 {
@@ -294,7 +338,26 @@ void Netchan_Setup( netsrc_t sock, netchan_t *chan, netadr_t adr, int qport, voi
 {
 	Netchan_Clear( chan );
 
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	/* A slot presets its buffers before setup; the memset must not lose them. */
+	byte *preset_message = chan->message_buf;
+	byte *preset_reliable = chan->reliable_buf;
+#endif
 	memset( chan, 0, sizeof( *chan ));
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	if( !preset_message || !preset_reliable )
+	{
+		if( sock != NS_CLIENT )
+		{
+			Host_Error( "%s: server channel without buffers", __func__ );
+			return;
+		}
+		preset_message = gc_client_netchan_buf[0];
+		preset_reliable = gc_client_netchan_buf[1];
+	}
+	chan->message_buf = preset_message;
+	chan->reliable_buf = preset_reliable;
+#endif
 
 	if( pfnBlockSize == NULL )
 	{
@@ -328,7 +391,7 @@ void Netchan_Setup( netsrc_t sock, netchan_t *chan, netadr_t adr, int qport, voi
 	chan->use_cookie = FBitSet( flags, NETCHAN_USE_COOKIE ) ? true : false;
 	chan->cookie = 0;
 
-	MSG_Init( &chan->message, "NetData", chan->message_buf, sizeof( chan->message_buf ));
+	MSG_Init( &chan->message, "NetData", chan->message_buf, NET_MAX_MESSAGE );
 }
 
 /*
@@ -1912,7 +1975,7 @@ void Netchan_TransmitBits( netchan_t *chan, int length, const byte *data )
 				}
 
 				// copy frag stuff on top of current buffer
-				MSG_StartWriting( &temp, chan->reliable_buf, sizeof( chan->reliable_buf ), chan->reliable_length, -1 );
+				MSG_StartWriting( &temp, chan->reliable_buf, NET_MAX_MESSAGE, chan->reliable_length, -1 );
 				MSG_WriteBits( &temp, MSG_GetData( &pbuf->frag_message ), MSG_GetNumBitsWritten( &pbuf->frag_message ));
 				chan->reliable_length += MSG_GetNumBitsWritten( &pbuf->frag_message );
 				chan->frag_length[i] = MSG_GetNumBitsWritten( &pbuf->frag_message );

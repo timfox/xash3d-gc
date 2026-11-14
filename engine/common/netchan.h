@@ -29,6 +29,13 @@ GNU General Public License for more details.
 // 0 == regular, 1 == file stream
 #define MAX_STREAMS			2
 
+/* GameCube slim client slots (see sv_client.c): the two NET_MAX_MESSAGE staging
+ * buffers move out of netchan_t so a server slot that never talks over the
+ * network (a bot) does not carry 64 KiB it cannot use. Off by default. */
+#ifndef XASH_GC_SLIM_CLIENTS
+#define XASH_GC_SLIM_CLIENTS 0
+#endif
+
 // flow control bytes per second limits
 #define MAX_RATE			100000.0f
 #define MIN_RATE			1000.0f
@@ -201,12 +208,20 @@ typedef struct netchan_s
 
 	// staging and holding areas
 	sizebuf_t		message;
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	byte		*message_buf;	// storage is owned by the slot: see Netchan_Setup
+#else
 	byte		message_buf[NET_MAX_MESSAGE];
+#endif
 
 	// reliable message buffer.
 	// we keep adding to it until reliable is acknowledged.  Then we clear it.
 	int		reliable_length;
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	byte		*reliable_buf;
+#else
 	byte		reliable_buf[NET_MAX_MESSAGE];	// unacked reliable message (max size for loopback connection)
+#endif
 
 	// Waiting list of buffered fragments to go onto queue.
 	// Multiple outgoing buffers can be queued in succession
@@ -274,6 +289,8 @@ void Netchan_FragSend( netchan_t *chan );
 void Netchan_Clear( netchan_t *chan );
 #if XASH_GAMECUBE
 void Netchan_GCResetEmergency( void );
+void *Netchan_GCBorrowEmergency( size_t bytes );
+qboolean Netchan_GCReturnEmergency( const void *data );
 #endif
 
 #endif//NET_MSG_H

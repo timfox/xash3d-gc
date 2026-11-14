@@ -445,6 +445,13 @@ void GAME_EXPORT TriVertex3f( float x, float y, float z )
 		return;
 	}
 #endif
+#if XASH_GAMECUBE
+	/* GX world draw has no soft z/view buffer; with the Flipper effects pipe
+	 * skipped (frame-budget probe window) particles fell into the soft
+	 * rasterizer and R_PolysetDrawSpansAdditive read *NULL z (DSI). */
+	if( !d_pzbuffer || !vid.buffer )
+		return;
+#endif
 	if( mode == TRI_TRIANGLES )
 	{
 #if XASH_GAMECUBE

@@ -68,7 +68,9 @@ static entity_state_t gc_singleplayer_packet_entities[SINGLEPLAYER_BACKUP * NUM_
 /* 2P listen sv_client_t table — Z_Realloc of ~178 KiB soft-fails after renderer
  * init (unclaimed≈36 KiB) and leaves svs.clients=NULL; SpawnServer then DSI's
  * on clients[0] (dod_donner probe 121415). Paired with mapload_pad cut. */
-#define GC_LISTEN_CLIENTS_BSS 2
+/* 2 full slots as before; with slim slots GC_SV_MAX_SLOTS (people in the first
+ * two, bots in the rest). */
+#define GC_LISTEN_CLIENTS_BSS GC_SV_MAX_SLOTS
 static sv_client_t gc_listen_clients[GC_LISTEN_CLIENTS_BSS] __attribute__((aligned( 32 )));
 
 qboolean SV_IsStaticPacketEntities( const entity_state_t *ents )
@@ -759,6 +761,9 @@ void SV_ActivateServer( int runPhysics )
 		if( GC_MapLoadMemoryOpt() && !Sys_CheckParm( "-gcfullphysics" ))
 		{
 			memset( &cl->netchan, 0, sizeof( cl->netchan ));
+#if XASH_GC_SLIM_CLIENTS
+			SV_GCBindClientBuffers( cl );
+#endif
 			Con_Reportf( "Xash3D GameCube: local client netchan reset for map route\n" );
 		}
 		else
@@ -1121,6 +1126,11 @@ static void SV_SetupClients( void )
 	if( Host_IsDedicated() )
 		svs.maxclients = bound( 4, svs.maxclients, MAX_CLIENTS );
 	else svs.maxclients = bound( 1, svs.maxclients, MAX_CLIENTS );
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	/* The menu pins maxplayers to 2; bots need more slots than people. */
+	if( svs.maxclients > 1 && svs.maxclients < (int)sv_gc_slots.value )
+		svs.maxclients = bound( 2, (int)sv_gc_slots.value, GC_SV_MAX_SLOTS );
+#endif
 
 	if( svs.maxclients == 1 )
 		Cvar_SetValue( "deathmatch", 0.0f );
@@ -1158,7 +1168,7 @@ static void SV_SetupClients( void )
 		const size_t sp_cap = sizeof( gc_singleplayer_packet_entities );
 
 		/* Cap 2P listen to the SP ring so we never soft-fail Z_Realloc to NULL. */
-		if( svs.maxclients <= 2 && (size_t)svs.num_client_entities > sp_slots )
+		if( svs.maxclients <= GC_LISTEN_CLIENTS_BSS && (size_t)svs.num_client_entities > sp_slots )
 		{
 			Con_Reportf( "Xash3D GameCube: server packet entities capped %d -> %d for listen BSS\n",
 				svs.num_client_entities, (int)sp_slots );
@@ -1168,7 +1178,7 @@ static void SV_SetupClients( void )
 		{
 			const size_t packet_bytes = sizeof( entity_state_t ) * (size_t)svs.num_client_entities;
 
-			if( svs.maxclients <= 2
+			if( svs.maxclients <= GC_LISTEN_CLIENTS_BSS
 				&& SV_UPDATE_BACKUP <= SINGLEPLAYER_BACKUP
 				&& packet_bytes <= sp_cap )
 			{

@@ -1177,6 +1177,32 @@ void GC_AramVideoRelease( void )
 	GC_AramFree( base );
 }
 
+/* World DL packs get their own growable stream block.  They used to share
+ * the map window with the BSP hot lumps: on the retail disc the hot lumps
+ * claimed it first (1 MiB), the 1.4 MiB c0a0 pack fell back to the disc
+ * path and the first frame stalled on a GX fence. */
+static u32 gc_aram_worlddl_base, gc_aram_worlddl_capacity;
+
+unsigned int GC_AramWorldDLReserve( unsigned int size )
+{
+	u32 aligned = ( size + 31u ) & ~31u;
+
+	if( !aligned ) return 0;
+	if( gc_aram_worlddl_base && aligned <= gc_aram_worlddl_capacity )
+		return gc_aram_worlddl_base;
+	if( gc_aram_worlddl_base )
+	{
+		GC_AramFree( gc_aram_worlddl_base );
+		gc_aram_worlddl_base = 0;
+		gc_aram_worlddl_capacity = 0;
+	}
+	/* Round up so the tram chain's slightly larger packs reuse the block. */
+	aligned = ( aligned + 256u * 1024u - 1u ) & ~( 256u * 1024u - 1u );
+	gc_aram_worlddl_base = GC_AramAllocTagged( aligned, true, "worlddl" );
+	if( gc_aram_worlddl_base ) gc_aram_worlddl_capacity = aligned;
+	return gc_aram_worlddl_base;
+}
+
 unsigned int GC_AramMapReserve( unsigned int size )
 {
 	u32 aligned = ( size + 31u ) & ~31u;

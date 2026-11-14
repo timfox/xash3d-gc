@@ -464,6 +464,7 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 	 * Listen/WorldDL boots use -gcmap (not -gcnewgame) — same tip starvation. */
 	if( !file && ( Sys_CheckParm( "-gcnewgame" )
 		|| Sys_CheckParm( "-gcmap" )
+		|| Sys_CheckParm( "-gcmenuplaystart" )
 		|| Sys_CheckParm( "-gclistenserver" )))
 	{
 		const qboolean tip_sfx =

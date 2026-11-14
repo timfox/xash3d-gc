@@ -140,6 +140,10 @@ CVAR_DEFINE( public_server, "public", "0", 0, "change server type from private t
 CVAR_DEFINE_AUTO( sv_novis, "0", 0, "force to ignore server visibility" );			// disable server culling entities by vis
 CVAR_DEFINE( sv_pausable, "pausable", "1", 0, "allow players to pause or not" );
 CVAR_DEFINE( sv_maxclients, "maxplayers", "1", FCVAR_LATCH, "server max capacity" );
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+/* Minimum listen-server slots (people plus bots); the menu pins maxplayers to 2. */
+CVAR_DEFINE( sv_gc_slots, "sv_gc_slots", GC_SV_DEFAULT_SLOTS_STR, FCVAR_LATCH, "GameCube listen server slots, 2 to the slot table size" );
+#endif
 CVAR_DEFINE_AUTO( sv_check_errors, "0", FCVAR_ARCHIVE, "check edicts for errors" );
 CVAR_DEFINE_AUTO( sv_validate_changelevel, "0", 0, "test change level for level-designer errors" );
 CVAR_DEFINE( sv_hostmap, "hostmap", "", 0, "keep name of last entered map" );
@@ -1066,6 +1070,9 @@ void SV_Init( void )
 	Cvar_RegisterVariable( &sv_edgefriction );
 	Cvar_RegisterVariable( &sv_stopspeed );
 	Cvar_RegisterVariable( &sv_maxclients );
+#if XASH_GAMECUBE && XASH_GC_SLIM_CLIENTS
+	Cvar_RegisterVariable( &sv_gc_slots );
+#endif
 	Cvar_RegisterVariable( &sv_check_errors );
 	Cvar_RegisterVariable( &public_server );
 	Cvar_RegisterVariable( &sv_failuretime );

@@ -55,7 +55,9 @@ static void AVI_ParseAudioFormat( movie_state_t *Avi, fs_offset_t file_size );
 #define GC_AVI_UPLOAD_MAX_H		240
 #define GC_AVI_STATIC_FRAME_MAX_BYTES	( 320 * 240 * 2 )
 #define GC_AVI_STATIC_OFFSETS_MAX	256
-static byte gc_avi_static_frame[GC_AVI_STATIC_FRAME_MAX_BYTES] __attribute__((aligned( 32 )));
+/* The intro frame (320x240 RGB565) only lives while the startup videos
+ * play: it comes from the boot arena, which the first map load takes back,
+ * instead of 150 KiB of BSS held for the whole game. */
 static uint32_t gc_avi_static_offsets[GC_AVI_STATIC_OFFSETS_MAX];
 static qboolean gc_avi_static_offsets_busy;
 static byte gc_avi_prefetch_stage[16384] __attribute__((aligned( 32 )));
@@ -113,7 +115,7 @@ static fs_offset_t AVI_GCReadRaw( movie_state_t *Avi, fs_offset_t offset, void *
 
 static qboolean AVI_UsesStaticFrameBuffer( const movie_state_t *Avi )
 {
-	return Avi && Avi->frame == gc_avi_static_frame;
+	return Avi && Avi->frame && GC_BootArenaOwns( Avi->frame );
 }
 #endif
 
@@ -218,12 +220,14 @@ static qboolean AVI_OpenGCVID( movie_state_t *Avi, const char *filename, qboolea
 
 	Avi->frame_size = (size_t)width * (size_t)height * ( Avi->raw_rgb565 ? 2 : 4 );
 #if XASH_GAMECUBE
+	Avi->frame = NULL;
 	if( Avi->raw_rgb565 && Avi->frame_size <= GC_AVI_STATIC_FRAME_MAX_BYTES )
 	{
-		memset( gc_avi_static_frame, 0, Avi->frame_size );
-		Avi->frame = gc_avi_static_frame;
+		Avi->frame = (byte *)GC_BootArenaAlloc( Avi->frame_size );
+		if( Avi->frame )
+			memset( Avi->frame, 0, Avi->frame_size );
 	}
-	else
+	if( !Avi->frame )
 #endif
 	Avi->frame = Mem_Malloc( avi_mempool, Avi->frame_size );
 	if( !Avi->frame )
@@ -1466,7 +1470,9 @@ void AVI_CloseVideo( movie_state_t *Avi )
 	if( Avi->frame )
 	{
 #if XASH_GAMECUBE
-		if( !AVI_UsesStaticFrameBuffer( Avi ))
+		if( AVI_UsesStaticFrameBuffer( Avi ))
+			GC_BootArenaFree( Avi->frame );
+		else
 #endif
 			Mem_Free( Avi->frame );
 	}

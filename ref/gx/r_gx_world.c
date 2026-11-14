@@ -460,6 +460,18 @@ static u16 r_gx_tex_linear_small[GC_GX_TEX_WORLD_MAX_DIM * GC_GX_TEX_WORLD_MAX_D
 static u16 *r_gx_tex_linear = r_gx_tex_linear_small;
 static size_t r_gx_tex_linear_cap = GC_GX_TEX_WORLD_MAX_DIM * GC_GX_TEX_WORLD_MAX_DIM;
 
+/* The 128x32 lean credits/HUD font converts to an 8 KiB RGB565 tile.  After
+ * a map load the HUD slabs often cannot be refilled (G184 slot fails), and
+ * then every glyph bind failed: the intro credits drew only their dark
+ * backing.  Fonts that fit get this static tile as a last resort. */
+#define GC_GX_FONT_TILE_BYTES	( 128u * 32u * sizeof( u16 ))
+static u16 r_gx_font_tile[GC_GX_FONT_TILE_BYTES / sizeof( u16 )] __attribute__((aligned( 32 )));
+
+static void R_GXFreeTile( u16 *tiled )
+{
+	if( tiled && tiled != r_gx_font_tile )
+		free( tiled );
+}
 #define GC_GX_TEX_HUD_SLOT0	( GC_GX_TEX_SLOTS - GC_GX_TEX_HUD_RESERVE )
 /* HUD/menu textures may also take the slots between the world pool and the
  * reserved slabs, backed on demand: the retail menu binds ~10 distinct
@@ -528,7 +540,7 @@ static void R_GXReserveHudPool( void )
 			continue;
 		if( r_gx_tex[slot].tiled )
 		{
-			free( r_gx_tex[slot].tiled );
+			R_GXFreeTile( r_gx_tex[slot].tiled );
 			r_gx_tex[slot].tiled = NULL;
 			r_gx_tex[slot].alloc_bytes = 0;
 			r_gx_tex[slot].valid = false;
@@ -587,7 +599,7 @@ void R_GXReleaseHudPoolForMapLoad( void )
 	{
 		if( r_gx_tex[i].tiled )
 		{
-			free( r_gx_tex[i].tiled );
+			R_GXFreeTile( r_gx_tex[i].tiled );
 			r_gx_tex[i].tiled = NULL;
 		}
 		memset( &r_gx_tex[i], 0, sizeof( r_gx_tex[i] ));
@@ -1382,6 +1394,8 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 	return (pixel_t *)r_gx_cinematic_tex.tiled;
 }
 
+static void R_GXCmprSlotsReset( void );
+
 static void R_GXTexCacheReset( void )
 {
 	int i;
@@ -1405,7 +1419,7 @@ static void R_GXTexCacheReset( void )
 			continue;
 		}
 		if( r_gx_tex[i].tiled && i >= GC_GX_TEX_WORLD_POOL )
-			free( r_gx_tex[i].tiled );
+			R_GXFreeTile( r_gx_tex[i].tiled );
 		memset( &r_gx_tex[i], 0, sizeof( r_gx_tex[i] ));
 		r_gx_tex_lru[i] = 0;
 		if( i < GC_GX_TEX_WORLD_POOL )
@@ -1427,6 +1441,7 @@ static void R_GXTexCacheReset( void )
 	r_gx_cinematic_ready = false;
 	r_gx_tex_world = NULL;
 	r_gx_hud_pool_ready = false;
+	R_GXCmprSlotsReset();
 	if( !gc_mem003_world_pool_logged )
 	{
 		gc_mem003_world_pool_logged = true;
@@ -1486,6 +1501,38 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	u8 fmt;
 	pixel_t *tex_pixels;
 	qboolean tex_alpha;
+
+	/* CMPR studio skins (r_gx_cmpr.c): already GX texels at their final size. */
+	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
+	{
+		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
+			|| r_gx_native_bound_pixels != img->pixels[0] )
+		{
+			r_gx_native_bound_pixels = img->pixels[0];
+			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
+				GX_TF_CMPR, GX_REPEAT, GX_REPEAT, GX_FALSE );
+			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
+			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
+			t->texnum = texnum;
+			t->w = img->width;
+			t->h = img->height;
+			t->fmt = GX_TF_CMPR;
+			t->valid = true;
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_bound_texnum = texnum;
+			r_gx_bound_fmt = GX_TF_CMPR;
+			r_gx_tex_loads++;
+		}
+		else
+		{
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_tex_reuses++;
+		}
+		R_GXSetTexAlphaTest( alpha );
+		return t;
+	}
 
 	/* Larger sides are box filtered down: without mipmaps they shimmer. */
 	while( img->width / step_x > cap )
@@ -2049,16 +2096,42 @@ static void R_GXHotService( void )
  * Prefer ≤32 Kb so 256² CMPR always drops the base mip. On tip-tight maps
  * (dod_donner) borrow the world-array spill tail reserved for CapFaces. */
 #define GC_CMPR_BOUNCE_BYTES ( 24u * 1024u )
-static byte *r_gx_cmpr_bounce;
-static unsigned r_gx_cmpr_bounce_cap;
+/* The bounce is a small cache of GC_CMPR_BOUNCE_BYTES slots with LRU, not one
+ * buffer: a frame binds 200-400 packed textures and a single slot re-DMAed and
+ * fence-waited on every change of texture. A slot is keyed by what it holds
+ * (ARAM address, skipped bytes, size), so a texture that is still resident is
+ * bound again with no DMA and no wait. Each slot has its own fence: only the
+ * slot about to be overwritten is waited for, and that one was used longest ago.
+ * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
+#define GC_CMPR_SLOTS_MAX     8
+#define GC_CMPR_SLOTS_DEFAULT 6
+#define GC_CMPR_HEAP_MARGIN ( 1024u * 1024u )	/* heap that must stay free after extra slots */
+static byte *r_gx_cmpr_bounce;		/* base of all slots */
+static unsigned r_gx_cmpr_bounce_cap;	/* bytes per slot */
+static int r_gx_cmpr_nslots;
+static struct
+{
+	unsigned aram, skip, bytes;	/* what the slot holds */
+	u16      fence;			/* last draw that sampled it */
+	unsigned used;
+	qboolean valid;
+} r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
+static unsigned r_gx_cmpr_clock;
+static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
-static unsigned r_gx_cmpr_bounce_skip;
-/* Flipper samples bounce asynchronously — fence before DMA overwrite or
- * CapFaces walls flash to the next texture every bind (caen/charlie). */
-static u16 r_gx_cmpr_bounce_fence;
 static unsigned r_gx_cmpr_bounce_stalls;
+static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
+
+/* A new map reuses texnums and ARAM windows: forget what the slots hold. */
+static void R_GXCmprSlotsReset( void )
+{
+	memset( r_gx_cmpr_slot, 0, sizeof( r_gx_cmpr_slot ));
+	r_gx_cmpr_cur_slot = -1;
+	r_gx_cmpr_bounce_texnum = 0;
+}
 
 extern byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
+extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 
 static byte *R_GXCmprBounce( void )
 {
@@ -2067,33 +2140,41 @@ static byte *R_GXCmprBounce( void )
 		/* Prefer spill first — tip memalign(48/32 Kb) on flash starves
 		 * SV_LoadFromFile (bounce24 20261110-030600) while dense8's smaller
 		 * DOL left tip free and accidentally took 48 Kb → white/wash. */
-		r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
-		if( r_gx_cmpr_bounce )
-			r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
-		if( !r_gx_cmpr_bounce )
-		{
-			static const unsigned try_sizes[] = {
-				GC_CMPR_BOUNCE_BYTES, 24u * 1024u
-			};
-			unsigned i;
+		int want = GC_CMPR_SLOTS_DEFAULT, n;
 
-			for( i = 0; i < sizeof( try_sizes ) / sizeof( try_sizes[0] ); ++i )
+		if( gEngfuncs.Sys_CheckParm( "-gccmprslots" ))
+		{
+			char buf[8];
+
+			if( _Sys_GetParmFromCmdLine( "-gccmprslots", buf, sizeof( buf )) && buf[0] )
+				want = Q_atoi( buf );
+			want = bound( 1, want, GC_CMPR_SLOTS_MAX );
+		}
+		/* Ask for the most slots first, fewer if MEM1 / spill cannot give them
+		 * contiguously; one slot is the previous behaviour. */
+		for( n = want; n >= 1 && !r_gx_cmpr_bounce; n = ( n > 4 ) ? 4 : n - 1 )
+		{
+			r_gx_cmpr_bounce = Mod_GCWorldArraySpillBorrow( n * GC_CMPR_BOUNCE_BYTES, "cmpr-bounce" );
+			/* Extra slots only take heap that leaves headroom for the map load;
+			 * one slot is the old behaviour. */
+			if( !r_gx_cmpr_bounce && ( n == 1
+				|| GC_MemHeapFreeBytes() >= n * GC_CMPR_BOUNCE_BYTES + GC_CMPR_HEAP_MARGIN ))
+				r_gx_cmpr_bounce = (byte *)memalign( 32, n * GC_CMPR_BOUNCE_BYTES );
+			if( r_gx_cmpr_bounce )
 			{
-				r_gx_cmpr_bounce = (byte *)memalign( 32, try_sizes[i] );
-				if( r_gx_cmpr_bounce )
-				{
-					r_gx_cmpr_bounce_cap = try_sizes[i];
-					break;
-				}
+				r_gx_cmpr_nslots = n;
+				r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
 			}
 		}
+		R_GXCmprSlotsReset();
 		if( r_gx_cmpr_bounce )
 		{
 			extern void GCube_AppendSwissEvidence( const char *fmt, ... );
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce %u Kb\n",
-				r_gx_cmpr_bounce_cap / 1024u );
-			GCube_AppendSwissEvidence( "CMPR ARAM bounce %u Kb",
-				r_gx_cmpr_bounce_cap / 1024u );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce %d x %u Kb = %u Kb\n",
+				r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap / 1024u,
+				r_gx_cmpr_nslots * r_gx_cmpr_bounce_cap / 1024u );
+			GCube_AppendSwissEvidence( "CMPR ARAM bounce %d x %u Kb",
+				r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap / 1024u );
 		}
 		else
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce alloc failed\n" );
@@ -2105,6 +2186,56 @@ static byte *R_GXCmprBounce( void )
 void R_GXPreallocCmprBounce( void )
 {
 	(void)R_GXCmprBounce();
+}
+
+/*
+ * The slot holding `bytes` of ARAM at aram+skip, DMAing it in on a miss. Only
+ * the LRU slot being replaced is waited for (its own last draw), never the one
+ * the previous bind is sampling. Returns the slot's MEM1 address.
+ */
+static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
+{
+	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
+	int i, pick = -1;
+
+	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	{
+		if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
+			&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
+		{
+			r_gx_cmpr_slot[i].used = ++r_gx_cmpr_clock;
+			r_gx_cmpr_hits++;
+			*slot_out = i;
+			return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+		}
+	}
+	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	{
+		if( !r_gx_cmpr_slot[i].valid )
+		{
+			pick = i;
+			break;
+		}
+		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
+			pick = i;
+	}
+	/* Never replace the slot the texture bound right now is sampling when
+	 * another is free to take: with >1 slot the LRU is not it, but be exact. */
+	if( pick == r_gx_cmpr_cur_slot && r_gx_cmpr_nslots > 1 )
+		pick = ( pick + 1 ) % r_gx_cmpr_nslots;
+	if( r_gx_cmpr_slot[pick].valid && GC_GXFenceWait( r_gx_cmpr_slot[pick].fence ))
+		r_gx_cmpr_bounce_stalls++;
+	GC_AramTransfer( aram + skip, r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap,
+		bytes, false );
+	r_gx_cmpr_slot[pick].aram = aram;
+	r_gx_cmpr_slot[pick].skip = skip;
+	r_gx_cmpr_slot[pick].bytes = bytes;
+	r_gx_cmpr_slot[pick].valid = true;
+	r_gx_cmpr_slot[pick].used = ++r_gx_cmpr_clock;
+	r_gx_cmpr_misses++;
+	r_gx_cmpr_dma_bytes += bytes;
+	*slot_out = pick;
+	return r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap;
 }
 
 static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
@@ -2169,19 +2300,11 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				}
 				if( remain > 0 && remain <= r_gx_cmpr_bounce_cap && use_levels > 0 )
 				{
-					if( r_gx_cmpr_bounce_texnum != texnum
-						|| r_gx_cmpr_bounce_skip != skip )
-					{
-						/* Prior CapFaces still sample this MEM1 bounce via FIFO. */
-						if( r_gx_cmpr_bounce_texnum != 0
-							&& GC_GXFenceWait( r_gx_cmpr_bounce_fence ))
-							r_gx_cmpr_bounce_stalls++;
-						GC_AramTransfer( img->gc_packed_aram + skip, bounce,
-							remain, false );
-						r_gx_cmpr_bounce_texnum = texnum;
-						r_gx_cmpr_bounce_skip = skip;
-					}
-					data = bounce;
+					int slot = -1;
+
+					data = R_GXCmprSlotFor( img->gc_packed_aram, skip, remain, &slot );
+					r_gx_cmpr_cur_slot = slot;
+					r_gx_cmpr_bounce_texnum = texnum;
 					used_bounce = true;
 					shift = use_shift;
 					levels = use_levels;
@@ -2236,12 +2359,12 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 		else
 		{
 			r_gx_tex_reuses++;
-			/* Same CMPR still resident in bounce — advance fence past new draws. */
-			if( r_gx_cmpr_bounce_texnum == texnum && r_gx_cmpr_bounce )
+			/* Same CMPR still resident in its slot — advance its fence. */
+			if( r_gx_cmpr_bounce_texnum == texnum && r_gx_cmpr_bounce && r_gx_cmpr_cur_slot >= 0 )
 				used_bounce = true;
 		}
-		if( used_bounce )
-			r_gx_cmpr_bounce_fence = GC_GXFenceNext();
+		if( used_bounce && r_gx_cmpr_cur_slot >= 0 )
+			r_gx_cmpr_slot[r_gx_cmpr_cur_slot].fence = GC_GXFenceNext();
 	}
 	R_GXSetTexAlphaTest( img->gc_packed_alpha ? true : false );
 	return t;
@@ -2594,6 +2717,26 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 			}
 			else if( !neu )
 			{
+				if(( !t->tiled || t->alloc_bytes < bytes )
+					&& hud_bind && FBitSet( img->flags, TF_FONT ) && bytes <= GC_GX_FONT_TILE_BYTES )
+				{
+					int j;
+
+					/* Take the static font tile from whichever slot held it. */
+					for( j = 0; j < GC_GX_TEX_SLOTS; j++ )
+					{
+						if( j != slot && r_gx_tex[j].tiled == r_gx_font_tile )
+						{
+							if( r_gx_tex[j].valid && GC_GXFenceWait( r_gx_tex_fence[j] ))
+								r_gx_tex_fence_stalls++;
+							memset( &r_gx_tex[j], 0, sizeof( r_gx_tex[j] ));
+							r_gx_tex_lru[j] = 0;
+						}
+					}
+					R_GXFreeTile( t->tiled );
+					t->tiled = r_gx_font_tile;
+					t->alloc_bytes = GC_GX_FONT_TILE_BYTES;
+				}
 				if( !t->tiled || t->alloc_bytes < bytes )
 				{
 					r_gx_hud_bind_fails++;
@@ -2603,7 +2746,7 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 			else
 			{
 				if( t->tiled )
-					free( t->tiled );
+					R_GXFreeTile( t->tiled );
 				t->tiled = neu;
 				t->alloc_bytes = want;
 			}
@@ -3039,6 +3182,7 @@ sky survives changelevels. Missing sides keep the solid clear colour.
 void R_GXInvalidateTriApiLayout( void );
 static u8 r_gx_sky_data[6][R_GX_SKY_BYTES] __attribute__(( aligned( 32 )));
 static char r_gx_sky_name[32];
+static qboolean r_gx_sky_quiet;
 /* r_gx_sky_obj / r_gx_sky_ready forward-declared near G285 backdrop. */
 static const model_t *r_gx_sky_world;
 static qboolean r_gx_sky_world_has_sky;
@@ -3089,6 +3233,21 @@ static void R_GXSkyLoad( void )
 
 	if( r_gx_sky_name[0] && !Q_stricmp( name, r_gx_sky_name ) && r_gx_sky_ready )
 		return;
+	/* A missing sky used to be retried (two disc opens per side) and
+	 * logged every frame: ~15k OSReports per c0a0 ride. Retry a failed
+	 * name at most every few seconds and report it once. */
+	{
+		static char failed_name[32];
+		static double failed_time;
+		const double now = gEngfuncs.pfnTime ? gEngfuncs.pfnTime() : 0.0;
+
+		if( failed_name[0] && !Q_stricmp( name, failed_name )
+			&& now >= failed_time && now - failed_time < 5.0 )
+			return;
+		r_gx_sky_quiet = failed_name[0] && !Q_stricmp( name, failed_name );
+		Q_strncpy( failed_name, name, sizeof( failed_name ));
+		failed_time = now;
+	}
 	/* Early CapFaces prefetch can miss before the disc pack settles; find-miss
 	 * then poisoned later opens. Clear and only commit the name on full success. */
 	FS_ClearFindMissCache();
@@ -3120,7 +3279,8 @@ static void R_GXSkyLoad( void )
 		}
 		if( len != R_GX_SKY_BYTES )
 		{
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: sky %s missing %s, using the clear colour\n", name, path );
+			if( !r_gx_sky_quiet )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: sky %s missing %s, using the clear colour\n", name, path );
 			r_gx_sky_ready = false;
 		}
 	}
@@ -4413,10 +4573,23 @@ soft RecursiveWorldNode used to stamp surfaces during the edge walk).
 */
 static void R_GXMarkVisibleSurfaces( model_t *world )
 {
-	int i;
+	msurface_t **marks_lo, **marks_hi;
+	msurface_t *surf_lo, *surf_hi;
+	int i, rejected = 0;
+	static int reject_logs;
 
 	if( !world || !world->leafs || world->numleafs <= 0 )
 		return;
+	/* The pre-edge scratch reclaim can free the mark-face array under a tight
+	 * tip; leaf->firstmarksurface then dangles into reused memory and the
+	 * walk crashed or hung the first CapFaces frame (c0a0 after "CapFaces step
+	 * vis done").  Only follow marks that lie inside the world's arrays. */
+	if( !world->marksurfaces || world->nummarksurfaces <= 0 || !world->surfaces || world->numsurfaces <= 0 )
+		return;
+	marks_lo = world->marksurfaces;
+	marks_hi = world->marksurfaces + world->nummarksurfaces;
+	surf_lo = world->surfaces;
+	surf_hi = world->surfaces + world->numsurfaces;
 
 	for( i = 0; i < world->numleafs; i++ )
 	{
@@ -4430,12 +4603,28 @@ static void R_GXMarkVisibleSurfaces( model_t *world )
 		c = leaf->nummarksurfaces;
 		if( !mark || c <= 0 )
 			continue;
+		if( mark < marks_lo || mark >= marks_hi || c > marks_hi - mark )
+		{
+			rejected++;
+			continue;
+		}
 		do
 		{
-			( *mark )->visframe = tr.framecount;
+			msurface_t *surf = *mark;
+
+			if( surf >= surf_lo && surf < surf_hi )
+				surf->visframe = tr.framecount;
+			else
+				rejected++;
 			mark++;
 		}
 		while( --c );
+	}
+	if( rejected && reject_logs < 3 )
+	{
+		reject_logs++;
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: MarkVisible skipped %d stale marks on %s\n",
+			rejected, world->name );
 	}
 }
 
@@ -5820,9 +6009,21 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 		t = ( dist - 4000.0f ) / 12000.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
+		/* Near + looking down → see bottom; grazing / far → denser fogcolor.
+		 * Keep mid alphas lean — one Z-winning sheet must not read solid. */
+		a = 48 + (int)( 50.0f * fres ) + (int)( 55.0f * t )
+			+ (int)( 35.0f * ( path - 1.0f ) / 4.0f );
+		if( a < 40 ) a = 40;
+		if( a > 190 ) a = 190;
+		/* Horizon haze toward env fog — soft, not a solid sheet. */
+		t = ( dist - 1200.0f ) / 6000.0f;
+		if( t < 0.0f ) t = 0.0f;
+		else if( t > 1.0f ) t = 1.0f;
+		t *= 0.35f;
 		r = (int)( (float)r + ( (float)er - (float)r ) * t );
 		g = (int)( (float)g + ( (float)eg - (float)g ) * t );
 		b = (int)( (float)b + ( (float)eb - (float)b ) * t );
+		(void)reflect_x100;
 	}
 	if( r > 255 ) r = 255;
 	if( g > 255 ) g = 255;
@@ -6156,6 +6357,80 @@ static void R_GXDrawPackedWater( void )
 		}
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
 	}
+	/* Underwater volume fog: camera-facing fogcolor veil at ~$fogend so the
+	 * view fills like Source without re-arming Flipper HW fog. */
+	{
+		int under_wi = -1;
+		float best_abs = 1e30f;
+		mplane_t upl;
+		byte fog_rgb[3];
+		float fog_start = 1.0f, fog_end = 100.0f;
+		vec3_t forward, right, up, center;
+		float half, eye_dot;
+		u32 veil;
+
+		for( wi = 0; wi < water_n; wi++ )
+		{
+			if( !GC_WaterFacePlane( wi, &upl, NULL ))
+				continue;
+			eye_dot = DotProduct( tr.modelorg, upl.normal ) - upl.dist;
+			if( eye_dot >= 0.0f )
+				continue;
+			if( -eye_dot < best_abs )
+			{
+				best_abs = -eye_dot;
+				under_wi = wi;
+			}
+		}
+		if( under_wi >= 0 )
+		{
+			GC_GetWaterFaceFog( under_wi, fog_rgb, NULL );
+			GC_GetWaterFaceFogRange( under_wi, &fog_start, &fog_end, NULL, NULL );
+			if( fog_end < 8.0f )
+				fog_end = 8.0f;
+			AngleVectors( RI.rvp.viewangles, forward, right, up );
+			center[0] = tr.modelorg[0] + forward[0] * ( fog_end * 0.55f );
+			center[1] = tr.modelorg[1] + forward[1] * ( fog_end * 0.55f );
+			center[2] = tr.modelorg[2] + forward[2] * ( fog_end * 0.55f );
+			half = fog_end * 1.25f;
+			/* Dense but not ink — leave a little SpecOn sand through. */
+			veil = ( (u32)fog_rgb[0] << 24 ) | ( (u32)fog_rgb[1] << 16 )
+				| ( (u32)fog_rgb[2] << 8 ) | 200u;
+			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+			GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
+			GX_SetNumTexGens( 0 );
+			GX_SetNumTevStages( 1 );
+			GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
+			GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
+			GX_ClearVtxDesc();
+			GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+			GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+			GX_Begin( GX_QUADS, GX_VTXFMT0, 4 );
+			GX_Position3f32(
+				center[0] + ( -right[0] - up[0] ) * half,
+				center[1] + ( -right[1] - up[1] ) * half,
+				center[2] + ( -right[2] - up[2] ) * half );
+			GX_Color1u32( veil );
+			GX_Position3f32(
+				center[0] + ( right[0] - up[0] ) * half,
+				center[1] + ( right[1] - up[1] ) * half,
+				center[2] + ( right[2] - up[2] ) * half );
+			GX_Color1u32( veil );
+			GX_Position3f32(
+				center[0] + ( right[0] + up[0] ) * half,
+				center[1] + ( right[1] + up[1] ) * half,
+				center[2] + ( right[2] + up[2] ) * half );
+			GX_Color1u32( veil );
+			GX_Position3f32(
+				center[0] + ( -right[0] + up[0] ) * half,
+				center[1] + ( -right[1] + up[1] ) * half,
+				center[2] + ( -right[2] + up[2] ) * half );
+			GX_Color1u32( veil );
+			GX_End();
+		}
+	}
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	{
@@ -6468,6 +6743,10 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gx tex passes=%d uploads=%u stalls=%u native=%u\n",
 				passes, r_gx_tex_uploads, r_gx_tex_fence_stalls + r_gx_cmpr_bounce_stalls,
 				r_gx_tex_native_conversions );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: cmpr bounce slots=%d hits=%u misses=%u dma=%u Kb stalls=%u\n",
+				r_gx_cmpr_nslots, r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes / 1024u,
+				r_gx_cmpr_bounce_stalls );
+			r_gx_cmpr_hits = r_gx_cmpr_misses = r_gx_cmpr_dma_bytes = 0;
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: hot window %u Kb resident=%d queued=%d uploads=%u bytes=%u evictions=%u deferred=%u\n",
 				r_gx_hot.size / 1024, r_gx_hot.count, r_gx_hot.queued, r_gx_hot.uploads, r_gx_hot.bytes, r_gx_hot.evictions, r_gx_hot.deferred );
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gx world per frame draws=%u verts=%u state_sets=%u tex_binds=%u\n",
@@ -6511,10 +6790,17 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				Q_memprint( GC_MemHeapFreeBytes() ));
 	}
 	R_GXHotService();
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step hot-service done tip=%s\n",
+			Q_memprint( GC_MemHeapFreeBytes() ));
 	R_GXSetupWorld3DState();
 	/* CapFaces lean: PVS + frustum before emit (no live marksurfaces). */
 	R_GXBuildFrustum();
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step frustum done\n" );
 	GC_BeginCapFaceVis( RI.rvp.vieworigin );
+	if( log_begin )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CapFaces step vis done\n" );
 
 	draw = GC_GetNewGameDrawSurfs();
 	n = GC_GetNewGameCapFaceCount();

@@ -65,6 +65,31 @@ typedef struct
 	int		get, send;
 } net_loopback_t;
 
+#if NET_LOOPBACK_DYNAMIC
+/* Late in the tram chain the MEM1 heap can be too fragmented for a 2-3 KiB
+ * packet (c0a0d: Z_Malloc fatal at map start).  A lost loopback packet is
+ * recoverable -- the netchan resends reliable data -- so fall back to one
+ * small static buffer per direction, and drop the packet if that is busy. */
+#define NET_LOOPBACK_FALLBACK 4096
+static byte net_loop_fallback[NS_COUNT][NET_LOOPBACK_FALLBACK] __attribute__(( aligned( 32 )));
+static qboolean net_loop_fallback_busy[NS_COUNT];
+
+static void NET_LoopFreeData( byte *data )
+{
+	for( int s = 0; s < NS_COUNT; s++ )
+	{
+		if( data == net_loop_fallback[s] )
+		{
+			net_loop_fallback_busy[s] = false;
+			return;
+		}
+	}
+	if( Netchan_GCReturnEmergency( data ))
+		return;
+	Mem_Free( data );
+}
+#endif
+
 typedef struct packetlag_s
 {
 	byte		*data;	// Raw stream data is stored.
@@ -1010,7 +1035,7 @@ static qboolean NET_GetLoopPacket( netsrc_t sock, netadr_t *from, byte *data, si
 	memcpy( data, loop->msgs[i].data, loop->msgs[i].datalen );
 	*length = loop->msgs[i].datalen;
 #if NET_LOOPBACK_DYNAMIC
-	Mem_Free( loop->msgs[i].data );
+	NET_LoopFreeData( loop->msgs[i].data );
 	loop->msgs[i].data = NULL;
 	loop->msgs[i].datalen = 0;
 #endif
@@ -1037,7 +1062,7 @@ static void NET_SendLoopPacket( netsrc_t sock, size_t length, const void *data, 
 	// an unread slot is overwritten when the ring wraps, as before
 	if( loop->msgs[i].data )
 	{
-		Mem_Free( loop->msgs[i].data );
+		NET_LoopFreeData( loop->msgs[i].data );
 		loop->msgs[i].data = NULL;
 	}
 
@@ -1048,7 +1073,30 @@ static void NET_SendLoopPacket( netsrc_t sock, size_t length, const void *data, 
 		return;
 	}
 
-	loop->msgs[i].data = (byte *)Z_Malloc( length );
+	loop->msgs[i].data = (byte *)Mem_TryMalloc( host.mempool, length );
+	if( !loop->msgs[i].data )
+	{
+		const int s = sock ^ 1;
+
+		if( length <= NET_LOOPBACK_FALLBACK && !net_loop_fallback_busy[s] )
+		{
+			net_loop_fallback_busy[s] = true;
+			loop->msgs[i].data = net_loop_fallback[s];
+		}
+		else if(( loop->msgs[i].data = (byte *)Netchan_GCBorrowEmergency( length )) != NULL )
+		{
+			Con_Reportf( "Xash3D GameCube: loopback packet %zu in netchan emergency slot\n", length );
+		}
+		else
+		{
+			static int drops;
+
+			if( drops++ < 8 )
+				Con_Reportf( S_WARN "%s: MEM1 full, dropped loopback packet (%zu)\n", __func__, length );
+			loop->msgs[i].datalen = 0;
+			return;
+		}
+	}
 #endif
 	memcpy( loop->msgs[i].data, data, length );
 	loop->msgs[i].datalen = length;
@@ -1067,7 +1115,7 @@ static void NET_ClearLoopback( void )
 		for( int i = 0; i < MAX_LOOPBACK; i++ )
 		{
 			if( net.loopbacks[sock].msgs[i].data )
-				Mem_Free( net.loopbacks[sock].msgs[i].data );
+				NET_LoopFreeData( net.loopbacks[sock].msgs[i].data );
 			net.loopbacks[sock].msgs[i].data = NULL;
 			net.loopbacks[sock].msgs[i].datalen = 0;
 		}

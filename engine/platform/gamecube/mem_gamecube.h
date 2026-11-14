@@ -106,6 +106,7 @@ unsigned int GC_AramVideoReserve( unsigned int size );
 void GC_AramVideoRelease( void );
 /* One map-owned ARAM window, reused across transitions without new blocks. */
 unsigned int GC_AramMapReserve( unsigned int size );
+unsigned int GC_AramWorldDLReserve( unsigned int size );
 void GC_AramMapReset( void );
 unsigned int GC_AramMapCapacity( void );
 qboolean GC_StageMapHotLumps( const void *bsp, size_t bsp_size );

@@ -48,7 +48,15 @@ static qboolean Mod_GCIsNewGameRoute( void )
  * first call so the cache slice is claimed before the first prop TryAlloc. */
 static qboolean Mod_GCMapModelSpillAfterWorldDL( void )
 {
-	return R_GXWorldDLActive();
+	/* Active() loads the map's WorldDL on first call, which claims its chunk
+	 * cache slice from the spill before the first prop allocates there. Its
+	 * result is not the gate: a map without a world DL (dod_avalanche on the
+	 * listen route) leaves the spill free, and the fallback is an FS_LoadFile
+	 * malloc that fails with the heap exhausted ("FS_LoadZIPFile: can't alloc
+	 * 50669 bytes" for by_banister, 94489 for sherman). If the spill is full
+	 * TryAlloc fails and the old heap path still runs. */
+	(void)R_GXWorldDLActive();
+	return true;
 }
 
 /* Real MDLs live in the 1 MiB studio BSS arena (lean meshes + viewweapons).
@@ -273,6 +281,127 @@ void Mod_GCSeqGroupTouch( const void *ptr )
 
 	if( i >= 0 )
 		gc_seqgroup_slot[i].used = ++gc_seqgroup_clock;
+}
+
+/*
+ * Viewmodel mesh slots. Bump-allocating every weapon mesh (5 resident, ~470 KiB)
+ * left the shared studio region without room for the skins of the weapon that
+ * loaded last. Two fixed slots hold the weapon in hand and one spare; reusing a
+ * slot abandons its previous owner exactly like the CapFaces/arena-reset paths
+ * (mesh pointer cleared, mempool freed). The model_t stays, the draw paths skip
+ * a model without a mesh, and the next SetModel promote reads the raw MDL back
+ * from the ARAM asset cache into a slot.
+ */
+#define GC_VM_SLOTS      2
+#define GC_VM_SLOT_SIZE  ( 128 * 1024 )
+static struct
+{
+	byte    *buf;
+	model_t *owner;
+	size_t  bytes;
+	unsigned used;
+} gc_vm_slot[GC_VM_SLOTS];
+static unsigned gc_vm_clock;
+
+static qboolean Mod_GCIsViewModelPath( const char *path )
+{
+	return path && Q_stristr( path, "models/v_" ) != NULL;
+}
+
+static void Mod_GCVMSlotsReset( void )
+{
+	memset( gc_vm_slot, 0, sizeof( gc_vm_slot ));
+	gc_vm_clock = 0;
+}
+
+static void Mod_GCVMSlotEvict( int i )
+{
+	model_t *mod = gc_vm_slot[i].owner;
+	int k;
+
+	if( !mod )
+		return;
+	Con_Reportf( "Xash3D GameCube: viewmodel slot %d evicts '%s' (%s)\n", i,
+		mod->name[0] ? mod->name : "?", Q_memprint( gc_vm_slot[i].bytes ));
+	if( mod->cache.data == gc_vm_slot[i].buf )
+	{
+		mod->submodels = NULL;
+		mod->cache.data = NULL;
+		if( mod->mempool )
+			Mem_FreePool( &mod->mempool );
+	}
+	if( gc_real_studio_view > 0 )
+		gc_real_studio_view--;
+	gc_real_studio_bytes = ( gc_real_studio_bytes > gc_vm_slot[i].bytes )
+		? gc_real_studio_bytes - gc_vm_slot[i].bytes : 0;
+	for( k = 0; k < gc_pinned_viewmodel_count; k++ )
+	{
+		if( gc_pinned_viewmodels[k] != mod )
+			continue;
+		memmove( &gc_pinned_viewmodels[k], &gc_pinned_viewmodels[k + 1],
+			(size_t)( gc_pinned_viewmodel_count - k - 1 ) * sizeof( gc_pinned_viewmodels[0] ));
+		gc_pinned_viewmodels[--gc_pinned_viewmodel_count] = NULL;
+		break;
+	}
+	gc_vm_slot[i].owner = NULL;
+	gc_vm_slot[i].bytes = 0;
+	R_GXStudioInvalidateBindings();
+}
+
+/* A slot for a viewmodel mesh of this size, evicting the least recently used
+ * owner. NULL (caller falls back to the arena bump) if it does not fit. */
+static byte *Mod_GCVMSlotAlloc( size_t size )
+{
+	int i, pick = -1;
+
+	if( size == 0 || size > GC_VM_SLOT_SIZE )
+		return NULL;
+	for( i = 0; i < GC_VM_SLOTS; i++ )
+	{
+		if( !gc_vm_slot[i].buf )
+		{
+			gc_vm_slot[i].buf = Mod_GCStudioBssAlloc( GC_VM_SLOT_SIZE );
+			if( !gc_vm_slot[i].buf )
+				continue;
+		}
+		if( !gc_vm_slot[i].owner )
+		{
+			pick = i;
+			break;
+		}
+		if( pick < 0 || gc_vm_slot[i].used < gc_vm_slot[pick].used )
+			pick = i;
+	}
+	if( pick < 0 )
+		return NULL;
+	Mod_GCVMSlotEvict( pick );
+	return gc_vm_slot[pick].buf;
+}
+
+/* The mesh loaded into a slot belongs to mod now. */
+static void Mod_GCVMSlotClaim( model_t *mod, const void *buf, size_t bytes )
+{
+	int i;
+
+	for( i = 0; i < GC_VM_SLOTS; i++ )
+	{
+		if( gc_vm_slot[i].buf && gc_vm_slot[i].buf == buf && mod->cache.data == buf )
+		{
+			gc_vm_slot[i].owner = mod;
+			gc_vm_slot[i].bytes = bytes;
+			gc_vm_slot[i].used = ++gc_vm_clock;
+			return;
+		}
+	}
+}
+
+static void Mod_GCVMSlotTouch( const model_t *mod )
+{
+	int i;
+
+	for( i = 0; mod && i < GC_VM_SLOTS; i++ )
+		if( gc_vm_slot[i].owner == mod )
+			gc_vm_slot[i].used = ++gc_vm_clock;
 }
 
 qboolean Mod_GCIsStudioBssCache( const void *ptr )
@@ -638,7 +767,9 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				return NULL;
 			}
 			previous_bump = gc_studio_bss_bump;
-			slot = Mod_GCStudioBssAlloc( (size_t)cached );
+			slot = Mod_GCIsViewModelPath( model_path ) ? Mod_GCVMSlotAlloc( (size_t)cached ) : NULL;
+			if( !slot )
+				slot = Mod_GCStudioBssAlloc( (size_t)cached );
 			if( slot && GC_AssetCacheRead( mirror, slot, cached ))
 			{
 				*length = (fs_offset_t)cached;
@@ -697,6 +828,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 					if( total == flen )
 					{
 						Mod_GCWorldArraySpillPinBase( slot, (size_t)flen );
+						/* raw file bytes, before the byte swap: reloads become DMA */
+						GC_AssetCacheStore( mirror, slot, (unsigned int)flen );
 						*length = flen;
 						if( from_bss )
 							*from_bss = true;
@@ -711,7 +844,12 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			}
 			if( !slot && flen >= (fs_offset_t)sizeof( studiohdr_t )
 				&& flen <= (fs_offset_t)GC_STUDIO_MODEL_LIMIT )
-				slot = Mod_GCStudioBssAlloc( (size_t)flen );
+			{
+				if( Mod_GCIsViewModelPath( model_path ))
+					slot = Mod_GCVMSlotAlloc( (size_t)flen );
+				if( !slot )
+					slot = Mod_GCStudioBssAlloc( (size_t)flen );
+			}
 			if( slot )
 			{
 				total = 0;
@@ -777,6 +915,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 							if( total == flen )
 							{
 								Mod_GCWorldArraySpillPinBase( slot, (size_t)flen );
+						/* raw file bytes, before the byte swap: reloads become DMA */
+						GC_AssetCacheStore( mirror, slot, (unsigned int)flen );
 								*length = flen;
 								if( from_bss )
 									*from_bss = true; /* don't free — spill-backed */
@@ -906,7 +1046,10 @@ qboolean Mod_GCPromoteStudioPath( const char *path )
 			free( buf );
 		Mod_GCStudioNameAllowed( path, &is_view );
 		if( is_view )
+		{
+			Mod_GCVMSlotTouch( mod );
 			Mod_GCPinViewModel( mod );
+		}
 		return true;
 	}
 
@@ -939,7 +1082,10 @@ qboolean Mod_GCPromoteStudioPath( const char *path )
 		Mod_GCNoteRealStudioLoaded( path, kept );
 		Mod_GCStudioNameAllowed( path, &is_view );
 		if( is_view )
+		{
+			Mod_GCVMSlotClaim( mod, buf, kept );
 			Mod_GCPinViewModel( mod );
+		}
 		R_GXStudioInvalidateBindings();
 		return true;
 	}
@@ -964,6 +1110,7 @@ qboolean Mod_GCEnsureLandmarkViewModel( const char *model_path )
 	mod = Mod_FindName( model_path, false );
 	if( Mod_GCStudioAlreadyResident( mod ))
 	{
+		Mod_GCVMSlotTouch( mod );
 		Mod_GCPinViewModel( mod );
 		Q_strncpy( gc_landmark_viewmodel, model_path, sizeof( gc_landmark_viewmodel ));
 		return true;
@@ -1020,6 +1167,7 @@ qboolean Mod_GCCapFacesClaimTeamViewModel( const char *model_path )
 		gc_real_studio_bytes = 0;
 		gc_studio_bss_owners = 0;
 		gc_studio_bss_bump = 0;
+		Mod_GCVMSlotsReset();
 		gc_landmark_viewmodel[0] = '\0';
 		Con_Reportf( "Xash3D GameCube: CapFaces studio BSS reclaim abandoned=%d for '%s'\n",
 			abandoned, model_path );
@@ -1664,6 +1812,7 @@ void Mod_FreeModel( model_t *mod )
 				{
 					gc_studio_bss_owners = 0;
 					gc_studio_bss_bump = 0;
+					Mod_GCVMSlotsReset();
 				}
 				mod->cache.data = NULL;
 			}
@@ -1760,6 +1909,7 @@ void Mod_FreeAll( void )
 	gc_deferred_studio_attempts = 0;
 	gc_studio_bss_bump = 0;
 	gc_studio_bss_owners = 0;
+	Mod_GCVMSlotsReset();
 	gc_landmark_viewmodel[0] = '\0';
 #endif
 	mod_numknown = 0;
@@ -2422,6 +2572,7 @@ void Mod_GCReleaseStudioArena( void )
 	 * wrote the next animation file over the new map's skins. Two are placed
 	 * first, so a full arena still has animations; the others come on demand. */
 	memset( gc_seqgroup_slot, 0, sizeof( gc_seqgroup_slot ));
+	Mod_GCVMSlotsReset();
 	gc_seqgroup_slot[0].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	gc_seqgroup_slot[1].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	Con_Reportf( "Xash3D GameCube: studio arena released models=%d bytes=%u\n", freed, (uint)before );

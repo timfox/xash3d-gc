@@ -748,6 +748,11 @@ static void CL_DeltaEntity( sizebuf_t *msg, frame_t *frame, int newnum, entity_s
 
 	if(( newnum < 0 ) || ( newnum >= clgame.maxEntities ))
 	{
+#if XASH_GAMECUBE
+		/* Direct-map New Game keeps the 2-slot bootstrap entity table and
+		 * draws entities from server edicts; every snapshot lands here. */
+		if( clgame.maxEntities > 2 )
+#endif
 		Con_DPrintf( S_ERROR "%s: invalid newnum: %d\n", __func__, newnum );
 		if( has_update )
 		{
@@ -898,7 +903,11 @@ int CL_ParsePacketEntities( sizebuf_t *msg, qboolean delta, connprotocol_t proto
 		oldnum = CL_UpdateOldEntNum( ++oldindex, oldframe, &oldent );
 	}
 
-	if( newframe->num_entities != count && newframe->num_entities != 0 )
+	if( newframe->num_entities != count && newframe->num_entities != 0
+#if XASH_GAMECUBE
+		&& clgame.maxEntities > 2
+#endif
+		)
 		Con_Reportf( S_WARN "%s%s: (%i should be %i)\n", __func__, delta ? "Delta" : "", newframe->num_entities, count );
 
 	if( !newframe->valid )

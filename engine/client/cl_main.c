@@ -104,7 +104,7 @@ void CL_GameCubeArmLeanPlayActive( void )
 	{
 		memset( &loopback, 0, sizeof( loopback ));
 		NET_NetadrSetType( &loopback, NA_LOOPBACK );
-		Netchan_Setup( NS_CLIENT, &cls.netchan, loopback, 0, NULL,
+		Netchan_Setup( NS_CLIENT, &cls.netchan, loopback, Cvar_VariableInteger( "net_qport" ), NULL,
 			CL_GetFragmentSize, 0 );
 		Con_Reportf( "Xash3D GameCube: direct-map client loopback netchan primed\n" );
 	}
