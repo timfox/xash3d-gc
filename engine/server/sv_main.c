@@ -910,6 +910,7 @@ void SV_AddToMaster( netadr_t from, sizebuf_t *msg )
 	Info_SetValueForKey( s, "region", "255", len ); // server region. 255 -- all regions
 	Info_SetValueForKey( s, "product", GI->gamefolder, len ); // product? Where is the difference with gamedir?
 	Info_SetValueForKey( s, "nat", sv_nat.string, len ); // Server running under NAT, use reverse connection
+	Info_SetValueForKey( s, DODGC_NET_KEY, DODGC_NET_VERSION, len ); // DoD GC compatibility marker
 
 	NET_SendPacket( NS_SERVER, Q_strlen( s ), s, from );
 }
