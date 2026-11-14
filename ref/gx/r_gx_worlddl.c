@@ -655,6 +655,54 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			}
 		}
 	}
+	/* Worlds whose lists are under 1.5 MB (the DoD maps) skipped the adoption
+	 * above, so the texture cache stayed at one heap slot: every packed bind
+	 * missed and fence-waited (about 200 binds, 45 ms, on the Avalanche
+	 * street). Their chunk cache comes from the spill, leaving the idle map
+	 * arena above its carves unused. Lend the texture cache a share of that
+	 * remainder, scaled to what is there; give the cache up to the old
+	 * full set only when the arena is large. */
+	if( gc_wd_hdr.file_size < 1536u * 1024u && !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" )
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprarena" ))
+	{
+		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
+		const size_t hw = ( live + 31u ) & ~(size_t)31u;
+		const size_t cap = GC_MapLoadBufferCapacity();
+		const size_t keep = 352u * 1024u;	/* water table, prop slots, entity overflow */
+		const unsigned slot_bytes = 10944u, far_bytes = 2752u;
+
+		if( cap > hw + keep + 192u * 1024u )
+		{
+			size_t avail = cap - hw - keep;
+			size_t budget = avail / 2u;	/* leave half for later carves */
+			int nslots, far_n = 0;
+			byte *tex;
+
+			if( budget > 1190u * 1024u )
+				budget = 1190u * 1024u;
+			if( budget >= 760u * 1024u )
+			{
+				nslots = 64;
+				far_n = (int)(( budget - (size_t)nslots * slot_bytes ) / far_bytes );
+				if( far_n > 176 )
+					far_n = 176;
+			}
+			else
+			{
+				nslots = (int)( budget / slot_bytes );
+				if( nslots > 64 )
+					nslots = 64;
+			}
+			if( nslots >= 8 )
+			{
+				GC_RetainMapLoadBufferBorrow();
+				tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
+					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+				if( tex )
+					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+			}
+		}
+	}
 	if( !gc_wd_cache )
 	{
 		const unsigned cache_hi =
