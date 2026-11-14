@@ -1408,6 +1408,8 @@ static void SV_Info( netadr_t from, int protocolVersion )
 		Info_SetValueForKeyf( s, "maxcl", sizeof( s ), "%i", svs.maxclients );
 		Info_SetValueForKey( s, "gamedir", GI->gamefolder, sizeof( s ));
 		Info_SetValueForKey( s, "password", SV_HavePassword() ? "1" : "0", sizeof( s ));
+		// lets Find servers list only DoD GC servers (same marker as the connect handshake)
+		Info_SetValueForKey( s, DODGC_NET_KEY, DODGC_NET_VERSION, sizeof( s ));
 
 		// write host last so we can try to cut off too long hostnames
 		// TODO: value size limit for infostrings

@@ -2366,6 +2366,10 @@ static void CL_ParseStatusMessage( netadr_t from, sizebuf_t *msg )
 	if( !COM_StringEmptyOrNULL( Info_ValueForKey( infostring, "gs" )))
 		return;
 
+	// only DoD GC servers are joinable: same marker the connect handshake checks
+	if( Q_strcmp( Info_ValueForKey( infostring, DODGC_NET_KEY ), DODGC_NET_VERSION ))
+		return;
+
 	maxcl = Q_atoi( Info_ValueForKey( infostring, "maxcl" ));
 	numcl = Q_atoi( Info_ValueForKey( infostring, "numcl" ));
 	i = Q_atoi( Info_ValueForKey( infostring, "p" ));

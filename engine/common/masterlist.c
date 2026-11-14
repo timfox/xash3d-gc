@@ -51,6 +51,18 @@ static struct masterlist_s
 
 static CVAR_DEFINE_AUTO( sv_verbose_heartbeats, "0", 0, "print every heartbeat to console" );
 
+/* Day of Defeat GameCube master: "host[:port]" (default port 27010). Empty = off.
+ * Set it in the config, with `dodgc_master host` or with -dodgcmaster host: a
+ * GameCube has no keyboard, so a non-empty value also makes listen servers
+ * announce themselves without `public 1`. See scripts/dodgc_master.py. */
+#ifndef DODGC_DEFAULT_MASTER
+#define DODGC_DEFAULT_MASTER ""
+#endif
+#define DODGC_MASTER_PORT "27010"
+static CVAR_DEFINE( dodgc_master, "dodgc_master", DODGC_DEFAULT_MASTER, FCVAR_ARCHIVE, "DoD GC master server host[:port] for Find servers (empty = none)" );
+static string dodgc_master_applied; // cvar value last applied
+static string dodgc_master_entry;   // address of the master entry it created
+
 #define HEARTBEAT_SECONDS               ((sv_nat.value > 0.0f) ? 60.0f : 300.0f) // 1 or 5 minutes
 #define RESOLVE_EXPIRE_SECONDS          (60.0f)  // positive cache: 1 minute
 #define NEGATIVE_RESOLVE_EXPIRE_SECONDS (300.0f) // negative cache: 5 minutes
@@ -66,6 +78,7 @@ static size_t NET_BuildMasterServerScanRequest( char *buf, size_t size, uint32_t
 	Q_strncpy( info, filter, remaining );
 
 	Info_SetValueForKey( info, "gamedir", GI->gamefolder, remaining );
+	Info_SetValueForKey( info, DODGC_NET_KEY, DODGC_NET_VERSION, remaining );
 
 	if( proto != PROTO_GOLDSRC )
 	{
@@ -117,6 +130,59 @@ static net_gai_state_t NET_GetMasterHostByName( master_t *m )
 
 	m->adr.type = 0;
 	return res;
+}
+
+static master_t *NET_AddMaster( const char *addr );
+
+/*
+========================
+NET_SyncDodGCMaster
+
+Keep one master entry in step with the dodgc_master cvar. The entry is never
+saved to xashcomm.lst: the cvar itself is archived.
+========================
+*/
+static void NET_SyncDodGCMaster( void )
+{
+	string wanted;
+	master_t **link;
+
+	if( !Q_strcmp( dodgc_master.string, dodgc_master_applied ))
+		return;
+
+	// drop the previous cvar-provided entry
+	for( link = &ml.head; *link; link = &( *link )->next )
+	{
+		master_t *m = *link;
+
+		if( m->save || !dodgc_master_entry[0] || Q_stricmp( m->address, dodgc_master_entry ))
+			continue;
+
+		*link = m->next;
+		if( ml.tail == m )
+			ml.tail = NULL;
+		Mem_Free( m );
+		for( ml.tail = ml.head; ml.tail && ml.tail->next; ml.tail = ml.tail->next );
+		break;
+	}
+
+	Q_strncpy( dodgc_master_applied, dodgc_master.string, sizeof( dodgc_master_applied ));
+	dodgc_master_entry[0] = '\0';
+
+	if( COM_StringEmpty( dodgc_master.string ))
+		return;
+
+	Q_strncpy( wanted, dodgc_master.string, sizeof( wanted ));
+	if( !Q_strchr( wanted, ':' ) && Q_strlen( wanted ) + sizeof( ":" DODGC_MASTER_PORT ) < sizeof( wanted ))
+		Q_strncat( wanted, ":" DODGC_MASTER_PORT, sizeof( wanted ));
+
+	Q_strncpy( dodgc_master_entry, wanted, sizeof( dodgc_master_entry ));
+	NET_AddMaster( wanted );
+}
+
+static qboolean NET_DodGCMasterEnabled( void )
+{
+	return !COM_StringEmpty( dodgc_master.string );
 }
 
 static void NET_ClearSendState( void )
@@ -340,7 +406,10 @@ NET_MasterQuery
 qboolean NET_MasterQuery( uint32_t key, qboolean nat, const char *filter )
 {
 	char buf[512];
-	size_t len = NET_BuildMasterServerScanRequest( buf, sizeof( buf ), key, nat, filter, PROTO_CURRENT );
+	size_t len;
+
+	NET_SyncDodGCMaster();
+	len = NET_BuildMasterServerScanRequest( buf, sizeof( buf ), key, nat, filter, PROTO_CURRENT );
 	qboolean wait = NET_SendToMasters( NS_CLIENT, len, buf, PROTO_CURRENT );
 
 	// goldsrc don't have nat traversal extensions
@@ -366,7 +435,9 @@ NET_MasterHeartbeat
 */
 void NET_MasterHeartbeat( void )
 {
-	if(( !public_server.value && !sv_nat.value ) || svs.maxclients == 1 )
+	NET_SyncDodGCMaster();
+
+	if(( !public_server.value && !sv_nat.value && !NET_DodGCMasterEnabled( )) || svs.maxclients == 1 )
 		return; // only public servers send heartbeats
 
 	if( Host_IsDedicated() && public_server.value )
@@ -781,6 +852,14 @@ void NET_InitMasters( void )
 	Cmd_AddCommand( "listmasters", NET_ListMasters_f, "list masterservers" );
 
 	Cvar_RegisterVariable( &sv_verbose_heartbeats );
+	Cvar_RegisterVariable( &dodgc_master );
+
+	{
+		char arg[MAX_STRING];
+
+		if( Sys_GetParmFromCmdLine( "-dodgcmaster", arg ) && arg[0] )
+			Cvar_DirectSet( &dodgc_master, arg );
+	}
 
 #if 0
 	NET_AddMasterStatic( "http://meltdown.lan/test" );
