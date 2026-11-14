@@ -298,6 +298,32 @@ void *GC_BootArenaAllocSmall( size_t size )
 		|| !gc_boot_small_top )
 		return NULL;
 	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
+	/* Reuse a freed block first: realloc growth and short-lived allocations
+	 * otherwise leave holes the downward bump never revisits, and the whole
+	 * zone drains on churn with almost nothing live. */
+	{
+		byte *cursor;
+
+		for( cursor = gc_boot_small_low; cursor < gc_boot_small_top; cursor += ((gc_boot_blk_t *)cursor)->size )
+		{
+			gc_boot_blk_t *hole = (gc_boot_blk_t *)cursor;
+
+			if( hole->used || hole->size < need )
+				continue;
+			if( hole->size - need >= 2u * GC_BOOT_ARENA_ALIGN + sizeof( gc_boot_blk_t ))
+			{
+				gc_boot_blk_t *rest = (gc_boot_blk_t *)( cursor + need );
+
+				rest->size = hole->size - (uint32_t)need;
+				rest->used = 0;
+				hole->size = (uint32_t)need;
+			}
+			hole->used = 1;
+			gc_boot_small_live++;
+			gc_boot_small_live_bytes += hole->size;
+			return (byte *)hole + sizeof( gc_boot_blk_t );
+		}
+	}
 	if( (size_t)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )) < need )
 		return NULL;
 	gc_boot_small_low -= need;
@@ -337,6 +363,21 @@ qboolean GC_BootArenaFree( void *ptr )
 		blk->used = 0;
 		gc_boot_small_live--;
 		gc_boot_small_live_bytes -= blk->size;
+		/* Merge runs of free neighbours so holes can serve larger blocks. */
+		{
+			byte *cursor = gc_boot_small_low;
+
+			while( cursor < gc_boot_small_top )
+			{
+				gc_boot_blk_t *cur = (gc_boot_blk_t *)cursor;
+				byte *next = cursor + cur->size;
+
+				if( !cur->used && next < gc_boot_small_top && !((gc_boot_blk_t *)next)->used )
+					cur->size += ((gc_boot_blk_t *)next)->size;
+				else
+					cursor = next;
+			}
+		}
 		/* The zone is contiguous from small_low to its top: retreat past
 		 * freed blocks so a dead zone costs nothing at the map load. */
 		while( gc_boot_small_low < gc_boot_small_top && !((gc_boot_blk_t *)gc_boot_small_low)->used )
