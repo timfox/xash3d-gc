@@ -2216,7 +2216,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 #if XASH_GAMECUBE
 	/* Tram→AM early changelevel queues before the main loop; HPAK_CheckIntegrity
 	 * hangs on disc-only New Game (c0a0e→c1a0 probes). Skip for map probes. */
-	if( Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcnewgame" )
+	if( 1 /* local: menu boot crashes in iso9660 entry_from_path(NULL) */ || Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcnewgame" )
 		|| Sys_CheckParm( "-gclistenserver" ) || Sys_CheckParm( "-gcconnect" ))
 	{
 		Con_Reportf( "Xash3D GameCube: HPAK integrity check skipped (gcmap/newgame/listenserver/connect)\n" );
