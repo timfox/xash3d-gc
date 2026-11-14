@@ -1434,6 +1434,8 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 # New Game can load real meshes without ISO9660 lookups in huge models/, and
 # without mounting an extra ZIP (which tips the New Game MEM1 cliff).
 GC_STUDIO_MODELS = (
+	# Player body (bots and the local player): without it the lean client draws no player.
+	"models/player.mdl",
 	"models/v_crowbar.mdl",
 	"models/v_9mmhandgun.mdl",
 	# DoD CapFaces team weapons (lean-stripped on inject; real names on disc).
@@ -2517,7 +2519,7 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 		Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
 	)
 	dod_capfaces_stems = {
-		"v_garand", "v_mp40", "v_98k", "v_tommy", "v_colt", "v_luger",
+		"player", "v_garand", "v_mp40", "v_98k", "v_tommy", "v_colt", "v_luger",
 		"v_amerk", "v_spade", "v_crowbar", "w_crowbar",
 		"v_grenade", "v_stick", "w_grenade", "w_stick",
 		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
@@ -2530,6 +2532,14 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 	for relative in GC_STUDIO_MODELS:
 		src = data / relative
 		stem = Path(relative).stem.lower()
+		if relative == "models/player.mdl":
+			# DoD's own models/player.mdl is ~3.8 MB (over the 1.5 MB studio budget, the
+			# client then draws no player at all); the HL1 player body is 281 KB.
+			for root in (Path("/home/tim/Desktop/dod-gc/content/valve"), retail):
+				alt = root / relative
+				if alt.is_file():
+					src = alt
+					break
 		if not src.is_file() and retail.is_dir():
 			alt = retail / relative
 			if alt.is_file():
