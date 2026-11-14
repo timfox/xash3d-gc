@@ -15,8 +15,23 @@
  * network thread stacks are static. Reserve 256 KiB for kernel objects;
  * keep the loader's high-memory reservation intact. */
 void __real___lwp_wkspace_init( unsigned int size );
+extern char _end[];	/* linker: end of .bss */
+void *SYS_GetArena1Lo( void );
+void SYS_SetArena1Lo( void *newLo );
 void __wrap___lwp_wkspace_init( unsigned int size )
 {
+	/* The workspace is carved from ArenaLo upward. This DOL's BSS is huge
+	 * (renderer map-load pad, slabs); if the loader's ArenaLo sits below the
+	 * end of BSS the kernel objects (lwp mutexes) land on top of BSS data and
+	 * corrupt it -- seen as a libogc mutex nest-count sharing a Console
+	 * Commands pool block header. Never let ArenaLo sit inside our image. */
+	{
+		const uintptr_t lo = (uintptr_t)SYS_GetArena1Lo();
+		const uintptr_t end = ( (uintptr_t)_end + 31u ) & ~(uintptr_t)31u;
+
+		if( lo < end )
+			SYS_SetArena1Lo( (void *)end );
+	}
 	(void)size;
 	__real___lwp_wkspace_init( 256u * 1024u );
 }
