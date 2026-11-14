@@ -706,7 +706,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				tex = ( top >= hw ) ? (byte *)GC_MapLoadBufferTailAlloc( top, need ) : NULL;
 				if( tex )
 				{
-					GC_MapLoadBufferLowerTailHighwater( hw );
+					/* Keep the mark above the slots: later carves (water table, prop
+					 * slots, entity overflow) then land in the keep reserve above them
+					 * instead of growing up into the slot memory. */
 					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
 				}
 			}
