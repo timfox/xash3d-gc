@@ -729,6 +729,135 @@ float r_gx_mirror_real_org[3];
 #define GC_MIRROR_W	256
 #define GC_MIRROR_H	192
 
+/* Clip plane for the mirror pass. Geometry under the water must not show in
+ * the reflection (the reflected eye is below the seabed and would see the
+ * seabed first). GX has no user clip planes; the classic substitute is one
+ * more TEV stage whose texture is 0 below the plane and 1 above, looked up
+ * by height, feeding the alpha test. The setters below are wrapped so that
+ * every material recipe drawn while r_gx_mirror_clip is set gets that stage
+ * appended without knowing about it. */
+qboolean r_gx_mirror_clip;
+static int gc_clip_stages = 1, gc_clip_gens;
+static qboolean gc_clip_blend, gc_clip_atest;
+static byte gc_clip_tex[32] __attribute__(( aligned( 32 )));
+static GXTexObj gc_clip_obj;
+
+static void R_GXMirrorClipApply( void )
+{
+	u8 stage, coord;
+
+	if( !r_gx_mirror_clip || gc_clip_stages > 15 || gc_clip_gens > 7 )
+		return;
+	stage = (u8)( GX_TEVSTAGE0 + gc_clip_stages );
+	coord = (u8)( GX_TEXCOORD0 + gc_clip_gens );
+	GX_SetNumTevStages( (u8)( gc_clip_stages + 1 ));
+	GX_SetNumTexGens( (u8)( gc_clip_gens + 1 ));
+	GX_SetTexCoordGen( coord, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX9 );
+	GX_SetTevDirect( stage );
+	GX_SetTevSwapMode( stage, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+	GX_SetTevOrder( stage, coord, GX_TEXMAP7, GX_COLORNULL );
+	GX_SetTevColorIn( stage, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+	GX_SetTevColorOp( stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	if( gc_clip_blend || gc_clip_atest )
+		GX_SetTevAlphaIn( stage, GX_CA_ZERO, GX_CA_APREV, GX_CA_TEXA, GX_CA_ZERO );
+	else
+		GX_SetTevAlphaIn( stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+	GX_SetTevAlphaOp( stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	if( !gc_clip_atest )
+		GX_SetAlphaCompare( GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	/* The alpha test must run before depth is written. */
+	GX_SetZCompLoc( GX_FALSE );
+}
+
+void R_GXWrapNumTevStages( u8 n )
+{
+	gc_clip_stages = n;
+	GX_SetNumTevStages( n );
+	R_GXMirrorClipApply();
+}
+
+void R_GXWrapNumTexGens( u8 n )
+{
+	gc_clip_gens = n;
+	GX_SetNumTexGens( n );
+	R_GXMirrorClipApply();
+}
+
+void R_GXWrapAlphaCompare( u8 c0, u8 r0, u8 op, u8 c1, u8 r1 )
+{
+	gc_clip_atest = !( c0 == GX_ALWAYS && c1 == GX_ALWAYS );
+	GX_SetAlphaCompare( c0, r0, op, c1, r1 );
+	R_GXMirrorClipApply();
+}
+
+void R_GXWrapBlendMode( u8 type, u8 src, u8 dst, u8 op )
+{
+	gc_clip_blend = ( type == GX_BM_BLEND && src == GX_BL_SRCALPHA );
+	GX_SetBlendMode( type, src, dst, op );
+	R_GXMirrorClipApply();
+}
+
+void R_GXWrapZCompLoc( u8 before_tex )
+{
+	GX_SetZCompLoc( r_gx_mirror_clip ? GX_FALSE : before_tex );
+}
+
+/* World-space clip lookup: s = 0.5 at the water plane. Props pass their
+ * model matrix's height row. */
+void R_GXMirrorClipMtx( float zx, float zy, float zz, float zw )
+{
+	const float k = 1.0f / 64.0f;
+	Mtx tm;
+
+	memset( tm, 0, sizeof( tm ));
+	tm[0][0] = zx * k;
+	tm[0][1] = zy * k;
+	tm[0][2] = zz * k;
+	tm[0][3] = ( zw - r_gx_mirror_z ) * k + 0.5f;
+	tm[1][3] = 0.5f;
+	GX_LoadTexMtxImm( tm, GX_TEXMTX9, GX_MTX2x4 );
+}
+
+void R_GXMirrorClipSet( qboolean on )
+{
+	if( on )
+	{
+		if( !gc_clip_tex[2] )
+		{
+			int row;
+
+			/* 8x8 I4, one block: left half 0, right half 15. */
+			for( row = 0; row < 8; row++ )
+			{
+				gc_clip_tex[row * 4 + 2] = 0xff;
+				gc_clip_tex[row * 4 + 3] = 0xff;
+			}
+			DCFlushRange( gc_clip_tex, sizeof( gc_clip_tex ));
+			GX_InitTexObj( &gc_clip_obj, gc_clip_tex, 8, 8, GX_TF_I4, GX_CLAMP, GX_CLAMP, GX_FALSE );
+			GX_InitTexObjFilterMode( &gc_clip_obj, GX_NEAR, GX_NEAR );
+		}
+		GX_LoadTexObj( &gc_clip_obj, GX_TEXMAP7 );
+		R_GXMirrorClipMtx( 0.0f, 0.0f, 1.0f, 0.0f );
+		r_gx_mirror_clip = true;
+		R_GXMirrorClipApply();
+	}
+	else if( r_gx_mirror_clip )
+	{
+		r_gx_mirror_clip = false;
+		GX_SetNumTevStages( (u8)gc_clip_stages );
+		GX_SetNumTexGens( (u8)gc_clip_gens );
+		if( !gc_clip_atest )
+			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+		GX_SetZCompLoc( gc_clip_atest ? GX_FALSE : GX_TRUE );
+	}
+}
+
+#define GX_SetNumTevStages	R_GXWrapNumTevStages
+#define GX_SetNumTexGens	R_GXWrapNumTexGens
+#define GX_SetAlphaCompare	R_GXWrapAlphaCompare
+#define GX_SetBlendMode		R_GXWrapBlendMode
+#define GX_SetZCompLoc		R_GXWrapZCompLoc
+
 static void R_GXBuildWorldProjection( Mtx44 out )
 {
 	f32 zNear = 4.0f;
@@ -5859,6 +5988,8 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	R_GXBuildWorldModelview( mv );
 	guMtxConcat( mv, mm, out );
 	GX_LoadPosMtxImm( out, GX_PNMTX0 );
+	if( r_gx_mirror_clip )
+		R_GXMirrorClipMtx( mm[2][0], mm[2][1], mm[2][2], mm[2][3] );
 	col.r = (u8)( gc_prop_lit >> 24 );
 	col.g = (u8)( gc_prop_lit >> 16 );
 	col.b = (u8)( gc_prop_lit >> 8 );
@@ -5952,50 +6083,6 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			/* Resident piece: a display list the GP reads in place. No
 			 * per-vertex CPU work at all for the horizon pass. */
 			GX_CallDispList( (void *)( hdr + 32 ), body );
-			/* Wet rock (piece flag 1): a second, additive draw that keeps
-			 * only the bright flecks and veins of the rock texture,
-			 * ( texel - 0.5 ) x 4, tinted with cool sky light. Retail gets
-			 * these from $envmap through the normal map; the texture's own
-			 * highlights are the cheapest stand-in. Stronger when looking
-			 * toward the sun. Resident pieces only: the list is in place. */
-			if(( hdr[1] & 1 ) && !additive && !far_lod && gc_prop_glint_k.a )
-			{
-				GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
-				GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-				/* The rock textures are dark (median 63, top 1 % at 100 of
-				 * 255), so: x2, then ( x - 0.5 ) x 2. Texels above about
-				 * 64 pass; the median lands on zero. */
-				GX_SetNumTevStages( 3 );
-				GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
-				/* Green as luminance: per-channel thresholds turned the glint
-				 * into green and yellow blotches on the mossy rock texture. */
-				GX_SetTevSwapModeTable( GX_TEV_SWAP2, GX_CH_GREEN, GX_CH_GREEN, GX_CH_GREEN, GX_CH_ALPHA );
-				GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP2 );
-				GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
-				GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-				GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
-				GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
-				GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-				GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-				GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-				GX_SetTevOrder( GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
-				GX_SetTevKColor( GX_KCOLOR1, gc_prop_glint_k );
-				GX_SetTevKColorSel( GX_TEVSTAGE2, GX_TEV_KCSEL_K1 );
-				GX_SetTevColorIn( GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO );
-				GX_SetTevColorOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-				GX_SetTevAlphaIn( GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-				GX_SetTevAlphaOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-				GX_CallDispList( (void *)( hdr + 32 ), body );
-				/* Back to texture x light for the next piece. */
-				GX_SetNumTevStages( 1 );
-				GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-				GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
-				GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
-				GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
-				GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-				GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-				GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
-			}
 		}
 		else
 		{
@@ -6984,264 +7071,11 @@ static void R_GXDrawPackedWater( void )
 		}
 		}
 	}
-	/* Grazing sky reflection. Normal-map red is a mask; never modulate the
-	 * CMPR as albedo (that reads as cyan/magenta tiles). */
-	if( water_tex && water_drawn > 0 && !gc_mirror_valid )
-	{
-		vec3_t forward, right, up;
-
-		AngleVectors( RI.rvp.viewangles, forward, right, up );
-		(void)right;
-		(void)up;
-		GX_LoadTexObj( (GXTexObj *)GC_GetWaterTexObj(), GX_TEXMAP0 );
-			/* Soft add over the transparent fogcolor body — keep sparkle quiet
-		 * so submerged sand SpecOn still reads through the sheet. */
-		GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
-		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-		GX_SetNumTexGens( 1 );
-		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
-		GX_SetNumTevStages( 1 );
-		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
-		GX_SetTevSwapModeTable( GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_RED );
-		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1 );
-		GX_SetTevKColorSel( GX_TEVSTAGE0, GX_TEV_KCSEL_K0 );
-		GX_SetTevKAlphaSel( GX_TEVSTAGE0, GX_TEV_KASEL_K0_A );
-		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_TEXA, GX_CA_KONST, GX_CA_ZERO );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetVtxDesc( GX_VA_CLR1, GX_NONE );
-		GX_SetNumChans( 1 );
-		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
-		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
-		for( wi = 0; wi < water_n; wi++ )
-		{
-			mplane_t pl;
-			float pts[32][3];
-			float st[32][2];
-			int nv, si;
-			float dot, su, sv, nd, fres, ou, ov, refl;
-			u8 reflect_x100 = 150;
-			GXColor sheen;
-
-			if( !GC_WaterFacePlane( wi, &pl, NULL ))
-				continue;
-			if( fabsf( pl.normal[2] ) < 0.85f )
-				continue;
-			dot = DotProduct( tr.modelorg, pl.normal ) - pl.dist;
-			if( fabsf( dot ) < 0.01f )
-				continue;
-			nv = GC_GetWaterFaceVerts( wi, pts, 32 );
-			if( nv < 3 || GC_GetWaterFaceST( wi, st, 32 ) != nv )
-				continue;
-			{
-				vec3_t wmin, wmax;
-				int ax, vi;
-
-				for( ax = 0; ax < 3; ax++ )
-				{
-					wmin[ax] = pts[0][ax];
-					wmax[ax] = pts[0][ax];
-				}
-				for( vi = 1; vi < nv; vi++ )
-				{
-					for( ax = 0; ax < 3; ax++ )
-					{
-						if( pts[vi][ax] < wmin[ax] )
-							wmin[ax] = pts[vi][ax];
-						if( pts[vi][ax] > wmax[ax] )
-							wmax[ax] = pts[vi][ax];
-					}
-				}
-				if( R_GXBoxOutsideFrustum( wmin, wmax ))
-					continue;
-			}
-			/* Ripple sparkle is a near-field detail; past 2500 units it is
-			 * below a texel and each face costs two ARAM reads. */
-			{
-				const float ddx = pts[0][0] - tr.modelorg[0];
-				const float ddy = pts[0][1] - tr.modelorg[1];
-
-				if( ddx * ddx + ddy * ddy > 2500.0f * 2500.0f )
-					continue;
-			}
-			nd = fabsf( DotProduct( forward, pl.normal ));
-			if( nd > 1.0f )
-				nd = 1.0f;
-			fres = ( 1.0f - nd ) * ( 1.0f - nd );
-			if( fres < 0.06f )
-				continue;
-			GC_GetWaterFaceFog( wi, NULL, &reflect_x100 );
-			refl = (float)reflect_x100 * ( 1.0f / 100.0f );
-			if( refl < 0.2f )
-				refl = 0.2f;
-			else if( refl > 2.0f )
-				refl = 2.0f;
-			/* Sky/fog tint for the sheen — quieter over transparent body. */
-			sheen.r = (u8)( 151.0f * fres * refl * 0.10f );
-			sheen.g = (u8)( 166.0f * fres * refl * 0.10f );
-			sheen.b = (u8)( 181.0f * fres * refl * 0.10f );
-			sheen.a = (u8)( 60.0f * fres );
-			GX_SetTevKColor( GX_KCOLOR0, sheen );
-			GC_GetWaterFaceScroll( wi, &su, &sv, NULL );
-			ou = time_sec * su;
-			ov = time_sec * sv;
-			ou = ou - (float)(int)ou;
-			ov = ov - (float)(int)ov;
-			/* Retail water_ati_cheap001 "$scale" "[1 1]" — use baked ST as-is.
-			 * The old 0.08 stretch made ~1600 wu/tile ripples (too large). */
-			GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
-			for( si = 0; si < nv; si++ )
-			{
-				GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
-				GX_Color1u32( 0xFFFFFFFFu );
-				GX_TexCoord2f32( st[si][0] + ou, st[si][1] + ov );
-			}
-			GX_End();
-			/* Second normal layer. Retail scrolls two maps; keep it quieter. */
-			if( scroll2_u != 0.0f || scroll2_v != 0.0f )
-			{
-				GXColor sheen2;
-				float ou2, ov2;
-
-				sheen2.r = (u8)( sheen.r >> 1 );
-				sheen2.g = (u8)( sheen.g >> 1 );
-				sheen2.b = (u8)( sheen.b >> 1 );
-				sheen2.a = (u8)( sheen.a >> 1 );
-				GX_SetTevKColor( GX_KCOLOR0, sheen2 );
-				ou2 = time_sec * scroll2_u;
-				ov2 = time_sec * scroll2_v;
-				ou2 = ou2 - (float)(int)ou2;
-				ov2 = ov2 - (float)(int)ov2;
-				if( ou2 < 0.0f )
-					ou2 += 1.0f;
-				if( ov2 < 0.0f )
-					ov2 += 1.0f;
-				GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
-				for( si = 0; si < nv; si++ )
-				{
-					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
-					GX_Color1u32( 0xFFFFFFFFu );
-					GX_TexCoord2f32( st[si][0] + ou2, st[si][1] + ov2 );
-				}
-				GX_End();
-			}
-		}
-		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-	}
-	/* Sun glare on the water. Retail's harbor is dark water crossed by
-	 * bright, broken streaks: the sky around the sun mirrored in ripple
-	 * facets, strongest toward the sun and sliding with the player. Here:
-	 * two scrolling layers of the water normal map pick out the facets,
-	 * and a soft blob projected around the sun's mirror point on the water
-	 * plane says where they catch the light. */
-	if( water_drawn > 0 && water_tex && tr.modelorg[2] > -60.0f && !gc_mirror_valid
-		&& !gEngfuncs.Sys_CheckParm( "-gcnowaterglare" ))
-	{
-		const float sx = -0.731f, sy = 0.682f;	/* env_sun bearing, yaw 137 */
-		const float h = tr.modelorg[2] + 64.0f;
-		const float d = h * 5.67f;		/* 1 / tan( 10 degrees ) */
-		const float lu = d * 2.2f + 1400.0f, lv = h * 3.0f + 800.0f;
-		const float cx = tr.modelorg[0] + sx * d * 0.9f;
-		const float cy = tr.modelorg[1] + sy * d * 0.9f;
-		const GXColor k = { 255, 250, 232, 255 };
-		float ta = time_sec * 0.035f, tb = time_sec * 0.027f;
-		Mtx tm;
-
-		ta -= (float)(int)ta;
-		tb -= (float)(int)tb;
-		if( gc_fx_n < 0 )
-			R_GXSmokeLoad();	/* builds the soft blob texture */
-		tm[0][0] = sx / lu;  tm[0][1] = sy / lu;  tm[0][2] = 0.0f;
-		tm[0][3] = 0.5f - ( cx * sx + cy * sy ) / lu;
-		tm[1][0] = -sy / lv; tm[1][1] = sx / lv;  tm[1][2] = 0.0f;
-		tm[1][3] = 0.5f - ( cx * -sy + cy * sx ) / lv;
-		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 0.0f; tm[2][3] = 1.0f;
-		GX_LoadTexMtxImm( tm, GX_TEXMTX3, GX_MTX2x4 );
-		/* Ripple layer A: long along the sun's bearing, so facets read as
-		 * streaks toward the light. */
-		tm[0][0] = sx / 420.0f;  tm[0][1] = sy / 420.0f;  tm[0][3] = ta;
-		tm[1][0] = -sy / 110.0f; tm[1][1] = sx / 110.0f;  tm[1][3] = 0.0f;
-		GX_LoadTexMtxImm( tm, GX_TEXMTX4, GX_MTX2x4 );
-		/* Ripple layer B: finer, across it, drifting the other way. */
-		tm[0][0] = 1.0f / 173.0f; tm[0][1] = 0.0f; tm[0][3] = -tb;
-		tm[1][0] = 0.0f; tm[1][1] = 1.0f / 131.0f; tm[1][3] = tb * 0.6f;
-		GX_LoadTexMtxImm( tm, GX_TEXMTX5, GX_MTX2x4 );
-		GX_LoadTexObj( &gc_fx_obj, GX_TEXMAP4 );
-		GX_LoadTexObj( (GXTexObj *)GC_GetWaterTexObj(), GX_TEXMAP0 );
-		r_gx_bound_texnum = 0;
-		r_gx_bound_fmt = 0;
-		GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
-		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-		GX_SetNumChans( 0 );
-		GX_SetNumTexGens( 3 );
-		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX3 );
-		GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX4 );
-		GX_SetTexCoordGen( GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX5 );
-		GX_SetNumTevStages( 4 );
-		/* The normal map's red channel is the facet tilt, 0.5 = flat. */
-		GX_SetTevSwapModeTable( GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_RED );
-		/* Stage 0: layer A, ( tilt - 0.5 ) x 4: only facets tipped one way. */
-		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD1, GX_TEXMAP0, GX_COLORNULL );
-		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1 );
-		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
-		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_4, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		/* Stage 1: x layer B, x2, so the streaks break up and shimmer. */
-		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD2, GX_TEXMAP0, GX_COLORNULL );
-		GX_SetTevSwapMode( GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP1 );
-		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		/* Stage 2: x the glare blob around the mirror point. */
-		GX_SetTevOrder( GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL );
-		GX_SetTevSwapMode( GX_TEVSTAGE2, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-		GX_SetTevColorIn( GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-		GX_SetTevAlphaOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		/* Stage 3: x sky-at-the-sun colour. */
-		GX_SetTevOrder( GX_TEVSTAGE3, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
-		GX_SetTevSwapMode( GX_TEVSTAGE3, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-		GX_SetTevKColor( GX_KCOLOR0, k );
-		GX_SetTevKColorSel( GX_TEVSTAGE3, GX_TEV_KCSEL_K0 );
-		GX_SetTevColorIn( GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-		GX_SetTevAlphaOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_ClearVtxDesc();
-		GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
-		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
-		for( wi = 0; wi < water_n; wi++ )
-		{
-			mplane_t pl;
-			float pts[32][3];
-			int nv, si;
-			float gx0, gy0, du, dv;
-
-			if( !GC_WaterFacePlane( wi, &pl, NULL ) || fabsf( pl.normal[2] ) < 0.85f )
-				continue;
-			nv = GC_GetWaterFaceVerts( wi, pts, 32 );
-			if( nv < 3 )
-				continue;
-			/* Only faces the blob can touch. */
-			gx0 = pts[0][0] - cx;
-			gy0 = pts[0][1] - cy;
-			du = gx0 * sx + gy0 * sy;
-			dv = gx0 * -sy + gy0 * sx;
-			if( fabsf( du ) > lu * 0.5f + 800.0f || fabsf( dv ) > lv * 0.5f + 800.0f )
-				continue;
-			GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
-			for( si = 0; si < nv; si++ )
-				GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
-			GX_End();
-		}
-		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-		GX_SetTevSwapMode( GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-		GX_SetNumChans( 1 );
-	}
+	/* The reflection is the mirror pass above. The earlier stand-ins (a
+	 * sheen from the normal map's red channel and a painted sun-glare
+	 * blob) are gone: nothing here that is not the scene itself. */
+	(void)water_tex;
+	(void)time_sec;
 	GX_SetNumChans( 1 );
 	GX_SetNumTevStages( 1 );
 	gc_water_split = false;
@@ -7686,9 +7520,12 @@ static void R_GXWaterMirrorPass( void )
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
+	/* The sky is in; everything from here is cut at the water plane. */
+	R_GXMirrorClipSet( true );
 	R_GXWorldDLDraw();
 	R_GXPropDrawHorizon( RI.rvp.vieworigin );
 	R_GXPropDraw( RI.rvp.vieworigin );
+	R_GXMirrorClipSet( false );
 	GX_SetTexCopySrc( 0, 0, GC_MIRROR_W, GC_MIRROR_H );
 	GX_SetTexCopyDst( GC_MIRROR_W, GC_MIRROR_H, GX_TF_RGB565, GX_FALSE );
 	GX_CopyTex( gc_mirror_tex, GX_FALSE );

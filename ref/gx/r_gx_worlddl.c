@@ -98,6 +98,19 @@ extern void R_GXCmprSetFar( qboolean far_pool );
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
+/* Mirror-pass clip stage: see r_gx_world.c. */
+extern qboolean r_gx_mirror_clip;
+extern void R_GXWrapNumTevStages( u8 n );
+extern void R_GXWrapNumTexGens( u8 n );
+extern void R_GXWrapAlphaCompare( u8 c0, u8 r0, u8 op, u8 c1, u8 r1 );
+extern void R_GXWrapBlendMode( u8 type, u8 src, u8 dst, u8 op );
+extern void R_GXWrapZCompLoc( u8 before_tex );
+extern void R_GXMirrorClipSet( qboolean on );
+#define GX_SetNumTevStages	R_GXWrapNumTevStages
+#define GX_SetNumTexGens	R_GXWrapNumTexGens
+#define GX_SetAlphaCompare	R_GXWrapAlphaCompare
+#define GX_SetBlendMode		R_GXWrapBlendMode
+#define GX_SetZCompLoc		R_GXWrapZCompLoc
 
 /* Bump relief and detail live in media/tevmat.gcm (I8 mod2x tiles). Sand
  * uses the real normal map: IndTex warps the sun disc, then the alpha mask
@@ -1757,7 +1770,17 @@ int R_GXWorldDLDraw( void )
 	if( gc_wd_pf_on < 0 )
 		gc_wd_pf_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
 	R_GXCmprSetFar( gc_wd_tex_overflow );
-	WD_PF( 5, R_GXWorldDLDrawSkyline());
+	{
+		/* The sky volume is drawn scaled 16x through its own matrix: its
+		 * vertex heights are not world heights, so no water clip there. */
+		const qboolean clip = r_gx_mirror_clip;
+
+		if( clip )
+			R_GXMirrorClipSet( false );
+		WD_PF( 5, R_GXWorldDLDrawSkyline());
+		if( clip )
+			R_GXMirrorClipSet( true );
+	}
 	R_GXCmprSetFar( false );
 	gc_wd_chunk_lm = 0;
 	R_GXWorldDLSetupLit( 0 );
