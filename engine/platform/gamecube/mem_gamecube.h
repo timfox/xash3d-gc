@@ -78,6 +78,7 @@ size_t GC_MapLoadBufferCapacity( void );
 /* Unused bytes after a borrowed BSP image inside the static map-load arena. */
 void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need );
 size_t GC_MapLoadBufferTailHighwater( void );
+size_t GC_MapLoadBufferTailPeak( void );
 /* Only lowers the mark (spilled/abandoned tail residents). Never raises it. */
 void GC_MapLoadBufferLowerTailHighwater( size_t highwater );
 /* ARAM manager (aram_core.c). Session blocks last the boot and come from the
@@ -203,6 +204,7 @@ static inline void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need 
 	return NULL;
 }
 static inline size_t GC_MapLoadBufferTailHighwater( void ) { return 0; }
+static inline size_t GC_MapLoadBufferTailPeak( void ) { return 0; }
 static inline void GC_MapLoadBufferLowerTailHighwater( size_t highwater ) { (void)highwater; }
 static inline void GC_BeginMapLoadMemoryOpt( void ) { }
 static inline void GC_EndMapLoadMemoryOpt( void ) { }

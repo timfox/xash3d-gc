@@ -44,6 +44,7 @@ Not feature-parity: full brush-mover lighting remains soft/diagnostic.
 #endif
 #include <gccore.h>
 #include <ogc/gx.h>
+#include <ogc/lwp_watchdog.h>
 #include <malloc.h>
 #include <string.h>
 #include <math.h>
@@ -2103,7 +2104,7 @@ static void R_GXHotService( void )
  * bound again with no DMA and no wait. Each slot has its own fence: only the
  * slot about to be overwritten is waited for, and that one was used longest ago.
  * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
-#define GC_CMPR_SLOTS_MAX     8
+#define GC_CMPR_SLOTS_MAX     192	/* 8 from the heap; a large world adopts more from the map arena */
 #define GC_CMPR_SLOTS_DEFAULT 6
 #define GC_CMPR_HEAP_MARGIN ( 1024u * 1024u )	/* heap that must stay free after extra slots */
 static byte *r_gx_cmpr_bounce;		/* base of all slots */
@@ -2148,7 +2149,7 @@ static byte *R_GXCmprBounce( void )
 
 			if( _Sys_GetParmFromCmdLine( "-gccmprslots", buf, sizeof( buf )) && buf[0] )
 				want = Q_atoi( buf );
-			want = bound( 1, want, GC_CMPR_SLOTS_MAX );
+			want = bound( 1, want, 8 );
 		}
 		/* Ask for the most slots first, fewer if MEM1 / spill cannot give them
 		 * contiguously; one slot is the previous behaviour. */
@@ -2180,6 +2181,28 @@ static byte *R_GXCmprBounce( void )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce alloc failed\n" );
 	}
 	return r_gx_cmpr_bounce;
+}
+
+/* A large world hands the texture cache a block of the idle map-load arena:
+ * enough slots that a frame's 150-odd world textures all stay resident. The
+ * default six 24 KB slots turned over on almost every bind (900 a frame in
+ * the Lost Coast harbor, 166 ms of DMA and fence waits). */
+void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes )
+{
+	if( !base || nslots < 1 || slot_bytes < 4096u || ( slot_bytes & 31u ))
+		return;
+	if( nslots > GC_CMPR_SLOTS_MAX )
+		nslots = GC_CMPR_SLOTS_MAX;
+	GX_DrawDone();
+	r_gx_cmpr_bounce = base;
+	r_gx_cmpr_nslots = nslots;
+	r_gx_cmpr_bounce_cap = slot_bytes;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u Kb = %u Kb (map arena)\n",
+		nslots, slot_bytes / 1024u, nslots * slot_bytes / 1024u );
 }
 
 /* Call once after GX init / before map load while MEM1 tip is free. */
@@ -5171,6 +5194,10 @@ typedef struct
 	u32	dl_ofs, first_bytes;
 	u16	tris;
 	u8	frac, pad;
+	/* Far level of detail: about a sixth of the triangles. Same piece
+	 * chain layout; equal to the full chain for tiny models. */
+	u32	far_ofs, far_bytes;
+	u16	far_tris, pad2;
 } gc_prop_model_t;
 
 static unsigned gc_prop_aram;
@@ -5272,9 +5299,9 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 3 )
+		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 4 )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v3)\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v4)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
@@ -5334,7 +5361,7 @@ static void R_GXPropLoad( void )
 		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack v3 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		"Xash3D GameCube: prop pack v4 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
 		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
 		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
@@ -5501,7 +5528,7 @@ static void R_GXPropSetLitAt( const float *org )
  * from ARAM through the bounce buffer and copied into the FIFO. The light
  * colour rides in the material register, so vertices carry no colour.
  * Angles are radians, Source order (pitch, yaw, roll). */
-static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll )
+static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
 	const gc_prop_model_t *m;
 	Mtx mv, mm, out;
@@ -5533,8 +5560,8 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
-	ofs = gc_prop_dl_base + m->dl_ofs;
-	bytes = m->first_bytes;
+	ofs = gc_prop_dl_base + ( far_lod ? m->far_ofs : m->dl_ofs );
+	bytes = far_lod ? m->far_bytes : m->first_bytes;
 	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
 	{
 		const u8 *hdr = gc_prop_bounce;
@@ -5565,16 +5592,41 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 {
 	float mid[3], org[3];
 	const float k = 6.2831853f / 65536.0f;
+	const float *eye = RI.rvp.vieworigin;
+	float dx, dy, dz, r2, d2, cover2;
 
 	mid[0] = 0.5f * ( (float)in->mins[0] + (float)in->maxs[0] );
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
-	R_GXPropSetLitAt( mid );
+	/* Size on screen = bounding radius over distance. Under 0.6 % it is a
+	 * few pixels: skip. Under 12 % draw the far level of detail. The
+	 * harbor used to push all 368 far instances at full detail (88k
+	 * triangles a frame through ARAM). */
+	dx = (float)in->maxs[0] - (float)in->mins[0];
+	dy = (float)in->maxs[1] - (float)in->mins[1];
+	dz = (float)in->maxs[2] - (float)in->mins[2];
+	r2 = 0.25f * ( dx * dx + dy * dy + dz * dz );
+	d2 = R_GXPropD2( eye, in->mins, in->maxs );
+	cover2 = d2 > 1.0f ? r2 / d2 : 1.0f;
+	if( cover2 < 0.006f * 0.006f )
+		return 0;
+	/* Static props: sample the world light once, keep it in the record's
+	 * spare word (low byte 1 = valid). The sample walks every chunk. */
+	{
+		gc_prop_inst_t *w = (gc_prop_inst_t *)in;
+
+		if(( w->pad & 0xffu ) != 1u )
+		{
+			R_GXPropSetLitAt( mid );
+			w->pad = ( gc_prop_lit & 0xffffff00u ) | 1u;
+		}
+		gc_prop_lit = ( w->pad & 0xffffff00u ) | 0xffu;
+	}
 	org[0] = (float)in->org[0];
 	org[1] = (float)in->org[1];
 	org[2] = (float)in->org[2];
 	return R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
-		(float)in->ang[1] * k, (float)in->ang[2] * k );
+		(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
 }
 
 /* CapFaces: Lost Coast fisherman walks the retail lead-to-gate path
@@ -5690,7 +5742,7 @@ static void R_GXFishermanWalkDraw( const float *org )
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-	R_GXPropEmitModel( gc_prop_walk_model, pos, 0.0f, yaw, 0.0f );
+	R_GXPropEmitModel( gc_prop_walk_model, pos, 0.0f, yaw, 0.0f, false );
 	if( !logged )
 	{
 		logged = true;
@@ -5739,7 +5791,7 @@ static void R_GXCanisterFlightDraw( const float *org )
 	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
 	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
 	R_GXPropSetLitAt( pos );
-	R_GXPropEmitModel( gc_prop_flight_model, pos, 0.0f, 0.0f, 0.0f );
+	R_GXPropEmitModel( gc_prop_flight_model, pos, 0.0f, 0.0f, 0.0f, false );
 	if( !logged )
 	{
 		logged = true;
@@ -6281,6 +6333,15 @@ static void R_GXDrawPackedWater( void )
 				if( R_GXBoxOutsideFrustum( wmin, wmax ))
 					continue;
 			}
+			/* Ripple sparkle is a near-field detail; past 2500 units it is
+			 * below a texel and each face costs two ARAM reads. */
+			{
+				const float ddx = pts[0][0] - tr.modelorg[0];
+				const float ddy = pts[0][1] - tr.modelorg[1];
+
+				if( ddx * ddx + ddy * ddy > 2500.0f * 2500.0f )
+					continue;
+			}
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
@@ -6456,6 +6517,21 @@ static void R_GXTrace( const char *tag )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	/* Flythrough stage timing: where the frame goes, every 120 frames. */
+	static u64 st_acc[6], st_last;
+	static int st_n, st_on = -1;
+	u64 st_t0 = 0, st_t;
+
+	if( st_on < 0 )
+		st_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	if( st_on )
+	{
+		st_t0 = gettime();
+		if( st_last )
+			st_acc[5] += st_t0 - st_last;
+		st_last = st_t0;
+	}
+#define ST_MARK( k ) do { if( st_on ) { st_t = gettime(); st_acc[k] += st_t - st_t0; st_t0 = st_t; } } while( 0 )
 
 	R_GXReserveHudPool();
 	R_GXPrefetchMapSkybox();
@@ -6465,8 +6541,10 @@ static int R_GXDrawWorldDLFrame( void )
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
+	ST_MARK( 0 );
 	R_GXTrace( "worlddl" );
 	drawn = R_GXWorldDLDraw();
+	ST_MARK( 1 );
 	R_GXTrace( "worlddl done" );
 	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
 	 * prop VAT change hangs Dolphin's GP after the first frame. */
@@ -6482,6 +6560,7 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
 	R_GXTrace( "canister" );
 	R_GXCanisterFlightDraw( RI.rvp.vieworigin );
+	ST_MARK( 2 );
 	R_GXTrace( "water" );
 	R_GXDrawPackedWater();
 	R_GXTrace( "underwater" );
@@ -6489,8 +6568,25 @@ static int R_GXDrawWorldDLFrame( void )
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_cull_none = true;
 	R_GXInvalidateTriApiLayout();
+	ST_MARK( 3 );
 	R_GXTrace( "frame end" );
 	GX_Flush();
+	ST_MARK( 4 );
+	if( st_on && ++st_n >= 120 )
+	{
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: stage ms/frame setup=%.1f worlddl=%.1f props=%.1f water=%.1f flush=%.1f frame=%.1f (%.1f fps)\n",
+			(float)ticks_to_microsecs( st_acc[0] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[1] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[2] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[3] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[4] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( st_acc[5] ) / ( 1000.0f * st_n ),
+			st_acc[5] ? 1000000.0f * st_n / (float)ticks_to_microsecs( st_acc[5] ) : 0.0f );
+		memset( st_acc, 0, sizeof( st_acc ));
+		st_n = 0;
+	}
+#undef ST_MARK
 	r_gx_world_drew = true;
 	GC_MarkGxWorldEfbReady();
 	return drawn > 0 ? drawn : 1;

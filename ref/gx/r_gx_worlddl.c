@@ -24,6 +24,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <ogc/lwp_watchdog.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
 #define GC_WD_FLAG_LIGHT_X1	0x0001	/* GoldSrc lighting: lightmap pages at x1 */
@@ -92,6 +93,7 @@ extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
+extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
 
 /* Bump relief and detail live in media/tevmat.gcm (I8 mod2x tiles). Sand
@@ -334,6 +336,12 @@ static s16 *gc_wd_chunk_mins;	/* n_chunks * 3 */
 static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
+static qboolean gc_wd_cache_in_arena;
+/* Flythrough profile of the draw loop (-gcvst), logged every 120 frames. */
+static u64 gc_wd_pf[6];
+static u32 gc_wd_pf_cnt[6];
+static int gc_wd_pf_on = -1, gc_wd_pf_frames;
+#define WD_PF( k, stmt ) do { if( gc_wd_pf_on > 0 ) { u64 pf_t = gettime(); stmt; gc_wd_pf[k] += gettime() - pf_t; gc_wd_pf_cnt[k]++; } else { stmt; } } while( 0 )
 static u32 gc_wd_cache_size, gc_wd_cache_head;
 static u32 gc_wd_aram;		/* entire file in ARAM */
 static file_t *gc_wd_file;
@@ -589,6 +597,57 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	 * CapFaces listen map props (lean sherman/jagd/…) need ~256 KiB of the
 	 * same spill after WorldDL; leave headroom (ava-prop-2 tip≈6 KiB heap). */
 	gc_wd_cache = NULL;
+	try_sz = 0;
+	gc_wd_cache_in_arena = false;
+	/* Large worlds (Lost Coast, 3.5 MB of lists): the renderer's static
+	 * map-load arena is idle once the BSP is in, with about 3 MB above its
+	 * tail highwater. Keeping the whole visible set resident there ends
+	 * the per-frame ARAM refetch of 800+ chunks that held the harbor at
+	 * 3 fps. 256 KB stays free above for entity overflow carves. */
+	if( gc_wd_hdr.file_size >= 1536u * 1024u && !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" ))
+	{
+		/* Start above every carve this map made, not above the highwater:
+		 * a lean load lowers the highwater to 0 while the world-texture low
+		 * mips it carved stay live (starting at 0 bleached them white). */
+		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
+		const size_t hw = ( live + 31u ) & ~(size_t)31u;
+		const size_t cap = GC_MapLoadBufferCapacity();
+		const size_t keep = 256u * 1024u;
+
+		if( cap > hw + keep + 512u * 1024u )
+		{
+			size_t hw2 = hw;
+			size_t want;
+
+			/* Texture slots first: 96 x 12 KB holds a 128x128 CMPR chain
+			 * (a 256x256 drops its top mip) for every texture in view. */
+			GC_RetainMapLoadBufferBorrow();
+			if( cap > hw + keep + 2048u * 1024u )
+			{
+				const unsigned slot_bytes = 12u * 1024u;
+				const int nslots = 96;
+				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw, (size_t)nslots * slot_bytes );
+
+				if( tex )
+				{
+					R_GXCmprBounceAdopt( tex, nslots, slot_bytes );
+					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
+				}
+			}
+			want = ( cap - hw2 - keep ) & ~(size_t)31u;
+			const size_t all = (( gc_wd_hdr.file_size + gc_wd_hdr.max_chunk + 63u ) & ~(size_t)31u );
+
+			if( want > all )
+				want = all;
+			gc_wd_cache = (byte *)GC_MapLoadBufferTailAlloc( hw2, want );
+			if( gc_wd_cache )
+			{
+				try_sz = (u32)want;
+				gc_wd_cache_in_arena = true;
+			}
+		}
+	}
+	if( !gc_wd_cache )
 	{
 		const unsigned cache_hi =
 			( gEngfuncs.Sys_CheckParm( "-gcworldrender" )
@@ -610,7 +669,10 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	}
 	gc_wd_cache_size = try_sz;
 	gc_wd_cache_head = 0;
-	Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
+	if( gc_wd_cache_in_arena )
+		Mod_GCWorldArraySpillPinBase( tbl, tables );
+	else
+		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
 
 	/* Whole pack → ARAM so tree/chunkdir/PVS/chunks share one store. */
@@ -1540,7 +1602,9 @@ int R_GXWorldDLDraw( void )
 	}
 	R_GXWorldDLSetupLit( 0 );
 	R_GXFogBegin();
-	R_GXWorldDLDrawSkyline();
+	if( gc_wd_pf_on < 0 )
+		gc_wd_pf_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	WD_PF( 5, R_GXWorldDLDrawSkyline());
 	gc_wd_chunk_lm = 0;
 	R_GXWorldDLSetupLit( 0 );
 
@@ -1577,7 +1641,7 @@ int R_GXWorldDLDraw( void )
 		/* Spend the cache on the ground in front of the camera. Index order
 		 * filled it with whatever chunk id came first and left the shore out. */
 		gc_wd_sort_org = org;
-		qsort( order, (size_t)norder, sizeof( order[0] ), R_GXWorldDLChunkCmp );
+		WD_PF( 0, qsort( order, (size_t)norder, sizeof( order[0] ), R_GXWorldDLChunkCmp ));
 		/* Shore first so cliffs/boats lock cache slots; towers take the
 		 * reserved leftover (+ Force). Towers-first starved the cliff plates
 		 * when IsTower matched ~12 harbor chunks (gaps on the right wall). */
@@ -1605,10 +1669,10 @@ int R_GXWorldDLDraw( void )
 			i = order[oi];
 			if( R_GXWorldDLIsTower( i ) != want_tower )
 				continue;
-			chunk = R_GXWorldDLResident( i, bud );
+			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{
-				chunk = R_GXWorldDLForce( i );
+				WD_PF( 2, chunk = R_GXWorldDLForce( i ));
 				forced = chunk != NULL;
 			}
 			if( !chunk )
@@ -1633,7 +1697,7 @@ int R_GXWorldDLDraw( void )
 					lm_ofs = *(const u32 *)( chunk + 8 );
 				if( lm_ofs && gc_wd_lm_stream )
 				{
-					lm_page = R_GXWorldDLLmPage( lm_ofs - 1u );
+					WD_PF( 3, lm_page = R_GXWorldDLLmPage( lm_ofs - 1u ));
 					if( lm_page )
 					{
 						GX_InitTexObj( &gc_wd_lm_obj, lm_page, 32, 32, GX_TF_RGB565,
@@ -1688,8 +1752,13 @@ int R_GXWorldDLDraw( void )
 							continue;
 						}
 					}
-					if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
-						continue;
+					{
+						qboolean bound;
+
+						WD_PF( 4, bound = R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ));
+						if( !bound )
+							continue;
+					}
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 					cur_mat = (int)b->mat;
 				}
@@ -1765,6 +1834,22 @@ int R_GXWorldDLDraw( void )
 				pvs_hits, frustum_drop, frustum_cull ? 1 : 0, tower_chunks, forced_n );
 	}
 	R_GXFogEnd();
+	if( gc_wd_pf_on > 0 && ++gc_wd_pf_frames >= 120 )
+	{
+		const float k = 1.0f / ( 1000.0f * 120.0f );
+
+		gEngfuncs.Con_Reportf(
+			"Xash3D GameCube: worlddl ms/frame sort=%.1f resident=%.1f(%u) force=%.1f(%u) lmpage=%.1f(%u) bindtex=%.1f(%u) skyline=%.1f\n",
+			(float)ticks_to_microsecs( gc_wd_pf[0] ) * k,
+			(float)ticks_to_microsecs( gc_wd_pf[1] ) * k, gc_wd_pf_cnt[1] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[2] ) * k, gc_wd_pf_cnt[2] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
+			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
+		memset( gc_wd_pf, 0, sizeof( gc_wd_pf ));
+		memset( gc_wd_pf_cnt, 0, sizeof( gc_wd_pf_cnt ));
+		gc_wd_pf_frames = 0;
+	}
 	R_GXTevMatEndAlphaTest();
 	GX_SetNumTevStages( 1 );
 	GX_SetNumTexGens( 1 );

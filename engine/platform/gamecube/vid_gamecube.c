@@ -1224,6 +1224,8 @@ static int gc_water_face_count;
 #define GC_WATER_RAW_MAX 512
 static byte gc_water_stage[128] __attribute__(( aligned( 32 )));
 static int gc_water_stage_i = -1;
+static byte *gc_water_mem;
+static qboolean gc_water_mem_tried;
 static u32 gc_water_aram;
 static int gc_water_raw_count;
 static float gc_water_scroll2_u, gc_water_scroll2_v;
@@ -1234,6 +1236,24 @@ static const byte *GC_WaterRec( int index )
 {
 	if( !gc_water_aram || index < 0 || index >= gc_water_raw_count )
 		return NULL;
+	/* Resident mirror of the whole table once a large world has opened the
+	 * idle map-load arena (34 KB for 266 faces). The renderer asks for each
+	 * face several times a frame and every miss was a 128-byte ARAM DMA. */
+	if( !gc_water_mem && !gc_water_mem_tried && GC_MapLoadBufferTailHighwater() > 0 )
+	{
+		const u32 bytes = (u32)gc_water_raw_count * 128u;
+		byte *p;
+
+		gc_water_mem_tried = true;
+		p = (byte *)GC_MapLoadBufferTailAlloc( Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes );
+		if( p )
+		{
+			GC_AramTransfer( gc_water_aram, p, bytes, false );
+			gc_water_mem = p;
+		}
+	}
+	if( gc_water_mem )
+		return gc_water_mem + (u32)index * 128u;
 	if( gc_water_stage_i != index )
 	{
 		GC_AramTransfer( gc_water_aram + (u32)index * 128u, gc_water_stage, 128, false );
@@ -2688,6 +2708,8 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 	gc_water_face_count = 0;
 	gc_water_raw_count = 0;
 	gc_water_stage_i = -1;
+	gc_water_mem = NULL;
+	gc_water_mem_tried = false;
 	gc_water_scroll2_u = 0.0f;
 	gc_water_scroll2_v = 0.0f;
 	if( gc_water_aram )
