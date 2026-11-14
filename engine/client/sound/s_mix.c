@@ -583,6 +583,14 @@ void S_PaintChannels( int endtime )
 		if( room_channels > 0 || cls.key_dest != key_menu )
 			S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain );
 
+#if XASH_GAMECUBE
+		{
+			// Source soundscape voices (platform/gamecube/soundscape_gamecube.c)
+			extern void GC_SoundscapeMix( int *paint, int count, int gain );
+
+			GC_SoundscapeMix( (int *)paintbuffer, num_samples, gain );
+		}
+#endif
 		// transfer out according to DMA format
 		S_TransferPaintBuffer( paintbuffer, end );
 		snd.paintedtime = end;
