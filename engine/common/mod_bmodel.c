@@ -188,10 +188,13 @@ qboolean Mod_GCEnsureStaticReserves( void )
 	/* Never consolation-seize leafs when nodes deferred (-gcmap boot tip). */
 	gc_leafs_highslot_carve = false;
 #if XASH_DODGC_NETWORK
+	/* Only once a map is being loaded (sv.name set): the boot and menu never
+	 * use the leafs block, and holding its ~292 KiB there ate the entire
+	 * headroom the BSS savings bought (engine_subsystems_ready free=1480). */
 	/* FULL avalanche mleafs (286 KiB) cannot share the ~390 KiB under-surface
 	 * hole with nodes (413 KiB). Hold static leafs for the listen FULL path
 	 * so PreallocWorldNodes can leave scratch to mnodes (ava-fullbsp21/22). */
-	if( !gc_static_leafs
+	if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 48u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
@@ -255,7 +258,7 @@ void Mod_GCReleaseUnusedWorldReserves( void )
 #if XASH_DODGC_NETWORK
 	/* After nodes reserve returns to the tip, seize leafs for FULL avalanche
 	 * (scratch hole fits mnodes only — ava-fullbsp21). */
-	if( !gc_static_leafs
+	if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 32u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
