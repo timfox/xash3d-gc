@@ -1251,6 +1251,7 @@ static const byte *GC_WaterRec( int index )
 			GC_AramTransfer( gc_water_aram, p, bytes, false );
 			gc_water_mem = p;
 		}
+		Con_Reportf( "Xash3D GameCube: water mirror %s (%u bytes)\n", p ? "resident" : "FAIL, ARAM per face", bytes );
 	}
 	if( gc_water_mem )
 		return gc_water_mem + (u32)index * 128u;

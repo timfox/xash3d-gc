@@ -5736,10 +5736,18 @@ static void R_GXPropSetLitAt( const float *org )
  * colour rides in the material register, so vertices carry no colour.
  * Angles are radians, Source order (pitch, yaw, roll). */
 /* Resident copy of a model's full chain, or NULL to stream it this frame. */
+static u32 gc_prop_want_frame[GC_PROP_MAX_MODELS], gc_prop_want_bytes, gc_prop_want_peak;
+
 static byte *R_GXPropCacheGet( unsigned model )
 {
 	const u32 bytes = gc_prop_chain_bytes[model];
 	u32 head, k;
+
+	if( gc_prop_want_frame[model] != gc_prop_cache_frame + 1u )
+	{
+		gc_prop_want_frame[model] = gc_prop_cache_frame + 1u;
+		gc_prop_want_bytes += bytes;
+	}
 
 	if( !gc_prop_cache )
 	{
@@ -5969,29 +5977,25 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		else
 		{
 			/* Streamed piece: the bounce is reused for the next one, so
-			 * the vertices are copied into the FIFO. 30 bytes a triangle:
-			 * seven words and a half-word. They start 3 bytes into the
-			 * body, after the list's own draw command. */
+			 * the list is copied into the FIFO. GX_Begin sends the first
+			 * draw command (and any pending state); the rest of the body,
+			 * further strip commands and the NOP padding included, goes
+			 * through as raw words. */
 			const u8 *q = hdr + 35;
 			u64 t0 = gettime();
 
 			(void)p;
-			GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)nverts );
-			for( n = nverts / 3u; n; n-- )
+			GX_Begin( hdr[32] & 0xf8, GX_VTXFMT0, *(const u16 *)( hdr + 33 ));
+			for( n = ( body - 3u ) >> 2; n; n-- )
 			{
 				wgPipe->U32 = *(const u32 *)( q );
-				wgPipe->U32 = *(const u32 *)( q + 4 );
-				wgPipe->U32 = *(const u32 *)( q + 8 );
-				wgPipe->U32 = *(const u32 *)( q + 12 );
-				wgPipe->U32 = *(const u32 *)( q + 16 );
-				wgPipe->U32 = *(const u32 *)( q + 20 );
-				wgPipe->U32 = *(const u32 *)( q + 24 );
-				wgPipe->U16 = *(const u16 *)( q + 28 );
-				q += 30;
+				q += 4;
 			}
+			for( n = ( body - 3u ) & 3u; n; n-- )
+				wgPipe->U8 = *q++;
 			GX_End();
 			gc_prop_pf[2] += gettime() - t0;
-			gc_prop_pf_cnt[2] += nverts / 3u;
+			gc_prop_pf_cnt[2] += *(const u16 *)( hdr + 12 );
 		}
 		if( additive )
 		{
@@ -5999,7 +6003,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 			GX_SetChanMatColor( GX_COLOR0A0, col );
 		}
-		drawn += (int)( nverts / 3u );
+		drawn += (int)*(const u16 *)( hdr + 12 );
 		ofs += bytes;
 		bytes = next;
 	}
@@ -6244,6 +6248,9 @@ void R_GXPropDrawHorizon( const float *org )
 	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	static u16 order[GC_PROP_MAX_INST];
 
+	if( gc_prop_want_bytes > gc_prop_want_peak )
+		gc_prop_want_peak = gc_prop_want_bytes;
+	gc_prop_want_bytes = 0;
 	gc_prop_cache_frame++;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
 	{
@@ -6424,6 +6431,19 @@ static void R_GXPropDraw( const float *org )
 static qboolean gc_water_split;
 static int gc_water_refl_a;
 
+/* Gekko has no fsqrt; libm's software sqrtf was most of the water pass.
+ * The reciprocal estimate plus one Newton step is good to ~5 digits. */
+static inline float R_GXFastDist( float d2 )
+{
+	float y;
+
+	if( d2 < 1.0f )
+		return 0.0f;
+	__asm__( "frsqrte %0,%1" : "=f"( y ) : "f"( d2 ));
+	y = y * ( 1.5f - 0.5f * d2 * y * y );
+	return d2 * y;
+}
+
 static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 {
 	byte fog_rgb[3];
@@ -6475,7 +6495,7 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 		dx = pt[0] - eye[0];
 		dy = pt[1] - eye[1];
 		dz = pt[2] - eye[2];
-		dist = sqrtf( dx * dx + dy * dy + dz * dz );
+		dist = R_GXFastDist( dx * dx + dy * dy + dz * dz );
 	}
 
 	if( underwater )
@@ -6805,7 +6825,27 @@ static void R_GXDrawPackedWater( void )
 				for( ti = 1; ti + 1 < nv; ti++ )
 				{
 					const float *A = pts[0], *B = pts[ti], *C = pts[ti + 1];
+					const float inv = 1.0f / (float)n;
+					/* Shade each grid node once; a node is shared by up to
+					 * six of the triangles emitted below. */
+					float np[5][5][3];
+					u32 nc[5][5];
+					u8 nr[5][5];
 
+					for( u = 0; u <= n; u++ )
+					{
+						for( v = 0; v <= n - u; v++ )
+						{
+							const float fu = (float)u * inv, fv = (float)v * inv;
+							float *q = np[u][v];
+
+							q[0] = A[0] + ( B[0] - A[0] ) * fv + ( C[0] - A[0] ) * fu;
+							q[1] = A[1] + ( B[1] - A[1] ) * fv + ( C[1] - A[1] ) * fu;
+							q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
+							nc[u][v] = R_GXWaterBodyTint( wi, q, eye_dot, nd );
+							nr[u][v] = (u8)gc_water_refl_a;
+						}
+					}
 					for( u = 0; u < n; u++ )
 					{
 						for( v = 0; v < 2 * ( n - u ) - 1; v++ )
@@ -6813,7 +6853,6 @@ static void R_GXDrawPackedWater( void )
 							/* Row u holds n-u upright and n-u-1 inverted cells. */
 							const int col = v >> 1;
 							int bu[3], bv[3];
-							float q[3];
 
 							if( !( v & 1 ))
 							{
@@ -6829,16 +6868,12 @@ static void R_GXDrawPackedWater( void )
 							}
 							for( k = 0; k < 3; k++ )
 							{
-								const float fu = (float)bu[k] / (float)n;
-								const float fv = (float)bv[k] / (float)n;
+								const float *q = np[bu[k]][bv[k]];
 
-								q[0] = A[0] + ( B[0] - A[0] ) * fv + ( C[0] - A[0] ) * fu;
-								q[1] = A[1] + ( B[1] - A[1] ) * fv + ( C[1] - A[1] ) * fu;
-								q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
 								GX_Position3f32( q[0], q[1], q[2] );
-								GX_Color1u32( R_GXWaterBodyTint( wi, q, eye_dot, nd ));
+								GX_Color1u32( nc[bu[k]][bv[k]] );
 								if( gc_water_split )
-									GX_Color1u32( (u32)gc_water_refl_a );
+									GX_Color1u32( (u32)nr[bu[k]][bv[k]] );
 							}
 						}
 					}
@@ -7534,20 +7569,40 @@ static int R_GXDrawWorldDLFrame( void )
 		const float k = 1.0f / ( 1000.0f * 120.0f );
 
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris)\n",
+			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris) want=%uKb\n",
 			(float)ticks_to_microsecs( gc_prop_pf[0] ) * k, gc_prop_pf_cnt[0] / 120u,
 			(float)ticks_to_microsecs( gc_prop_pf[1] ) * k, gc_prop_pf_cnt[1] / 120u,
-			(float)ticks_to_microsecs( gc_prop_pf[2] ) * k, gc_prop_pf_cnt[2] / 120u );
+			(float)ticks_to_microsecs( gc_prop_pf[2] ) * k, gc_prop_pf_cnt[2] / 120u, gc_prop_want_peak / 1024u );
+		gc_prop_want_peak = 0;
 		memset( gc_prop_pf, 0, sizeof( gc_prop_pf ));
 		memset( gc_prop_pf_cnt, 0, sizeof( gc_prop_pf_cnt ));
 		gc_prop_pf_frames = 0;
 	}
 	R_GXTrace( "water" );
-	R_GXDrawPackedWater();
-	R_GXTrace( "ropes" );
-	R_GXRopeDraw();
-	R_GXTrace( "smoke" );
-	R_GXSmokeDraw();
+	{
+		static u64 sub[3];
+		static int sub_n;
+		u64 a0 = st_on ? gettime() : 0, a1, a2, a3;
+
+		R_GXDrawPackedWater();
+		a1 = st_on ? gettime() : 0;
+		R_GXTrace( "ropes" );
+		R_GXRopeDraw();
+		a2 = st_on ? gettime() : 0;
+		R_GXTrace( "smoke" );
+		R_GXSmokeDraw();
+		a3 = st_on ? gettime() : 0;
+		sub[0] += a1 - a0; sub[1] += a2 - a1; sub[2] += a3 - a2;
+		if( st_on && ++sub_n >= 120 )
+		{
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: late ms/frame water=%.1f ropes=%.1f smoke=%.1f\n",
+				(float)ticks_to_microsecs( sub[0] ) / 120000.0f,
+				(float)ticks_to_microsecs( sub[1] ) / 120000.0f,
+				(float)ticks_to_microsecs( sub[2] ) / 120000.0f );
+			sub[0] = sub[1] = sub[2] = 0;
+			sub_n = 0;
+		}
+	}
 	R_GXTrace( "underwater" );
 	R_GXDrawUnderwaterFog();
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
