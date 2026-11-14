@@ -562,6 +562,11 @@ Sys_Quit
 */
 void Sys_Quit( const char *reason )
 {
+#if XASH_GAMECUBE && defined( XASH_GC_MEMWATCH_DEBUG )
+	/* Name the exit path before shutdown: a parked reset otherwise looks silent. */
+	SYS_Report( "Xash3D GameCube: Sys_Quit reason=%s status=%d frame=%u caller=%p\n",
+		reason ? reason : "<null>", host.status, host.framecount, __builtin_return_address( 0 ));
+#endif
 	Host_ShutdownWithReason( reason );
 	Host_ExitInMain();
 }
