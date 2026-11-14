@@ -95,6 +95,7 @@ extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
+extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
 
@@ -339,6 +340,10 @@ static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
+/* More distinct world textures than full-size slots: distant chunks then
+ * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
+ * texture across cubemap patch variants, so all of them stay at 128x128. */
+static qboolean gc_wd_tex_overflow;
 /* Flythrough profile of the draw loop (-gcvst), logged every 120 frames. */
 static u64 gc_wd_pf[6];
 static u32 gc_wd_pf_cnt[6];
@@ -628,17 +633,18 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			GC_RetainMapLoadBufferBorrow();
 			if( cap > hw + keep + 2048u * 1024u )
 			{
-				/* 48 full slots (128x128 chain, 10944 bytes) for what is
-				 * close, 240 slots one mip down (64x64 chain, 2752 bytes)
-				 * for the rest and for props: 1.16 MB holds 288 textures. */
+				/* 90 full slots (128x128 chain, 10944 bytes): every world
+				 * texture of Lost Coast at once. 128 slots one mip down
+				 * (64x64 chain, 2752 bytes) for props. 1.31 MB. */
 				const unsigned slot_bytes = 10944u, far_bytes = 2752u;
-				const int nslots = 48, far_n = 240;
+				const int nslots = 90, far_n = 128;
 				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
 					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
 
 				if( tex )
 				{
 					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+					gc_wd_tex_overflow = GC_WorldTexCount() > nslots;
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
 			}
@@ -1642,7 +1648,7 @@ int R_GXWorldDLDraw( void )
 	R_GXFogBegin();
 	if( gc_wd_pf_on < 0 )
 		gc_wd_pf_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
-	R_GXCmprSetFar( true );
+	R_GXCmprSetFar( gc_wd_tex_overflow );
 	WD_PF( 5, R_GXWorldDLDrawSkyline());
 	R_GXCmprSetFar( false );
 	gc_wd_chunk_lm = 0;
@@ -1711,7 +1717,8 @@ int R_GXWorldDLDraw( void )
 				continue;
 			/* Past 1400 units a 128x128 texture is already on its 64x64
 			 * mip; bind it from the small-slot pool. */
-			R_GXCmprSetFar( R_GXWorldDLChunkD2( (u16)i ) > 1400.0f * 1400.0f );
+			/* Only when the pack has more textures than full-size slots. */
+			R_GXCmprSetFar( gc_wd_tex_overflow && R_GXWorldDLChunkD2( (u16)i ) > 1400.0f * 1400.0f );
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{

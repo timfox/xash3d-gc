@@ -5365,6 +5365,12 @@ static struct
 	byte          low_shift[GC_WT_MAX_TEXTURES]; /* first resident mip */
 } gc_wt;
 
+/* Entries in the loaded world texture pack. */
+int GC_WorldTexCount( void )
+{
+	return (int)gc_wt.count;
+}
+
 /* Transient table/hot-mip pool: prefer unused map-load arena tail to avoid a
  * large contiguous MEM1 allocation. Boot/map load leaves little headroom; the
  * full texture chains live in ARAM and this pool only holds active low mips.
