@@ -6399,10 +6399,13 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	 * transition restores overran the 128 KiB slab, and an ammo_glockclip
 	 * was constructed into a NULL block. On the World DL route the world is
 	 * fully loaded by now and the arena tail above it is free (the live
-	 * surface table it was sized for is never built), so reserve here. */
+	 * surface table it was sized for is never built), so reserve here.
+	 * Start above the tail peak, not the highwater: a lean load lowers the
+	 * highwater to 0 while the world-texture carves above it stay live. */
 	if( GC_MenuRunsServer() && !SV_GCPrivateOverflowReserved())
 	{
-		SV_GCReservePrivateOverflow( GC_MapLoadBufferTailHighwater(), GC_ENTITY_OVERFLOW_BYTES );
+		SV_GCReservePrivateOverflow( Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()),
+			GC_ENTITY_OVERFLOW_BYTES );
 		if( !SV_GCPrivateOverflowReserved())
 			Con_Reportf( S_WARN "Xash3D GameCube: entity overflow unavailable at spawn (tail high-water %s)\n",
 				Q_memprint( GC_MapLoadBufferTailHighwater()));
