@@ -424,6 +424,11 @@ void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const ch
 		size_t blocksize = sizeof( memheader_small_t ) + size + sizeof( byte );
 		memheader_small_t *mem = Q_malloc( blocksize );
 
+#if XASH_GAMECUBE
+		/* Heap exhausted at boot: the idle map-load pad takes it. */
+		if( mem == NULL )
+			mem = (memheader_small_t *)GC_BootArenaAllocSmall( blocksize );
+#endif
 		if( mem == NULL )
 			return NULL;
 
@@ -463,6 +468,8 @@ void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const ch
 			|| !Q_stricmp( pool->name, "FileSystem Pool" )
 			|| ( GC_BootArenaMenuScope() && !Q_stricmp( pool->name, "ref_gx zone" ))))
 			mem = (memheader_t *)GC_BootArenaAlloc( blocksize );
+		if( !mem )
+			mem = (memheader_t *)GC_BootArenaAllocSmall( blocksize );
 #endif
 
 		if( mem == NULL )

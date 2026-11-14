@@ -204,8 +204,18 @@ typedef struct gc_boot_blk_s
 	uint32_t pad[6];	/* keep the payload 32-byte aligned */
 } gc_boot_blk_t;
 
+/* Heap-pressure fallback: small allocations the libc heap refuses are served
+ * from a bump zone at the TOP of the pad, so whatever is still live at the
+ * first map load pins only the top of the pad (the map-load arena ends at the
+ * pad's end) instead of the whole of it. */
+#define GC_BOOT_SMALL_ZONE ( 128u * 1024u )
+
 static byte *gc_boot_base;
 static size_t gc_boot_cap;
+static size_t gc_boot_large_cap;	/* first-fit region: cap minus the small zone */
+static byte *gc_boot_small_low, *gc_boot_small_top;
+static unsigned int gc_boot_small_live;
+static size_t gc_boot_small_live_bytes;
 static qboolean gc_boot_ready, gc_boot_closed;
 static unsigned int gc_boot_live;
 static size_t gc_boot_live_bytes, gc_boot_peak_bytes;
@@ -224,8 +234,14 @@ static qboolean GC_BootArenaInit( void )
 		gc_boot_base = NULL;
 		return false;
 	}
+	gc_boot_large_cap = gc_boot_cap;
+	if( gc_boot_cap > 4u * GC_BOOT_SMALL_ZONE )
+	{
+		gc_boot_large_cap = gc_boot_cap - GC_BOOT_SMALL_ZONE;
+		gc_boot_small_top = gc_boot_small_low = gc_boot_base + gc_boot_cap;
+	}
 	first = (gc_boot_blk_t *)gc_boot_base;
-	first->size = (uint32_t)gc_boot_cap;
+	first->size = (uint32_t)gc_boot_large_cap;
 	first->used = 0;
 	Con_Reportf( "Xash3D GameCube: boot arena ready capacity=%s\n", Q_memprint( gc_boot_cap ));
 	return true;
@@ -246,7 +262,7 @@ void *GC_BootArenaAlloc( size_t size )
 		return NULL;
 	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
 
-	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
 	{
 		gc_boot_blk_t *blk = (gc_boot_blk_t *)cursor;
 
@@ -271,6 +287,37 @@ void *GC_BootArenaAlloc( size_t size )
 	return NULL;
 }
 
+/* Last resort for a small allocation when the libc heap is exhausted. */
+void *GC_BootArenaAllocSmall( size_t size )
+{
+	size_t need;
+	gc_boot_blk_t *blk;
+
+	if( gc_boot_closed || size == 0 || size >= GC_BOOT_ARENA_MIN_ALLOC || !GC_BootArenaInit()
+		|| !gc_boot_small_top )
+		return NULL;
+	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
+	if( (size_t)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )) < need )
+		return NULL;
+	gc_boot_small_low -= need;
+	blk = (gc_boot_blk_t *)gc_boot_small_low;
+	blk->size = (uint32_t)need;
+	blk->used = 1;
+	gc_boot_small_live++;
+	gc_boot_small_live_bytes += need;
+	return (byte *)blk + sizeof( gc_boot_blk_t );
+}
+
+/* Lowest address that must stay out of the map-load arena, or NULL. */
+void *GC_BootArenaPinnedLow( void )
+{
+	if( gc_boot_live )
+		return gc_boot_base;
+	if( gc_boot_small_live )
+		return gc_boot_small_low;
+	return NULL;
+}
+
 qboolean GC_BootArenaFree( void *ptr )
 {
 	gc_boot_blk_t *blk;
@@ -284,16 +331,27 @@ qboolean GC_BootArenaFree( void *ptr )
 		Con_Reportf( S_ERROR "Xash3D GameCube: boot arena double free %p\n", ptr );
 		return true;
 	}
+	if( gc_boot_small_top && (byte *)blk >= gc_boot_base + gc_boot_large_cap )
+	{
+		blk->used = 0;
+		gc_boot_small_live--;
+		gc_boot_small_live_bytes -= blk->size;
+		/* The zone is contiguous from small_low to its top: retreat past
+		 * freed blocks so a dead zone costs nothing at the map load. */
+		while( gc_boot_small_low < gc_boot_small_top && !((gc_boot_blk_t *)gc_boot_small_low)->used )
+			gc_boot_small_low += ((gc_boot_blk_t *)gc_boot_small_low)->size;
+		return true;
+	}
 	blk->used = 0;
 	gc_boot_live--;
 	gc_boot_live_bytes -= blk->size;
 
 	/* Coalesce every run of free neighbours (few blocks; a full walk is cheap). */
-	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
 	{
 		gc_boot_blk_t *cur = (gc_boot_blk_t *)cursor;
 
-		while( !cur->used && cursor + cur->size < gc_boot_base + gc_boot_cap )
+		while( !cur->used && cursor + cur->size < gc_boot_base + gc_boot_large_cap )
 		{
 			gc_boot_blk_t *next = (gc_boot_blk_t *)( cursor + cur->size );
 			if( next->used )
@@ -350,7 +408,7 @@ void *__wrap_realloc( void *ptr, size_t size )
 static qboolean gc_boot_menu_scope;
 void GC_BootArenaSetMenuScope( qboolean on ) { gc_boot_menu_scope = on; }
 qboolean GC_BootArenaMenuScope( void ) { return gc_boot_menu_scope && !gc_boot_closed; }
-size_t GC_BootArenaLiveBytes( void ) { return gc_boot_live ? gc_boot_live_bytes : 0; }
+size_t GC_BootArenaLiveBytes( void ) { return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes; }
 
 /* First map load: no new boot allocations.  Returns the bytes still live. */
 size_t GC_BootArenaClose( void )
@@ -362,7 +420,7 @@ size_t GC_BootArenaClose( void )
 			Con_Reportf( "Xash3D GameCube: boot arena closed live=%u bytes=%s peak=%s\n",
 				gc_boot_live, Q_memprint( gc_boot_live_bytes ), Q_memprint( gc_boot_peak_bytes ));
 	}
-	return gc_boot_live ? gc_boot_live_bytes : 0;
+	return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes;
 }
 
 /* Unconditional heap mark at fixed boot stages (MEM1 headroom telemetry). */

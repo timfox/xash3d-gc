@@ -32,6 +32,8 @@ void GC_MemBreadcrumb( const char *stage );
 void GC_MemHeapMark( const char *stage );
 /* Boot arena over the idle map-load pad (before the first map load only). */
 void *GC_BootArenaAlloc( size_t size );
+void *GC_BootArenaAllocSmall( size_t size );
+void *GC_BootArenaPinnedLow( void );
 qboolean GC_BootArenaFree( void *ptr );
 qboolean GC_BootArenaOwns( const void *ptr );
 size_t GC_BootArenaClose( void );
@@ -158,6 +160,7 @@ static inline void GC_MemBreadcrumb( const char *stage ) { (void)stage; }
 static inline void GC_MemHeapMark( const char *stage ) { (void)stage; }
 static inline size_t GC_MemArenaFreeBytes( void ) { return 0; }
 static inline void *GC_BootArenaAlloc( size_t size ) { (void)size; return NULL; }
+static inline void *GC_BootArenaAllocSmall( size_t size ) { (void)size; return NULL; }
 static inline qboolean GC_BootArenaFree( void *ptr ) { (void)ptr; return false; }
 static inline qboolean GC_BootArenaOwns( const void *ptr ) { (void)ptr; return false; }
 static inline size_t GC_BootArenaClose( void ) { return 0; }
