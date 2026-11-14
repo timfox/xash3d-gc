@@ -1816,6 +1816,14 @@ void Mod_FreeModel( model_t *mod )
 				}
 				mod->cache.data = NULL;
 			}
+			else if( Mod_GCIsWorldArraySpillCache( mod->cache.data )
+				|| GC_IsMapLoadBuffer( mod->cache.data ))
+			{
+				/* G289 spill-resident cache (mod_studio.c) lives in the map
+				 * arena, never on the libc heap: free() would walk a bogus
+				 * chunk header (Flash Guru, DAR=3FA2AB2C). */
+				mod->cache.data = NULL;
+			}
 			else
 			{
 				free( mod->cache.data );
