@@ -2104,19 +2104,46 @@ static void R_GXHotService( void )
  * bound again with no DMA and no wait. Each slot has its own fence: only the
  * slot about to be overwritten is waited for, and that one was used longest ago.
  * -gccmprslots N sets the count (1-8, default 6 = 144 KiB). */
-#define GC_CMPR_SLOTS_MAX     192	/* 8 from the heap; a large world adopts more from the map arena */
+#define GC_CMPR_SLOTS_MAX     240	/* 8 from the heap; a large world adopts more from the map arena */
 #define GC_CMPR_SLOTS_DEFAULT 6
 #define GC_CMPR_HEAP_MARGIN ( 1024u * 1024u )	/* heap that must stay free after extra slots */
 static byte *r_gx_cmpr_bounce;		/* base of all slots */
 static unsigned r_gx_cmpr_bounce_cap;	/* bytes per slot */
 static int r_gx_cmpr_nslots;
+/* Second pool for distant surfaces: the last r_gx_cmpr_far_n slots are
+ * r_gx_cmpr_far_cap bytes each and hold one mip less (64x64, 2.7 KB instead
+ * of 10.9 KB). The harbor shows about 200 world textures; 96 full slots
+ * missed 110 times a frame. The world DL says which pool a chunk wants. */
+static int r_gx_cmpr_far_n;
+static unsigned r_gx_cmpr_far_cap;
+static qboolean r_gx_cmpr_want_far;
+
+static byte *R_GXCmprSlotPtr( int i )
+{
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+
+	if( i < near_n )
+		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+	return r_gx_cmpr_bounce + (size_t)near_n * r_gx_cmpr_bounce_cap
+		+ (size_t)( i - near_n ) * r_gx_cmpr_far_cap;
+}
+
+void R_GXCmprSetFar( qboolean far_pool )
+{
+	r_gx_cmpr_want_far = far_pool && r_gx_cmpr_far_n > 0;
+}
 static struct
 {
 	unsigned aram, skip, bytes;	/* what the slot holds */
 	u16      fence;			/* last draw that sampled it */
 	unsigned used;
 	qboolean valid;
+	unsigned texnum;		/* texture whose object is cached below, 0 = none */
+	GXTexObj obj;			/* ready to load: a resident hit is one GX call */
 } r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
+/* texnum -> slot + 1. A bind of a resident texture skips the mip walk, the
+ * slot search and GX_InitTexObj (about 1000 binds a frame in the harbor). */
+static u8 r_gx_cmpr_hint[2][MAX_TEXTURES];	/* [far pool][texnum] */
 static unsigned r_gx_cmpr_clock;
 static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
@@ -2127,6 +2154,7 @@ static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
 static void R_GXCmprSlotsReset( void )
 {
 	memset( r_gx_cmpr_slot, 0, sizeof( r_gx_cmpr_slot ));
+	memset( r_gx_cmpr_hint, 0, sizeof( r_gx_cmpr_hint ));
 	r_gx_cmpr_cur_slot = -1;
 	r_gx_cmpr_bounce_texnum = 0;
 }
@@ -2183,26 +2211,39 @@ static byte *R_GXCmprBounce( void )
 	return r_gx_cmpr_bounce;
 }
 
+/* Cumulative slot hits and misses, for the flythrough profile line. */
+void R_GXCmprStats( unsigned *hits, unsigned *misses )
+{
+	*hits = r_gx_cmpr_hits;
+	*misses = r_gx_cmpr_misses;
+}
+
 /* A large world hands the texture cache a block of the idle map-load arena:
  * enough slots that a frame's 150-odd world textures all stay resident. The
  * default six 24 KB slots turned over on almost every bind (900 a frame in
  * the Lost Coast harbor, 166 ms of DMA and fence waits). */
-void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes )
+void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes )
 {
 	if( !base || nslots < 1 || slot_bytes < 4096u || ( slot_bytes & 31u ))
 		return;
-	if( nslots > GC_CMPR_SLOTS_MAX )
-		nslots = GC_CMPR_SLOTS_MAX;
+	if( far_n < 0 || ( far_n && ( far_bytes < 1024u || ( far_bytes & 31u ))))
+		far_n = 0;
+	if( nslots + far_n > GC_CMPR_SLOTS_MAX || nslots + far_n > 254 )
+		return;
 	GX_DrawDone();
 	r_gx_cmpr_bounce = base;
-	r_gx_cmpr_nslots = nslots;
+	r_gx_cmpr_nslots = nslots + far_n;
 	r_gx_cmpr_bounce_cap = slot_bytes;
+	r_gx_cmpr_far_n = far_n;
+	r_gx_cmpr_far_cap = far_bytes;
+	r_gx_cmpr_want_far = false;
 	R_GXCmprSlotsReset();
 	GX_InvalidateTexAll();
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
-	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u Kb = %u Kb (map arena)\n",
-		nslots, slot_bytes / 1024u, nslots * slot_bytes / 1024u );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u + %d x %u bytes = %u Kb (map arena)\n",
+		nslots, slot_bytes, far_n, far_bytes,
+		( nslots * slot_bytes + far_n * far_bytes ) / 1024u );
 }
 
 /* Call once after GX init / before map load while MEM1 tip is free. */
@@ -2220,8 +2261,11 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 	int i, pick = -1;
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+	const int lo = r_gx_cmpr_want_far ? near_n : 0;
+	const int hi = r_gx_cmpr_want_far ? r_gx_cmpr_nslots : near_n;
 
-	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	for( i = lo; i < hi; i++ )
 	{
 		if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
 			&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
@@ -2229,10 +2273,10 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 			r_gx_cmpr_slot[i].used = ++r_gx_cmpr_clock;
 			r_gx_cmpr_hits++;
 			*slot_out = i;
-			return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
+			return R_GXCmprSlotPtr( i );
 		}
 	}
-	for( i = 0; i < r_gx_cmpr_nslots; i++ )
+	for( i = lo; i < hi; i++ )
 	{
 		if( !r_gx_cmpr_slot[i].valid )
 		{
@@ -2244,12 +2288,13 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	}
 	/* Never replace the slot the texture bound right now is sampling when
 	 * another is free to take: with >1 slot the LRU is not it, but be exact. */
-	if( pick == r_gx_cmpr_cur_slot && r_gx_cmpr_nslots > 1 )
-		pick = ( pick + 1 ) % r_gx_cmpr_nslots;
+	if( pick == r_gx_cmpr_cur_slot && hi - lo > 1 )
+		pick = lo + ( pick - lo + 1 ) % ( hi - lo );
 	if( r_gx_cmpr_slot[pick].valid && GC_GXFenceWait( r_gx_cmpr_slot[pick].fence ))
 		r_gx_cmpr_bounce_stalls++;
-	GC_AramTransfer( aram + skip, r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap,
+	GC_AramTransfer( aram + skip, R_GXCmprSlotPtr( pick ),
 		bytes, false );
+	r_gx_cmpr_slot[pick].texnum = 0;
 	r_gx_cmpr_slot[pick].aram = aram;
 	r_gx_cmpr_slot[pick].skip = skip;
 	r_gx_cmpr_slot[pick].bytes = bytes;
@@ -2258,7 +2303,7 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	r_gx_cmpr_misses++;
 	r_gx_cmpr_dma_bytes += bytes;
 	*slot_out = pick;
-	return r_gx_cmpr_bounce + (size_t)pick * r_gx_cmpr_bounce_cap;
+	return R_GXCmprSlotPtr( pick );
 }
 
 static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
@@ -2268,7 +2313,39 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 
 	img->gc_packed_used = r_gx_hot.frame;
-	if( img->gc_packed_bytes && !img->gc_packed_hot && !img->gc_packed_queued
+	if( !img->gc_packed_hot && texnum < MAX_TEXTURES && r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] )
+	{
+		const int hs = r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] - 1;
+
+		if( hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+			&& r_gx_cmpr_slot[hs].texnum == texnum )
+		{
+			if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR )
+			{
+				GX_LoadTexObj( &r_gx_cmpr_slot[hs].obj, GX_TEXMAP0 );
+				r_gx_bound_texnum = texnum;
+				r_gx_bound_fmt = GX_TF_CMPR;
+				r_gx_tex_loads++;
+			}
+			else
+				r_gx_tex_reuses++;
+			r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
+			r_gx_cmpr_slot[hs].fence = GC_GXFenceNext();
+			r_gx_cmpr_cur_slot = hs;
+			r_gx_cmpr_bounce_texnum = texnum;
+			r_gx_cmpr_hits++;
+			t->texnum = texnum;
+			t->w = img->width;
+			t->h = img->height;
+			t->fmt = GX_TF_CMPR;
+			t->valid = true;
+			R_GXSetTexAlphaTest( img->gc_packed_alpha ? true : false );
+			return t;
+		}
+	}
+	/* The hot window is a 96 KB stopgap; with adopted slots it only adds
+	 * per-frame DMA for textures that are already resident. */
+	if( r_gx_cmpr_nslots <= 8 && img->gc_packed_bytes && !img->gc_packed_hot && !img->gc_packed_queued
 		&& r_gx_hot.queued < GC_HOT_QUEUE_MAX )
 	{
 		img->gc_packed_queued = true;
@@ -2298,6 +2375,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				&& ( bounce = R_GXCmprBounce()) != NULL
 				&& r_gx_cmpr_bounce_cap > 0 )
 			{
+				const unsigned slot_cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 				unsigned skip = 0;
 				unsigned remain = img->gc_packed_bytes;
 				unsigned use_shift = 0;
@@ -2306,7 +2384,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				int mi;
 
 				for( mi = 0; mi < img->gc_packed_levels
-					&& remain > r_gx_cmpr_bounce_cap; ++mi )
+					&& remain > slot_cap; ++mi )
 				{
 					unsigned mw = (unsigned)Q_max( 1, img->width >> mi );
 					unsigned mh = (unsigned)Q_max( 1, img->height >> mi );
@@ -2321,7 +2399,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 					bw = Q_max( 1, img->width >> use_shift );
 					bh = Q_max( 1, img->height >> use_shift );
 				}
-				if( remain > 0 && remain <= r_gx_cmpr_bounce_cap && use_levels > 0 )
+				if( remain > 0 && remain <= slot_cap && use_levels > 0 )
 				{
 					int slot = -1;
 
@@ -2378,6 +2456,13 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 			r_gx_bound_texnum = texnum;
 			r_gx_bound_fmt = GX_TF_CMPR;
 			r_gx_tex_loads++;
+			if( used_bounce && r_gx_cmpr_cur_slot >= 0 && texnum < MAX_TEXTURES
+				&& r_gx_cmpr_cur_slot < 255 )
+			{
+				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].obj = t->obj;
+				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].texnum = texnum;
+				r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] = (u8)( r_gx_cmpr_cur_slot + 1 );
+			}
 		}
 		else
 		{
@@ -5216,9 +5301,22 @@ static u16 gc_prop_nmat;
 static u16 gc_prop_mat_w[128], gc_prop_mat_h[128];
 static u32 gc_prop_mat_ofs[128];
 static byte gc_prop_texmem[GC_PROP_TEX_SLOTS * GC_PROP_TEX_BYTES] __attribute__(( aligned( 32 )));
-static s16 gc_prop_slot_mat[GC_PROP_TEX_SLOTS];
-static GXTexObj gc_prop_slot_obj[GC_PROP_TEX_SLOTS];
+/* 16 slots are static. A large world lends 48 more from the map arena: the
+ * pack has 106 materials and 16 slots re-read a texture on most binds. */
+#define GC_PROP_TEX_SLOTS_MAX	64
+static s16 gc_prop_slot_mat[GC_PROP_TEX_SLOTS_MAX];
+static GXTexObj gc_prop_slot_obj[GC_PROP_TEX_SLOTS_MAX];
 static int gc_prop_tex_cursor;
+static int gc_prop_tex_nslots = GC_PROP_TEX_SLOTS;
+static byte *gc_prop_texmem_extra;
+static qboolean gc_prop_texmem_tried;
+
+static byte *R_GXPropTexSlot( int s )
+{
+	if( s < GC_PROP_TEX_SLOTS )
+		return gc_prop_texmem + (u32)s * GC_PROP_TEX_BYTES;
+	return gc_prop_texmem_extra + (u32)( s - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
+}
 static byte gc_prop_grey[32] __attribute__(( aligned( 32 ))) = {
 	0x84, 0x10, 0x84, 0x10, 0, 0, 0, 0,
 	0x84, 0x10, 0x84, 0x10, 0, 0, 0, 0,
@@ -5431,8 +5529,11 @@ static void R_GXPropLoadTex( void )
 		GC_AramTransfer( gc_prop_tex_aram + off, gc_prop_bounce, n, true );
 	}
 	gEngfuncs.fsapi->Close( f );
-	for( s = 0; s < GC_PROP_TEX_SLOTS; s++ )
+	for( s = 0; s < GC_PROP_TEX_SLOTS_MAX; s++ )
 		gc_prop_slot_mat[s] = -1;
+	gc_prop_tex_nslots = GC_PROP_TEX_SLOTS;
+	gc_prop_texmem_extra = NULL;
+	gc_prop_texmem_tried = false;
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tex mats=%u aram=%u Kb\n",
 		gc_prop_nmat, size / 1024u );
 }
@@ -5455,7 +5556,17 @@ static int R_GXPropBind( u8 mat )
 		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
 		return 0;
 	}
-	for( s = 0; s < GC_PROP_TEX_SLOTS; s++ )
+	if( !gc_prop_texmem_tried && GC_MapLoadBufferTailPeak() > 0 )
+	{
+		const u32 extra = (u32)( GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
+
+		gc_prop_texmem_tried = true;
+		gc_prop_texmem_extra = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), extra );
+		if( gc_prop_texmem_extra )
+			gc_prop_tex_nslots = GC_PROP_TEX_SLOTS_MAX;
+	}
+	for( s = 0; s < gc_prop_tex_nslots; s++ )
 	{
 		if( gc_prop_slot_mat[s] == (s16)mat )
 		{
@@ -5478,9 +5589,9 @@ static int R_GXPropBind( u8 mat )
 		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
 		return 0;
 	}
-	s = gc_prop_tex_cursor % GC_PROP_TEX_SLOTS;
+	s = gc_prop_tex_cursor % gc_prop_tex_nslots;
 	gc_prop_tex_cursor++;
-	dst = gc_prop_texmem + (u32)s * GC_PROP_TEX_BYTES;
+	dst = R_GXPropTexSlot( s );
 	GC_AramTransfer( gc_prop_tex_aram + gc_prop_mat_ofs[mat] + skip, dst,
 		( bytes + 31u ) & ~31u, false );
 	GX_InitTexObj( &gc_prop_slot_obj[s], dst, w, h, GX_TF_CMPR,

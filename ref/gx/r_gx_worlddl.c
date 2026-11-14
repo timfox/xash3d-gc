@@ -93,7 +93,9 @@ extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
-extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes );
+extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
+extern void R_GXCmprSetFar( qboolean far_pool );
+extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
 
 /* Bump relief and detail live in media/tevmat.gcm (I8 mod2x tiles). Sand
@@ -619,18 +621,22 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			size_t hw2 = hw;
 			size_t want;
 
-			/* Texture slots first: 96 x 12 KB holds a 128x128 CMPR chain
+			/* Texture slots first: a near and a far pool; the near one holds a 128x128 CMPR chain
 			 * (a 256x256 drops its top mip) for every texture in view. */
 			GC_RetainMapLoadBufferBorrow();
 			if( cap > hw + keep + 2048u * 1024u )
 			{
-				const unsigned slot_bytes = 12u * 1024u;
-				const int nslots = 96;
-				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw, (size_t)nslots * slot_bytes );
+				/* 64 full slots (128x128 chain, 10944 bytes) for what is
+				 * close, 176 slots one mip down (64x64 chain, 2752 bytes)
+				 * for the rest: 1.16 MB holds 240 textures. */
+				const unsigned slot_bytes = 10944u, far_bytes = 2752u;
+				const int nslots = 64, far_n = 176;
+				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
+					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
 
 				if( tex )
 				{
-					R_GXCmprBounceAdopt( tex, nslots, slot_bytes );
+					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
 			}
@@ -1634,7 +1640,9 @@ int R_GXWorldDLDraw( void )
 	R_GXFogBegin();
 	if( gc_wd_pf_on < 0 )
 		gc_wd_pf_on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
+	R_GXCmprSetFar( true );
 	WD_PF( 5, R_GXWorldDLDrawSkyline());
+	R_GXCmprSetFar( false );
 	gc_wd_chunk_lm = 0;
 	R_GXWorldDLSetupLit( 0 );
 
@@ -1699,6 +1707,9 @@ int R_GXWorldDLDraw( void )
 			i = order[oi];
 			if( R_GXWorldDLIsTower( i ) != want_tower )
 				continue;
+			/* Past 1400 units a 128x128 texture is already on its 64x64
+			 * mip; bind it from the small-slot pool. */
+			R_GXCmprSetFar( R_GXWorldDLChunkD2( (u16)i ) > 1400.0f * 1400.0f );
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{
@@ -1863,11 +1874,22 @@ int R_GXWorldDLDraw( void )
 				"Xash3D GameCube: world DL pvs=%d frustum_drop=%d cull=%d towers=%d forced=%d\n",
 				pvs_hits, frustum_drop, frustum_cull ? 1 : 0, tower_chunks, forced_n );
 	}
+	R_GXCmprSetFar( false );
 	R_GXFogEnd();
 	if( gc_wd_pf_on > 0 && ++gc_wd_pf_frames >= 120 )
 	{
 		const float k = 1.0f / ( 1000.0f * 120.0f );
 
+		{
+			static unsigned last_hits, last_misses;
+			unsigned hits, misses;
+
+			R_GXCmprStats( &hits, &misses );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: texture slots per frame hits=%u misses=%u\n",
+				( hits - last_hits ) / 120u, ( misses - last_misses ) / 120u );
+			last_hits = hits;
+			last_misses = misses;
+		}
 		gEngfuncs.Con_Reportf(
 			"Xash3D GameCube: worlddl ms/frame sort=%.1f resident=%.1f(%u) force=%.1f(%u) lmpage=%.1f(%u) bindtex=%.1f(%u) skyline=%.1f\n",
 			(float)ticks_to_microsecs( gc_wd_pf[0] ) * k,
