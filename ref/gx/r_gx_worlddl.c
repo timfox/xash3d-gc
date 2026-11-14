@@ -696,10 +696,19 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			if( nslots >= 8 )
 			{
 				GC_RetainMapLoadBufferBorrow();
-				tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
-					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+				/* Test: park the slots at the top of the arena (below the carve
+				 * reserve) so nothing that scratches from low offsets can reach
+				 * them, then lower the mark so later carves still fit below. */
+				const size_t need = (size_t)nslots * slot_bytes + (size_t)far_n * far_bytes;
+				size_t top = cap - keep;
+
+				top = ( top - need ) & ~(size_t)31u;
+				tex = ( top >= hw ) ? (byte *)GC_MapLoadBufferTailAlloc( top, need ) : NULL;
 				if( tex )
+				{
+					GC_MapLoadBufferLowerTailHighwater( hw );
 					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+				}
 			}
 		}
 	}
