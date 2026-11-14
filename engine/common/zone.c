@@ -1013,17 +1013,12 @@ static poolhandle_t Mem_InitPool( mempool_t *pool, const char *name, unsigned in
 #if XASH_GAMECUBE
 	if( !Q_stricmp( name, "FileSystem Pool" ))
 	{
-		/* -gcmemwatch checkpoints bracket a boot-time Console Commands header
-		 * corruption seen between the arena log and the first FS realloc. */
-		GC_MemWatch( "fs pool: before arena malloc" );
 		pool->gc_arena = Q_malloc( GC_FS_ARENA_SIZE );
-		GC_MemWatch( "fs pool: after arena malloc" );
 		if( pool->gc_arena )
 		{
 			pool->gc_arena_size = GC_FS_ARENA_SIZE;
 			Con_Reportf( "Xash3D GameCube: filesystem arena ready size=%s\n",
 				Q_memprint( pool->gc_arena_size ));
-			GC_MemWatch( "fs pool: after arena log" );
 		}
 	}
 #endif
@@ -1075,9 +1070,6 @@ poolhandle_t _Mem_AllocPool( const char *name, unsigned int flags, const char *f
 
 	poolchain = pool;
 	pool = &poolchain[poolcount++];
-#if XASH_GAMECUBE
-	GC_MemWatch( "allocpool: table grown" );
-#endif
 	return Mem_InitPool( pool, name, flags, filename, fileline );
 }
 
