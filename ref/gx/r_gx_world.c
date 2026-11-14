@@ -5186,8 +5186,8 @@ static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligne
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
 static u16 gc_prop_nmat;
-static u16 gc_prop_mat_w[96], gc_prop_mat_h[96];
-static u32 gc_prop_mat_ofs[96];
+static u16 gc_prop_mat_w[128], gc_prop_mat_h[128];
+static u32 gc_prop_mat_ofs[128];
 static byte gc_prop_texmem[GC_PROP_TEX_SLOTS * GC_PROP_TEX_BYTES] __attribute__(( aligned( 32 )));
 static s16 gc_prop_slot_mat[GC_PROP_TEX_SLOTS];
 static GXTexObj gc_prop_slot_obj[GC_PROP_TEX_SLOTS];
@@ -5358,7 +5358,7 @@ static void R_GXPropLoadTex( void )
 	if( !f )
 		return;
 	if( gEngfuncs.fsapi->Read( f, hdr, 12 ) != 12 || hdr[0] != GC_WT_MAGIC
-		|| hdr[1] == 0 || hdr[1] > 96 )
+		|| hdr[1] == 0 || hdr[1] > 127 )
 	{
 		gEngfuncs.fsapi->Close( f );
 		return;
