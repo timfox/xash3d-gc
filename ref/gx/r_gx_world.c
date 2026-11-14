@@ -6674,7 +6674,18 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 
 			fm = fm * fm * fm * fm * fm;
 			gc_water_refl_a = (int)( 255.0f * fm );
-			a = ab;
+			/* Water_ps2x: refract = lerp( scene, $fogcolor, saturate(
+			 * d - 0.05 )), d = the path under water over $fogend. The
+			 * path is the seabed depth (depth map texel, 40 units = 1)
+			 * times dist / height. The vertex carries 0.4 * dist /
+			 * height / 4; the TEV multiplies by the texel and by 4. */
+			{
+				const float hgt = eye[2] - pt[2];
+				const float g = 0.1f * 100.0f / ( fog_end > 1.0f ? fog_end : 100.0f )
+					* dist / ( hgt > 1.0f ? hgt : 1.0f );
+
+				a = g >= 1.0f ? 255 : (int)( 255.0f * g );
+			}
 		}
 		else
 		{
@@ -6764,11 +6775,43 @@ static qboolean R_GXWaterDepthReady( void )
 	return gc_wdepth_state > 0;
 }
 
+/* Water $normalmap as IA8 (media/water_gx.ia8), 64x64: A = x, I = y, each
+ * ( n * 8 * 127.5 ) + 128. Read by the reflection pass's indirect stages.
+ * In the map arena: the heap has no 8 KB to spare. */
+static GXTexObj gc_wnrm_obj;
+static int gc_wnrm_state;
+
+static qboolean R_GXWaterNormalReady( void )
+{
+	file_t *f;
+	byte *tex;
+
+	if( gc_wnrm_state )
+		return gc_wnrm_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;
+	gc_wnrm_state = -1;
+	f = gEngfuncs.fsapi->Open( "media/water_gx.ia8", "rb", false );
+	if( !f )
+		return false;
+	tex = (byte *)GC_MapLoadBufferTailAlloc(
+		Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), 8192 );
+	if( tex && gEngfuncs.fsapi->Read( f, tex, 8192 ) == 8192 )
+	{
+		DCFlushRange( tex, 8192 );
+		GX_InitTexObj( &gc_wnrm_obj, tex, 64, 64, GX_TF_IA8, GX_REPEAT, GX_REPEAT, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wnrm_obj, GX_LINEAR, GX_LINEAR );
+		gc_wnrm_state = 1;
+	}
+	gEngfuncs.fsapi->Close( f );
+	return gc_wnrm_state > 0;
+}
+
 static void R_GXDrawPackedWater( void )
 {
 	int water_n = GC_GetWaterFaceCount();
 	int wi, water_drawn = 0;
-	const qboolean water_tex = GC_WaterTexReady() && GC_GetWaterTexObj() != NULL;
+	const qboolean water_tex = R_GXWaterNormalReady();
 	float time_sec = gp_cl ? (float)gp_cl->time : 0.0f;
 	float scroll2_u = 0.0f, scroll2_v = 0.0f;
 
@@ -6817,8 +6860,16 @@ static void R_GXDrawPackedWater( void )
 			GX_SetTevKColor( GX_KCOLOR0, film );
 			GX_SetTevKAlphaSel( GX_TEVSTAGE0, GX_TEV_KASEL_K0_A );
 		}
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_KONST, GX_CA_RASA, GX_CA_TEXA, GX_CA_ZERO );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		if( gc_mirror_valid )
+		{
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_RASA, GX_CA_TEXA, GX_CA_ZERO );
+			GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_4, GX_TRUE, GX_TEVPREV );
+		}
+		else
+		{
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_KONST, GX_CA_RASA, GX_CA_TEXA, GX_CA_ZERO );
+			GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		}
 		/* Stage 1 adds the reflection's alpha from the second colour
 		 * channel, untouched by depth. */
 		GX_SetNumChans( 2 );
@@ -6949,15 +7000,82 @@ static void R_GXDrawPackedWater( void )
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
 			GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 			GX_SetNumChans( 1 );
-			GX_SetNumTexGens( 1 );
-			GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX3 );
-			GX_SetNumTevStages( 1 );
-			GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP5, GX_COLOR0A0 );
-			GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
-			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
-			GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 			GX_SetVtxDesc( GX_VA_CLR1, GX_NONE );
+			GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX3 );
+			if( water_tex )
+			{
+				/* Water_ps2x, MULTITEXTURE: N = mean of three lookups of
+				 * $normalmap, reflect uv += N.xy * $reflectamount. Three
+				 * indirect stages add their offsets; the last TEV stage
+				 * samples the mirror. Coordinates as Water_vs20 builds
+				 * them from the base texcoord (s, t):
+				 *   ( s, t ) + TextureScroll( rate, angle )
+				 *   (( s + t ) * 0.1, ( t - s ) * 0.1 ) + $scroll1 * time
+				 *   ( t * 0.45, s * 0.45 ) + $scroll2 * time
+				 * Offset in mirror texels = N * amount * size / 3; the
+				 * baked map stores N * 8 * 127.5 around 128. */
+				const float amt = 0.75f, rate = 0.02f;	/* water_ati.vmt */
+				f32 im[2][3];
+				Mtx bm;
+				float su = 0.0f, sv = 0.0f, o0, o1;
+				int st;
+
+				GC_GetWaterFaceScroll( order[0], &su, &sv, NULL );
+				memset( im, 0, sizeof( im ));
+				im[0][0] = amt * (float)GC_MIRROR_W / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
+				im[1][1] = amt * (float)GC_MIRROR_H / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
+				GX_SetIndTexMatrix( GX_ITM_0, im, -3 );
+				memset( bm, 0, sizeof( bm ));
+				o0 = rate * 0.4226f * time_sec; o1 = rate * 0.9063f * time_sec;
+				bm[0][0] = 1.0f; bm[0][3] = o0 - (float)(int)o0;
+				bm[1][1] = 1.0f; bm[1][3] = o1 - (float)(int)o1;
+				GX_LoadTexMtxImm( bm, GX_TEXMTX4, GX_MTX2x4 );
+				o0 = su * time_sec; o1 = sv * time_sec;
+				bm[0][0] = 0.1f; bm[0][1] = 0.1f; bm[0][3] = o0 - (float)(int)o0;
+				bm[1][0] = -0.1f; bm[1][1] = 0.1f; bm[1][3] = o1 - (float)(int)o1;
+				GX_LoadTexMtxImm( bm, GX_TEXMTX5, GX_MTX2x4 );
+				o0 = scroll2_u * time_sec; o1 = scroll2_v * time_sec;
+				bm[0][0] = 0.0f; bm[0][1] = 0.45f; bm[0][3] = o0 - (float)(int)o0;
+				bm[1][0] = 0.45f; bm[1][1] = 0.0f; bm[1][3] = o1 - (float)(int)o1;
+				GX_LoadTexMtxImm( bm, GX_TEXMTX6, GX_MTX2x4 );
+				memset( bm, 0, sizeof( bm ));
+				GX_LoadTexMtxImm( bm, GX_TEXMTX7, GX_MTX2x4 );
+				GX_LoadTexObj( &gc_wnrm_obj, GX_TEXMAP0 );
+				GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+				GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
+				GX_SetNumTexGens( 5 );
+				GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX4 );
+				GX_SetTexCoordGen( GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX5 );
+				GX_SetTexCoordGen( GX_TEXCOORD3, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX6 );
+				GX_SetTexCoordGen( GX_TEXCOORD4, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX7 );
+				GX_SetNumIndStages( 3 );
+				GX_SetNumTevStages( 3 );
+				for( st = 0; st < 3; st++ )
+				{
+					GX_SetIndTexOrder( GX_INDTEXSTAGE0 + st, GX_TEXCOORD1 + st, GX_TEXMAP0 );
+					GX_SetIndTexCoordScale( GX_INDTEXSTAGE0 + st, GX_ITS_1, GX_ITS_1 );
+					GX_SetTevIndirect( GX_TEVSTAGE0 + st, GX_INDTEXSTAGE0 + st, GX_ITF_8, GX_ITB_STU,
+						GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, st ? GX_TRUE : GX_FALSE, GX_FALSE, GX_ITBA_OFF );
+					GX_SetTevOrder( GX_TEVSTAGE0 + st, st == 2 ? GX_TEXCOORD0 : GX_TEXCOORD4, GX_TEXMAP5,
+						st == 2 ? GX_COLOR0A0 : GX_COLORNULL );
+					GX_SetTevColorIn( GX_TEVSTAGE0 + st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO,
+						st == 2 ? GX_CC_TEXC : GX_CC_ZERO );
+					GX_SetTevColorOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					GX_SetTevAlphaIn( GX_TEVSTAGE0 + st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO,
+						st == 2 ? GX_CA_RASA : GX_CA_ZERO );
+					GX_SetTevAlphaOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				}
+			}
+			else
+			{
+				GX_SetNumTexGens( 1 );
+				GX_SetNumTevStages( 1 );
+				GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP5, GX_COLOR0A0 );
+				GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+				GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+				GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			}
 		}
 		for( a = 0; a < nvis; a++ )
 		{
@@ -6965,6 +7083,9 @@ static void R_GXDrawPackedWater( void )
 			float pts[32][3];
 			int nv, si;
 			float eye_dot, nd;
+
+			float wst[32][2];
+			const qboolean wst_on = refl_pass && water_tex;
 
 			wi = order[a];
 			if( !GC_WaterFacePlane( wi, &pl, NULL ))
@@ -6976,6 +7097,8 @@ static void R_GXDrawPackedWater( void )
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
+			if( wst_on && GC_GetWaterFaceST( wi, wst, 32 ) != nv )
+				memset( wst, 0, sizeof( wst ));
 			if( eye_dot > 0.0f && dists[a] < 3000.0f * 3000.0f && nv <= 8 )
 			{
 				/* Near sheets are 512-unit quads; Fresnel swings across one,
@@ -6993,6 +7116,8 @@ static void R_GXDrawPackedWater( void )
 					float np[5][5][3];
 					u32 nc[5][5];
 					u8 nr[5][5];
+					float ns[5][5][2];
+					const float *sA = wst[0], *sB = wst[ti], *sC = wst[ti + 1];
 
 					for( u = 0; u <= n; u++ )
 					{
@@ -7006,6 +7131,11 @@ static void R_GXDrawPackedWater( void )
 							q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
 							nc[u][v] = R_GXWaterBodyTint( wi, q, eye_dot, nd );
 							nr[u][v] = (u8)gc_water_refl_a;
+							if( wst_on )
+							{
+								ns[u][v][0] = sA[0] + ( sB[0] - sA[0] ) * fv + ( sC[0] - sA[0] ) * fu;
+								ns[u][v][1] = sA[1] + ( sB[1] - sA[1] ) * fv + ( sC[1] - sA[1] ) * fu;
+							}
 						}
 					}
 					for( u = 0; u < n; u++ )
@@ -7034,12 +7164,16 @@ static void R_GXDrawPackedWater( void )
 
 								GX_Position3f32( q[0], q[1], q[2] );
 								if( refl_pass )
+								{
 									GX_Color1u32( 0xFFFFFF00u | (u32)nr[bu[k]][bv[k]] );
+									if( wst_on )
+										GX_TexCoord2f32( ns[bu[k]][bv[k]][0], ns[bu[k]][bv[k]][1] );
+								}
 								else
 								{
 									GX_Color1u32( nc[bu[k]][bv[k]] );
 									if( gc_water_split )
-										GX_Color1u32( (u32)nr[bu[k]][bv[k]] );
+										GX_Color1u32( gc_mirror_valid ? 0u : (u32)nr[bu[k]][bv[k]] );
 								}
 							}
 						}
@@ -7056,12 +7190,16 @@ static void R_GXDrawPackedWater( void )
 
 					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
 					if( refl_pass )
+					{
 						GX_Color1u32( 0xFFFFFF00u | (u32)gc_water_refl_a );
+						if( wst_on )
+							GX_TexCoord2f32( wst[si][0], wst[si][1] );
+					}
 					else
 					{
 						GX_Color1u32( col );
 						if( gc_water_split )
-							GX_Color1u32( (u32)gc_water_refl_a );
+							GX_Color1u32( gc_mirror_valid ? 0u : (u32)gc_water_refl_a );
 					}
 				}
 				GX_End();
@@ -7071,11 +7209,17 @@ static void R_GXDrawPackedWater( void )
 		}
 		}
 	}
+	if( gc_mirror_valid )
+	{
+		GX_SetNumIndStages( 0 );
+		GX_SetTevDirect( GX_TEVSTAGE0 );
+		GX_SetTevDirect( GX_TEVSTAGE1 );
+		GX_SetTevDirect( GX_TEVSTAGE2 );
+		GX_SetVtxDesc( GX_VA_TEX0, GX_NONE );
+	}
 	/* The reflection is the mirror pass above. The earlier stand-ins (a
 	 * sheen from the normal map's red channel and a painted sun-glare
 	 * blob) are gone: nothing here that is not the scene itself. */
-	(void)water_tex;
-	(void)time_sec;
 	GX_SetNumChans( 1 );
 	GX_SetNumTevStages( 1 );
 	gc_water_split = false;

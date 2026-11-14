@@ -1263,12 +1263,9 @@ static const byte *GC_WaterRec( int index )
 	return gc_water_stage;
 }
 static qboolean gc_g286_water_logged;
-/* GX scroll water CMPR (media/water_gx.cmp) — 64×64. */
-#define GC_WATER_TEX_SIZE	64
-#define GC_WATER_TEX_BYTES	( GC_WATER_TEX_SIZE * GC_WATER_TEX_SIZE / 2 )
-static u8 gc_water_tex_data[GC_WATER_TEX_BYTES] __attribute__(( aligned( 32 )));
-static GXTexObj gc_water_tex_obj;
-static qboolean gc_water_tex_ready;
+/* The water normal map lives with the renderer now (r_gx_world.c loads
+ * media/water_gx.ia8 into the map arena); the old scroll-texture path is off. */
+static const qboolean gc_water_tex_ready = false;
 /* G225: ARAM page + aligned MEM1 DMA stage. */
 static u32 gc_aram_fill_base;
 static int gc_aram_fill_count;
@@ -2655,7 +2652,7 @@ qboolean GC_WaterTexReady( void )
 
 void *GC_GetWaterTexObj( void )
 {
-	return gc_water_tex_ready ? (void *)&gc_water_tex_obj : NULL;
+	return NULL;
 }
 
 qboolean GC_WaterFacePlane( int index, mplane_t *out, int *out_flags )
@@ -2718,7 +2715,6 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 		GC_AramFree( gc_water_aram );
 		gc_water_aram = 0;
 	}
-	gc_water_tex_ready = false;
 	gc_g286_water_logged = false;
 	memset( gc_water_faces, 0, sizeof( gc_water_faces ));
 	if( !mod || !mod->name || !mod->name[0] )
@@ -2894,25 +2890,6 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 	}
 	FS_Close( f );
 
-	/* Scroll CMPR */
-	{
-		file_t *tf = FS_Open( "media/water_gx.cmp", "rb", false );
-		if( !tf )
-			tf = FS_Open( "media/water_gx.cmp", "rb", true );
-		if( tf && FS_FileLength( tf ) == GC_WATER_TEX_BYTES
-			&& FS_Read( tf, gc_water_tex_data, GC_WATER_TEX_BYTES ) == GC_WATER_TEX_BYTES )
-		{
-			DCFlushRange( gc_water_tex_data, sizeof( gc_water_tex_data ));
-			GX_InitTexObj( &gc_water_tex_obj, gc_water_tex_data,
-				GC_WATER_TEX_SIZE, GC_WATER_TEX_SIZE, GX_TF_CMPR,
-				GX_REPEAT, GX_REPEAT, GX_FALSE );
-			GX_InitTexObjLOD( &gc_water_tex_obj, GX_LINEAR, GX_LINEAR,
-				0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1 );
-			gc_water_tex_ready = true;
-		}
-		if( tf )
-			FS_Close( tf );
-	}
 	Con_Reportf( "Xash3D GameCube: water pack loaded %s faces=%d tex=%d aram=%d scroll2=%.3f,%.3f\n",
 		path, GC_GetWaterFaceCount(), gc_water_tex_ready ? 1 : 0,
 		gc_water_aram ? 1 : 0, gc_water_scroll2_u, gc_water_scroll2_v );

@@ -130,15 +130,6 @@ static GXTexObj gc_tev_obj;
 static u8 gc_tev_envmask[GC_TEV_MAX_ENVMASK * GC_TEV_ENVMASK] __attribute__(( aligned( 32 )));
 static GXTexObj gc_tev_envmask_obj;
 static s8 gc_tev_envmask_bound = -1;
-static u8 gc_spec_mask[2048] __attribute__(( aligned( 32 )));
-static GXTexObj gc_spec_obj;
-static u8 gc_nrm_tex[2048] __attribute__(( aligned( 32 )));
-static GXTexObj gc_nrm_obj;
-static u8 gc_sun_tex[512] __attribute__(( aligned( 32 )));
-static GXTexObj gc_sun_obj;
-static qboolean gc_spec_ready;
-static qboolean gc_nrm_ready;
-static qboolean gc_sun_ready;
 static byte *gc_wd_force;
 static u32 gc_wd_force_size;
 static int gc_wd_tev_gens = 1;
@@ -414,9 +405,6 @@ static void R_GXMatPackLoad( void )
 	gc_tev_nmask = 0;
 	gc_tev_bound = -1;
 	gc_tev_envmask_bound = -1;
-	gc_spec_ready = false;
-	gc_nrm_ready = false;
-	gc_sun_ready = false;
 	f = gEngfuncs.fsapi->Open( "media/tevmat.gcm", "rb", false );
 	if( f && gEngfuncs.fsapi->Read( f, hdr, 8 ) == 8
 		&& hdr[0] == 'G' && hdr[1] == 'C' && hdr[2] == 'm' && hdr[3] == 't'
@@ -459,49 +447,12 @@ static void R_GXMatPackLoad( void )
 	}
 	else if( f )
 		gEngfuncs.fsapi->Close( f );
-	f = gEngfuncs.fsapi->Open( "media/sand_spec.cmp", "rb", false );
-	if( f && gEngfuncs.fsapi->Read( f, gc_spec_mask, sizeof( gc_spec_mask )) == (fs_offset_t)sizeof( gc_spec_mask ))
-	{
-		DCFlushRange( gc_spec_mask, sizeof( gc_spec_mask ));
-		GX_InitTexObj( &gc_spec_obj, gc_spec_mask, 64, 64, GX_TF_CMPR,
-			GX_REPEAT, GX_REPEAT, GX_FALSE );
-		GX_InitTexObjFilterMode( &gc_spec_obj, GX_LINEAR, GX_LINEAR );
-		gc_spec_ready = true;
-		gEngfuncs.fsapi->Close( f );
-	}
-	else if( f )
-		gEngfuncs.fsapi->Close( f );
-	f = gEngfuncs.fsapi->Open( "media/sand_nrm.cmp", "rb", false );
-	if( f && gEngfuncs.fsapi->Read( f, gc_nrm_tex, sizeof( gc_nrm_tex )) == (fs_offset_t)sizeof( gc_nrm_tex ))
-	{
-		DCFlushRange( gc_nrm_tex, sizeof( gc_nrm_tex ));
-		GX_InitTexObj( &gc_nrm_obj, gc_nrm_tex, 64, 64, GX_TF_CMPR,
-			GX_REPEAT, GX_REPEAT, GX_FALSE );
-		GX_InitTexObjFilterMode( &gc_nrm_obj, GX_LINEAR, GX_LINEAR );
-		gc_nrm_ready = true;
-		gEngfuncs.fsapi->Close( f );
-	}
-	else if( f )
-		gEngfuncs.fsapi->Close( f );
-	f = gEngfuncs.fsapi->Open( "media/sand_sun.cmp", "rb", false );
-	if( f && gEngfuncs.fsapi->Read( f, gc_sun_tex, sizeof( gc_sun_tex )) == (fs_offset_t)sizeof( gc_sun_tex ))
-	{
-		DCFlushRange( gc_sun_tex, sizeof( gc_sun_tex ));
-		GX_InitTexObj( &gc_sun_obj, gc_sun_tex, 32, 32, GX_TF_CMPR,
-			GX_CLAMP, GX_CLAMP, GX_FALSE );
-		GX_InitTexObjFilterMode( &gc_sun_obj, GX_LINEAR, GX_LINEAR );
-		gc_sun_ready = true;
-		gEngfuncs.fsapi->Close( f );
-	}
-	else if( f )
-		gEngfuncs.fsapi->Close( f );
 	if( !logged )
 	{
 		logged = true;
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: tevmat mats=%u details=%u envmasks=%u spec=%d nrm=%d sun=%d\n",
-			(unsigned)gc_tev_nmat, (unsigned)gc_tev_ndet, (unsigned)gc_tev_nmask,
-			gc_spec_ready ? 1 : 0, gc_nrm_ready ? 1 : 0, gc_sun_ready ? 1 : 0 );
+			"Xash3D GameCube: tevmat mats=%u details=%u envmasks=%u\n",
+			(unsigned)gc_tev_nmat, (unsigned)gc_tev_ndet, (unsigned)gc_tev_nmask );
 	}
 }
 
@@ -1130,329 +1081,10 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 		guFrustum( proj, y_max, -y_max, -x_max, x_max, z_near, z_far );
 }
 
-static float gc_wd_sun_view[3];
-
-/* 32x32 I8 soft blob for projected glare (sun on wet sand): (1 - r^2)^2. */
-static byte gc_wd_glare[32 * 32] __attribute__(( aligned( 32 )));
-static GXTexObj gc_wd_glare_obj;
-static qboolean gc_wd_glare_ready;
-
-static void R_GXWorldDLGlareTex( void )
-{
-	if( !gc_wd_glare_ready )
-	{
-		int x, y;
-
-		for( y = 0; y < 32; y++ )
-		{
-			for( x = 0; x < 32; x++ )
-			{
-				const float fx = ( (float)x - 15.5f ) / 15.5f;
-				const float fy = ( (float)y - 15.5f ) / 15.5f;
-				float d = 1.0f - ( fx * fx + fy * fy );
-				const int tile = ( y >> 2 ) * 4 + ( x >> 3 );
-
-				if( d < 0.0f )
-					d = 0.0f;
-				gc_wd_glare[tile * 32 + ( y & 3 ) * 8 + ( x & 7 )] = (byte)( d * d * 255.0f );
-			}
-		}
-		DCFlushRange( gc_wd_glare, sizeof( gc_wd_glare ));
-		GX_InitTexObj( &gc_wd_glare_obj, gc_wd_glare, 32, 32, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
-		GX_InitTexObjFilterMode( &gc_wd_glare_obj, GX_LINEAR, GX_LINEAR );
-		gc_wd_glare_ready = true;
-	}
-	GX_LoadTexObj( &gc_wd_glare_obj, GX_TEXMAP6 );
-}
-
-/* Lost Coast env_sun, same direction as the sky disc. View space, for the
- * specular light. The normal matrix is the view rotation: the bake stores
- * world-space normals. */
-static void R_GXWorldDLSpecLight( void )
-{
-	vec3_t forward, right, up, world, sun;
-	Mtx nrm;
-	GXLightObj lit;
-	const float yaw = 137.0f * 3.14159265f / 180.0f;
-	const float el = 10.0f * 3.14159265f / 180.0f;
-	float len;
-	GXColor sun_col = { 253, 236, 198, 255 };
-
-	world[0] = cosf( el ) * cosf( yaw );
-	world[1] = cosf( el ) * sinf( yaw );
-	world[2] = sinf( el );
-	AngleVectors( RI.rvp.viewangles, forward, right, up );
-	sun[0] = DotProduct( right, world );
-	sun[1] = DotProduct( up, world );
-	sun[2] = -DotProduct( forward, world );
-	len = sqrtf( sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2] );
-	if( len > 0.001f )
-	{
-		sun[0] /= len;
-		sun[1] /= len;
-		sun[2] /= len;
-	}
-	/* Parallel sun. A specular lobe against a 10-degree sun is black on flat
-	 * sand (the whole beach shares one half-angle). Diffuse N·L uses the
-	 * baked normals, so slopes facing the sun pick up the warm light. */
-	gc_wd_sun_view[0] = sun[0];
-	gc_wd_sun_view[1] = sun[1];
-	gc_wd_sun_view[2] = sun[2];
-	memset( &lit, 0, sizeof( lit ));
-	GX_InitLightPos( &lit, sun[0] * 1000000.0f, sun[1] * 1000000.0f, sun[2] * 1000000.0f );
-	GX_InitLightColor( &lit, sun_col );
-	GX_InitLightAttn( &lit, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f );
-	GX_LoadLightObj( &lit, GX_LIGHT0 );
-	nrm[0][0] = right[0]; nrm[0][1] = right[1]; nrm[0][2] = right[2]; nrm[0][3] = 0.0f;
-	nrm[1][0] = up[0];    nrm[1][1] = up[1];    nrm[1][2] = up[2];    nrm[1][3] = 0.0f;
-	nrm[2][0] = -forward[0]; nrm[2][1] = -forward[1]; nrm[2][2] = -forward[2]; nrm[2][3] = 0.0f;
-	GX_LoadNrmMtxImm( nrm, GX_PNMTX0 );
-}
-
-/* indtex: wet-sand IndTex path. tev_id with F_ENVMASK uses the baked
- * $basealphaenvmapmask I4 (metal / plaster / frescos). Towers use N·L
- * fill only — sand_nrm on industrial brushes made the skyline dark. */
-static void R_GXWorldDLSpecOn( u16 strength, int indtex, int tev_id )
-{
-	GXColor mat;
-	u16 s = strength ? strength : 96;
-	int env_mask = R_GXTevMatEnvMask( tev_id );
-
-	if( s > 200 )
-		s = 200;
-	/* Flat sand meets the sun at about N·L 0.17. Push the warm lift so the
-	 * specular pass reads next to the diffuse in the framedump. */
-	mat.r = (u8)( s * 255 / 200 );
-	mat.g = (u8)( s * 230 / 200 );
-	mat.b = (u8)( s * 175 / 200 );
-	mat.a = 255;
-	{
-		static qboolean logged;
-
-		if( !logged )
-		{
-			logged = true;
-			gEngfuncs.Con_Reportf(
-				"Xash3D GameCube: world DL specular strength=%u indtex=%d envmask=%d\n",
-				(unsigned)strength, indtex, env_mask );
-		}
-	}
-	R_GXWorldDLSpecLight();
-	GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
-	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-	GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
-		GX_LIGHT0, GX_DF_CLAMP, GX_AF_NONE );
-	{
-		GXColor black = { 0, 0, 0, 255 };
-
-		GX_SetChanAmbColor( GX_COLOR0A0, black );
-	}
-	GX_SetChanMatColor( GX_COLOR0A0, mat );
-	/* $basealphaenvmapmask: sun disc × tint × I4 base-alpha mask (no IndTex). */
-	if( env_mask >= 0 && gc_sun_ready )
-	{
-		GX_SetNumIndStages( 0 );
-		GX_SetNumTexGens( 1 );
-		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
-		GX_LoadTexObj( &gc_sun_obj, GX_TEXMAP4 );
-		R_GXTevBindEnvMask( (u8)env_mask );
-		GX_SetNumTevStages( 2 );
-		GX_SetTevDirect( GX_TEVSTAGE0 );
-		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP4, GX_COLOR0A0 );
-		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevDirect( GX_TEVSTAGE1 );
-		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL );
-		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-	}
-	/* Retail wet sand: sun disc looked up through the normal map, then
-	 * gated by the normal-map alpha. N·L keeps the broad warm lift. */
-	/* Wet sand (retail $envmap + $normalmapalphaenvmapmask): the sky's glare
-	 * off a wet surface. The hardware specular term (N.H to a power, per
-	 * vertex, infinite viewer) is bright when the camera faces the low sun
-	 * and fades as it turns away; the displacement normals break it up
-	 * across the beach and the sand's own texture gates it per texel, so
-	 * pebbles glint and the gaps stay dull. The previous recipe multiplied
-	 * by a sun-disc texture sampled at the sand's UVs, which is black almost
-	 * everywhere: no shine reached the screen. -gcsandnl keeps that path. */
-	else if( indtex && env_mask < 0 && !gEngfuncs.Sys_CheckParm( "-gcsandnl" ))
-	{
-		/* Sun glare on the wet beach, for a local viewer. On a level
-		 * surface the sun's mirror image sits where the eye ray reflects
-		 * up to it: eye height / tan(elevation) ahead along the sun's
-		 * bearing, so it slides with the camera and stretches toward it.
-		 * GX specular assumes an infinite viewer (one half-angle for the
-		 * whole beach: all or nothing), so the lobe is a soft blob texture
-		 * projected from world XY around that point instead, gated per
-		 * texel by the sand texture. */
-		const float *eye = RI.rvp.vieworigin;
-		const float sx = -0.731f, sy = 0.682f;	/* env_sun bearing, yaw 137 */
-		float h = eye[2] + 48.0f;		/* above the beach plane */
-		float d, lu, lv, cx, cy;
-		Mtx tm;
-		GXColor k;
-
-		if( h < 24.0f )
-			h = 24.0f;
-		d = h * 5.67f;				/* 1 / tan( 10 degrees ) */
-		lu = d * 1.5f + 500.0f;
-		lv = h * 1.6f + 200.0f;
-		cx = eye[0] + sx * d * 0.75f;
-		cy = eye[1] + sy * d * 0.75f;
-		tm[0][0] = sx / lu;  tm[0][1] = sy / lu;  tm[0][2] = 0.0f;
-		tm[0][3] = 0.5f - ( cx * sx + cy * sy ) / lu;
-		tm[1][0] = -sy / lv; tm[1][1] = sx / lv;  tm[1][2] = 0.0f;
-		tm[1][3] = 0.5f - ( cx * -sy + cy * sx ) / lv;
-		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 0.0f; tm[2][3] = 1.0f;
-		GX_LoadTexMtxImm( tm, GX_TEXMTX1, GX_MTX2x4 );
-		R_GXWorldDLGlareTex();
-		GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
-			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
-		/* Sky glare is near white (retail's wet patches read 153,151,138);
-		 * the warm N.L material colour turned the beach yellow. */
-		k.r = (u8)( s * 74 / 200 );
-		k.g = (u8)( s * 74 / 200 );
-		k.b = (u8)( s * 68 / 200 );
-		k.a = 255;
-		GX_SetTevKColor( GX_KCOLOR0, k );
-		GX_SetNumIndStages( 0 );
-		GX_SetNumTexGens( 2 );
-		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
-		GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX1 );
-		GX_SetNumTevStages( 2 );
-		GX_SetTevDirect( GX_TEVSTAGE0 );
-		GX_SetTevDirect( GX_TEVSTAGE1 );
-		/* Stage 0: the sand layer the batch just drew (TEXMAP0) x sun colour. */
-		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
-		GX_SetTevKColorSel( GX_TEVSTAGE0, GX_TEV_KCSEL_K0 );
-		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		/* Stage 1: x the projected glare blob. */
-		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD1, GX_TEXMAP6, GX_COLORNULL );
-		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-	}
-	else if( indtex && env_mask < 0 && gc_nrm_ready && gc_sun_ready && gc_spec_ready && s >= 96 )
-	{
-		f32 imtx[2][3];
-		Mtx tm;
-
-		/* Wet sand is a mirror for the low sun: the glare path runs from
-		 * the eye toward env_sun and moves with the camera. That is the
-		 * hardware specular term (N.H to a power, per vertex), not N.L,
-		 * which only said which slopes face the sun. The displacement
-		 * mesh is dense enough to carry it. -gcsandnl keeps the old lift. */
-		if( !gEngfuncs.Sys_CheckParm( "-gcsandnl" ))
-		{
-			GXLightObj sl;
-			const GXColor sun_col = { 253, 236, 198, 255 };
-
-			memset( &sl, 0, sizeof( sl ));
-			GX_InitSpecularDir( &sl, -gc_wd_sun_view[0], -gc_wd_sun_view[1], -gc_wd_sun_view[2] );
-			GX_InitLightShininess( &sl, 20.0f );
-			GX_InitLightColor( &sl, sun_col );
-			GX_LoadLightObj( &sl, GX_LIGHT1 );
-			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
-				GX_LIGHT1, GX_DF_NONE, GX_AF_SPEC );
-			/* The two TEV stages below each scale by 2; at full material
-			 * colour the lobe clipped to a flat white patch. */
-			mat.r = (u8)( mat.r * 2 / 5 );
-			mat.g = (u8)( mat.g * 2 / 5 );
-			mat.b = (u8)( mat.b * 2 / 5 );
-			GX_SetChanMatColor( GX_COLOR0A0, mat );
-		}
-
-		tm[0][0] = 8.0f; tm[0][1] = 0.0f; tm[0][2] = 0.0f; tm[0][3] = 0.0f;
-		tm[1][0] = 0.0f; tm[1][1] = 8.0f; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
-		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 1.0f; tm[2][3] = 0.0f;
-		GX_LoadTexMtxImm( tm, GX_TEXMTX0, GX_MTX2x4 );
-		GX_SetNumTexGens( 2 );
-		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
-		GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0 );
-		GX_LoadTexObj( &gc_nrm_obj, GX_TEXMAP3 );
-		GX_LoadTexObj( &gc_sun_obj, GX_TEXMAP4 );
-		/* Spec disc on TEXMAP5 — TEXMAP2 is the streamed lightmap page. */
-		GX_LoadTexObj( &gc_spec_obj, GX_TEXMAP5 );
-		GX_SetNumIndStages( 1 );
-		GX_SetIndTexOrder( GX_INDTEXSTAGE0, GX_TEXCOORD1, GX_TEXMAP3 );
-		GX_SetIndTexCoordScale( GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1 );
-		/* Wider warp so the normal map moves the glint across the disc. */
-		imtx[0][0] = 0.70f; imtx[0][1] = 0.0f; imtx[0][2] = 0.0f;
-		imtx[1][0] = 0.0f; imtx[1][1] = 0.70f; imtx[1][2] = 0.0f;
-		GX_SetIndTexMatrix( GX_ITM_0, imtx, 0 );
-		GX_SetNumTevStages( 2 );
-		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP4, GX_COLOR0A0 );
-		GX_SetTevIndWarp( GX_TEVSTAGE0, GX_INDTEXSTAGE0, GX_TRUE, GX_TRUE, GX_ITM_0 );
-		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD1, GX_TEXMAP5, GX_COLORNULL );
-		GX_SetTevDirect( GX_TEVSTAGE1 );
-		GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
-		GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-		GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-	}
-	else
-	{
-		GX_SetNumIndStages( 0 );
-		GX_SetNumTexGens( 1 );
-		GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
-		GX_SetNumTevStages( 1 );
-		/* Tower/detail fill: N·L × 2 so sparse industrial brushes read as
-		 * one warm surface instead of a dark wire against the sky. */
-		GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
-		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC );
-		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
-		GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevDirect( GX_TEVSTAGE0 );
-		if( gc_spec_ready && s >= 96 )
-		{
-			/* TEXMAP5 — never TEXMAP2; that slot holds the chunk lightmap. */
-			GX_LoadTexObj( &gc_spec_obj, GX_TEXMAP5 );
-			GX_SetNumTevStages( 2 );
-			GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP5, GX_COLOR0A0 );
-			GX_SetTevDirect( GX_TEVSTAGE1 );
-			GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_CPREV, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
-			GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-			GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
-			GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		}
-	}
-}
-
-static void R_GXWorldDLSpecOff( void )
-{
-	GX_SetNumIndStages( 0 );
-	GX_SetTevDirect( GX_TEVSTAGE0 );
-	GX_SetTevDirect( GX_TEVSTAGE1 );
-	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
-	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
-		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
-	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
-	/* SpecOn leaves TEXMAP5/IndTex dirty — restore diffuse×LM TEV and the
-	 * chunk lightmap on TEXMAP2 for the next lit batch. */
-	if( gc_wd_chunk_lm )
-		GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
-}
-
 static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 {
 	const gc_wd_batch_t *b;
 	u32 nb, k;
-	int spec = 0;
 
 	nb = *(const u16 *)( chunk + 2 );
 	GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
@@ -1460,7 +1092,6 @@ static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 	for( k = 0; k < nb; k++, b++ )
 	{
 		const gc_wd_mat_t *m;
-		int env;
 
 		if( b->mat >= gc_wd_hdr.n_mats )
 			continue;
@@ -1471,31 +1102,12 @@ static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 				gc_wd_texnum[b->mat] = (s16)GC_WorldTexnumByHash( m->tex_hash );
 			if( gc_wd_texnum[b->mat] <= 0 )
 				continue;
-			if( spec )
-			{
-				R_GXWorldDLSpecOff();
-				spec = 0;
-			}
 			if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
 				continue;
 			*cur_mat = (int)b->mat;
 		}
-		env = gc_wd_hdr.version == 2 && ( m->flags & GC_WD_MAT_ENVMAP );
 		GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
-		if( env )
-		{
-			const int sand_ind = !( m->flags & GC_WD_MAT_BASEALPHA )
-				&& R_GXTevMatEnvMask( m->tevmat ) < 0;
-
-			R_GXWorldDLSpecOn( m->pad, sand_ind, m->tevmat );
-			spec = 1;
-			GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
-			R_GXWorldDLSpecOff();
-			spec = 0;
-		}
 	}
-	if( spec )
-		R_GXWorldDLSpecOff();
 }
 
 static void R_GXWorldDLClearDepth( void )
@@ -1634,20 +1246,6 @@ static void R_GXWorldDLDrawSkyline( void )
 			if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_chunks + gc_wd_chunk_ofs[i], slot, bytes ))
 				continue;
 			R_GXWorldDLEmitChunk( slot, &cur_mat );
-			/* Pale industrial fill — without it the skyline reads as dark
-			 * prop slivers instead of one tower surface on the horizon. */
-			/* Off by default: the fill also bleached the backdrop hills to
-			 * pale sand and the village to white boxes. Retail's distance
-			 * look is the map fog, not an additive glow. */
-			if( hz >= 100.0f && gEngfuncs.Sys_CheckParm( "-gcskyfill" ))
-			{
-				/* Stronger fill so horizon stacks read as one glowing
-				 * surface (frame_256 tower p90 ~255 vs ~229 without). */
-				R_GXWorldDLSpecOn( 220, 0, 0 );
-				R_GXWorldDLEmitChunk( slot, &cur_mat );
-				R_GXWorldDLSpecOff();
-				cur_mat = -1;
-			}
 		}
 		n++;
 	}
@@ -2013,28 +1611,6 @@ int R_GXWorldDLDraw( void )
 					/* Back to layer 1 for the spec pass and the next batch. */
 					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
-				}
-				/* Spec fill only on wet sand (IndTex) and harbor towers.
-				 * Detail/normal mats on cliffs used to SpecOn too and blew
-				 * the shore into a white sheet (cliff bright_frac 0.45 vs
-				 * ref 0.17) while stacks still read as prop slivers. */
-				if( gc_wd_hdr.version == 2
-					&& ( ( m->flags & GC_WD_MAT_ENVMAP )
-						|| R_GXWorldDLIsTower( i ) ))
-				{
-					const int env = ( m->flags & GC_WD_MAT_ENVMAP ) != 0;
-					const int env_mask = R_GXTevMatEnvMask( m->tevmat );
-					/* Towers: warm lift for glow, short of a white sheet. */
-					u16 spec_s = env ? m->pad : 140;
-					/* IndTex only for wet-sand ($normalmapalpha). Base-alpha
-					 * mats use the I4 mask path (or plain N·L if no slot). */
-					const int sand_ind = env && !( m->flags & GC_WD_MAT_BASEALPHA )
-						&& env_mask < 0;
-
-					R_GXWorldDLSpecOn( spec_s, sand_ind, m->tevmat );
-					GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
-					R_GXWorldDLSpecOff();
-					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 				}
 				drawn++;
 			}
