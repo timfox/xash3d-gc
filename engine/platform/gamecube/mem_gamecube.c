@@ -209,6 +209,7 @@ typedef struct gc_boot_blk_s
  * first map load pins only the top of the pad (the map-load arena ends at the
  * pad's end) instead of the whole of it. */
 #define GC_BOOT_SMALL_ZONE ( 128u * 1024u )
+#define GC_BOOT_SMALL_MAX ( 32u * 1024u )	/* largest block the zone serves */
 
 static byte *gc_boot_base;
 static size_t gc_boot_cap;
@@ -293,7 +294,7 @@ void *GC_BootArenaAllocSmall( size_t size )
 	size_t need;
 	gc_boot_blk_t *blk;
 
-	if( gc_boot_closed || size == 0 || size >= GC_BOOT_ARENA_MIN_ALLOC || !GC_BootArenaInit()
+	if( gc_boot_closed || size == 0 || size > GC_BOOT_SMALL_MAX || !GC_BootArenaInit()
 		|| !gc_boot_small_top )
 		return NULL;
 	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
@@ -372,6 +373,33 @@ void __wrap_free( void *ptr )
 	if( GC_BootArenaFree( ptr ))
 		return;
 	__real_free( ptr );
+}
+
+void *__real_malloc( size_t size );
+void *__real_calloc( size_t nmemb, size_t size );
+
+/* Every libc/library allocation: when the heap refuses a small block before
+ * the first map load, serve it from the boot pad's small zone. */
+void *__wrap_malloc( size_t size )
+{
+	void *p = __real_malloc( size );
+
+	if( !p && size )
+		p = GC_BootArenaAllocSmall( size );
+	return p;
+}
+
+void *__wrap_calloc( size_t nmemb, size_t size )
+{
+	void *p = __real_calloc( nmemb, size );
+
+	if( !p && nmemb && size && nmemb <= GC_BOOT_SMALL_MAX / size )
+	{
+		p = GC_BootArenaAllocSmall( nmemb * size );
+		if( p )
+			memset( p, 0, nmemb * size );
+	}
+	return p;
 }
 
 void *__wrap_realloc( void *ptr, size_t size )
