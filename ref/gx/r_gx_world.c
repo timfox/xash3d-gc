@@ -5152,19 +5152,37 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
 #define GC_PROP_TEX_BYTES	2048u
 #define GC_WT_MAGIC		0x47435754u
 
+/* Pack v3: a model is stored once (raw vertex pieces in ARAM) and each
+ * instance places it with an origin and Source angles through the GX
+ * position matrix. v2 stored every instance's triangles in world space. */
+#define GC_PROP_MAX_MODELS	192
+
 typedef struct
 {
-	u16	first, count;
-	s16	mins[3], maxs[3];
+	u16	model, count;	/* count = triangles in the model */
+	s16	mins[3], maxs[3];	/* world AABB */
+	s16	org[3];
+	s16	ang[3];		/* pitch yaw roll, 65536 = 360 degrees */
+	u32	pad;
 } gc_prop_inst_t;
+
+typedef struct
+{
+	u32	dl_ofs, first_bytes;
+	u16	tris;
+	u8	frac, pad;
+} gc_prop_model_t;
 
 static unsigned gc_prop_aram;
 static int gc_prop_state;	/* 0 untried, 1 ready, -1 absent */
 static u16 gc_prop_ninst;
-static u32 gc_prop_ntris, gc_prop_tris_ofs;
-static u16 gc_prop_flight_first, gc_prop_flight_count;
-static u16 gc_prop_walk_first, gc_prop_walk_count;
-static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST];
+static u32 gc_prop_ntris, gc_prop_dl_base;
+static u16 gc_prop_nmodels;
+static u16 gc_prop_flight_model, gc_prop_flight_count;
+static u16 gc_prop_walk_model, gc_prop_walk_count;
+/* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
+static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligned( 32 )));
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
 static u16 gc_prop_nmat;
@@ -5254,40 +5272,25 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 2 )
+		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 3 )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v3)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
-	gc_prop_ninst = (u16)( hdr[2] >> 16 );
-	gc_prop_ntris = hdr[2] & 0xffffu;
-	gc_prop_tris_ofs = hdr[4];
-	gc_prop_flight_first = (u16)( hdr[5] >> 16 );
-	gc_prop_flight_count = (u16)( hdr[5] & 0xffffu );
-	if( gc_prop_flight_count
-		&& (u32)gc_prop_flight_first + (u32)gc_prop_flight_count > gc_prop_ntris )
+	gc_prop_ninst = (u16)( hdr[1] & 0xffffu );
+	gc_prop_nmodels = (u16)( hdr[2] >> 16 );
+	gc_prop_dl_base = hdr[5];
+	gc_prop_flight_model = (u16)( hdr[6] >> 16 );
+	gc_prop_walk_model = (u16)( hdr[6] & 0xffffu );
+	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
+	size = (u32)gEngfuncs.fsapi->Tell( f );
+	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST
+		|| gc_prop_nmodels == 0 || gc_prop_nmodels > GC_PROP_MAX_MODELS
+		|| hdr[3] != 32u || ( hdr[4] & 31u ) || ( gc_prop_dl_base & 31u )
+		|| ( size & 31u ) || gc_prop_dl_base > size )
 	{
-		gc_prop_flight_first = 0;
-		gc_prop_flight_count = 0;
-	}
-	/* hdr[6]: CapFaces fisherman walk template (retail lead path). */
-	gc_prop_walk_first = (u16)( hdr[6] >> 16 );
-	gc_prop_walk_count = (u16)( hdr[6] & 0xffffu );
-	if( gc_prop_walk_count
-		&& (u32)gc_prop_walk_first + (u32)gc_prop_walk_count > gc_prop_ntris )
-	{
-		gc_prop_walk_first = 0;
-		gc_prop_walk_count = 0;
-	}
-	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST || gc_prop_ntris == 0 )
-	{
-		gEngfuncs.fsapi->Close( f );
-		return;
-	}
-	size = gc_prop_tris_ofs + gc_prop_ntris * 32u;
-	if( size < gc_prop_tris_ofs || ( size & 31u ))
-	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack bad layout\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
@@ -5315,15 +5318,25 @@ static void R_GXPropLoad( void )
 	}
 	gEngfuncs.fsapi->Close( f );
 	{
-		u32 bytes = ( gc_prop_ninst * sizeof( gc_prop_inst_t ) + 31u ) & ~31u;
+		u32 bytes = gc_prop_ninst * (u32)sizeof( gc_prop_inst_t );
+		u32 i;
 
 		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
+		bytes = ( gc_prop_nmodels * (u32)sizeof( gc_prop_model_t ) + 31u ) & ~31u;
+		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
+		gc_prop_ntris = 0;
+		for( i = 0; i < gc_prop_nmodels; i++ )
+			gc_prop_ntris += gc_prop_models[i].tris;
 	}
+	gc_prop_flight_count = gc_prop_flight_model < gc_prop_nmodels
+		? gc_prop_models[gc_prop_flight_model].tris : 0;
+	gc_prop_walk_count = gc_prop_walk_model < gc_prop_nmodels
+		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack inst=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
-		gc_prop_ninst, gc_prop_ntris, size / 1024u, gc_prop_flight_count,
-		gc_prop_walk_count );
+		"Xash3D GameCube: prop pack v3 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
+		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
 }
 
@@ -5483,99 +5496,85 @@ static void R_GXPropSetLitAt( const float *org )
 		gc_prop_lit = 0xB8B298FFu;
 }
 
-/* The baked triangles, one material run at a time. The box stand-ins are
- * gone: the mesh is the mesh. ox/oy/oz shift a local-space template into
- * world (canister flight / fisherman walk); pass zeros for ordinary instances.
- * yaw_rad rotates around Z before the translate (Source yaw: 0 = +X). */
-static int R_GXPropEmitRangeYaw( u32 first, u32 count, int ox, int oy, int oz,
-	float yaw_rad )
+/* One model through the position matrix. The pieces are raw vertex runs
+ * (s16 xyz at the model's fraction bits, s16 st), one material each, read
+ * from ARAM through the bounce buffer and copied into the FIFO. The light
+ * colour rides in the material register, so vertices carry no colour.
+ * Angles are radians, Source order (pitch, yaw, roll). */
+static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll )
 {
-	u32 left = count;
-	u32 tri = first;
+	const gc_prop_model_t *m;
+	Mtx mv, mm, out;
+	GXColor col;
+	u32 ofs, bytes;
 	int drawn = 0;
-	const float cs = cosf( yaw_rad );
-	const float sn = sinf( yaw_rad );
-	const qboolean spin = ( yaw_rad != 0.0f );
-	const u32 col = gc_prop_lit;
+	const float sp = sinf( pitch ), cp = cosf( pitch );
+	const float sy = sinf( yaw ), cy = cosf( yaw );
+	const float sr = sinf( roll ), cr = cosf( roll );
 
-	while( left )
+	if( model >= gc_prop_nmodels )
+		return 0;
+	m = &gc_prop_models[model];
+	mm[0][0] = cp * cy; mm[0][1] = sr * sp * cy - cr * sy; mm[0][2] = cr * sp * cy + sr * sy; mm[0][3] = org[0];
+	mm[1][0] = cp * sy; mm[1][1] = sr * sp * sy + cr * cy; mm[1][2] = cr * sp * sy - sr * cy; mm[1][3] = org[1];
+	mm[2][0] = -sp; mm[2][1] = sr * cp; mm[2][2] = cr * cp; mm[2][3] = org[2];
+	R_GXBuildWorldModelview( mv );
+	guMtxConcat( mv, mm, out );
+	GX_LoadPosMtxImm( out, GX_PNMTX0 );
+	col.r = (u8)( gc_prop_lit >> 24 );
+	col.g = (u8)( gc_prop_lit >> 16 );
+	col.b = (u8)( gc_prop_lit >> 8 );
+	col.a = 255;
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetChanMatColor( GX_COLOR0A0, col );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
+	ofs = gc_prop_dl_base + m->dl_ofs;
+	bytes = m->first_bytes;
+	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
 	{
-		u32 n = left;
-		u32 start = 0;
+		const u8 *hdr = gc_prop_bounce;
+		const u16 *p;
+		u32 nverts, body, next, n;
 
-		if( n > sizeof( gc_prop_bounce ) / 32u )
-			n = sizeof( gc_prop_bounce ) / 32u;
-		GC_AramTransfer( gc_prop_aram + gc_prop_tris_ofs + tri * 32u,
-			gc_prop_bounce, n * 32u, false );
-		while( start < n )
-		{
-			const u8 mat = (u8)( gc_prop_bounce[start * 32u] & 0x7f );
-			u32 end = start + 1;
-			u32 b, v;
-
-			while( end < n && ( gc_prop_bounce[end * 32u] & 0x7f ) == mat )
-				end++;
-			R_GXPropBind( mat );
-			GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)(( end - start ) * 3u ));
-			for( b = start; b < end; b++ )
-			{
-				const u8 *rec = gc_prop_bounce + b * 32u;
-				const s16 *p = (const s16 *)( rec + 2 );
-				const u16 *uv = (const u16 *)p;
-
-				for( v = 0; v < 3; v++, p += 5, uv += 5 )
-				{
-					int x, y, z;
-					float lx = (float)p[0];
-					float ly = (float)p[1];
-
-					if( spin )
-					{
-						x = (int)( lx * cs - ly * sn ) + ox;
-						y = (int)( lx * sn + ly * cs ) + oy;
-					}
-					else
-					{
-						x = (int)lx + ox;
-						y = (int)ly + oy;
-					}
-					z = (int)p[2] + oz;
-
-					if( x < -32767 ) x = -32767;
-					else if( x > 32767 ) x = 32767;
-					if( y < -32767 ) y = -32767;
-					else if( y > 32767 ) y = 32767;
-					if( z < -32767 ) z = -32767;
-					else if( z > 32767 ) z = 32767;
-					GX_Position3s16( (s16)x, (s16)y, (s16)z );
-					GX_Color1u32( col );
-					GX_TexCoord2u16( uv[3], uv[4] );
-				}
-			}
-			GX_End();
-			start = end;
-		}
-		tri += n;
-		left -= n;
-		drawn += (int)n;
+		GC_AramTransfer( gc_prop_aram + ofs, gc_prop_bounce, bytes, false );
+		nverts = *(const u16 *)( hdr + 2 );
+		body = *(const u32 *)( hdr + 4 );
+		next = *(const u32 *)( hdr + 8 );
+		if( !nverts || nverts * 10u > body || body + 32u != bytes )
+			break;
+		R_GXPropBind( (u8)( hdr[0] & 0x7f ));
+		GX_Begin( GX_TRIANGLES, GX_VTXFMT0, (u16)nverts );
+		p = (const u16 *)( hdr + 32 );
+		for( n = nverts * 5u; n; n-- )
+			wgPipe->U16 = *p++;
+		GX_End();
+		drawn += (int)( nverts / 3u );
+		ofs += bytes;
+		bytes = next;
 	}
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
 	return drawn;
-}
-
-static int R_GXPropEmitRange( u32 first, u32 count, int ox, int oy, int oz )
-{
-	return R_GXPropEmitRangeYaw( first, count, ox, oy, oz, 0.0f );
 }
 
 static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 {
-	float mid[3];
+	float mid[3], org[3];
+	const float k = 6.2831853f / 65536.0f;
 
 	mid[0] = 0.5f * ( (float)in->mins[0] + (float)in->maxs[0] );
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
 	R_GXPropSetLitAt( mid );
-	return R_GXPropEmitRange( in->first, in->count, 0, 0, 0 );
+	org[0] = (float)in->org[0];
+	org[1] = (float)in->org[1];
+	org[2] = (float)in->org[2];
+	return R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
+		(float)in->ang[1] * k, (float)in->ang[2] * k );
 }
 
 /* CapFaces: Lost Coast fisherman walks the retail lead-to-gate path
@@ -5691,7 +5690,7 @@ static void R_GXFishermanWalkDraw( const float *org )
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-	R_GXPropEmitRangeYaw( gc_prop_walk_first, gc_prop_walk_count, ox, oy, oz, yaw );
+	R_GXPropEmitModel( gc_prop_walk_model, pos, 0.0f, yaw, 0.0f );
 	if( !logged )
 	{
 		logged = true;
@@ -5740,7 +5739,7 @@ static void R_GXCanisterFlightDraw( const float *org )
 	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
 	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
 	R_GXPropSetLitAt( pos );
-	R_GXPropEmitRange( gc_prop_flight_first, gc_prop_flight_count, ox, oy, oz );
+	R_GXPropEmitModel( gc_prop_flight_model, pos, 0.0f, 0.0f, 0.0f );
 	if( !logged )
 	{
 		logged = true;
@@ -6009,17 +6008,6 @@ static u32 R_GXWaterBodyTint( int wi, const float *pt, float eye_dot, float nd )
 		t = ( dist - 4000.0f ) / 12000.0f;
 		if( t < 0.0f ) t = 0.0f;
 		else if( t > 1.0f ) t = 1.0f;
-		/* Near + looking down → see bottom; grazing / far → denser fogcolor.
-		 * Keep mid alphas lean — one Z-winning sheet must not read solid. */
-		a = 48 + (int)( 50.0f * fres ) + (int)( 55.0f * t )
-			+ (int)( 35.0f * ( path - 1.0f ) / 4.0f );
-		if( a < 40 ) a = 40;
-		if( a > 190 ) a = 190;
-		/* Horizon haze toward env fog — soft, not a solid sheet. */
-		t = ( dist - 1200.0f ) / 6000.0f;
-		if( t < 0.0f ) t = 0.0f;
-		else if( t > 1.0f ) t = 1.0f;
-		t *= 0.35f;
 		r = (int)( (float)r + ( (float)er - (float)r ) * t );
 		g = (int)( (float)g + ( (float)eg - (float)g ) * t );
 		b = (int)( (float)b + ( (float)eb - (float)b ) * t );
@@ -6356,80 +6344,6 @@ static void R_GXDrawPackedWater( void )
 			}
 		}
 		GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
-	}
-	/* Underwater volume fog: camera-facing fogcolor veil at ~$fogend so the
-	 * view fills like Source without re-arming Flipper HW fog. */
-	{
-		int under_wi = -1;
-		float best_abs = 1e30f;
-		mplane_t upl;
-		byte fog_rgb[3];
-		float fog_start = 1.0f, fog_end = 100.0f;
-		vec3_t forward, right, up, center;
-		float half, eye_dot;
-		u32 veil;
-
-		for( wi = 0; wi < water_n; wi++ )
-		{
-			if( !GC_WaterFacePlane( wi, &upl, NULL ))
-				continue;
-			eye_dot = DotProduct( tr.modelorg, upl.normal ) - upl.dist;
-			if( eye_dot >= 0.0f )
-				continue;
-			if( -eye_dot < best_abs )
-			{
-				best_abs = -eye_dot;
-				under_wi = wi;
-			}
-		}
-		if( under_wi >= 0 )
-		{
-			GC_GetWaterFaceFog( under_wi, fog_rgb, NULL );
-			GC_GetWaterFaceFogRange( under_wi, &fog_start, &fog_end, NULL, NULL );
-			if( fog_end < 8.0f )
-				fog_end = 8.0f;
-			AngleVectors( RI.rvp.viewangles, forward, right, up );
-			center[0] = tr.modelorg[0] + forward[0] * ( fog_end * 0.55f );
-			center[1] = tr.modelorg[1] + forward[1] * ( fog_end * 0.55f );
-			center[2] = tr.modelorg[2] + forward[2] * ( fog_end * 0.55f );
-			half = fog_end * 1.25f;
-			/* Dense but not ink — leave a little SpecOn sand through. */
-			veil = ( (u32)fog_rgb[0] << 24 ) | ( (u32)fog_rgb[1] << 16 )
-				| ( (u32)fog_rgb[2] << 8 ) | 200u;
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
-			GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
-			GX_SetNumTexGens( 0 );
-			GX_SetNumTevStages( 1 );
-			GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
-			GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
-			GX_ClearVtxDesc();
-			GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
-			GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
-			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
-			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
-			GX_Begin( GX_QUADS, GX_VTXFMT0, 4 );
-			GX_Position3f32(
-				center[0] + ( -right[0] - up[0] ) * half,
-				center[1] + ( -right[1] - up[1] ) * half,
-				center[2] + ( -right[2] - up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_Position3f32(
-				center[0] + ( right[0] - up[0] ) * half,
-				center[1] + ( right[1] - up[1] ) * half,
-				center[2] + ( right[2] - up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_Position3f32(
-				center[0] + ( right[0] + up[0] ) * half,
-				center[1] + ( right[1] + up[1] ) * half,
-				center[2] + ( right[2] + up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_Position3f32(
-				center[0] + ( -right[0] + up[0] ) * half,
-				center[1] + ( -right[1] + up[1] ) * half,
-				center[2] + ( -right[2] + up[2] ) * half );
-			GX_Color1u32( veil );
-			GX_End();
-		}
 	}
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
