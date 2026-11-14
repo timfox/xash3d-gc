@@ -887,7 +887,10 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				/* Map props: WorldDL listen leaves spill headroom (chunk cache
 				 * capped at 192 KiB). Stream lean mesh there — tip heap is dead.
 				 * Gate on WorldDL Active so props cannot starve the cache. */
-				if( Q_stristr( model_path, "mapmodels/" )
+				/* The lean HL1 player body (about 281 KiB) is over the BSS limit too and
+				 * has no heap fallback once client start has spent it, so it takes the
+				 * spill the same way. */
+				if(( Q_stristr( model_path, "mapmodels/" ) || !Q_stricmp( bare, "player" ))
 					&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 					&& Mod_GCAllowRealStudioLoad( model_path, (size_t)flen )
 					&& Mod_GCMapModelSpillAfterWorldDL())
