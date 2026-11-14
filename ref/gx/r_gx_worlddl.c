@@ -93,6 +93,7 @@ extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
+extern size_t Mod_GCBspScratchFloor( void );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
@@ -612,7 +613,10 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		 * a lean load lowers the highwater to 0 while the world-texture low
 		 * mips it carved stay live (starting at 0 bleached them white). */
 		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
-		const size_t hw = ( live + 31u ) & ~(size_t)31u;
+		/* The BSP surface table stays live inside the arena for the whole map and
+		 * the highwater does not cover it: slots carved there were overwritten by
+		 * its per-frame marks (and overwrote its records). */
+		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
 		 * 96 KB, prop far LODs about 170 KB, and entity overflow. */
@@ -666,7 +670,10 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprarena" ))
 	{
 		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
-		const size_t hw = ( live + 31u ) & ~(size_t)31u;
+		/* The BSP surface table stays live inside the arena for the whole map and
+		 * the highwater does not cover it: slots carved there were overwritten by
+		 * its per-frame marks (and overwrote its records). */
+		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		const size_t keep = 352u * 1024u;	/* water table, prop slots, entity overflow */
 		const unsigned slot_bytes = 10944u, far_bytes = 2752u;
