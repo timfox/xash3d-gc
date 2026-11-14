@@ -22,6 +22,9 @@ GNU General Public License for more details.
 #include "const.h"
 #include "client.h"
 #include "library.h"
+#if XASH_GAMECUBE
+#include "server.h"
+#endif
 
 static const char *const file_exts[] =
 {
@@ -600,6 +603,10 @@ void COM_HexConvert( const char *pszInput, int nInputLength, byte *pOutput )
 	}
 }
 
+#if XASH_GAMECUBE
+static byte *com_gc_borrowed_file; // see COM_LoadFileForMe
+#endif
+
 /*
 =============
 COM_LoadFileForMe
@@ -621,6 +628,38 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 
 	fs_offset_t iLength;
 	byte *pfile = g_fsapi.LoadFileMalloc( name, &iLength, false );
+#if XASH_GAMECUBE
+	/* The game DLL reads AI node graphs (maps/graphs/*.nod) this way at
+	 * worldspawn. On c0a0e the 9.5 KiB file buffer failed on the
+	 * fragmented heap, the graph never loaded, and Barney could not walk
+	 * to the tram door, shutting the player in. While a map loads the GX
+	 * world leaves the soft surface-cache store idle (the transition save
+	 * borrows it only later), so read a file that will not fit into it.
+	 * The game copies what it needs and frees the buffer right away. */
+	if( !pfile && GC_MenuRunsServer() && sv.state == ss_loading && !com_gc_borrowed_file )
+	{
+		extern byte *R_GCBorrowSurfaceCacheStore( size_t *size );
+		const fs_offset_t want = FS_FileSize( name, false );
+		size_t store_size = 0;
+		byte *store;
+		file_t *f;
+
+		if( want > 0 && ( store = R_GCBorrowSurfaceCacheStore( &store_size )) != NULL
+			&& (size_t)want + 1 <= store_size && ( f = FS_Open( name, "rb", false )) != NULL )
+		{
+			iLength = FS_Read( f, store, want );
+			FS_Close( f );
+			if( iLength == want )
+			{
+				store[want] = 0;
+				pfile = store;
+				com_gc_borrowed_file = store;
+				Con_Reportf( "Xash3D GameCube: %s read into the idle surface-cache store (%s)\n",
+					name, Q_memprint( want ));
+			}
+		}
+	}
+#endif
 	if( pLength ) *pLength = (int)iLength;
 
 	return pfile;
@@ -664,6 +703,13 @@ COM_FreeFile
 */
 void GAME_EXPORT COM_FreeFile( void *buffer )
 {
+#if XASH_GAMECUBE
+	if( buffer && buffer == com_gc_borrowed_file )
+	{
+		com_gc_borrowed_file = NULL;
+		return;
+	}
+#endif
 	free( buffer );
 }
 
