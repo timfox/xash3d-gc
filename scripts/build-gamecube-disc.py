@@ -4447,6 +4447,8 @@ def main() -> None:
 				if os.environ.get("XASH_GC_PROBE_STARTMAP"):
 					# Real menu New Game starts this map instead of the default.
 					play_lines.append("startmap " + os.environ["XASH_GC_PROBE_STARTMAP"])
+				if os.environ.get("XASH_GC_PROBE_MEMWATCH") == "1":
+					play_lines.append("memwatch")
 				if os.environ.get("XASH_GC_PROBE_MODELTRACE") == "1":
 					play_lines.append("modeltrace")
 				if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
