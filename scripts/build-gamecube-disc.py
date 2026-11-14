@@ -4475,6 +4475,11 @@ def main() -> None:
 				if os.environ.get("XASH_GC_PROBE_AUTOHOP") == "1":
 					# Walk out of the tram on c0a0e into c1a0 (intro proof).
 					menu_lines.append("autohop")
+				if os.environ.get("XASH_GC_PROBE_AUTOCAMPAIGN"):
+					# Chapter sweep on the retail menu route: each map runs this
+					# many seconds, then the player is moved into the next
+					# unvisited trigger_changelevel (sv_gc_campaign.c).
+					menu_lines.append("autocampaign " + os.environ["XASH_GC_PROBE_AUTOCAMPAIGN"])
 				if os.environ.get("XASH_GC_PROBE_MEMREPORT") == "1":
 					menu_lines.append("memreport")
 				if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
