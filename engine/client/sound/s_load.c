@@ -471,9 +471,13 @@ static wavdata_t *S_GCStreamSoundToAram( sfx_t *sfx )
 	if( !s_gc_snd_base )
 		return NULL;
 
-	f = FS_Open( va( "sound/%s", name ), "rb", false );
+	/* Sentence words name the file without its extension. */
+	f = FS_Open( va( "sound/%s%s", name, COM_FileExtension( name )[0] ? "" : ".wav" ), "rb", false );
 	if( !f )
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: sound %s not found for ARAM\n", sfx->name );
 		return NULL;
+	}
 	memset( &hdr, 0, sizeof( hdr ));
 	if( FS_Read( f, chunk, 12 ) != 12 || memcmp( chunk, "RIFF", 4 ) || memcmp( chunk + 8, "WAVE", 4 ))
 		goto fail;
@@ -766,7 +770,8 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		return NULL;
 	/* Larger than a MEM1 sound may be: play it from ARAM at full length. */
 	if( GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" )
-		&& FS_FileSize( va( "sound/%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name ), false ) > GC_SFX_MAX_FILE + 1024 )
+		&& FS_FileSize( va( "sound/%s%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name,
+			COM_FileExtension( sfx->name )[0] ? "" : ".wav" ), false ) > GC_SFX_MAX_FILE + 1024 )
 	{
 		if( (uint32_t)( host.realtime * 10.0 ) < s_gc_sfx_cooldown[sfx - s_knownSfx] )
 			return NULL;
@@ -861,6 +866,11 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 			if( sc )
 				Con_Reportf( "Xash3D GameCube: G125 load retry ok for %s\n", sfx->name );
 		}
+		/* No MEM1 block for the file buffer (ttrain_start1 needs 29 KiB on
+		 * a fragmented heap): the ARAM path reads it in 2 KiB blocks. */
+		if( !sc && GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" )
+			&& ( sfx->cache = S_GCStreamSoundToAram( sfx )) != NULL )
+			return sfx->cache;
 		if( !sc && GC_MapLoadMemoryOpt() && Q_stricmp( sfx->name, "*default" ))
 		{
 			S_GCSfxCooldown( sfx, GC_SFX_REFUSE_COOLDOWN );
@@ -899,6 +909,14 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 			Con_Reportf( "Xash3D GameCube: gameplay sfx budget refused name=%s size=%u used=%u cap=%u\n",
 				sfx->name, (uint)sc->size, (uint)s_gc_sfx_budget_used, (uint)GC_SFX_BUDGET );
 			FS_FreeSound( sc );
+			/* Out of MEM1 budget: still play it, from ARAM. */
+			if( GC_MenuRunsServer( ))
+			{
+				sfx->cache = S_GCStreamSoundToAram( sfx );
+				if( sfx->cache )
+					s_gc_sfx_cooldown[sfx - s_knownSfx] = 0;
+				return sfx->cache;
+			}
 			return NULL;
 		}
 

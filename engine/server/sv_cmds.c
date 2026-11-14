@@ -42,6 +42,9 @@ static void SV_GameCubePlayStart_f( void )
 	char map_name[MAX_QPATH];
 	const char *map;
 
+	if( COM_StringEmpty( sv_gc_playstart_map_override )
+		&& Sys_GetParmFromCmdLine( "-gcstartmap", sv_gc_playstart_map_override ))
+		Con_Reportf( "Xash3D GameCube: play start uses test start map %s\n", sv_gc_playstart_map_override );
 	if( !COM_StringEmpty( sv_gc_playstart_map_override ))
 		map = sv_gc_playstart_map_override;
 	else

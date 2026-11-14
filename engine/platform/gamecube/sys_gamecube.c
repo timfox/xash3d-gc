@@ -1094,6 +1094,10 @@ static qboolean gc_notexpacks_configured;
 static qboolean gc_autohop_configured;
 static qboolean gc_autocampaign_configured;
 static char gc_autocampaign_delay[16];
+/* Test-only: the retail menu New Game starts this map instead of c0a0, so a
+ * later chapter can be load-tested on the real route (not a playthrough). */
+static qboolean gc_startmap_configured;
+static char gc_startmap[32];
 static qboolean gc_modeltrace_configured;
 static qboolean gc_net_configured;
 static qboolean gc_netfast_configured;
@@ -1152,6 +1156,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_notexpacks_configured = false;
 	gc_autohop_configured = false;
 	gc_autocampaign_configured = false;
+	gc_startmap_configured = false;
 	gc_modeltrace_configured = false;
 	gc_phase_test[0] = '\0';
 	gc_changelevel_map[0] = '\0';
@@ -1298,6 +1303,25 @@ static void GCube_LoadDiscBootOverrides( void )
 				Q_strncpy( gc_autocampaign_delay, "20", sizeof( gc_autocampaign_delay ));
 			gc_autocampaign_configured = true;
 			SYS_Report( "Xash3D GameCube: disc boot override autocampaign %s\n", gc_autocampaign_delay );
+			continue;
+		}
+
+		if( !Q_strnicmp( cursor, "startmap", 8 ))
+		{
+			const char *arg = cursor + 8;
+			int n = 0;
+
+			while( *arg == ' ' || *arg == '\t' )
+				arg++;
+			while( arg[n] && arg[n] != ' ' && arg[n] != '\t' && arg[n] != '\r' && arg[n] != '\n'
+				&& n < (int)sizeof( gc_startmap ) - 1 )
+			{
+				gc_startmap[n] = arg[n];
+				n++;
+			}
+			gc_startmap[n] = '\0';
+			gc_startmap_configured = n > 0;
+			SYS_Report( "Xash3D GameCube: disc boot override startmap %s\n", gc_startmap );
 			continue;
 		}
 
@@ -2134,6 +2158,11 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	{
 		gc_argv[fake_argc++] = "-gcautocampaign";
 		gc_argv[fake_argc++] = gc_autocampaign_delay;
+	}
+	if( gc_startmap_configured )
+	{
+		gc_argv[fake_argc++] = "-gcstartmap";
+		gc_argv[fake_argc++] = gc_startmap;
 	}
 	if( gc_modeltrace_configured )
 		gc_argv[fake_argc++] = "-gcmodeltrace";
