@@ -431,6 +431,13 @@ void *__wrap_malloc( size_t size )
 	if( !p && size )
 	{
 		Con_Reportf( "THROWLOG malloc(%u) FAILED caller=%p heap_free=%s\n", (unsigned)size, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
+		{
+			static int smallstate_logged;
+			if( smallstate_logged++ < 60 || size >= 4096u )
+				Con_Reportf( "THROWLOG   smallzone size=%u closed=%d ready=%d base=%p small_top=%p small_low=%p large_end=%p room=%d small_live=%u small_live_bytes=%u menu_scope=%d\n",
+					(unsigned)size, (int)gc_boot_closed, (int)gc_boot_ready, gc_boot_base, gc_boot_small_top, gc_boot_small_low,
+					gc_boot_base + gc_boot_large_cap, (int)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )), gc_boot_small_live, (unsigned)gc_boot_small_live_bytes, (int)GC_BootArenaMenuScope());
+		}
 		if( size >= 32u * 1024u )
 		{
 			size_t large_free = 0, largest = 0;
