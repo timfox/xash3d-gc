@@ -421,6 +421,10 @@ void *__real_calloc( size_t nmemb, size_t size );
 
 /* Every libc/library allocation: when the heap refuses a small block before
  * the first map load, serve it from the boot pad's small zone. */
+#ifdef XASH_GC_MEMWATCH_DEBUG
+static volatile int gc_throwlog_busy;
+#endif
+
 void *__wrap_malloc( size_t size )
 {
 	void *p = __real_malloc( size );
@@ -428,8 +432,9 @@ void *__wrap_malloc( size_t size )
 	if( !p && size )
 		p = GC_BootArenaAllocSmall( size );
 #ifdef XASH_GC_MEMWATCH_DEBUG
-	if( !p && size )
+	if( !p && size && !gc_throwlog_busy )
 	{
+		gc_throwlog_busy = 1;
 		Con_Reportf( "THROWLOG malloc(%u) FAILED caller=%p heap_free=%s\n", (unsigned)size, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
 		{
 			static int smallstate_logged;
@@ -460,6 +465,7 @@ void *__wrap_malloc( size_t size )
 				(unsigned)size, __builtin_return_address( 0 ), (int)gc_boot_closed, (int)gc_boot_ready, gc_boot_base, (unsigned)gc_boot_cap,
 				(unsigned)gc_boot_large_cap, (unsigned)large_free, (unsigned)largest, (unsigned)GC_BootArenaLiveBytes(), gc_boot_live, gc_boot_small_live );
 		}
+		gc_throwlog_busy = 0;
 	}
 #endif
 	return p;
