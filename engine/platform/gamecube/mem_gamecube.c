@@ -429,7 +429,31 @@ void *__wrap_malloc( size_t size )
 		p = GC_BootArenaAllocSmall( size );
 #ifdef XASH_GC_MEMWATCH_DEBUG
 	if( !p && size )
+	{
 		Con_Reportf( "THROWLOG malloc(%u) FAILED caller=%p heap_free=%s\n", (unsigned)size, __builtin_return_address( 0 ), Q_memprint( GC_MemHeapFreeBytes()));
+		if( size >= 32u * 1024u )
+		{
+			size_t large_free = 0, largest = 0;
+			byte *cursor;
+
+			if( gc_boot_base )
+				for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+				{
+					gc_boot_blk_t *b = (gc_boot_blk_t *)cursor;
+					if( !b->used )
+					{
+						large_free += b->size;
+						if( b->size > largest )
+							largest = b->size;
+					}
+					if( b->size == 0 )
+						break;
+				}
+			Con_Reportf( "THROWLOG   bootarena size=%u caller=%p closed=%d ready=%d base=%p cap=%u large_cap=%u large_free=%u largest_free_blk=%u live_bytes=%u live_blocks=%u small_live=%u\n",
+				(unsigned)size, __builtin_return_address( 0 ), (int)gc_boot_closed, (int)gc_boot_ready, gc_boot_base, (unsigned)gc_boot_cap,
+				(unsigned)gc_boot_large_cap, (unsigned)large_free, (unsigned)largest, (unsigned)GC_BootArenaLiveBytes(), gc_boot_live, gc_boot_small_live );
+		}
+	}
 #endif
 	return p;
 }
