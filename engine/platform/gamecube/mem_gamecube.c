@@ -409,7 +409,30 @@ void *__wrap_realloc( void *ptr, size_t size )
 	void *neu;
 
 	if( !ptr || !GC_BootArenaOwns( ptr ))
-		return __real_realloc( ptr, size );
+	{
+		extern size_t malloc_usable_size( void *ptr );
+		void *r = __real_realloc( ptr, size );
+
+		/* Heap refused the grow: move the block into the boot pad's small
+		 * zone (the old block stays valid when realloc fails). */
+		if( !r && size )
+		{
+			if( !ptr )
+				r = GC_BootArenaAllocSmall( size );
+			else
+			{
+				size_t old = malloc_usable_size( ptr );
+
+				r = GC_BootArenaAllocSmall( size );
+				if( r )
+				{
+					memcpy( r, ptr, old < size ? old : size );
+					__real_free( ptr );
+				}
+			}
+		}
+		return r;
+	}
 	if( size == 0 )
 	{
 		GC_BootArenaFree( ptr );
