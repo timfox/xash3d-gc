@@ -403,6 +403,9 @@ void GC_MemWatchFrame( void );
 void GC_DeltaCheckTables( const char *tag );
 #endif
 void Mem_PrintStats( void );
+#ifdef XASH_GC_MEMWATCH_DEBUG
+void GC_MemPoolDump( const char *tag );
+#endif
 void Mem_Stats_f( void );
 size_t Mem_TotalRealSize( void );
 
