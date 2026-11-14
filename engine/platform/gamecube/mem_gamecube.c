@@ -301,6 +301,7 @@ void *GC_BootArenaAllocSmall( size_t size )
 	/* Reuse a freed block first: realloc growth and short-lived allocations
 	 * otherwise leave holes the downward bump never revisits, and the whole
 	 * zone drains on churn with almost nothing live. */
+#ifndef GC_BOOT_SMALL_NOREUSE
 	{
 		byte *cursor;
 
@@ -324,6 +325,7 @@ void *GC_BootArenaAllocSmall( size_t size )
 			return (byte *)hole + sizeof( gc_boot_blk_t );
 		}
 	}
+#endif
 	if( (size_t)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )) < need )
 		return NULL;
 	gc_boot_small_low -= need;
@@ -363,6 +365,12 @@ qboolean GC_BootArenaFree( void *ptr )
 		blk->used = 0;
 		gc_boot_small_live--;
 		gc_boot_small_live_bytes -= blk->size;
+#ifdef GC_BOOT_SMALL_POISON
+		/* Stale users of freed small-zone memory read 0xDD and a later reuse
+		 * of the block is easy to spot in dumps. */
+		memset( (byte *)blk + sizeof( gc_boot_blk_t ), 0xDD, blk->size - sizeof( gc_boot_blk_t ));
+#endif
+#ifndef GC_BOOT_SMALL_NOREUSE
 		/* Merge runs of free neighbours so holes can serve larger blocks. */
 		{
 			byte *cursor = gc_boot_small_low;
@@ -378,6 +386,7 @@ qboolean GC_BootArenaFree( void *ptr )
 					cursor = next;
 			}
 		}
+#endif
 		/* The zone is contiguous from small_low to its top: retreat past
 		 * freed blocks so a dead zone costs nothing at the map load. */
 		while( gc_boot_small_low < gc_boot_small_top && !((gc_boot_blk_t *)gc_boot_small_low)->used )
