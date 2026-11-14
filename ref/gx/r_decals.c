@@ -759,6 +759,26 @@ void GAME_EXPORT R_DecalShoot( int textureIndex, int entityIndex, int modelIndex
 		return;
 	}
 
+#if XASH_GAMECUBE
+	/* The retail New Game route draws the world from its World DL pack and
+	 * never builds the live msurface table (mod->surfaces is NULL), but the
+	 * BSP nodes still name face ranges: R_DecalNode walked NULL + firstsurface
+	 * and the game died on the first bullet hole (c1a2a). Until decals get
+	 * their own surface data, place none rather than crash. */
+	if( !model->surfaces || model->numsurfaces <= 0 )
+	{
+		static qboolean logged;
+
+		if( !logged )
+		{
+			logged = true;
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: decal skipped, %s has no live surface table\n",
+				model->name );
+		}
+		return;
+	}
+#endif
+
 	decalInfo.m_pModel = model;
 	hull_t *hull = &model->hulls[0]; // always use #0 hull
 

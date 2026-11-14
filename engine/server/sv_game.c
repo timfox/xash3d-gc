@@ -6394,6 +6394,19 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	Assert( entities != NULL );
 #if XASH_GAMECUBE
 	SV_GCCampaignScanEntities( mapname, entities );
+	/* The BSP loader reserves private-data overflow only for ≥64 KiB entity
+	 * lumps. c1a2c's lump is smaller, yet its own entities plus the ones a
+	 * transition restores overran the 128 KiB slab, and an ammo_glockclip
+	 * was constructed into a NULL block. On the World DL route the world is
+	 * fully loaded by now and the arena tail above it is free (the live
+	 * surface table it was sized for is never built), so reserve here. */
+	if( GC_MenuRunsServer() && !SV_GCPrivateOverflowReserved())
+	{
+		SV_GCReservePrivateOverflow( GC_MapLoadBufferTailHighwater(), GC_ENTITY_OVERFLOW_BYTES );
+		if( !SV_GCPrivateOverflowReserved())
+			Con_Reportf( S_WARN "Xash3D GameCube: entity overflow unavailable at spawn (tail high-water %s)\n",
+				Q_memprint( GC_MapLoadBufferTailHighwater()));
+	}
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;
 	memset( gc_ent_priv_slab_bits, 0, sizeof( gc_ent_priv_slab_bits ));

@@ -169,7 +169,11 @@ R_PushDlights
 */
 int R_PushDlights( model_t *model, int framecount )
 {
-	if( !model )
+	/* The GameCube retail route draws the world from its World DL pack and
+	 * has no live surface table: marking walked NULL + firstsurface and the
+	 * game died on the first dynamic light (alien slave zap, c1a2a). Models
+	 * still take dynamic lights; lit walls need World DL support. */
+	if( !model || !model->surfaces )
 		return framecount;
 
 	for( int i = 0; i < MAX_DLIGHTS; i++ )
@@ -187,6 +191,8 @@ int R_PushDlights( model_t *model, int framecount )
 
 void R_PushDlightsForBmodel( model_t *model, int framecount, const matrix4x4 object_matrix )
 {
+	if( !model || !model->surfaces )
+		return;
 	for( int i = 0; i < MAX_DLIGHTS; i++ )
 	{
 		dlight_t *l = &gp_dlights[i];
@@ -262,6 +268,9 @@ start:
 	int numsurfaces = node_numsurfaces( node, model );
 
 	VectorCopy( mid, g_trace_lightspot );
+
+	if( !model->surfaces ) // GameCube World DL route: no live surface table
+		numsurfaces = 0;
 
 	for( int i = 0; i < numsurfaces; i++ )
 	{
