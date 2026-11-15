@@ -1628,8 +1628,10 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			/* A weapon a player carries keeps its w_ model at the player's
 			 * origin; it drew as a white rifle lying at the bot's feet
 			 * (ceres 18e0d6f). Carried items belong to the player model. */
-			if( ed->v.owner && SV_IsValidEdict( ed->v.owner )
-				&& NUM_FOR_EDICT( ed->v.owner ) >= 1 && NUM_FOR_EDICT( ed->v.owner ) <= svs.maxclients )
+			if(( ed->v.owner && SV_IsValidEdict( ed->v.owner )
+					&& NUM_FOR_EDICT( ed->v.owner ) >= 1 && NUM_FOR_EDICT( ed->v.owner ) <= svs.maxclients )
+				|| ed->v.movetype == MOVETYPE_FOLLOW
+				|| ( ed->v.aiment && SV_IsValidEdict( ed->v.aiment )))
 			{
 				static int carried_logs;
 
@@ -1682,6 +1684,19 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			{
 				scan_studio_skip++;
 				continue;
+			}
+			{
+				static int pick_logs;
+
+				if( pick_logs < 12 )
+				{
+					pick_logs++;
+					Con_Reportf( "Xash3D GameCube: lean studio candidate %d %s class=%s owner=%d aiment=%d movetype=%d org=(%.0f %.0f %.0f)\n",
+						e, mod->name, SV_GetString( ed->v.classname ),
+						ed->v.owner ? NUM_FOR_EDICT( ed->v.owner ) : 0,
+						ed->v.aiment ? NUM_FOR_EDICT( ed->v.aiment ) : 0,
+						ed->v.movetype, ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] );
+				}
 			}
 			/* Insert into nearest-N picks. */
 			if( n_picks < studio_budget )
@@ -1985,7 +2000,29 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							speed, bh ? bh->numseq : -1 );
 					}
 				}
-				ent->curstate.weaponmodel = ed->v.weaponmodel;
+				/* v.weaponmodel is a string_t (the p_ model path); the renderer
+				 * wants a model index (ceres fpa: weaponmodel=28156). Attach it
+				 * only when that model is resident. */
+				ent->curstate.weaponmodel = 0;
+				if( ed->v.weaponmodel )
+				{
+					const char *wpath = SV_GetString( ed->v.weaponmodel );
+					int widx = ( wpath && wpath[0] ) ? SV_ModelIndex( wpath ) : 0;
+					model_t *wm = ( widx > 0 && widx < MAX_MODELS ) ? SV_ModelHandle( widx ) : NULL;
+					static int wlogs;
+
+					if( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data )
+					{
+						cl.models[widx] = wm;
+						ent->curstate.weaponmodel = widx;
+					}
+					if( wlogs < 4 )
+					{
+						wlogs++;
+						Con_Reportf( "Xash3D GameCube: lean player %d weapon %s index %d %s\n",
+							e, wpath ? wpath : "?", widx, ent->curstate.weaponmodel ? "attached" : "not resident" );
+					}
+				}
 				ent->curstate.rendermode = ed->v.rendermode;
 				ent->curstate.renderamt = (int)ed->v.renderamt;
 				ent->curstate.effects = ed->v.effects;
