@@ -575,7 +575,10 @@ static wavdata_t *S_GCStreamSoundToAram( sfx_t *sfx )
 	}
 	FS_Close( f );
 	f = NULL;
+	/* Marked in the ARAM copy so the next play skips the MEM1 attempt. */
+	SetBits( hdr.flags, GC_SOUND_ARAM_BACKED );
 	GC_AramCopy( s_gc_snd_base + s_gc_snd_head, &hdr, sizeof( hdr ), true );
+	ClearBits( hdr.flags, GC_SOUND_ARAM_BACKED );
 
 	e = &s_gc_snd_store[s_gc_snd_next];
 	s_gc_snd_next = ( s_gc_snd_next + 1 ) % GC_SND_ARAM_ENTRIES;
@@ -768,6 +771,20 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 	/* Announcer lines are streamed (S_GCStreamVoice), never cached. */
 	if( GC_MenuRunsServer() && !Q_strnicmp( sfx->name, "tride/", 6 ))
 		return NULL;
+	/* Streamed to ARAM before (sentence words are freed after each
+	 * sentence): take the header again, no disc read or MEM1 attempt. */
+	if( GC_MenuRunsServer() && s_gc_snd_base && Q_stricmp( sfx->name, "*default" ))
+	{
+		const gc_snd_stored_t *e = S_GCSoundStored( sfx );
+		wavdata_t hdr;
+
+		if( e && e->bytes > sizeof( wavdata_t ))
+		{
+			GC_AramCopy( s_gc_snd_base + e->aram, &hdr, sizeof( hdr ), false );
+			if( FBitSet( hdr.flags, GC_SOUND_ARAM_BACKED ) && hdr.size == e->bytes - sizeof( wavdata_t ))
+				return ( sfx->cache = S_GCAramBackedHeader( &hdr, s_gc_snd_base + e->aram + sizeof( wavdata_t )));
+		}
+	}
 	/* Larger than a MEM1 sound may be: play it from ARAM at full length. */
 	if( GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" )
 		&& FS_FileSize( va( "sound/%s%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name,
