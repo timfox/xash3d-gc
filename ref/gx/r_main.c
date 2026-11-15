@@ -1888,6 +1888,7 @@ static void R_EdgeDrawingGcmapProbe( void )
 		VectorCopy( RI.rvp.vieworigin, tr.modelorg );
 		if( tr.framecount <= 1 )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: R_EdgeDrawing GX CapFaces begin\n" );
+		GC_HeapCheckArmed( "edge drawing begin" );
 		/* Pre-live low-res bring-up skips CapFaces (MEM1). Post-lab changelevel
 		 * dests draw once GX world is live (GX-023); tram G36 sample stays off. */
 		if( GC_UseLowResWorldProbe() && !GC_AllowFlipperCapFaces() )

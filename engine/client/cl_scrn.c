@@ -860,6 +860,9 @@ text to the screen.
 */
 void SCR_UpdateScreen( void )
 {
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "update screen enter" );
+#endif
 	qboolean screen_redraw = true; // assume screen has been redrawn
 #if XASH_GAMECUBE
 	static qboolean gc_newgame_probe_rearm_logged;

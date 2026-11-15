@@ -6936,6 +6936,8 @@ static int R_GXDrawWorldDLFrame( void )
 	if( !r_gx_first_worlddl_frame_done )
 	{
 		R_GXTrace( "complete" );
+		GC_HeapCheckArmed( "first worldDL frame complete" );
+		GC_HeapCheckArm( false );
 		r_gx_first_worlddl_frame_done = true;
 	}
 	r_gx_world_drew = true;

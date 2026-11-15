@@ -471,6 +471,7 @@ static void CL_CheckClientState( void )
 #if XASH_DODGC_NETWORK
 		Con_Reportf( "GameCube DoD: gameplay active server=%s signon=%d\n", cls.servername, cls.signon );
 		GC_HeapCheck( "gameplay active" );
+		GC_HeapCheckArm( true );
 		GC_NetReportStatus( "gameplay" );
 		GCube_AppendSwissEvidence( "GameCube DoD: gameplay active signon=%d", cls.signon );
 #endif
@@ -4309,6 +4310,9 @@ int gc_menu_step_frames;
 
 void Host_ClientFrame( void )
 {
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "client frame enter" );
+#endif
 #if XASH_GAMECUBE
 	static int gc_fullphysics_client_log;
 	static int gc_connect_frame_log;

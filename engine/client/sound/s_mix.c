@@ -559,6 +559,9 @@ void S_ClearBuffers( int num_samples )
 
 void S_PaintChannels( int endtime )
 {
+#if XASH_GAMECUBE
+	{ void GC_HeapCheckArmed( const char *tag ); GC_HeapCheckArmed( "paint channels enter" ); }
+#endif
 	int gain = S_GetMasterVolume() * 256;
 
 	while( snd.paintedtime < endtime )

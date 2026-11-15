@@ -781,6 +781,9 @@ void Host_Frame( double time )
 
 	double t1 = Platform_DoubleTime();
 
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "host frame enter" );
+#endif
 	GC_WatchdogMark( "host frame" );
 #if XASH_GAMECUBE
 	GC_ProfFrame();
