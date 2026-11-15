@@ -62,8 +62,10 @@ typedef int qboolean;
 #define true 1
 #define false 0
 #define GC_STUDIO_BSS_BYTES 256
+#define GC_STUDIO_MODEL_LIMIT ( GC_STUDIO_BSS_BYTES - gc_studio_skin_top )
 static byte gc_studio_bss[GC_STUDIO_BSS_BYTES] __attribute__((aligned(32)));
-static size_t gc_studio_bss_bump;
+static size_t gc_studio_bss_bump, gc_studio_skin_top;
+static unsigned gc_studio_skin_live;
 static int gc_studio_bss_owners;
 static int Sys_CheckParm(const char *s) { (void)s; return 0; }
 static void Con_Reportf(const char *s, ...) { (void)s; }
@@ -116,6 +118,8 @@ static struct {
          alphamap[64], mapload_pad[128];
 } vid __attribute__((aligned(32)));
 static qboolean gc_renderer_trimmed, gc_static_map_arena_in_use, gc_static_map_arena_dirty;
+static qboolean gc_static_map_arena_ever_used;
+static size_t gc_boot_pad_pin_bytes;
 static void log_msg(const char *fmt, ...) { (void)fmt; }
 static struct { void (*Con_Reportf)(const char *, ...); } gEngfuncs = { log_msg };
 static const char *Q_memprint(size_t n) { (void)n; return "size"; }
@@ -162,9 +166,9 @@ int main(void) {
 typedef unsigned char byte;
 static byte storage[600] __attribute__((aligned(32)));
 static byte *gc_mapload_buf;
-static size_t gc_mapload_buf_size, gc_mapload_tail_highwater;
+static size_t gc_mapload_buf_size, gc_mapload_tail_highwater, gc_mapload_tail_peak;
 static int gc_mapload_buf_in_use, entity_reserved;
-static int SV_GCPrivateOverflowReserved(void) { return entity_reserved; }
+static int SV_GCPrivateOverflowPinsMapArena(void) { return entity_reserved; }
 static void Con_Reportf(const char *format, ...) { (void)format; }
 '''
         fixture += "void *GC_MapLoadBufferTailAlloc(" + function
@@ -259,11 +263,12 @@ int main(void) {
 #include <stddef.h>
 #include <stdlib.h>
 typedef unsigned char byte;
+typedef int qboolean;
 static byte arena[64];
 static byte *gc_mapload_buf = arena;
 static size_t gc_mapload_buf_size = sizeof(arena);
 static int gc_mapload_buf_in_use, entity_reserved, release_calls;
-static int SV_GCPrivateOverflowReserved(void) { return entity_reserved; }
+static int SV_GCPrivateOverflowPinsMapArena(void) { return entity_reserved; }
 static int R_GCReleaseMapLoadStaticArena(void *p) {
     assert(p == arena); release_calls++; return 1;
 }
@@ -303,12 +308,23 @@ int main(void) {
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <malloc.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 typedef unsigned char byte;
 typedef int qboolean;
+#define true 1
+#define false 0
+#define Q_strnicmp strncasecmp
 #define GC_ENTITY_OVERFLOW_BYTES (64u * 1024u)
+static struct { char name[64]; } sv = { "c1a0" };
+static size_t heap_free;
+static size_t GC_MemHeapFreeBytes(void) { return heap_free; }
+static void Image_GCPurgeDecodeScratch(void) {}
 static byte storage[GC_ENTITY_OVERFLOW_BYTES] __attribute__((aligned(32)));
 static byte *gc_ent_priv_overflow;
+static qboolean gc_ent_priv_overflow_from_tip;
 static byte gc_ent_priv_overflow_bits[GC_ENTITY_OVERFLOW_BYTES / 16 / 8];
 static size_t gc_ent_priv_overflow_capacity, gc_ent_priv_overflow_used;
 static int calls;
@@ -343,6 +359,23 @@ int main(void) {
     assert(gc_ent_priv_overflow_used == 0);
     assert(SV_GCPrivateOverflowAlloc(49152) == storage);
     assert(SV_GCPrivateOverflowAlloc(16) == NULL);
+    assert(SV_GCPrivateOverflowPinsMapArena());
+
+    /* No arena tail: the reservation comes from the heap and must not pin
+     * the map arena. */
+    gc_ent_priv_overflow = NULL;
+    heap_free = 1u << 20;
+    SV_GCReservePrivateOverflow(0, 49152);
+    assert(SV_GCPrivateOverflowReserved() && !SV_GCPrivateOverflowPinsMapArena());
+    assert(gc_ent_priv_overflow != storage && gc_ent_priv_overflow_capacity == 49152);
+    free(gc_ent_priv_overflow);
+
+    /* DoD maps keep a smaller reserve. */
+    gc_ent_priv_overflow = NULL;
+    heap_free = 0;
+    strcpy(sv.name, "dod_charlie");
+    SV_GCReservePrivateOverflow(128, 49152);
+    assert(SV_GCPrivateOverflowPinsMapArena() && gc_ent_priv_overflow_capacity == 8192);
     return 0;
 }
 '''
