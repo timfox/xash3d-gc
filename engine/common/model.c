@@ -59,6 +59,15 @@ static qboolean Mod_GCMapModelSpillAfterWorldDL( void )
 	return true;
 }
 
+/* Map props and player bodies go to the world-array spill first: a team
+ * body's mesh core is about 265 KiB, and the studio arena has to keep room
+ * for viewmodels, skins and the animation pool. */
+static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
+{
+	return Q_stristr( model_path, "mapmodels/" ) != NULL
+		|| Q_stristr( model_path, "models/player" ) != NULL;
+}
+
 /* Real MDLs live in the 1 MiB studio BSS arena (lean meshes + viewweapons).
  * Stubbing left GetEyePosition null and stalled denser maps during spawn —
  * the GameCube can hold the early-campaign cast without that compromise. */
@@ -645,6 +654,9 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		"by_canopy", "arc_xer_tree2", "furniture", "bulb",
 		/* dod_avalanche env_models — full-fidelity props (ava-prop-1). */
 		"sherman", "jagd", "by_banister", "flags",
+		/* DoD team bodies, split into a mesh core plus an animation pack
+		 * (dod-gc tools/split_studio_mdl.py --pack). */
+		"axis-inf", "axis-para", "brit-inf", "us-inf", "us-para",
 		NULL
 	};
 	static const char *views[] = {
@@ -808,7 +820,7 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			/* Mapmodels prefer world-array spill so the 184 KiB studio BSS
 			 * stays free for the team viewmodel (ava-prop-2 tip≈6 KiB).
 			 * Only after WorldDL owns its chunk-cache slice. */
-			if( Q_stristr( model_path, "mapmodels/" )
+			if( Mod_GCStudioPrefersSpill( model_path )
 				&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 				&& Mod_GCMapModelSpillAfterWorldDL())
 			{
@@ -889,7 +901,7 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				/* Map props: WorldDL listen leaves spill headroom (chunk cache
 				 * capped at 192 KiB). Stream lean mesh there — tip heap is dead.
 				 * Gate on WorldDL Active so props cannot starve the cache. */
-				if( Q_stristr( model_path, "mapmodels/" )
+				if( Mod_GCStudioPrefersSpill( model_path )
 					&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 					&& Mod_GCAllowRealStudioLoad( model_path, (size_t)flen )
 					&& Mod_GCMapModelSpillAfterWorldDL())
