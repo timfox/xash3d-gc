@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "r_local.h"
 #if XASH_GAMECUBE
+#include <gccore.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 #endif
 
@@ -1263,6 +1264,75 @@ int R_GCPackedTexture( const char *name, int width, int height, int levels, qboo
 	tex->gc_packed_levels = (byte)levels;
 	tex->gc_packed_alpha = (byte)alpha;
 	tex->gc_packed_queued = false;
+	return tex - r_images;
+}
+
+/*
+================
+R_GCBakedCmprSkin
+
+A studio skin the disc build already encoded as GX CMPR (STUDIO_NF_GC_CMPR in
+a gc_studio companion).  The texels are copied into the studio skin window as
+they are: no palette decode, no RGBA scratch, no encode at load.
+Returns the texture number, 0 when there is no room for it.
+================
+*/
+int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int height, qboolean masked )
+{
+	const size_t bytes = R_GXCmprBytes( width, height );
+	const qboolean in_arena = r_gc_studio_skins_in_arena;
+	image_t *tex;
+	byte *dst;
+
+	if( !GL_CheckTexName( name ) || !texels || width < 8 || height < 8
+		|| ( width & 7 ) || ( height & 7 ) || width > 1024 || height > 1024 )
+		return 0;
+	if(( tex = GL_TextureForName( name )) != NULL )
+		return tex - r_images;
+	tex = GL_AllocTexture( name, TF_NOMIPMAP );
+	r_gc_studio_skins_in_arena = true;
+	dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+	r_gc_studio_skins_in_arena = in_arena;
+	if( !dst )
+		dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+	if( !dst )
+	{
+		static int baked_fail_logs;
+
+		if( baked_fail_logs++ < 4 )
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: baked CMPR skin %s no room (%s, window left %s)\n",
+				name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
+		/* Unlink the slot again so a later load can retry. */
+		{
+			image_t **prev = &r_imagesHashTable[tex->hashValue];
+
+			while( *prev && *prev != tex )
+				prev = &( *prev )->nextHash;
+			if( *prev )
+				*prev = tex->nextHash;
+		}
+		memset( tex, 0, sizeof( *tex ));
+		return 0;
+	}
+	memcpy( dst, texels, bytes );
+	DCFlushRange( dst, (u32)bytes );
+	tex->width = tex->srcWidth = width;
+	tex->height = tex->srcHeight = height;
+	tex->depth = 1;
+	tex->alpha_pixels = NULL;
+	tex->pixels[0] = (pixel_t *)dst;
+	tex->gc_gx_native = true;
+	tex->gc_gx_native_alpha = masked ? 1 : 0;
+	tex->gc_gx_cmpr = 1;
+	tex->numMips = 1;
+	tex->size = bytes;
+	{
+		static int baked_logged;
+
+		if( baked_logged++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: baked CMPR skin %s %dx%d (%s)\n",
+				name, width, height, Q_memprint( bytes ));
+	}
 	return tex - r_images;
 }
 

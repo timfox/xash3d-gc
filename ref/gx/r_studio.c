@@ -3931,6 +3931,23 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 	const byte *gc_skin_src = NULL;
 #endif
 
+#if XASH_GAMECUBE
+	/* Baked by the disc build: GX CMPR texels, used as they are. */
+	if( FBitSet( ptexture->flags, STUDIO_NF_GC_CMPR ))
+	{
+		Q_strncpy( mdlname, mod->name, sizeof( mdlname ));
+		COM_FileBase( ptexture->name, name, sizeof( name ));
+		COM_StripExtension( mdlname );
+		Q_snprintf( texname, sizeof( texname ), "#%s/%s.mdl", mdlname, name );
+		ptexture->index = R_GCBakedCmprSkin( texname, (const byte *)phdr + ptexture->index,
+			ptexture->width, ptexture->height, FBitSet( ptexture->flags, STUDIO_NF_MASKED ));
+		ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR );	/* index is a texture number from here on */
+		if( !ptexture->index )
+			ptexture->index = tr.defaultTexture;
+		return;
+	}
+#endif
+
 	if( ptexture->flags & STUDIO_NF_NORMALMAP )
 		flags |= ( TF_NORMALMAP );
 

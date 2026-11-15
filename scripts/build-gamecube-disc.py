@@ -353,6 +353,9 @@ def write_bootstrap_pk3(
 		studio_count = inject_gc_studio_into_bootstrap(archive, data)
 		if studio_count:
 			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
+		player_count = inject_gc_player_models(archive, data)
+		if player_count:
+			print(f"GameCube player models: injected {player_count} file(s) into bootstrap pk3")
 		hud_count = inject_gc_hud_into_bootstrap(archive, data)
 		if hud_count:
 			print(f"GameCube HUD mirror: injected {hud_count} sprite(s) into bootstrap pk3")
@@ -2502,6 +2505,117 @@ def lean_studio_tex_companion_bytes(src: Path, max_edge: int = 64) -> bytes | No
 	return bytes(out)
 
 
+STUDIO_NF_MASKED = 0x40
+STUDIO_NF_GC_CMPR = 1 << 28  # keep equal to STUDIO_NF_GC_CMPR in engine/studio.h
+
+
+def gc_cmpr_skin_edge(size: int, cap: int) -> int:
+	"""Baked edge for a source edge: the power of two nearest in log terms,
+	8..cap (same rule as R_GXCmprPow2 in ref/gx/r_gx_cmpr.c)."""
+	edge = 8
+	while edge < cap and 2 * edge * edge < size * size:
+		edge <<= 1
+	return edge
+
+
+def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128) -> bytes | None:
+	"""A gc_studio/<stem>t.mdl whose skins are already GX CMPR.
+
+	Same layout as lean_studio_tex_companion_bytes (header, texture structs,
+	skin table, texel blobs), but each texture carries STUDIO_NF_GC_CMPR and
+	its blob is width*height/2 bytes of big-endian CMPR blocks, 32-byte
+	aligned in the file. The engine copies them into the skin window as they
+	are (R_GCBakedCmprSkin): no palette decode and no encode at load.
+	Colour-remap textures (DM_Base, remap*) stay palettised.
+	"""
+	try:
+		import numpy as np
+		from PIL import Image
+	except ImportError:
+		return None
+	try:
+		raw = src.read_bytes()
+	except OSError:
+		return None
+	if len(raw) < 244 or raw[:4] not in (b"IDST", b"IDSQ"):
+		return None
+	numtextures = struct.unpack_from("<i", raw, 180)[0]
+	textureindex = struct.unpack_from("<i", raw, 184)[0]
+	numskinref = struct.unpack_from("<i", raw, 192)[0]
+	numskinfamilies = struct.unpack_from("<i", raw, 196)[0]
+	skinindex = struct.unpack_from("<i", raw, 200)[0]
+	if numtextures <= 0 or textureindex <= 0 or textureindex + numtextures * 80 > len(raw):
+		return None
+
+	skin_bytes = b""
+	if numskinref > 0 and numskinfamilies > 0 and skinindex > 0 \
+			and skinindex + numskinref * numskinfamilies * 2 <= len(raw):
+		skin_bytes = raw[skinindex : skinindex + numskinref * numskinfamilies * 2]
+	else:
+		numskinref = numskinfamilies = 0
+
+	tex_table = 244
+	skin_table = tex_table + numtextures * 80
+	out = bytearray(skin_table + len(skin_bytes))
+	out[0:4] = b"IDST"
+	struct.pack_into("<i", out, 4, 10)
+	out[8:72] = raw[8:72]
+	out[skin_table:] = skin_bytes
+	data_start = None
+
+	for i in range(numtextures):
+		off = textureindex + i * 80
+		name = raw[off : off + 64]
+		flags, width, height, index = struct.unpack_from("<iiii", raw, off + 64)
+		if width <= 0 or height <= 0 or index < 0 or index + width * height + 768 > len(raw):
+			return None
+		pixels = raw[index : index + width * height]
+		palette = raw[index + width * height : index + width * height + 768]
+		label = name.split(b"\0")[0].lower()
+		while len(out) % 32:
+			out.append(0)
+		if data_start is None:
+			data_start = len(out)
+		dst = tex_table + i * 80
+		out[dst : dst + 64] = name
+		if label.startswith(b"dm_base") or label.startswith(b"remap") or width < 8 or height < 8:
+			struct.pack_into("<iiii", out, dst + 64, flags, width, height, len(out))
+			out += pixels + palette
+			continue
+		nw, nh = gc_cmpr_skin_edge(width, max_edge), gc_cmpr_skin_edge(height, max_edge)
+		pal = np.frombuffer(palette, np.uint8).reshape(256, 3)
+		idx = np.frombuffer(pixels, np.uint8).reshape(height, width)
+		masked = bool(flags & STUDIO_NF_MASKED)
+		opaque = (idx != 255) if masked else np.ones((height, width), bool)
+		rgb = pal[idx]
+		if masked and not opaque.all() and opaque.any():
+			# Cut-out texels take the mean opaque colour so the filter does
+			# not bleed the key colour into the edges.
+			rgb = rgb.copy()
+			rgb[~opaque] = rgb[opaque].mean(0).astype(np.uint8)
+		if (nw, nh) != (width, height):
+			rgb = np.asarray(Image.fromarray(rgb, "RGB").resize((nw, nh), Image.Resampling.LANCZOS))
+			opaque = np.asarray(
+				Image.fromarray(opaque.astype(np.uint8) * 255, "L").resize((nw, nh), Image.Resampling.NEAREST)
+			) >= 128
+		blob = gx_cmpr_encode_blocks(np.ascontiguousarray(rgb), np.ascontiguousarray(opaque))
+		if len(blob) != nw * nh // 2:
+			return None
+		# Chrome/additive are dropped as in the palettised companion.
+		keep = (flags & STUDIO_NF_MASKED) | STUDIO_NF_GC_CMPR
+		struct.pack_into("<iiii", out, dst + 64, keep, nw, nh, len(out))
+		out += blob
+
+	struct.pack_into("<i", out, 72, len(out))
+	struct.pack_into("<i", out, 180, numtextures)
+	struct.pack_into("<i", out, 184, tex_table)
+	struct.pack_into("<i", out, 188, data_start if data_start is not None else len(out))
+	struct.pack_into("<i", out, 192, numskinref)
+	struct.pack_into("<i", out, 196, numskinfamilies)
+	struct.pack_into("<i", out, 200, skin_table if skin_bytes else 0)
+	return bytes(out)
+
+
 def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
 	"""Add allowlisted MDLs into an existing bootstrap ZIP under gc_studio/."""
 	staged = 0
@@ -2609,6 +2723,127 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 					f"  lean studio tex {stem}t.mdl: {src.stat().st_size} → {len(tex_payload)} bytes"
 				)
 				staged += 1
+	return staged
+
+
+# DoD team bodies. Each retail model is about 3.9 MB, of which 3.7 MB is
+# animation. The splitter in dod-gc (tools/split_studio_mdl.py) moves the
+# animation into a big-endian pack the engine streams one sequence at a time
+# (Mod_GCAnimPackGet), leaving a mesh core of about 250 KB for gc_studio/.
+GC_PLAYER_MODELS = ("axis-inf", "axis-para", "brit-inf", "us-inf", "us-para")
+GC_PLAYER_PACK_PATH = "models/player/anim_%s.gca"
+GC_PLAYER_SKIN_EDGE = 128  # longest edge of a baked player skin
+
+
+def load_studio_splitter():
+	"""Import dod-gc's split_studio_mdl module, or None when it is not around."""
+	import importlib.util
+
+	here = Path(__file__).resolve().parent.parent
+	candidates = []
+	raw = os.environ.get("DODGC_TOOLS", "").strip()
+	if raw:
+		candidates.append(Path(raw))
+	candidates += [
+		here.parent / "dod-gc" / "tools",
+		here.parent / "tools",
+		Path("/home/tim/Desktop/dod-gc/tools"),
+	]
+	for root in candidates:
+		path = root / "split_studio_mdl.py"
+		if path.is_file():
+			spec = importlib.util.spec_from_file_location("split_studio_mdl", path)
+			module = importlib.util.module_from_spec(spec)
+			spec.loader.exec_module(module)
+			return module
+	return None
+
+
+def find_player_model(roots, stem: str, suffix: str) -> Path | None:
+	"""models/player/<stem>/<stem><suffix>.mdl, ignoring case (retail uses 'T')."""
+	want = f"{stem}{suffix}.mdl".lower()
+	for root in roots:
+		folder = root / "models" / "player" / stem
+		if not folder.is_dir():
+			continue
+		for child in folder.iterdir():
+			if child.name.lower() == want:
+				return child
+	return None
+
+
+def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=None) -> int:
+	"""Split the DoD team bodies: core into gc_studio/, animation pack loose in data."""
+	roots = [data]
+	raw = os.environ.get("DODGC_FULL_DOD", "").strip()
+	if raw:
+		roots.append(Path(raw))
+	roots += [
+		Path("/home/tim/Desktop/dod-gc/content/dod"),
+		Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
+	]
+	found = [(stem, find_player_model(roots, stem, "")) for stem in GC_PLAYER_MODELS]
+	found = [(stem, src) for stem, src in found if src is not None]
+	if not found:
+		return 0
+	if splitter is None:
+		splitter = load_studio_splitter()
+	if splitter is None:
+		print("  player models: split_studio_mdl.py not found (set DODGC_TOOLS); team bodies not staged")
+		return 0
+	staged = 0
+	packs: dict[str, int] = {}
+	for stem, src in found:
+		try:
+			files, _ = splitter.split(src.read_bytes(), stem, pack_path=GC_PLAYER_PACK_PATH)
+		except Exception as exc:  # StudioError or a malformed file: skip this body
+			print(f"  player model {stem}: split failed ({exc})")
+			continue
+		core = files.get(stem + ".mdl")
+		if core is None:
+			continue
+		pack_rel = ""
+		for name, payload in files.items():
+			if not name.endswith(".gca"):
+				continue
+			pack_rel = name
+			if name not in packs:
+				dest = data / Path(GC_PLAYER_PACK_PATH).parent / name
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				if not dest.is_file() or dest.stat().st_size != len(payload):
+					dest.write_bytes(payload)
+				packs[name] = len(payload)
+		arcname = f"gc_studio/{stem}.mdl"
+		if arcname in archive.NameToInfo:
+			continue
+		archive.writestr(arcname, core, compress_type=zipfile.ZIP_STORED)
+		staged += 1
+		print(f"  player model {stem}: {src.stat().st_size} → core {len(core)} bytes, animation {pack_rel}")
+		# Skins: the retail <stem>T.mdl, or the textures the splitter took out.
+		tex_arc = f"gc_studio/{stem}t.mdl"
+		if tex_arc in archive.NameToInfo:
+			continue
+		tex_src = find_player_model(roots, stem, "t")
+		tex_payload = None
+		kind = "palettised"
+		if tex_src is not None:
+			# Native first: 128 px CMPR is 8 KB a skin, less than 64 px palettised.
+			tex_payload = gc_cmpr_skin_companion_bytes(tex_src, max_edge=GC_PLAYER_SKIN_EDGE)
+			if tex_payload:
+				kind = f"GX CMPR up to {GC_PLAYER_SKIN_EDGE} px"
+			else:
+				tex_payload = lean_studio_tex_companion_bytes(tex_src, max_edge=128)
+				if tex_payload and len(tex_payload) > 96 * 1024:
+					tex_payload = lean_studio_tex_companion_bytes(tex_src, max_edge=64)
+		if tex_payload:
+			archive.writestr(tex_arc, tex_payload, compress_type=zipfile.ZIP_STORED)
+			staged += 1
+			print(f"  player skins {stem}t.mdl: {tex_src.stat().st_size} → {len(tex_payload)} bytes ({kind})")
+		else:
+			print(f"  player skins {stem}: no {stem}T.mdl found, body will draw untextured")
+	if packs:
+		total = sum(packs.values())
+		print(f"  player animation: {len(packs)} pack(s), {total} bytes, in {data / 'models' / 'player'}")
 	return staged
 
 
