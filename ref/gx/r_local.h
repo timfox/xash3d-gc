@@ -1400,5 +1400,6 @@ void R_SetUpWorldTransform( void );
 void R_GXCmprSkinSize( int w, int h, int *ow, int *oh );
 size_t R_GXCmprBytes( int w, int h );
 qboolean R_GXEncodeCmprSkin( const byte *src, int sw, int sh, int dw, int dh, qboolean masked, byte *dst );
+int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int height, qboolean masked );
 #endif
 #endif // GL_LOCAL_H
