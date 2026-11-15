@@ -4126,7 +4126,7 @@ static void CL_InitLocal( void )
 #if XASH_GAMECUBE
 	/* Registered here, before listenserver.cfg runs, so a plain
 	 * "gc_facebot 1" line in it takes effect (see the lean emitter). */
-	Cvar_Get( "gc_facebot", "0", 0, "GameCube test: aim the view at the nearest other player" );
+	Cvar_Get( "gc_facebot", "0", 0, "GameCube test: 1 aims the view at the nearest other player, 2 also moves next to it once" );
 #endif
 
 	Cvar_RegisterVariable( &cl_nosmooth );

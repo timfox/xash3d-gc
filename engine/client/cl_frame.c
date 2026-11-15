@@ -1916,8 +1916,52 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( near_e && (( gc_facebot && gc_facebot->value != 0.0f ) || Sys_CheckParm( "-gcfacebot" )))
 			{
 				static int facebot_logs;
+				static qboolean facebot_moved;
 				vec3_t dir, ang;
 
+				/* gc_facebot 2: also move the local player, once, to a free
+				 * spot next to the bot (a hull trace out from the bot in 8
+				 * directions, longest clear one), so walls between the spawn
+				 * and the bot cannot hide it. */
+				if( gc_facebot && gc_facebot->value >= 2.0f && !facebot_moved
+					&& player && SV_IsValidEdict( player ))
+				{
+					float best = 0.0f;
+					vec3_t best_pos;
+					int k;
+
+					for( k = 0; k < 8; k++ )
+					{
+						float a = (float)k * ( M_PI_F / 4.0f );
+						vec3_t end;
+						trace_t tr;
+						float clear;
+
+						end[0] = near_org[0] + cosf( a ) * 240.0f;
+						end[1] = near_org[1] + sinf( a ) * 240.0f;
+						end[2] = near_org[2];
+						tr = SV_MoveNoEnts( near_org, player->v.mins, player->v.maxs, end, MOVE_NOMONSTERS, player );
+						if( tr.allsolid || tr.startsolid )
+							continue;
+						clear = tr.fraction * 240.0f;
+						if( clear > best )
+						{
+							best = clear;
+							VectorLerp( near_org, Q_min( clear - 16.0f, 200.0f ) / 240.0f, end, best_pos );
+						}
+					}
+					facebot_moved = true;
+					if( best >= 96.0f )
+					{
+						VectorCopy( best_pos, player->v.origin );
+						VectorClear( player->v.velocity );
+						SV_LinkEdict( player, false );
+						VectorCopy( best_pos, view_org );
+					}
+					Con_Reportf( "Xash3D GameCube: gc_facebot move %s to (%.0f %.0f %.0f), clear %.0f from player %d\n",
+						best >= 96.0f ? "done" : "skipped", best >= 96.0f ? best_pos[0] : 0.0f,
+						best >= 96.0f ? best_pos[1] : 0.0f, best >= 96.0f ? best_pos[2] : 0.0f, best, near_e );
+				}
 				VectorSubtract( near_org, view_org, dir );
 				VectorAngles( dir, ang );
 				if( ang[0] > 180.0f )
