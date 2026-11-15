@@ -11079,8 +11079,18 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( max_chars < 8 )
 		max_chars = 8;
 
-	GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
-		"HALF-LIFE", text, text_scale, 24 );
+	{
+		/* Header = the game's own title (gameinfo.txt "title" / liblist
+		 * "game"), upper-cased for the panel font. */
+		char title[25];
+		int ti;
+
+		Q_strncpy( title, ( GI && GI->title[0] ) ? GI->title : "HALF-LIFE", sizeof( title ));
+		for( ti = 0; title[ti]; ti++ )
+			title[ti] = Q_toupper( title[ti] );
+		GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
+			title, text, text_scale, 24 );
+	}
 #if XASH_GAMECUBE
 	if( compact )
 	{
