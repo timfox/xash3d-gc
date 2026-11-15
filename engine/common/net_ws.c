@@ -106,7 +106,14 @@ typedef struct
 	int		current_sequence;
 	int		split_count;
 	int		total_size;
+#if XASH_GAMECUBE
+	/* 32 KiB reassembly buffer taken from the heap on the first split packet and
+	 * returned when the message completes: a listen server rarely sees one, so
+	 * it should not sit in MEM1 .bss all session. */
+	char		*buffer;
+#else
 	char		buffer[NET_MAX_FRAGMENT];
+#endif
 } LONGPACKET;
 
 // use this to pick apart the network stream, must be packed
@@ -1384,12 +1391,21 @@ static qboolean NET_GetLong( byte *pData, size_t size, size_t *outSize, size_t s
 
 	size_t body_size = splitsize - header_size;
 	size_t offset = (size_t)packet_number * body_size;
-	if( offset + size > sizeof( net.split.buffer ))
+	if( offset + size > NET_MAX_FRAGMENT )
 	{
 		Con_Printf( S_ERROR "%s: split packet would overflow reassembly buffer (offset %zu + size %zu > %zu)\n",
-			__func__, offset, size, sizeof( net.split.buffer ));
+			__func__, offset, size, (size_t)NET_MAX_FRAGMENT );
 		return false;
 	}
+
+#if XASH_GAMECUBE
+	if( !net.split.buffer && !( net.split.buffer = (char *)malloc( NET_MAX_FRAGMENT )))
+	{
+		Con_Printf( S_ERROR "%s: no memory for split packet reassembly\n", __func__ );
+		net.split.current_sequence = -1;
+		return false;
+	}
+#endif
 
 	if( net.split_flags[packet_number] != sequence_number )
 	{
@@ -1414,14 +1430,22 @@ static qboolean NET_GetLong( byte *pData, size_t size, size_t *outSize, size_t s
 	{
 		net.split.current_sequence = -1; // Clear packet
 
-		if( net.split.total_size > sizeof( net.split.buffer ))
+		if( net.split.total_size > NET_MAX_FRAGMENT )
 		{
 			Con_Printf( "Split packet too large! %d bytes\n", net.split.total_size );
+#if XASH_GAMECUBE
+			free( net.split.buffer );
+			net.split.buffer = NULL;
+#endif
 			return false;
 		}
 
 		memcpy( pData, net.split.buffer, net.split.total_size );
 		*outSize = net.split.total_size;
+#if XASH_GAMECUBE
+		free( net.split.buffer );
+		net.split.buffer = NULL;
+#endif
 
 		return true;
 	}

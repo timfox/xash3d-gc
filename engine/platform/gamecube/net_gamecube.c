@@ -379,6 +379,27 @@ int GC_NetBringUp( int max_retries )
 	gc_net_ip[0] = gc_net_mask[0] = gc_net_gw[0] = '\0';
 	Con_Reportf( "Xash3D GameCube: net bring-up (BBA/eth2sp1 via libogc, dhcp retries=%d)\n",
 		max_retries );
+#if XASH_GAMECUBE_LIBOGC2
+	{
+		/* lwIP heap, RX pbuf pool and net thread stack come from the libc heap at
+		 * bring-up (libogc2-lwip-dynamic.patch) instead of ~150 KiB of worst-case
+		 * .bss. Defaults suit 2-4 player UDP play; -gcnetmem / -gcnetpbufs /
+		 * -gcnetstack override them for tuning. Bring-up runs before the map
+		 * loads, so this memory is taken before the BSP needs it. */
+		extern void net_set_budget( u32 mem_size, u32 pbuf_pool, u32 stack_size );
+		char arg[16];
+		u32 mem = 24 * 1024, pool = 12, stack = 16 * 1024;
+
+		if( Sys_GetParmFromCmdLine( "-gcnetmem", arg ) && Q_atoi( arg ) > 0 )
+			mem = (u32)Q_atoi( arg );
+		if( Sys_GetParmFromCmdLine( "-gcnetpbufs", arg ) && Q_atoi( arg ) > 0 )
+			pool = (u32)Q_atoi( arg );
+		if( Sys_GetParmFromCmdLine( "-gcnetstack", arg ) && Q_atoi( arg ) > 0 )
+			stack = (u32)Q_atoi( arg );
+		net_set_budget( mem, pool, stack );
+		Con_Reportf( "Xash3D GameCube: lwIP budget heap=%u pbufs=%u stack=%u (malloc at bring-up)\n", mem, pool, stack );
+	}
+#endif
 	/* if_config() owns net_init internally. Calling net_init() first hangs
 	 * Dolphin BuiltIn BBA (guest never returns from EXI bring-up). */
 	if( Sys_CheckParm( "-netstatic" ) || !gc_net_dhcp.value )
