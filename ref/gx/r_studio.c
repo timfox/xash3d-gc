@@ -1024,6 +1024,24 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	f = R_StudioEstimateFrame( e, pseqdesc, g_studio.time );
 
 #if XASH_GAMECUBE
+	/* Player bodies: sample the frame clock now and then, to tell a still
+	 * idle from a frozen clock (ceres ae635f9: byte-identical shots). */
+	if( e->player )
+	{
+		static int player_frame_calls, player_frame_logs;
+
+		if( player_frame_logs < 8 && ( player_frame_calls++ % 120 ) == 0 )
+		{
+			player_frame_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player bones %s seq=%d '%s' f=%.2f/%d time=%.2f animtime=%.2f framerate=%.2f frame=%.0f interp=%d\n",
+				e->model ? e->model->name : "?", e->curstate.sequence, pseqdesc->label, f, pseqdesc->numframes,
+				g_studio.time, e->curstate.animtime, e->curstate.framerate, e->curstate.frame,
+				g_studio.interpolate ? 1 : 0 );
+		}
+	}
+#endif
+
+#if XASH_GAMECUBE
 	/* G377: play group-0 sequences (idle/walk in-base). Seqgroup 1+ still
 	 * Host_Error on missing scientist0N.mdl — clamp those to a group-0 idle.
 	 * Do not force frame 0; EstimateFrame drives the pose. */
