@@ -748,8 +748,10 @@ static void Mod_GCFreeBspPin( void **ptr )
 		return;
 	}
 
+	GC_WatchdogStage( "bsp pin heap free" );
 	free( *ptr );
 	*ptr = NULL;
+	GC_WatchdogStage( "bsp pin freed" );
 }
 #endif
 #include "swaplib.h"
@@ -9188,7 +9190,9 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		size_t texinfo_bytes = mod->numtexinfo * sizeof( mtexinfo_t );
 		qboolean texinfo_heap_owned = false;
 
+		GC_WatchdogStage( "texinfo pin malloc" );
 		pinned = malloc( texinfo_bytes );
+		GC_WatchdogStage( "texinfo pin copy" );
 		if( pinned )
 		{
 			memcpy( pinned, mod->texinfo, texinfo_bytes );
@@ -9231,7 +9235,9 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 	gc_retain_bsp_source_buffer = false;
 	Con_Reportf( "Xash3D GameCube: releasing gcmap BSP staging %s before surfaces\n",
 		Q_memprint( bufferlen ));
+	GC_WatchdogStage( "bsp source buffer release" );
 	Mod_GCReleaseBspSourceBuffer( mod, bmod, mod_base, bufferlen );
+	GC_WatchdogStage( "bsp source buffer released" );
 	if( !gc_faces_source_alias && !bmod->surfaces && gc_faces_tail_copy )
 		bmod->surfaces = gc_faces_tail_copy;
 	/* Staging lumps are cleared, but the map-load arena stays allocated
@@ -11894,8 +11900,13 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	else
 		Con_Reportf( "Xash3D GameCube: CapFaces lean — skip face ensure (%zu faces)\n",
 			bmod->numsurfaces );
+	/* Stage names for the watchdog: a stall here used to report only the
+	 * last breadcrumb from the server ("map buffer prepared"). */
+	GC_WatchdogStage( "pre-surface lump free" );
 	Mod_GCFreeGcmapPreSurfaceLumps( bmod );
+	GC_WatchdogStage( "pre-surface staging release" );
 	Mod_GCReleaseGcmapPreSurfaceStaging( mod, bmod, mod_base, bufferlen );
+	GC_WatchdogStage( "pre-surface staging released" );
 	if( !gc_capfaces_lean_surfaces )
 		Mod_GCRefreshClampedSurfaceSlot( mod, bmod );
 	else
@@ -11905,7 +11916,9 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 		GC_MapLoadBufferLowerTailHighwater( 0 );
 		Con_Reportf( "Xash3D GameCube: CapFaces lean — cleared surface high-slot for leafs/nodes\n" );
 	}
+	GC_WatchdogStage( "pre-surfaces sample" );
 	GC_MemSample( "pre-surfaces" );
+	GC_WatchdogStage( "surfaces load" );
 	if( !gc_capfaces_lean_surfaces
 		&& bmod->numsurfaces
 		&& ( bmod->version == QBSP2_VERSION ? !bmod->surfaces32 : !bmod->surfaces ))
