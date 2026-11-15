@@ -1438,6 +1438,32 @@ fills the draw list (G315 solid=0). Pull nearby server brush edicts plus at
 most one already-resident world studio (not v_*) into the Flipper list.
 ===============
 */
+/* DoD animation token for a carried weapon, from its p_ model name
+ * (models/p_stg44.mdl -> "stg44"); the body's sequences are stand_<token>_aim. */
+static const char *CL_GCLeanDodAimToken( const char *wpath )
+{
+	static const struct { const char *model; const char *token; } map[] = {
+		{ "p_stg44", "stg44" }, { "p_mp40", "mp40" }, { "p_k98", "bolt" }, { "p_garand", "rifle" },
+		{ "p_tommy", "tommy" }, { "p_thompson", "tommy" }, { "p_spring", "bolt" }, { "p_amerk", "knife" },
+		{ "p_colt", "pistol" }, { "p_luger", "pistol" }, { "p_bar", "mg" }, { "p_mg42", "mg" },
+		{ "p_30cal", "30cal" }, { "p_bren", "bren" }, { "p_bazooka", "bazooka" }, { "p_pschreck", "pschreck" },
+		{ "p_spade", "spade" }, { "p_grenade", "gren" }, { "p_stick", "stick" },
+	};
+	const char *name;
+	int i;
+
+	if( !wpath || !wpath[0] )
+		return NULL;
+	name = Q_strrchr( wpath, '/' );
+	name = name ? name + 1 : wpath;
+	for( i = 0; i < (int)( sizeof( map ) / sizeof( map[0] )); i++ )
+	{
+		if( !Q_strnicmp( name, map[i].model, Q_strlen( map[i].model )))
+			return map[i].token;
+	}
+	return NULL;
+}
+
 /* First sequence of a studio header whose label contains `want`, or -1. */
 static int CL_GCLeanFindSeq( const studiohdr_t *hdr, const char *want )
 {
@@ -1981,6 +2007,33 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						gait = CL_GCLeanFindSeq( bh, "walk" );
 					else
 						gait = idle;
+					/* DoD bodies have no "idle"/"run" HL labels: sequence 0 is look_idle (arm held
+					 * out). Use the DoD ones: stand_/crouch_<weapon>_aim for the carried weapon,
+					 * dod_idle1, and dod_walk / dod_jog / dod_sprint for the legs. */
+					{
+						const char *tok = ed->v.weaponmodel ? CL_GCLeanDodAimToken( SV_GetString( ed->v.weaponmodel )) : NULL;
+						char label[48];
+						int aim = -1, dgait = -1;
+
+						if( tok )
+						{
+							Q_snprintf( label, sizeof( label ), "%s_%s_aim",
+								FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
+							aim = CL_GCLeanFindSeq( bh, label );
+						}
+						if( aim < 0 )
+							aim = CL_GCLeanFindSeq( bh, "dod_idle1" );
+						if( speed > 200.0f )
+							dgait = CL_GCLeanFindSeq( bh, "dod_sprint" );
+						else if( speed > 120.0f )
+							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
+						else if( speed > 10.0f )
+							dgait = CL_GCLeanFindSeq( bh, "dod_walk" );
+						if( aim >= 0 )
+							idle = aim;
+						if( dgait >= 0 )
+							gait = dgait;
+					}
 					if( ed->v.sequence == 0 && idle >= 0 )
 						ent->curstate.sequence = idle;
 					if( ed->v.gaitsequence == 0 && gait >= 0 )
