@@ -1762,6 +1762,16 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			static int player_last_reject[MAX_CLIENTS + 1];
 			static qboolean player_body_tried[MAX_CLIENTS + 1];
 			static qboolean player_scan_logged;
+			static convar_t *gc_facebot;
+			int near_e = 0;
+			float near_d = 0.0f;
+			vec3_t near_org = { 0.0f, 0.0f, 0.0f };
+
+			/* gc_facebot 1 (console or listenserver.cfg): turn the local view
+			 * toward the nearest drawn player each frame, so a fixed test
+			 * run can capture a bot without steering. */
+			if( !gc_facebot )
+				gc_facebot = Cvar_Get( "gc_facebot", "0", 0, "GameCube test: aim the view at the nearest other player" );
 
 			if( !player_scan_logged )
 			{
@@ -1883,14 +1893,43 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->latched.prevanimtime = ent->curstate.animtime;
 				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 				{
+					float d = VectorLength( delta );
+
 					studios++;
 					studio_slots++;
+					if( !near_e || d < near_d )
+					{
+						near_e = e;
+						near_d = d;
+						VectorCopy( ed->v.origin, near_org );
+					}
 					if( player_logs < 8 )
 					{
 						player_logs++;
-						Con_Reportf( "Xash3D GameCube: lean emit player %d model=%s userinfo=%s seq=%d dist=%.0f\n",
-							e, mod->name, cl.players[e - 1].model, ed->v.sequence, VectorLength( delta ));
+						Con_Reportf( "Xash3D GameCube: lean emit player %d model=%s userinfo=%s seq=%d dist=%.0f org=(%.0f %.0f %.0f) yaw=%.0f\n",
+							e, mod->name, cl.players[e - 1].model, ed->v.sequence, d,
+							ed->v.origin[0], ed->v.origin[1], ed->v.origin[2],
+							RAD2DEG( atan2f( delta[1], delta[0] )));
 					}
+				}
+			}
+			if( near_e && gc_facebot && gc_facebot->value != 0.0f )
+			{
+				static int facebot_logs;
+				vec3_t dir, ang;
+
+				VectorSubtract( near_org, view_org, dir );
+				VectorAngles( dir, ang );
+				if( ang[0] > 180.0f )
+					ang[0] -= 360.0f;
+				cl.viewangles[PITCH] = -ang[PITCH];
+				cl.viewangles[YAW] = ang[YAW];
+				cl.viewangles[ROLL] = 0.0f;
+				if( facebot_logs < 4 )
+				{
+					facebot_logs++;
+					Con_Reportf( "Xash3D GameCube: gc_facebot aim at player %d dist=%.0f angles=(%.0f %.0f)\n",
+						near_e, near_d, cl.viewangles[PITCH], cl.viewangles[YAW] );
 				}
 			}
 		}
