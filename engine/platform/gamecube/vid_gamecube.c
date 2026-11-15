@@ -11035,6 +11035,9 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	int bar_x, bar_y, bar_w, bar_h;
 	unsigned short text = GC_RGB8To565( GC_VGUI_TEXT_R, GC_VGUI_TEXT_G, GC_VGUI_TEXT_B );
 	const char *detail_line;
+	/* Lost Coast loading plaque: title bar plus a centred progress bar, no
+	 * status lines (Tim's mockup). Fatal panels keep the full layout. */
+	const qboolean compact = !top_aligned && GI && !Q_stricmp( GI->gamefolder, "lostcoast" );
 
 	panel_x = width * GC_VIDEO_SAFE_AREA_PERCENT / 100;
 	panel_w = width - panel_x * 2;
@@ -11057,6 +11060,13 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( header_h > panel_h / 3 )
 		header_h = panel_h / 3;
 
+	if( compact )
+	{
+		bar_h = height >= 240 ? 10 : 6;
+		panel_h = header_h + bar_h + pad * 3;
+		panel_y = height - panel_h - height * GC_VIDEO_SAFE_AREA_PERCENT / 100;
+	}
+
 	GC_DrawVguiBevelPanel( dst, width, height, stride, panel_x, panel_y, panel_w, panel_h, header_h );
 
 	text_x = panel_x + pad + 2;
@@ -11071,6 +11081,16 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 
 	GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
 		"HALF-LIFE", text, text_scale, 24 );
+#if XASH_GAMECUBE
+	if( compact )
+	{
+		bar_x = panel_x + pad * 2;
+		bar_w = panel_w - pad * 4;
+		bar_y = panel_y + header_h + ( panel_h - header_h - bar_h ) / 2;
+		GC_DrawProgressBar( dst, width, height, stride, bar_x, bar_y, bar_w, bar_h, gc_loading_progress );
+		return;
+	}
+#endif
 	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
 		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
 	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
