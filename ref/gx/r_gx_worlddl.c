@@ -32,6 +32,7 @@ void R_GXPropDrawHorizon( const float *org );
 #define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
 #define GC_WD_MAT_BASEALPHA	0x08	/* $basealphaenvmapmask — no sand IndTex */
+#define GC_WD_MAT_ENVNOMASK	0x10	/* $envmap without a mask */
 #define GC_WD_MAX_MATS		512
 #define GC_WD_MAX_CHUNKS	6144
 #define GC_WD_ST_FRAC		9
@@ -1173,28 +1174,51 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 }
 
 /*
- * $envmap on up-facing surfaces (wet sand, floors, roofs).
+ * $envmap reflections (wet sand, rock, roofs, plaster, metal).
  *
  * LightmappedGeneric adds ( cubemap x mask x $envmaptint )^2 in linear light
  * ($envmapcontrast 1), the cubemap being the env_cubemap sample VBSP patched
- * into the material. The bake carries all of it: media/cm_<map>.gcm holds
- * each HDR cubemap's upper hemisphere on the tangent plane z = 1 (linear,
- * square root), the material record names its cubemap and tint, and the
- * tevmat table has the authored mask. For a level surface the mirror
- * direction of the view ray through P is ( P.x - eye.x, P.y - eye.y,
- * eye.z - P.z ), so the lookup R.xy / R.z is one projective texgen from the
- * vertex position. The cubemaps sit in ARAM; four stay resident.
+ * into the material. The bake carries all of it: the material record names
+ * its cubemap and tint, the tevmat table has the authored mask, and each
+ * reflective batch carries its surface normal n.
+ *
+ * GX has no cubemaps and cannot reflect a vector per vertex, but for a flat
+ * surface the mirror direction of the view ray through P is linear in P:
+ * R = H ( P - eye ), H = I - 2 n n^T. media/cm_<map>.gcm holds the HDR
+ * cubemaps resampled on planes a . d = 1 about a few axes a (linear, square
+ * root); with the plane's frame ( t, b ) the lookup ( R.t, R.b ) / R.a is one
+ * projective texgen from the vertex position. The maps sit in ARAM; a few
+ * stay resident.
  */
-#define GC_WD_ENV_SLOTS	4
+#define GC_WD_ENV_SLOTS_UP	16	/* ground views, side x side */
+#define GC_WD_ENV_SLOTS	48	/* then 32 small ones for walls, roofs, rock */
+#define GC_WD_ENV_MAXKEYS	512
+#define GC_WD_ENV_AXES	17
+#define GC_WD_ENVQ_MAX	384
 static int gc_wd_env_state;	/* 0 untried, 1 ready, -1 absent */
 static u32 gc_wd_env_aram, gc_wd_env_bytes, gc_wd_env_n;
-static float gc_wd_env_k;
+static u32 gc_wd_env_bytes_s, gc_wd_env_n_up;	/* small view bytes; views about the up axis come first */
+static u16 gc_wd_env_side_s;
+static float gc_wd_env_k, gc_wd_env_k_up;	/* plane half-width: sides, up */
 static u16 gc_wd_env_side;
 static byte *gc_wd_env_mem;
+static u16 gc_wd_env_keys[GC_WD_ENV_MAXKEYS];	/* axis * 256 + cubemap, sorted */
 static s16 gc_wd_env_cube[GC_WD_ENV_SLOTS];
 static int gc_wd_env_used[GC_WD_ENV_SLOTS];
 static GXTexObj gc_wd_env_obj[GC_WD_ENV_SLOTS];
 static u8 gc_wd_env_tint[64];
+static float gc_wd_env_axis[GC_WD_ENV_AXES][3];
+/* Reflective batches of resident chunks, drawn after the opaque world. */
+static struct { const byte *chunk; const gc_wd_batch_t *b; } gc_wd_envq[GC_WD_ENVQ_MAX];
+static int gc_wd_envq_n;
+static u8 gc_wd_env_white[32] __attribute__(( aligned( 32 )));
+static u32 gc_wd_env_stat[3];	/* view loads, views refused (slots busy), batches */
+/* The slot each axis last bound this frame: when every slot is busy a
+ * surface borrows its axis's last view (a neighbouring cubemap) instead of
+ * losing its reflection, which showed as hard edges between sand patches. */
+static s8 gc_wd_env_axis_slot[GC_WD_ENV_AXES];
+static int gc_wd_env_axis_frame[GC_WD_ENV_AXES];
+static GXTexObj gc_wd_env_white_obj;
 /* $bumpmap X/Y behind the reflection (media/en_<map>.bin), by mask index. */
 static u8 gc_wd_env_nrm_of[8];	/* slot + 1, 0 = flat */
 static GXTexObj gc_wd_env_nrm_obj[3];
@@ -1249,98 +1273,133 @@ static qboolean R_GXWorldDLEnvReady( void )
 	f = gEngfuncs.fsapi->Open( path, "rb", false );
 	if( !f || i != 64 )
 		return false;
-	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x4743434du && ( hdr[1] >> 16 ) == 3 )
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x4743434du && ( hdr[1] >> 16 ) == 5
+		&& ( hdr[1] & 0xffffu ) <= GC_WD_ENV_MAXKEYS )
 	{
 		gc_wd_env_n = hdr[1] & 0xffffu;
 		gc_wd_env_side = (u16)( hdr[2] >> 16 );
 		gc_wd_env_k = (float)( hdr[2] & 0xffffu ) * ( 1.0f / 256.0f );
+		gc_wd_env_k_up = (float)( hdr[3] >> 16 ) * ( 1.0f / 256.0f );
+		gc_wd_env_side_s = (u16)( hdr[3] & 0xffffu );
+		gc_wd_env_n_up = hdr[4] >> 16;
 		gc_wd_env_bytes = (u32)gc_wd_env_side * gc_wd_env_side / 2u;
-		tab = ( gc_wd_env_n * 8u + 31u ) & ~31u;
+		gc_wd_env_bytes_s = (u32)gc_wd_env_side_s * gc_wd_env_side_s / 2u;
+		tab = ( gc_wd_env_n * 2u + 31u ) & ~31u;
 		gc_wd_env_mem = (byte *)GC_MapLoadBufferTailAlloc(
 			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()),
-			GC_WD_ENV_SLOTS * gc_wd_env_bytes );
-		if( gc_wd_env_mem && gc_wd_env_k > 0.0f && !( gc_wd_env_bytes & 31u )
+			GC_WD_ENV_SLOTS_UP * gc_wd_env_bytes + ( GC_WD_ENV_SLOTS - GC_WD_ENV_SLOTS_UP ) * gc_wd_env_bytes_s );
+		if( gc_wd_env_mem && gc_wd_env_k > 0.0f && gc_wd_env_k_up > 0.0f && gc_wd_env_n_up <= gc_wd_env_n
+			&& gc_wd_env_bytes && !( gc_wd_env_bytes & 31u ) && gc_wd_env_bytes_s && !( gc_wd_env_bytes_s & 31u )
+			&& gc_wd_env_bytes_s <= gc_wd_env_bytes
+			&& gEngfuncs.fsapi->Read( f, gc_wd_env_keys, gc_wd_env_n * 2u ) == (fs_offset_t)( gc_wd_env_n * 2u )
 			&& gEngfuncs.fsapi->Seek( f, 32 + tab, SEEK_SET ) == 0
-			&& ( gc_wd_env_aram = GC_AramReserveTagged( gc_wd_env_n * gc_wd_env_bytes, "cubemaps" )) != 0 )
+			&& ( gc_wd_env_aram = GC_AramReserveTagged( gc_wd_env_n_up * gc_wd_env_bytes
+				+ ( gc_wd_env_n - gc_wd_env_n_up ) * gc_wd_env_bytes_s, "cubemaps" )) != 0 )
 		{
 			/* Slot 0 is the bounce while the pack goes up to ARAM. */
+			u32 at = 0;
+
 			for( i = 0; i < gc_wd_env_n; i++ )
 			{
-				if( gEngfuncs.fsapi->Read( f, gc_wd_env_mem, gc_wd_env_bytes ) != (fs_offset_t)gc_wd_env_bytes )
+				const u32 nb = i < gc_wd_env_n_up ? gc_wd_env_bytes : gc_wd_env_bytes_s;
+
+				if( gEngfuncs.fsapi->Read( f, gc_wd_env_mem, nb ) != (fs_offset_t)nb )
 					break;
-				GC_AramTransfer( gc_wd_env_aram + i * gc_wd_env_bytes, gc_wd_env_mem, gc_wd_env_bytes, true );
+				GC_AramTransfer( gc_wd_env_aram + at, gc_wd_env_mem, nb, true );
+				at += nb;
 			}
 			if( i == gc_wd_env_n )
 			{
 				for( i = 0; i < GC_WD_ENV_SLOTS; i++ )
 					gc_wd_env_cube[i] = -1;
+				/* Same list as tools/bake_lostcoast_cubemaps.py: up, eight
+				 * level directions, eight raised 45 degrees. */
+				gc_wd_env_axis[0][2] = 1.0f;
+				for( i = 0; i < 16; i++ )
+				{
+					const float az = (float)( i & 7u ) * ( M_PI_F / 4.0f );
+					const float ce = i < 8 ? 1.0f : 0.70710678f;
+
+					gc_wd_env_axis[1 + i][0] = cosf( az ) * ce;
+					gc_wd_env_axis[1 + i][1] = sinf( az ) * ce;
+					gc_wd_env_axis[1 + i][2] = i < 8 ? 0.0f : 0.70710678f;
+				}
+				memset( gc_wd_env_white, 0xff, sizeof( gc_wd_env_white ));
+				DCFlushRange( gc_wd_env_white, sizeof( gc_wd_env_white ));
+				GX_InitTexObj( &gc_wd_env_white_obj, gc_wd_env_white, 8, 8, GX_TF_I4,
+					GX_REPEAT, GX_REPEAT, GX_FALSE );
 				gc_wd_env_state = 1;
 				R_GXWorldDLEnvNormals();
 			}
 		}
 	}
 	gEngfuncs.fsapi->Close( f );
-	gEngfuncs.Con_Reportf( "Xash3D GameCube: env cubemaps %s: %u x %ux%u\n",
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: env cubemaps %s: %u views %ux%u\n",
 		gc_wd_env_state > 0 ? "ready" : "FAILED", (unsigned)gc_wd_env_n,
 		(unsigned)gc_wd_env_side, (unsigned)gc_wd_env_side );
 	return gc_wd_env_state > 0;
 }
 
-/* Bind cubemap `cube` on TEXMAP6. False when every slot is in use this frame. */
-static qboolean R_GXWorldDLEnvBind( int cube )
+/* Bind cubemap view `view` on TEXMAP6. False when every slot of its size is
+ * in use this frame. */
+static qboolean R_GXWorldDLEnvBind( int view, int axis )
 {
-	int i, victim = -1;
+	int i, victim = -1, s0, s1;
+	qboolean up;
 
-	if( cube < 0 || (u32)cube >= gc_wd_env_n )
+	if( view < 0 || (u32)view >= gc_wd_env_n )
 		return false;
-	for( i = 0; i < GC_WD_ENV_SLOTS; i++ )
+	up = (u32)view < gc_wd_env_n_up;
+	s0 = up ? 0 : GC_WD_ENV_SLOTS_UP;
+	s1 = up ? GC_WD_ENV_SLOTS_UP : GC_WD_ENV_SLOTS;
+	for( i = s0; i < s1; i++ )
 	{
-		if( gc_wd_env_cube[i] == cube )
+		if( gc_wd_env_cube[i] == view )
 			break;
 		if( gc_wd_env_used[i] != gc_wd_frame
 			&& ( victim < 0 || gc_wd_env_used[i] < gc_wd_env_used[victim] ))
 			victim = i;
 	}
-	if( i == GC_WD_ENV_SLOTS )
+	if( i == s1 )
 	{
+		const u32 nb = up ? gc_wd_env_bytes : gc_wd_env_bytes_s;
+		const u16 side = up ? gc_wd_env_side : gc_wd_env_side_s;
 		byte *mem;
 
 		if( victim < 0 )
-			return false;
+		{
+			gc_wd_env_stat[1]++;
+			if( gc_wd_env_axis_frame[axis] != gc_wd_frame )
+				return false;
+			GX_LoadTexObj( &gc_wd_env_obj[gc_wd_env_axis_slot[axis]], GX_TEXMAP6 );
+			return true;
+		}
+		gc_wd_env_stat[0]++;
 		i = victim;
-		mem = gc_wd_env_mem + (u32)i * gc_wd_env_bytes;
-		GC_AramTransfer( gc_wd_env_aram + (u32)cube * gc_wd_env_bytes, mem, gc_wd_env_bytes, false );
-		GX_InitTexObj( &gc_wd_env_obj[i], mem, gc_wd_env_side, gc_wd_env_side, GX_TF_CMPR,
-			GX_CLAMP, GX_CLAMP, GX_FALSE );
+		mem = up ? gc_wd_env_mem + (u32)i * gc_wd_env_bytes
+			: gc_wd_env_mem + GC_WD_ENV_SLOTS_UP * gc_wd_env_bytes + (u32)( i - GC_WD_ENV_SLOTS_UP ) * gc_wd_env_bytes_s;
+		GC_AramTransfer( gc_wd_env_aram + ( up ? (u32)view * gc_wd_env_bytes
+			: gc_wd_env_n_up * gc_wd_env_bytes + ( (u32)view - gc_wd_env_n_up ) * gc_wd_env_bytes_s ),
+			mem, nb, false );
+		GX_InitTexObj( &gc_wd_env_obj[i], mem, side, side, GX_TF_CMPR, GX_CLAMP, GX_CLAMP, GX_FALSE );
 		GX_InitTexObjFilterMode( &gc_wd_env_obj[i], GX_LINEAR, GX_LINEAR );
 		GX_InvalidateTexAll();
-		gc_wd_env_cube[i] = (s16)cube;
+		gc_wd_env_cube[i] = (s16)view;
 	}
 	gc_wd_env_used[i] = gc_wd_frame;
+	gc_wd_env_axis_slot[axis] = (s8)i;
+	gc_wd_env_axis_frame[axis] = gc_wd_frame;
 	GX_LoadTexObj( &gc_wd_env_obj[i], GX_TEXMAP6 );
 	return true;
 }
 
-/* Additive reflection state for one material. False: draw nothing. */
-static qboolean R_GXWorldDLEnvOn( const gc_wd_mat_t *m )
+/* State shared by every reflective batch. */
+static void R_GXWorldDLEnvBegin( void )
 {
-	const int mask = R_GXTevMatEnvMask( m->tevmat );
-	const float *eye = RI.rvp.vieworigin;
-	const float ik = 0.5f / gc_wd_env_k;
-	const u8 *t = &gc_wd_env_tint[( m->pad & 15u ) * 4u];
-	GXColor tint;
-	Mtx tm;
+	const GXColor black = { 0, 0, 0, 255 };
+	f32 zfar = RI.farClip > 1.0f ? RI.farClip : 4096.0f;
+	int st;
 
-	/* No authored mask in the table: no reflection, rather than an unmasked one. */
-	if( mask < 0 || !( m->pad >> 8 ) || !R_GXWorldDLEnvBind( (int)( m->pad >> 8 ) - 1 ))
-		return false;
-	R_GXTevBindEnvMask( (u8)mask );
-	tm[0][0] = ik;   tm[0][1] = 0.0f; tm[0][2] = -0.5f; tm[0][3] = -eye[0] * ik + 0.5f * eye[2];
-	tm[1][0] = 0.0f; tm[1][1] = ik;   tm[1][2] = -0.5f; tm[1][3] = -eye[1] * ik + 0.5f * eye[2];
-	tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = -1.0f; tm[2][3] = eye[2];
-	GX_LoadTexMtxImm( tm, GX_TEXMTX8, GX_MTX3x4 );
-	tint.r = t[0]; tint.g = t[1]; tint.b = t[2]; tint.a = 255;
-	GX_SetTevKColor( GX_KCOLOR0, tint );
 	GX_SetNumIndStages( 0 );
 	GX_SetNumTexGens( 2 );
 	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX8 );
@@ -1350,46 +1409,19 @@ static qboolean R_GXWorldDLEnvOn( const gc_wd_mat_t *m )
 	 * ( cube / 2 ), stage 1 squares that x2 ( cube^2 / 2 ), stage 2 multiplies
 	 * by the constant ( tint^2 x exposure / 2 ) x4, stage 3 by mask^2 x2:
 	 * 2 x exposure x ( cube x tint x mask )^2, clamped. */
+	for( st = 0; st < 4; st++ )
 	{
-		int st;
-
-		for( st = 0; st < 4; st++ )
-		{
-			GX_SetTevDirect( GX_TEVSTAGE0 + st );
-			GX_SetTevOrder( GX_TEVSTAGE0 + st, st == 3 ? GX_TEXCOORD1 : GX_TEXCOORD0,
-				st == 3 ? GX_TEXMAP5 : GX_TEXMAP6, GX_COLORNULL );
-			GX_SetTevKColorSel( GX_TEVSTAGE0 + st, GX_TEV_KCSEL_K0 );
-			GX_SetTevColorIn( GX_TEVSTAGE0 + st, GX_CC_ZERO,
-				st == 0 ? GX_CC_TEXC : GX_CC_CPREV,
-				st == 1 ? GX_CC_CPREV : st == 2 ? GX_CC_KONST : GX_CC_TEXC, GX_CC_ZERO );
-			GX_SetTevColorOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO,
-				st == 0 ? GX_CS_SCALE_1 : st == 2 ? GX_CS_SCALE_4 : GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
-			GX_SetTevAlphaIn( GX_TEVSTAGE0 + st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, st ? GX_CA_APREV : GX_CA_KONST );
-			GX_SetTevAlphaOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		}
-	}
-	/* Reflect about the per-pixel normal: with n = ( nx, ny, 1 ) the lookup
-	 * R.xy / R.z = p moves by 2 ( I + p p^T ) ( nx, ny ) to first order. An
-	 * indirect matrix is constant over the draw, so p is taken at the centre
-	 * of the view. Offset texels = m x ( n x 127.5 ) x 2^( exp + 3 ). */
-	if( gc_wd_env_nrm_of[mask & 7] )
-	{
-		vec3_t fwd;
-		f32 im[2][3], d, pa, pb;
-		const f32 c = (f32)gc_wd_env_side / ( gc_wd_env_k * 510.0f );
-
-		AngleVectors( RI.rvp.viewangles, fwd, NULL, NULL );
-		d = -fwd[2] < 0.25f ? 0.25f : -fwd[2];
-		pa = fwd[0] / d; pb = fwd[1] / d;
-		im[0][0] = c * ( 1.0f + pa * pa ); im[0][1] = c * pa * pb; im[0][2] = 0.0f;
-		im[1][0] = c * pa * pb; im[1][1] = c * ( 1.0f + pb * pb ); im[1][2] = 0.0f;
-		GX_SetIndTexMatrix( GX_ITM_0, im, -1 );
-		GX_LoadTexObj( &gc_wd_env_nrm_obj[gc_wd_env_nrm_of[mask & 7] - 1], GX_TEXMAP4 );
-		GX_SetNumIndStages( 1 );
-		GX_SetIndTexOrder( GX_INDTEXSTAGE0, GX_TEXCOORD1, GX_TEXMAP4 );
-		GX_SetIndTexCoordScale( GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1 );
-		GX_SetTevIndirect( GX_TEVSTAGE0, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_ST, GX_ITM_0,
-			GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF );
+		GX_SetTevDirect( GX_TEVSTAGE0 + st );
+		GX_SetTevOrder( GX_TEVSTAGE0 + st, st == 3 ? GX_TEXCOORD1 : GX_TEXCOORD0,
+			st == 3 ? GX_TEXMAP5 : GX_TEXMAP6, GX_COLORNULL );
+		GX_SetTevKColorSel( GX_TEVSTAGE0 + st, GX_TEV_KCSEL_K0 );
+		GX_SetTevColorIn( GX_TEVSTAGE0 + st, GX_CC_ZERO,
+			st == 0 ? GX_CC_TEXC : GX_CC_CPREV,
+			st == 1 ? GX_CC_CPREV : st == 2 ? GX_CC_KONST : GX_CC_TEXC, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO,
+			st == 0 ? GX_CS_SCALE_1 : st == 2 ? GX_CS_SCALE_4 : GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE0 + st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, st ? GX_CA_APREV : GX_CA_KONST );
+		GX_SetTevAlphaOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 	}
 	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	/* The frame buffer is display gamma d; the sum belongs in linear light.
@@ -1398,13 +1430,160 @@ static qboolean R_GXWorldDLEnvOn( const gc_wd_mat_t *m )
 	GX_SetBlendMode( GX_BM_BLEND, GX_BL_INVDSTCLR, GX_BL_ONE, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 	/* Added light is fogged toward black, not toward the fog colour. */
-	{
-		const GXColor black = { 0, 0, 0, 255 };
-		f32 zfar = RI.farClip > 1.0f ? RI.farClip : 4096.0f;
+	if( zfar < 16384.0f )
+		zfar = 16384.0f;
+	GX_SetFog( GX_FOG_PERSP_LIN, 1600.0f, 50000.0f, 4.0f, zfar, black );
+}
 
-		if( zfar < 16384.0f )
-			zfar = 16384.0f;
-		GX_SetFog( GX_FOG_PERSP_LIN, 1600.0f, 50000.0f, 4.0f, zfar, black );
+/* Cubemap view, lookup matrix, tint and mask for one material on a surface
+ * with the batch word `pad` (0x8000 | texture layout << 12 | octahedral
+ * normal). False: no pass. */
+static qboolean R_GXWorldDLEnvSetup( const gc_wd_mat_t *m, u16 pad )
+{
+	const float *eye = RI.rvp.vieworigin;
+	float ik, kk;
+	const u8 *tn = &gc_wd_env_tint[( m->pad & 15u ) * 4u];
+	const int cube = (int)( m->pad >> 8 ) - 1;
+	int mask = -1, lo, hi, axis = 0, i, view = -1;
+	vec3_t n, a, t, b, ht, hb, ha;
+	float best = -2.0f, d;
+	GXColor tint;
+	Mtx tm;
+
+	if( cube < 0 )
+		return false;
+	if( !( m->flags & GC_WD_MAT_ENVNOMASK ))
+	{
+		/* No authored mask in the table: no reflection, rather than an
+		 * unmasked one. */
+		mask = R_GXTevMatEnvMask( m->tevmat );
+		if( mask < 0 )
+			return false;
+	}
+	/* The batch normal. */
+	n[0] = (float)(( pad >> 6 ) & 63u ) * ( 2.0f / 63.0f ) - 1.0f;
+	n[1] = (float)( pad & 63u ) * ( 2.0f / 63.0f ) - 1.0f;
+	n[2] = 1.0f - fabsf( n[0] ) - fabsf( n[1] );
+	if( n[2] < 0.0f )
+	{
+		const float x = n[0];
+
+		n[0] = ( 1.0f - fabsf( n[1] )) * ( x >= 0.0f ? 1.0f : -1.0f );
+		n[1] = ( 1.0f - fabsf( x )) * ( n[1] >= 0.0f ? 1.0f : -1.0f );
+	}
+	VectorNormalize( n );
+	for( i = 0; i < GC_WD_ENV_AXES; i++ )
+	{
+		d = DotProduct( n, gc_wd_env_axis[i] );
+		if( d > best )
+		{
+			best = d;
+			axis = i;
+		}
+	}
+	lo = 0; hi = (int)gc_wd_env_n - 1;
+	while( lo <= hi )
+	{
+		const int mid = ( lo + hi ) >> 1;
+		const int key = gc_wd_env_keys[mid];
+
+		if( key == axis * 256 + cube )
+		{
+			view = mid;
+			break;
+		}
+		if( key < axis * 256 + cube )
+			lo = mid + 1;
+		else
+			hi = mid - 1;
+	}
+	if( view < 0 || !R_GXWorldDLEnvBind( view, axis ))
+		return false;
+	if( mask >= 0 )
+		R_GXTevBindEnvMask( (u8)mask );
+	else
+		GX_LoadTexObj( &gc_wd_env_white_obj, GX_TEXMAP5 );
+	kk = axis == 0 ? gc_wd_env_k_up : gc_wd_env_k;
+	ik = 0.5f / kk;
+	/* The plane's frame, then each vector through H = I - 2 n n^T. */
+	VectorCopy( gc_wd_env_axis[axis], a );
+	if( axis == 0 )
+	{
+		VectorSet( t, 1.0f, 0.0f, 0.0f );
+		VectorSet( b, 0.0f, 1.0f, 0.0f );
+	}
+	else
+	{
+		VectorSet( t, -a[1], a[0], 0.0f );
+		VectorNormalize( t );
+		CrossProduct( a, t, b );
+	}
+	d = 2.0f * DotProduct( t, n ); VectorMA( t, -d, n, ht );
+	d = 2.0f * DotProduct( b, n ); VectorMA( b, -d, n, hb );
+	d = 2.0f * DotProduct( a, n ); VectorMA( a, -d, n, ha );
+	for( i = 0; i < 3; i++ )
+	{
+		tm[0][i] = ik * ht[i] + 0.5f * ha[i];
+		tm[1][i] = ik * hb[i] + 0.5f * ha[i];
+		tm[2][i] = ha[i];
+	}
+	for( i = 0; i < 3; i++ )
+		tm[i][3] = -( tm[i][0] * eye[0] + tm[i][1] * eye[1] + tm[i][2] * eye[2] );
+	GX_LoadTexMtxImm( tm, GX_TEXMTX8, GX_MTX3x4 );
+	tint.r = tn[0]; tint.g = tn[1]; tint.b = tn[2]; tint.a = 255;
+	GX_SetTevKColor( GX_KCOLOR0, tint );
+	/* Reflect about the per-pixel normal: with the normal map's ( nx, ny )
+	 * the lookup p = ( R.t, R.b ) / R.a moves by 2 ( I + p p^T ) ( nx, ny ) to
+	 * first order. An indirect matrix is constant over the draw, so p is
+	 * taken at the centre of the view. Offset texels = m x ( n x 127.5 ) x
+	 * 2^( exp + 3 ). */
+	if( mask >= 0 && gc_wd_env_nrm_of[mask & 7] )
+	{
+		vec3_t fwd;
+		f32 im[2][3], pa, pb;
+		const f32 c = (f32)( axis == 0 ? gc_wd_env_side : gc_wd_env_side_s ) / ( kk * 510.0f );
+
+		AngleVectors( RI.rvp.viewangles, fwd, NULL, NULL );
+		d = DotProduct( fwd, ha );
+		if( d < 0.25f )
+			d = 0.25f;
+		pa = DotProduct( fwd, ht ) / d; pb = DotProduct( fwd, hb ) / d;
+		{
+			/* The normal map's X runs along the surface's texture S and its
+			 * Y along T. Bits 12-14 of the batch word say how S and T lie in
+			 * ( t, b ): bit 0 swapped, bit 1 / 2 the sign of each row. */
+			const u32 o = ( pad >> 12 ) & 7u;
+			const f32 sx = ( o & 2u ) ? -1.0f : 1.0f, sy = ( o & 4u ) ? -1.0f : 1.0f;
+			const f32 m00 = c * ( 1.0f + pa * pa ), m01 = c * pa * pb, m11 = c * ( 1.0f + pb * pb );
+			int r, q;
+
+			if( o & 1u )
+			{
+				im[0][0] = m01 * sy; im[0][1] = m00 * sx;
+				im[1][0] = m11 * sy; im[1][1] = m01 * sx;
+			}
+			else
+			{
+				im[0][0] = m00 * sx; im[0][1] = m01 * sy;
+				im[1][0] = m01 * sx; im[1][1] = m11 * sy;
+			}
+			im[0][2] = im[1][2] = 0.0f;
+			for( r = 0; r < 2; r++ )
+				for( q = 0; q < 2; q++ )
+					im[r][q] = im[r][q] > 0.99f ? 0.99f : im[r][q] < -0.99f ? -0.99f : im[r][q];
+		}
+		GX_SetIndTexMatrix( GX_ITM_0, im, -1 );
+		GX_LoadTexObj( &gc_wd_env_nrm_obj[gc_wd_env_nrm_of[mask & 7] - 1], GX_TEXMAP4 );
+		GX_SetNumIndStages( 1 );
+		GX_SetIndTexOrder( GX_INDTEXSTAGE0, GX_TEXCOORD1, GX_TEXMAP4 );
+		GX_SetIndTexCoordScale( GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1 );
+		GX_SetTevIndirect( GX_TEVSTAGE0, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_ST, GX_ITM_0,
+			GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF );
+	}
+	else
+	{
+		GX_SetNumIndStages( 0 );
+		GX_SetTevDirect( GX_TEVSTAGE0 );
 	}
 	return true;
 }
@@ -1423,6 +1602,46 @@ static void R_GXWorldDLEnvOff( void )
 	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
 	if( gc_wd_chunk_lm )
 		GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
+}
+
+/* Draw the queued reflective batches over the finished opaque world. */
+static void R_GXWorldDLEnvFlush( void )
+{
+	const byte *chunk = NULL;
+	u32 last = 0xffffffffu;
+	qboolean ok = false;
+	int q;
+
+	if( !gc_wd_envq_n )
+		return;
+	R_GXWorldDLEnvBegin();
+	for( q = 0; q < gc_wd_envq_n; q++ )
+	{
+		const gc_wd_batch_t *b = gc_wd_envq[q].b;
+		const u32 key = ( (u32)b->mat << 16 ) | b->pad;
+
+		if( gc_wd_envq[q].chunk != chunk )
+		{
+			chunk = gc_wd_envq[q].chunk;
+			GX_SetArray( GX_VA_POS, (void *)( chunk + *(const u32 *)( chunk + 4 )), 6 );
+		}
+		if( key != last )
+		{
+			ok = R_GXWorldDLEnvSetup( &gc_wd_mats[b->mat], b->pad );
+			last = key;
+		}
+		if( ok )
+			GX_CallDispList( (void *)( chunk + b->dl_ofs ), b->dl_bytes );
+	}
+	gc_wd_env_stat[2] += (u32)gc_wd_envq_n;
+	if( gc_wd_pf_on > 0 && ( gc_wd_frame & 127 ) == 0 )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: env per frame batches=%u view loads=%u refused=%u\n",
+			gc_wd_env_stat[2] / 128u, gc_wd_env_stat[0] / 128u, gc_wd_env_stat[1] / 128u );
+		gc_wd_env_stat[0] = gc_wd_env_stat[1] = gc_wd_env_stat[2] = 0;
+	}
+	gc_wd_envq_n = 0;
+	R_GXWorldDLEnvOff();
 }
 
 static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
@@ -1727,6 +1946,7 @@ int R_GXWorldDLDraw( void )
 	gc_wd_chunk_lm = 0;
 	R_GXWorldDLSetupLit( 0 );
 
+	gc_wd_envq_n = 0;
 	/* Full world first: draw every PVS-visible chunk. Frustum cull is a later
 	 * speed knob (ava-play99-60 sat at 20 chunks with waiting=0 while the
 	 * alley still looked starved). Lazy-load still gates on budget/cache. */
@@ -1956,16 +2176,30 @@ int R_GXWorldDLDraw( void )
 					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 				}
-				/* $envmap on up-facing batches (batch pad 1), main view only:
-				 * the mirror pass is already a reflection. */
-				if( b->pad && ( m->flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
-					&& gc_wd_hdr.version == 2 && R_GXWorldDLEnvReady() && R_GXWorldDLEnvOn( m ))
+				/* $envmap: reflective batches carry their normal. Main view
+				 * only: the mirror pass is already a reflection. A forced
+				 * chunk's memory is reused, so its batches draw now. */
+				if(( b->pad & 0x8000u ) && ( m->flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
+					&& gc_wd_hdr.version == 2 && R_GXWorldDLEnvReady())
 				{
-					GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
-					R_GXWorldDLEnvOff();
-					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
-					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
-						cur_mat = (int)b->mat;
+					if( !forced )
+					{
+						if( gc_wd_envq_n < GC_WD_ENVQ_MAX )
+						{
+							gc_wd_envq[gc_wd_envq_n].chunk = chunk;
+							gc_wd_envq[gc_wd_envq_n++].b = b;
+						}
+					}
+					else
+					{
+						R_GXWorldDLEnvBegin();
+						if( R_GXWorldDLEnvSetup( m, b->pad ))
+							GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+						R_GXWorldDLEnvOff();
+						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
+						if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+							cur_mat = (int)b->mat;
+					}
 				}
 				drawn++;
 			}
@@ -1979,6 +2213,7 @@ int R_GXWorldDLDraw( void )
 			}
 		}
 		}
+		R_GXWorldDLEnvFlush();
 		if( !logged || ( gc_wd_frame & 255 ) == 0 )
 			gEngfuncs.Con_Reportf(
 				"Xash3D GameCube: world DL pvs=%d frustum_drop=%d cull=%d towers=%d forced=%d\n",
