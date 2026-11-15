@@ -1752,6 +1752,80 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				studio_slots++;
 			}
 		}
+		/* Other players and bots. The scan above starts after the client slots
+		 * and skips player.mdl, so on this route nobody else was ever drawn.
+		 * Emit them as players (ent->player) so the renderer swaps in the team
+		 * body from their "model" userinfo (models/player/<model>/<model>.mdl). */
+		{
+			static int player_logs;
+
+			for( e = 1; e <= svs.maxclients && studio_slots < studio_budget; e++ )
+			{
+				edict_t *ed = SV_EdictNum( e );
+				model_t *mod;
+				cl_entity_t *ent;
+				vec3_t delta;
+
+				if( e == cl.playernum + 1 || !SV_IsValidEdict( ed ) || !ed->v.modelindex )
+					continue;
+				if( FBitSet( ed->v.effects, EF_NODRAW ) || ed->v.iuser1 != 0 || ed->v.deadflag >= DEAD_DEAD )
+					continue;
+				mod = SV_ModelHandle( ed->v.modelindex );
+				if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+					continue;
+				VectorSubtract( ed->v.origin, view_org, delta );
+				if( VectorLength( delta ) > studio_max_dist )
+					continue;
+				if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
+					cl.models[ed->v.modelindex] = mod;
+				ent = &lean_studio_ents[studio_slots];
+				memset( ent, 0, sizeof( *ent ));
+				ent->index = e;
+				ent->player = true;
+				ent->model = mod;
+				VectorCopy( ed->v.origin, ent->origin );
+				VectorCopy( ed->v.angles, ent->angles );
+				ent->angles[0] = 0.0f;
+				VectorCopy( ent->origin, ent->curstate.origin );
+				VectorCopy( ent->angles, ent->curstate.angles );
+				VectorCopy( ed->v.mins, ent->curstate.mins );
+				VectorCopy( ed->v.maxs, ent->curstate.maxs );
+				ent->curstate.number = e;
+				ent->curstate.modelindex = ed->v.modelindex;
+				ent->curstate.solid = (int)ed->v.solid;
+				ent->curstate.movetype = (int)ed->v.movetype;
+				ent->curstate.sequence = ed->v.sequence;
+				ent->curstate.gaitsequence = ed->v.gaitsequence;
+				ent->curstate.frame = ed->v.frame;
+				ent->curstate.body = ed->v.body;
+				ent->curstate.skin = ed->v.skin;
+				ent->curstate.scale = 1.0f;
+				ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
+				ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : (float)cl.time;
+				ent->curstate.weaponmodel = ed->v.weaponmodel;
+				ent->curstate.rendermode = ed->v.rendermode;
+				ent->curstate.renderamt = (int)ed->v.renderamt;
+				ent->curstate.effects = ed->v.effects;
+				ent->curstate.entityType = ENTITY_NORMAL;
+				ent->curstate.blending[0] = 127;
+				ent->curstate.blending[1] = 127;
+				ent->prevstate = ent->curstate;
+				VectorCopy( ent->origin, ent->latched.prevorigin );
+				VectorCopy( ent->angles, ent->latched.prevangles );
+				ent->latched.prevanimtime = ent->curstate.animtime;
+				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					studios++;
+					studio_slots++;
+					if( player_logs < 8 )
+					{
+						player_logs++;
+						Con_Reportf( "Xash3D GameCube: lean emit player %d model=%s userinfo=%s seq=%d dist=%.0f\n",
+							e, mod->name, cl.players[e - 1].model, ed->v.sequence, VectorLength( delta ));
+					}
+				}
+			}
+		}
 		if( studios == 0 )
 		{
 			/* Prefer tiny lean w_crowbar stub — v_crowbar hung Flipper
