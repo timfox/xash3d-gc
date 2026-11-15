@@ -145,6 +145,8 @@ static GXTexObj gc_wd_lm_obj;
 /* Declared early — LmPage / SetupLit sit above the rest of the WorldDL state. */
 static gc_wd_header_t gc_wd_hdr;
 static int gc_wd_frame;
+static char gc_wd_mapbase[40];
+static void R_GXWorldDLFog( f32 z_near, f32 z_far );
 
 static qboolean R_GXWorldDLFetch( u32 file_ofs, void *dst, u32 len );
 
@@ -468,6 +470,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	R_GXWorldDLUnload();
 	if( gEngfuncs.Sys_CheckParm( "-gcnobspdl" ))
 		return;
+	Q_strncpy( gc_wd_mapbase, mapbase, sizeof( gc_wd_mapbase ));
 	Q_snprintf( path, sizeof( path ), "media/wd_%s.gcd", mapbase );
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL open %s\n", path );
 	f = gEngfuncs.fsapi->Open( path, "rb", false );
@@ -1081,6 +1084,259 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
 		guFrustum( proj, y_max, -y_max, -x_max, x_max, z_near, z_far );
 }
 
+/*
+ * $envmap on up-facing surfaces (wet sand, floors, roofs).
+ *
+ * LightmappedGeneric adds ( cubemap x mask x $envmaptint )^2 in linear light
+ * ($envmapcontrast 1), the cubemap being the env_cubemap sample VBSP patched
+ * into the material. The bake carries all of it: media/cm_<map>.gcm holds
+ * each HDR cubemap's upper hemisphere on the tangent plane z = 1 (linear,
+ * square root), the material record names its cubemap and tint, and the
+ * tevmat table has the authored mask. For a level surface the mirror
+ * direction of the view ray through P is ( P.x - eye.x, P.y - eye.y,
+ * eye.z - P.z ), so the lookup R.xy / R.z is one projective texgen from the
+ * vertex position. The cubemaps sit in ARAM; four stay resident.
+ */
+#define GC_WD_ENV_SLOTS	4
+static int gc_wd_env_state;	/* 0 untried, 1 ready, -1 absent */
+static u32 gc_wd_env_aram, gc_wd_env_bytes, gc_wd_env_n;
+static float gc_wd_env_k;
+static u16 gc_wd_env_side;
+static byte *gc_wd_env_mem;
+static s16 gc_wd_env_cube[GC_WD_ENV_SLOTS];
+static int gc_wd_env_used[GC_WD_ENV_SLOTS];
+static GXTexObj gc_wd_env_obj[GC_WD_ENV_SLOTS];
+static u8 gc_wd_env_tint[64];
+/* $bumpmap X/Y behind the reflection (media/en_<map>.bin), by mask index. */
+static u8 gc_wd_env_nrm_of[8];	/* slot + 1, 0 = flat */
+static GXTexObj gc_wd_env_nrm_obj[3];
+
+static void R_GXWorldDLEnvNormals( void )
+{
+	char path[96];
+	byte head[32], *mem;
+	file_t *f;
+	u32 i, n;
+
+	Q_snprintf( path, sizeof( path ), "media/en_%s.bin", gc_wd_mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f )
+		return;
+	if( gEngfuncs.fsapi->Read( f, head, 32 ) == 32 && head[0] == 'G' && head[3] == 'n'
+		&& ( n = head[4] ) >= 1 && n <= 3
+		&& ( mem = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), n * 8192u )) != NULL
+		&& gEngfuncs.fsapi->Read( f, mem, n * 8192u ) == (fs_offset_t)( n * 8192u ))
+	{
+		DCFlushRange( mem, n * 8192u );
+		for( i = 0; i < n; i++ )
+		{
+			GX_InitTexObj( &gc_wd_env_nrm_obj[i], mem + i * 8192u, 64, 64, GX_TF_IA8,
+				GX_REPEAT, GX_REPEAT, GX_FALSE );
+			GX_InitTexObjFilterMode( &gc_wd_env_nrm_obj[i], GX_LINEAR, GX_LINEAR );
+			gc_wd_env_nrm_of[head[5 + i] & 7] = (u8)( i + 1 );
+		}
+	}
+	gEngfuncs.fsapi->Close( f );
+}
+
+static qboolean R_GXWorldDLEnvReady( void )
+{
+	char path[96];
+	file_t *f;
+	u32 hdr[8], i, tab;
+
+	if( gc_wd_env_state )
+		return gc_wd_env_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;
+	gc_wd_env_state = -1;
+	Q_snprintf( path, sizeof( path ), "media/et_%s.bin", gc_wd_mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f )
+		return false;
+	i = (u32)gEngfuncs.fsapi->Read( f, gc_wd_env_tint, 64 );
+	gEngfuncs.fsapi->Close( f );
+	Q_snprintf( path, sizeof( path ), "media/cm_%s.gcm", gc_wd_mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f || i != 64 )
+		return false;
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x4743434du && ( hdr[1] >> 16 ) == 3 )
+	{
+		gc_wd_env_n = hdr[1] & 0xffffu;
+		gc_wd_env_side = (u16)( hdr[2] >> 16 );
+		gc_wd_env_k = (float)( hdr[2] & 0xffffu ) * ( 1.0f / 256.0f );
+		gc_wd_env_bytes = (u32)gc_wd_env_side * gc_wd_env_side / 2u;
+		tab = ( gc_wd_env_n * 8u + 31u ) & ~31u;
+		gc_wd_env_mem = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()),
+			GC_WD_ENV_SLOTS * gc_wd_env_bytes );
+		if( gc_wd_env_mem && gc_wd_env_k > 0.0f && !( gc_wd_env_bytes & 31u )
+			&& gEngfuncs.fsapi->Seek( f, 32 + tab, SEEK_SET ) == 0
+			&& ( gc_wd_env_aram = GC_AramReserveTagged( gc_wd_env_n * gc_wd_env_bytes, "cubemaps" )) != 0 )
+		{
+			/* Slot 0 is the bounce while the pack goes up to ARAM. */
+			for( i = 0; i < gc_wd_env_n; i++ )
+			{
+				if( gEngfuncs.fsapi->Read( f, gc_wd_env_mem, gc_wd_env_bytes ) != (fs_offset_t)gc_wd_env_bytes )
+					break;
+				GC_AramTransfer( gc_wd_env_aram + i * gc_wd_env_bytes, gc_wd_env_mem, gc_wd_env_bytes, true );
+			}
+			if( i == gc_wd_env_n )
+			{
+				for( i = 0; i < GC_WD_ENV_SLOTS; i++ )
+					gc_wd_env_cube[i] = -1;
+				gc_wd_env_state = 1;
+				R_GXWorldDLEnvNormals();
+			}
+		}
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: env cubemaps %s: %u x %ux%u\n",
+		gc_wd_env_state > 0 ? "ready" : "FAILED", (unsigned)gc_wd_env_n,
+		(unsigned)gc_wd_env_side, (unsigned)gc_wd_env_side );
+	return gc_wd_env_state > 0;
+}
+
+/* Bind cubemap `cube` on TEXMAP6. False when every slot is in use this frame. */
+static qboolean R_GXWorldDLEnvBind( int cube )
+{
+	int i, victim = -1;
+
+	if( cube < 0 || (u32)cube >= gc_wd_env_n )
+		return false;
+	for( i = 0; i < GC_WD_ENV_SLOTS; i++ )
+	{
+		if( gc_wd_env_cube[i] == cube )
+			break;
+		if( gc_wd_env_used[i] != gc_wd_frame
+			&& ( victim < 0 || gc_wd_env_used[i] < gc_wd_env_used[victim] ))
+			victim = i;
+	}
+	if( i == GC_WD_ENV_SLOTS )
+	{
+		byte *mem;
+
+		if( victim < 0 )
+			return false;
+		i = victim;
+		mem = gc_wd_env_mem + (u32)i * gc_wd_env_bytes;
+		GC_AramTransfer( gc_wd_env_aram + (u32)cube * gc_wd_env_bytes, mem, gc_wd_env_bytes, false );
+		GX_InitTexObj( &gc_wd_env_obj[i], mem, gc_wd_env_side, gc_wd_env_side, GX_TF_CMPR,
+			GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wd_env_obj[i], GX_LINEAR, GX_LINEAR );
+		GX_InvalidateTexAll();
+		gc_wd_env_cube[i] = (s16)cube;
+	}
+	gc_wd_env_used[i] = gc_wd_frame;
+	GX_LoadTexObj( &gc_wd_env_obj[i], GX_TEXMAP6 );
+	return true;
+}
+
+/* Additive reflection state for one material. False: draw nothing. */
+static qboolean R_GXWorldDLEnvOn( const gc_wd_mat_t *m )
+{
+	const int mask = R_GXTevMatEnvMask( m->tevmat );
+	const float *eye = RI.rvp.vieworigin;
+	const float ik = 0.5f / gc_wd_env_k;
+	const u8 *t = &gc_wd_env_tint[( m->pad & 15u ) * 4u];
+	GXColor tint;
+	Mtx tm;
+
+	/* No authored mask in the table: no reflection, rather than an unmasked one. */
+	if( mask < 0 || !( m->pad >> 8 ) || !R_GXWorldDLEnvBind( (int)( m->pad >> 8 ) - 1 ))
+		return false;
+	R_GXTevBindEnvMask( (u8)mask );
+	tm[0][0] = ik;   tm[0][1] = 0.0f; tm[0][2] = -0.5f; tm[0][3] = -eye[0] * ik + 0.5f * eye[2];
+	tm[1][0] = 0.0f; tm[1][1] = ik;   tm[1][2] = -0.5f; tm[1][3] = -eye[1] * ik + 0.5f * eye[2];
+	tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = -1.0f; tm[2][3] = eye[2];
+	GX_LoadTexMtxImm( tm, GX_TEXMTX8, GX_MTX3x4 );
+	tint.r = t[0]; tint.g = t[1]; tint.b = t[2]; tint.a = 255;
+	GX_SetTevKColor( GX_KCOLOR0, tint );
+	GX_SetNumIndStages( 0 );
+	GX_SetNumTexGens( 2 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX8 );
+	GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetNumTevStages( 4 );
+	/* The cubemap texel is sqrt( cube / 2 ), linear HDR. Stage 0 squares it
+	 * ( cube / 2 ), stage 1 squares that x2 ( cube^2 / 2 ), stage 2 multiplies
+	 * by the constant ( tint^2 x exposure / 2 ) x4, stage 3 by mask^2 x2:
+	 * 2 x exposure x ( cube x tint x mask )^2, clamped. */
+	{
+		int st;
+
+		for( st = 0; st < 4; st++ )
+		{
+			GX_SetTevDirect( GX_TEVSTAGE0 + st );
+			GX_SetTevOrder( GX_TEVSTAGE0 + st, st == 3 ? GX_TEXCOORD1 : GX_TEXCOORD0,
+				st == 3 ? GX_TEXMAP5 : GX_TEXMAP6, GX_COLORNULL );
+			GX_SetTevKColorSel( GX_TEVSTAGE0 + st, GX_TEV_KCSEL_K0 );
+			GX_SetTevColorIn( GX_TEVSTAGE0 + st, GX_CC_ZERO,
+				st == 0 ? GX_CC_TEXC : GX_CC_CPREV,
+				st == 1 ? GX_CC_CPREV : st == 2 ? GX_CC_KONST : GX_CC_TEXC, GX_CC_ZERO );
+			GX_SetTevColorOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO,
+				st == 0 ? GX_CS_SCALE_1 : st == 2 ? GX_CS_SCALE_4 : GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+			GX_SetTevAlphaIn( GX_TEVSTAGE0 + st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, st ? GX_CA_APREV : GX_CA_KONST );
+			GX_SetTevAlphaOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		}
+	}
+	/* Reflect about the per-pixel normal: with n = ( nx, ny, 1 ) the lookup
+	 * R.xy / R.z = p moves by 2 ( I + p p^T ) ( nx, ny ) to first order. An
+	 * indirect matrix is constant over the draw, so p is taken at the centre
+	 * of the view. Offset texels = m x ( n x 127.5 ) x 2^( exp + 3 ). */
+	if( gc_wd_env_nrm_of[mask & 7] )
+	{
+		vec3_t fwd;
+		f32 im[2][3], d, pa, pb;
+		const f32 c = (f32)gc_wd_env_side / ( gc_wd_env_k * 510.0f );
+
+		AngleVectors( RI.rvp.viewangles, fwd, NULL, NULL );
+		d = -fwd[2] < 0.25f ? 0.25f : -fwd[2];
+		pa = fwd[0] / d; pb = fwd[1] / d;
+		im[0][0] = c * ( 1.0f + pa * pa ); im[0][1] = c * pa * pb; im[0][2] = 0.0f;
+		im[1][0] = c * pa * pb; im[1][1] = c * ( 1.0f + pb * pb ); im[1][2] = 0.0f;
+		GX_SetIndTexMatrix( GX_ITM_0, im, -1 );
+		GX_LoadTexObj( &gc_wd_env_nrm_obj[gc_wd_env_nrm_of[mask & 7] - 1], GX_TEXMAP4 );
+		GX_SetNumIndStages( 1 );
+		GX_SetIndTexOrder( GX_INDTEXSTAGE0, GX_TEXCOORD1, GX_TEXMAP4 );
+		GX_SetIndTexCoordScale( GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1 );
+		GX_SetTevIndirect( GX_TEVSTAGE0, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_ST, GX_ITM_0,
+			GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF );
+	}
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	/* The frame buffer is display gamma d; the sum belongs in linear light.
+	 * d( ( b + s )^( 1 / 2.2 ) ) is close to 2 s ( 1 - d ) over the mid range,
+	 * so the pass carries 2 s and blends src x ( 1 - dst ) + dst. */
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_INVDSTCLR, GX_BL_ONE, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+	/* Added light is fogged toward black, not toward the fog colour. */
+	{
+		const GXColor black = { 0, 0, 0, 255 };
+		f32 zfar = RI.farClip > 1.0f ? RI.farClip : 4096.0f;
+
+		if( zfar < 16384.0f )
+			zfar = 16384.0f;
+		GX_SetFog( GX_FOG_PERSP_LIN, 1600.0f, 50000.0f, 4.0f, zfar, black );
+	}
+	return true;
+}
+
+static void R_GXWorldDLEnvOff( void )
+{
+	f32 zfar = RI.farClip > 1.0f ? RI.farClip : 4096.0f;
+
+	GX_SetTevDirect( GX_TEVSTAGE0 );
+
+	if( zfar < 16384.0f )
+		zfar = 16384.0f;
+	R_GXWorldDLFog( 4.0f, zfar );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
+	if( gc_wd_chunk_lm )
+		GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
+}
+
 static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 {
 	const gc_wd_batch_t *b;
@@ -1611,6 +1867,17 @@ int R_GXWorldDLDraw( void )
 					/* Back to layer 1 for the spec pass and the next batch. */
 					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
+				}
+				/* $envmap on up-facing batches (batch pad 1), main view only:
+				 * the mirror pass is already a reflection. */
+				if( b->pad && ( m->flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
+					&& gc_wd_hdr.version == 2 && R_GXWorldDLEnvReady() && R_GXWorldDLEnvOn( m ))
+				{
+					GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+					R_GXWorldDLEnvOff();
+					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
+					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+						cur_mat = (int)b->mat;
 				}
 				drawn++;
 			}
