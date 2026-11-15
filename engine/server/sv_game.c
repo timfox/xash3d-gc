@@ -5999,6 +5999,15 @@ static qboolean SV_GCMapEntityDiagVerbose( void )
 
 /* CapFaces progressive spawn: decorative ents are optional when Flipper draws
  * from cf_*.gcp. Soft-skip them so dense maps fit the 460 tip edict BSS. */
+/* Point entities a match cannot start without: team spawn points and the
+ * capture points. When the heap tip runs out during entity load they are still
+ * spawned (each needs only its private slab slot); everything else is skipped. */
+static qboolean SV_GCEntityKeptWhenStarved( const char *classname )
+{
+	return classname
+		&& ( !Q_strncmp( classname, "info_player_", 12 ) || !Q_strcmp( classname, "dod_control_point" ));
+}
+
 static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 {
 	if( COM_StringEmpty( classname ))
@@ -6588,13 +6597,21 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			if( entity_index > 1 && GC_MemHeapFreeBytes() <
 				( !Q_strnicmp( sv.name, "dod_", 4 ) ? 2u * 1024u : 8u * 1024u ))
 			{
-				Con_Reportf( S_WARN "Xash3D GameCube: %s tip-starved before spawn entity=%d class=%s tip=%s; stop entity load\n",
-					__func__, entity_index - 1, SV_ClassName( ent ),
-					Q_memprint( GC_MemHeapFreeBytes() ));
-				if( ent && !ent->free && NUM_FOR_EDICT( ent ) != 0 )
-					SV_FreeEdict( ent );
-				inhibited++;
-				break;
+				static int gc_starved_logged;
+
+				if( !SV_GCEntityKeptWhenStarved( SV_ClassName( ent )))
+				{
+					/* Skip this entity and keep going: the spawn points and capture
+					 * points further down the lump must still load. */
+					if( gc_starved_logged++ < 8 )
+						Con_Reportf( S_WARN "Xash3D GameCube: %s tip-starved before spawn entity=%d class=%s tip=%s; skipping\n",
+							__func__, entity_index - 1, SV_ClassName( ent ),
+							Q_memprint( GC_MemHeapFreeBytes() ));
+					if( ent && !ent->free && NUM_FOR_EDICT( ent ) != 0 )
+						SV_FreeEdict( ent );
+					inhibited++;
+					continue;
+				}
 			}
 #endif
 			spawn_result = svgame.dllFuncs.pfnSpawn( ent );

@@ -1166,8 +1166,13 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	 * CapFaces then Guru'd on frame 3 without this skip (DAR junk, 20261108). */
 	/* Network sessions must simulate movement; retain the offline capture
 	 * workaround only for routes that do not host or join a match. */
+	/* Bots (fake clients) only exist in a real match and must walk: they run
+	 * PM_Move even on this route. WorldDL keeps the hull0 clipnodes resident
+	 * ("WorldDL keep hull0 clipnodes" in the load log), which is what the skip
+	 * below was protecting. */
 	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw()
-		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" ))
+		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" )
+		&& !FBitSet( cl->flags, FCL_FAKECLIENT ))
 	{
 		static qboolean gc_pm_skip_logged;
 
