@@ -206,14 +206,22 @@ static int R_GXTevMatEnvMask( int id )
  */
 static byte *R_GXWorldDLLmPage( u32 page )
 {
+	static u8 hint[4096];	/* page & 4095 -> slot it was last found in */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
 
+	i = hint[page & 4095u];
+	if( i < GC_WD_LM_SLOTS && gc_wd_lm_slot_page[i] == (s32)page )
+	{
+		gc_wd_lm_slot_frame[i] = gc_wd_frame;
+		return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
+	}
 	for( i = 0; i < GC_WD_LM_SLOTS; i++ )
 	{
 		if( gc_wd_lm_slot_page[i] == (s32)page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
+			hint[page & 4095u] = (u8)i;
 			return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 		}
 		if( gc_wd_lm_slot_frame[i] < gc_wd_frame && gc_wd_lm_slot_frame[i] < oldest )
@@ -232,6 +240,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_slot_page[victim] = (s32)page;
 	gc_wd_lm_slot_frame[victim] = gc_wd_frame;
 	gc_wd_lm_miss++;
+	hint[page & 4095u] = (u8)victim;
 	return gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES;
 }
 
@@ -897,52 +906,83 @@ qboolean R_GXWorldDLEntityBoxVisible( const vec3_t mins, const vec3_t maxs )
 	return true;
 }
 
+/* Chunks resident in the cache, sorted by offset, and this frame's smallest
+ * request that found no room (anything as large fails without a search). */
+#define GC_WD_RES_MAX	2048
+static u16 gc_wd_res[GC_WD_RES_MAX];
+static u32 gc_wd_res_n, gc_wd_res_fail;
+static int gc_wd_res_fail_frame = -1;
+
 static byte *R_GXWorldDLResident( u32 i, u32 *budget )
 {
 	const u32 bytes = gc_wd_chunk_bytes[i];
-	u32 head, k;
+	u32 a, b, k, n, best_a = 0, best_b = 0, best_ofs = 0;
+	s32 best_age = 0x7fffffff;
 
 	if( gc_wd_slots[i].cache_ofs >= 0 )
 		return gc_wd_cache + gc_wd_slots[i].cache_ofs;
-	if( bytes > *budget || bytes > gc_wd_cache_size || bytes == 0 )
+	if( bytes > *budget || bytes > gc_wd_cache_size || bytes == 0 || gc_wd_hdr.n_chunks > GC_WD_RES_MAX )
 		return NULL;
-	head = gc_wd_cache_head;
-	if( head + bytes > gc_wd_cache_size )
-		head = 0;
-	for( k = 0; k < gc_wd_hdr.n_chunks; k++ )
-	{
-		const s32 o = gc_wd_slots[k].cache_ofs;
-		u32 kb;
-
-		if( o < 0 )
-			continue;
-		kb = gc_wd_chunk_bytes[k];
-		if( (u32)o + kb <= head || (u32)o >= head + bytes )
-			continue;
-		/* DrawDone at the start of the frame retired last frame's lists.
-		 * Locking those too left the cache full of the shore, so the tall
-		 * brushes never got a slot and the towers stayed the prop slivers. */
-		if( gc_wd_slots[k].used_frame == gc_wd_frame )
-			return NULL;
-	}
-	for( k = 0; k < gc_wd_hdr.n_chunks; k++ )
-	{
-		const s32 o = gc_wd_slots[k].cache_ofs;
-		u32 kb;
-
-		if( o < 0 )
-			continue;
-		kb = gc_wd_chunk_bytes[k];
-		if( (u32)o + kb <= head || (u32)o >= head + bytes )
-			continue;
-		gc_wd_slots[k].cache_ofs = -1;
-	}
-	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_chunks + gc_wd_chunk_ofs[i], gc_wd_cache + head, bytes ))
+	if( gc_wd_res_fail_frame == gc_wd_frame && bytes >= gc_wd_res_fail )
 		return NULL;
-	gc_wd_slots[i].cache_ofs = (s32)head;
-	gc_wd_cache_head = head + bytes;
+	/* The cache was emptied behind the list's back (map load). */
+	if( gc_wd_cache_head == 0 )
+		gc_wd_res_n = 0;
+	gc_wd_cache_head = 1;
+	n = gc_wd_res_n;
+	/* Every run of neighbours that would make room: take a free gap when
+	 * there is one, else the run whose most recent use is oldest. Chunks
+	 * drawn this frame stay (the GP may still be reading them; DrawDone at
+	 * the start of the frame retired last frame's lists). A ring head used
+	 * to land on this frame's chunks, so dozens were re-read from ARAM every
+	 * frame even with room to spare. */
+	for( a = 0; a <= n; a++ )
+	{
+		const u32 start = a ? (u32)gc_wd_slots[gc_wd_res[a - 1]].cache_ofs + gc_wd_chunk_bytes[gc_wd_res[a - 1]] : 0u;
+		s32 age = -0x7fffffff;
+
+		for( b = a; ; b++ )
+		{
+			const u32 end = b < n ? (u32)gc_wd_slots[gc_wd_res[b]].cache_ofs : gc_wd_cache_size;
+
+			if( end >= start + bytes )
+			{
+				if( age < best_age )
+				{
+					best_age = age; best_a = a; best_b = b; best_ofs = start;
+				}
+				break;
+			}
+			if( b >= n )
+				break;
+			if( gc_wd_slots[gc_wd_res[b]].used_frame == gc_wd_frame )
+			{
+				a = b;	/* no run crosses a chunk in use */
+				break;
+			}
+			if( gc_wd_slots[gc_wd_res[b]].used_frame > age )
+				age = gc_wd_slots[gc_wd_res[b]].used_frame;
+		}
+		if( best_age == -0x7fffffff )
+			break;
+	}
+	if( best_age == 0x7fffffff )
+	{
+		if( gc_wd_res_fail_frame != gc_wd_frame || bytes < gc_wd_res_fail )
+			gc_wd_res_fail = bytes;
+		gc_wd_res_fail_frame = gc_wd_frame;
+		return NULL;
+	}
+	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_chunks + gc_wd_chunk_ofs[i], gc_wd_cache + best_ofs, bytes ))
+		return NULL;
+	for( k = best_a; k < best_b; k++ )
+		gc_wd_slots[gc_wd_res[k]].cache_ofs = -1;
+	memmove( &gc_wd_res[best_a + 1], &gc_wd_res[best_b], ( n - best_b ) * sizeof( gc_wd_res[0] ));
+	gc_wd_res[best_a] = (u16)i;
+	gc_wd_res_n = n - ( best_b - best_a ) + 1u;
+	gc_wd_slots[i].cache_ofs = (s32)best_ofs;
 	*budget -= bytes;
-	return gc_wd_cache + head;
+	return gc_wd_cache + best_ofs;
 }
 
 /* Cache miss. The chunk is inside the frustum, so draw it from the tail
@@ -993,6 +1033,54 @@ static qboolean R_GXWorldDLBoxVisible( u32 i, vec3_t normals[4], const float *or
 			return false;
 	}
 	return true;
+}
+
+/* Entity visibility for the client's draw list in a world DL map: false when
+ * the box sits in a cluster the eye cannot see (the map's own PVS row) or
+ * well outside the view. The row and the view are last frame's, so the
+ * frustum test keeps a margin of 15 % of the distance. Without this every
+ * character in the map was animated and skinned every frame (30 ms in the
+ * Lost Coast harbor). `key` identifies the entity for the cluster memo. */
+qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs )
+{
+	static struct { int key; float org[3]; int cluster; } memo[32];
+	static vec3_t normals[4];
+	static int normals_frame = -1;
+	const float *eye = RI.rvp.vieworigin;
+	vec3_t c;
+	float r, d;
+	int p, cl;
+
+	if( gc_wd_state != 1 || !gc_wd_pvs || gc_wd_pvs_cluster == -2 || gc_wd_frame < 2 )
+		return true;
+	c[0] = 0.5f * ( mins[0] + maxs[0] );
+	c[1] = 0.5f * ( mins[1] + maxs[1] );
+	c[2] = 0.5f * ( mins[2] + maxs[2] );
+	r = 0.5f * ( fabsf( maxs[0] - mins[0] ) + fabsf( maxs[1] - mins[1] ) + fabsf( maxs[2] - mins[2] )) + 32.0f;
+	if( normals_frame != gc_wd_frame )
+	{
+		R_GXWorldDLFrustum( normals );
+		normals_frame = gc_wd_frame;
+	}
+	d = fabsf( c[0] - eye[0] ) + fabsf( c[1] - eye[1] ) + fabsf( c[2] - eye[2] );
+	for( p = 0; p < 4; p++ )
+	{
+		if( normals[p][0] * ( c[0] - eye[0] ) + normals[p][1] * ( c[1] - eye[1] )
+			+ normals[p][2] * ( c[2] - eye[2] ) < -( r + 0.15f * d ))
+			return false;
+	}
+	p = key & 31;
+	if( memo[p].key != key + 1 || fabsf( memo[p].org[0] - c[0] ) + fabsf( memo[p].org[1] - c[1] )
+		+ fabsf( memo[p].org[2] - c[2] ) > 16.0f )
+	{
+		memo[p].key = key + 1;
+		VectorCopy( c, memo[p].org );
+		memo[p].cluster = R_GXWorldDLEyeCluster( c );
+	}
+	cl = memo[p].cluster;
+	if( cl < 0 || (u32)cl >= gc_wd_hdr.n_clusters )
+		return true;
+	return ( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))) != 0;
 }
 
 /* Harbor industrial stacks: tall and narrow. Wide cliff plates must stay on

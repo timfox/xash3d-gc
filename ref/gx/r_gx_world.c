@@ -5927,26 +5927,43 @@ static byte *R_GXPropCacheGet( unsigned model )
 	}
 	if( bytes == 0 || ( bytes & 31u ) || bytes > gc_prop_cache_size || bytes > gc_prop_cache_budget )
 		return NULL;
-	head = gc_prop_cache_head;
-	if( head + bytes > gc_prop_cache_size )
-		head = 0;
-	for( k = 0; k < gc_prop_nmodels; k++ )
+	/* First fit in the gaps between resident chains; when there is none,
+	 * drop the chain that has gone unused longest and look again. (A ring
+	 * head kept landing on chains drawn this frame, so a dozen models were
+	 * streamed from ARAM every frame even when everything fitted.) */
+	for( ;; )
 	{
-		const s32 o = gc_prop_cache_ofs[k];
+		s32 victim = -1;
+		u32 next;
 
-		if( o < 0 || (u32)o + gc_prop_chain_bytes[k] <= head || (u32)o >= head + bytes )
-			continue;
+		for( head = 0; head + bytes <= gc_prop_cache_size; head = next )
+		{
+			next = 0;
+			for( k = 0; k < gc_prop_nmodels; k++ )
+			{
+				const s32 o = gc_prop_cache_ofs[k];
+
+				if( o >= 0 && (u32)o < head + bytes && (u32)o + gc_prop_chain_bytes[k] > head )
+				{
+					next = (u32)o + gc_prop_chain_bytes[k];
+					break;
+				}
+			}
+			if( !next )
+				break;
+		}
+		if( head + bytes <= gc_prop_cache_size )
+			break;
 		/* The GP may still be reading a list drawn this frame. */
-		if( gc_prop_cache_used[k] == gc_prop_cache_frame )
+		for( k = 0; k < gc_prop_nmodels; k++ )
+		{
+			if( gc_prop_cache_ofs[k] >= 0 && gc_prop_cache_used[k] + 1u < gc_prop_cache_frame
+				&& ( victim < 0 || gc_prop_cache_used[k] < gc_prop_cache_used[victim] ))
+				victim = (s32)k;
+		}
+		if( victim < 0 )
 			return NULL;
-	}
-	for( k = 0; k < gc_prop_nmodels; k++ )
-	{
-		const s32 o = gc_prop_cache_ofs[k];
-
-		if( o < 0 || (u32)o + gc_prop_chain_bytes[k] <= head || (u32)o >= head + bytes )
-			continue;
-		gc_prop_cache_ofs[k] = -1;
+		gc_prop_cache_ofs[victim] = -1;
 	}
 	GC_AramTransfer( gc_prop_aram + gc_prop_dl_base + gc_prop_models[model].dl_ofs,
 		gc_prop_cache + head, bytes, false );
@@ -5975,9 +5992,10 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	u32 ofs, bytes;
 	int drawn = 0;
 	const byte *resident = NULL, *resident_end = NULL;
-	const float sp = sinf( pitch ), cp = cosf( pitch );
-	const float sy = sinf( yaw ), cy = cosf( yaw );
-	const float sr = sinf( roll ), cr = cosf( roll );
+	/* Most props only have a yaw: libm sin/cos is software on the Gekko. */
+	const float sp = pitch != 0.0f ? sinf( pitch ) : 0.0f, cp = pitch != 0.0f ? cosf( pitch ) : 1.0f;
+	const float sy = yaw != 0.0f ? sinf( yaw ) : 0.0f, cy = yaw != 0.0f ? cosf( yaw ) : 1.0f;
+	const float sr = roll != 0.0f ? sinf( roll ) : 0.0f, cr = roll != 0.0f ? cosf( roll ) : 1.0f;
 
 	if( model >= gc_prop_nmodels )
 		return 0;
