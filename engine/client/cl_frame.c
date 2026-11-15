@@ -1447,6 +1447,24 @@ static int CL_GCLeanFindSeq( const studiohdr_t *hdr, const char *want )
 	if( !hdr || hdr->numseq <= 0 || hdr->seqindex <= 0 )
 		return -1;
 	sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	/* Exact label first, then a label starting with it, then any animated
+	 * (numframes > 1) label containing it: DoD's first "idle" match is
+	 * look_idle, a single-frame aim pose. */
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( !Q_stricmp( sd[i].label, want ))
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( !Q_strnicmp( sd[i].label, want, Q_strlen( want )) && sd[i].numframes > 1 )
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( Q_stristr( sd[i].label, want ) && sd[i].numframes > 1 )
+			return i;
+	}
 	for( i = 0; i < hdr->numseq; i++ )
 	{
 		if( Q_stristr( sd[i].label, want ))
@@ -1925,11 +1943,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						const mstudioseqdesc_t *sd = bh ? (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex ) : NULL;
 
 						seq_logs++;
-						Con_Reportf( "Xash3D GameCube: lean player %d seq %d '%s' gait %d '%s' speed %.0f numseq %d\n",
-							e, ent->curstate.sequence,
-							sd && ent->curstate.sequence < bh->numseq ? sd[ent->curstate.sequence].label : "?",
-							ent->curstate.gaitsequence,
-							sd && ent->curstate.gaitsequence < bh->numseq ? sd[ent->curstate.gaitsequence].label : "?",
+						int sq = ent->curstate.sequence, gq = ent->curstate.gaitsequence;
+						qboolean sok = sd && sq >= 0 && sq < bh->numseq;
+						qboolean gok = sd && gq >= 0 && gq < bh->numseq;
+
+						Con_Reportf( "Xash3D GameCube: lean player %d seq %d '%s' (%d frames %.0f fps) gait %d '%s' (%d frames) speed %.0f numseq %d\n",
+							e, sq, sok ? sd[sq].label : "?", sok ? sd[sq].numframes : -1, sok ? sd[sq].fps : 0.0f,
+							gq, gok ? sd[gq].label : "?", gok ? sd[gq].numframes : -1,
 							speed, bh ? bh->numseq : -1 );
 					}
 				}
