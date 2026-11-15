@@ -5486,6 +5486,7 @@ static qboolean gc_prop_far_tried;
 static byte *gc_prop_cache;
 static u32 gc_prop_cache_size, gc_prop_cache_head;
 static qboolean gc_prop_cache_tried;
+static int gc_prop_cache_generation = -1;
 static s32 gc_prop_cache_ofs[GC_PROP_MAX_MODELS];
 static u32 gc_prop_cache_used[GC_PROP_MAX_MODELS];
 static u32 gc_prop_chain_bytes[GC_PROP_MAX_MODELS];
@@ -5925,6 +5926,22 @@ static byte *R_GXPropCacheGet( unsigned model )
 {
 	const u32 bytes = gc_prop_chain_bytes[model];
 	u32 head, k;
+	extern int GC_GetNewGameCapGeneration( void );
+	const int generation = GC_GetNewGameCapGeneration();
+
+	/* A new generation (map load, cap faces rewrite) releases the memory the
+	 * cache lived in. From Codex's prop-coalesce work. */
+	if( generation != gc_prop_cache_generation )
+	{
+		if( gc_prop_cache )
+			GX_DrawDone();
+		gc_prop_cache_generation = generation;
+		gc_prop_cache = NULL;
+		gc_prop_cache_size = gc_prop_cache_head = 0;
+		gc_prop_cache_tried = false;
+		for( k = 0; k < GC_PROP_MAX_MODELS; k++ )
+			gc_prop_cache_ofs[k] = -1;
+	}
 
 	if( gc_prop_want_frame[model] != gc_prop_cache_frame + 1u )
 	{
@@ -5948,6 +5965,29 @@ static byte *R_GXPropCacheGet( unsigned model )
 		}
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb (studio arena)\n",
 			gc_prop_cache_size / 1024u );
+		/* The studio arena can be spent by the characters' skins and actor
+		 * lists (the Flipper actor work took all of it: 96 ARAM reads and
+		 * 17 ms a frame in the harbor, every prop streamed). Fall back to
+		 * what is left of the map arena tail, keeping a margin; the tail is
+		 * released with the map, so the cache restarts with each map. */
+		if( !gc_prop_cache )
+		{
+			const size_t used = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
+			const size_t capacity = GC_MapLoadBufferCapacity();
+			const size_t margin = 48u * 1024u;
+
+			if( used < capacity && capacity - used > margin + 128u * 1024u )
+			{
+				try_sz = (u32)(( capacity - used - margin ) & ~31u );
+				if( try_sz > 512u * 1024u )
+					try_sz = 512u * 1024u;
+				gc_prop_cache = (byte *)GC_MapLoadBufferTailAlloc( used, try_sz );
+				if( gc_prop_cache )
+					gc_prop_cache_size = try_sz;
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb (map arena tail)\n",
+				gc_prop_cache_size / 1024u );
+		}
 		if( !gc_prop_cache )
 			return NULL;
 	}

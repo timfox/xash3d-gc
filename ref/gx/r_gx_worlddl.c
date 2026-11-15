@@ -368,6 +368,8 @@ static u32 gc_wd_pf_bytes, gc_wd_pf_bytes_max;	/* chunk bytes drawn this frame /
 #define WD_PF( k, stmt ) do { if( gc_wd_pf_on > 0 ) { u64 pf_t = gettime(); stmt; gc_wd_pf[k] += gettime() - pf_t; gc_wd_pf_cnt[k]++; } else { stmt; } } while( 0 )
 static u32 gc_wd_cache_size, gc_wd_cache_head;
 static u32 gc_wd_aram;		/* entire file in ARAM */
+static u32 gc_wd_aram_prefix, gc_wd_aram_lm_start, gc_wd_aram_lm_bytes;
+static u32 gc_wd_disc_reads, gc_wd_disc_bytes;
 static file_t *gc_wd_file;
 static byte *gc_wd_pvs;
 static int gc_wd_pvs_cluster = -2;
@@ -380,16 +382,30 @@ static byte gc_wd_plane_tmp[64] __attribute__(( aligned( 32 )));
 static qboolean R_GXWorldDLFetch( u32 file_ofs, void *dst, u32 len )
 {
 	len = ( len + 31u ) & ~31u;
-	if( gc_wd_aram )
+	if( gc_wd_aram && file_ofs <= gc_wd_aram_prefix
+		&& len <= gc_wd_aram_prefix - file_ofs )
 	{
 		DCInvalidateRange( dst, len );
 		GC_AramTransfer( gc_wd_aram + file_ofs, dst, len, false );
 		return true;
 	}
+	if( gc_wd_aram && file_ofs >= gc_wd_aram_lm_start
+		&& file_ofs - gc_wd_aram_lm_start <= gc_wd_aram_lm_bytes
+		&& len <= gc_wd_aram_lm_bytes - ( file_ofs - gc_wd_aram_lm_start ))
+	{
+		DCInvalidateRange( dst, len );
+		GC_AramTransfer( gc_wd_aram + gc_wd_aram_prefix + file_ofs - gc_wd_aram_lm_start, dst, len, false );
+		return true;
+	}
 	if( !gc_wd_file )
 		return false;
 	gEngfuncs.fsapi->Seek( gc_wd_file, (fs_offset_t)file_ofs, SEEK_SET );
-	return gEngfuncs.fsapi->Read( gc_wd_file, dst, len ) > 0;
+	if( gEngfuncs.fsapi->Read( gc_wd_file, dst, len ) != (fs_offset_t)len )
+		return false;
+	gc_wd_disc_reads++;
+	gc_wd_disc_bytes += len;
+	DCFlushRange( dst, len );
+	return true;
 }
 
 static void R_GXWorldDLUnload( void )
@@ -402,6 +418,8 @@ static void R_GXWorldDLUnload( void )
 	gc_wd_texnum = NULL;
 	gc_wd_pvs = NULL;
 	gc_wd_aram = 0;
+	gc_wd_aram_prefix = gc_wd_aram_lm_start = gc_wd_aram_lm_bytes = 0;
+	gc_wd_disc_reads = gc_wd_disc_bytes = 0;
 	gc_wd_pvs_cluster = -2;
 }
 
@@ -667,16 +685,39 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
 
-	/* Whole pack → ARAM so tree/chunkdir/PVS/chunks share one store. */
-	gc_wd_aram = GC_AramWorldDLReserve( gc_wd_hdr.file_size );
+	/* Lazy policy (Codex's pvs-lazy work), opt in with -gclazyworld: keep
+	 * tree/PVS and lightmaps in ARAM and pull the geometry chunks from the
+	 * open world pack on the disc, which frees about 1.4 MB of ARAM. Off by
+	 * default: in the Lost Coast harbor it costs about 16 fps (40 -> 24 in a
+	 * Dolphin Null-backend ride) because every cache miss reads the disc. */
+	gc_wd_aram_prefix = gc_wd_hdr.file_size;
+	gc_wd_aram_lm_start = gc_wd_hdr.file_size;
+	gc_wd_aram_lm_bytes = 0;
+	if( gc_wd_hdr.version == 2 && !Q_stricmp( mapbase, "d2_lostcoast" )
+		&& gEngfuncs.Sys_CheckParm( "-gclazyworld" ))
+	{
+		u32 last_end = 0;
+		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
+		{
+			u32 end = gc_wd_chunk_ofs[i] + gc_wd_chunk_bytes[i];
+			if( end > last_end ) last_end = end;
+		}
+		gc_wd_aram_lm_start = gc_wd_hdr.ofs_chunks + (( last_end + 31u ) & ~31u );
+		if( gc_wd_aram_lm_start <= gc_wd_hdr.file_size )
+		{
+			gc_wd_aram_prefix = gc_wd_hdr.ofs_chunks;
+			gc_wd_aram_lm_bytes = gc_wd_hdr.file_size - gc_wd_aram_lm_start;
+		}
+	}
+	gc_wd_aram = GC_AramWorldDLReserve( gc_wd_aram_prefix + gc_wd_aram_lm_bytes );
 	bounce = gc_wd_cache;
 	done = 0;
 	if( gc_wd_aram )
 	{
 		gEngfuncs.fsapi->Seek( f, 0, SEEK_SET );
-		while( done < gc_wd_hdr.file_size )
+		while( done < gc_wd_aram_prefix )
 		{
-			u32 n = gc_wd_hdr.file_size - done;
+			u32 n = gc_wd_aram_prefix - done;
 
 			if( n > 64u * 1024u )
 				n = 64u * 1024u;
@@ -688,13 +729,32 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			GC_AramTransfer( gc_wd_aram + done, bounce, ( n + 31u ) & ~31u, true );
 			done += n;
 		}
-		if( done < gc_wd_hdr.file_size )
+		if( done < gc_wd_aram_prefix )
 			gc_wd_aram = 0;
+		if( gc_wd_aram && gc_wd_aram_lm_bytes )
+		{
+			gEngfuncs.fsapi->Seek( f, (fs_offset_t)gc_wd_aram_lm_start, SEEK_SET );
+			done = 0;
+			while( done < gc_wd_aram_lm_bytes )
+			{
+				u32 n = Q_min( gc_wd_aram_lm_bytes - done, 64u * 1024u );
+				if( n > gc_wd_cache_size ) n = gc_wd_cache_size;
+				if( gEngfuncs.fsapi->Read( f, bounce, n ) != (fs_offset_t)n ) break;
+				DCFlushRange( bounce, ( n + 31u ) & ~31u );
+				GC_AramTransfer( gc_wd_aram + gc_wd_aram_prefix + done, bounce, ( n + 31u ) & ~31u, true );
+				done += n;
+			}
+			if( done < gc_wd_aram_lm_bytes ) gc_wd_aram = 0;
+		}
 	}
-	if( gc_wd_aram )
+	if( gc_wd_aram && gc_wd_aram_prefix == gc_wd_hdr.file_size )
 		gEngfuncs.fsapi->Close( f );
 	else
 		gc_wd_file = f;
+	if( gc_wd_aram && gc_wd_file )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL lazy disc chunks prefix=%u lightmaps=%u deferred=%u bytes\n",
+			gc_wd_aram_prefix, gc_wd_aram_lm_bytes,
+			gc_wd_aram_lm_start - gc_wd_aram_prefix );
 
 	/* Lightmap page stream sits after the last padded chunk blob. */
 	gc_wd_lm_stream = 0;
@@ -744,7 +804,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		"Xash3D GameCube: world DL %s v%u clusters=%u chunks=%u mats=%u cache=%u Kb file=%u Kb (%s)\n",
 		path, gc_wd_hdr.version, gc_wd_hdr.n_clusters, gc_wd_hdr.n_chunks, gc_wd_hdr.n_mats,
 		gc_wd_cache_size / 1024u, gc_wd_hdr.file_size / 1024u,
-		gc_wd_aram ? "ARAM" : "disc" );
+		gc_wd_aram ? ( gc_wd_file ? "ARAM+disc" : "ARAM" ) : "disc" );
 }
 
 qboolean R_GXWorldDLActive( void )
@@ -1845,6 +1905,9 @@ int R_GXWorldDLDraw( void )
 	if( gc_wd_frame > 0 )
 		GX_DrawDone();
 	gc_wd_frame++;
+	if( gc_wd_file && ( gc_wd_frame & 127 ) == 0 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL disc totals reads=%u bytes=%u frame=%d\n",
+			gc_wd_disc_reads, gc_wd_disc_bytes, gc_wd_frame );
 	gc_wd_lm_miss = 0;
 	gc_wd_lm_binds = 0;
 	gc_wd_chunk_lm = 0;
