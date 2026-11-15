@@ -2331,6 +2331,14 @@ static void R_StudioDrawPoints( void )
 	if( !m_pStudioHeader )
 		return;
 
+#if XASH_GAMECUBE
+	/* Lost Coast characters: Flipper skins, lights and draws them from
+	 * prebuilt display lists (gc_studio/<name>.gca, r_gx_actor.c). */
+	if( GC_UseGxWorldDraw() && R_GXActorDraw( RI.currententity, RI.currentmodel,
+		m_pStudioHeader, g_studio.bonestransform ))
+		return;
+#endif
+
 	m_skinnum = RI.currententity->curstate.skin;
 	pvertbone = ((byte *)m_pStudioHeader + m_pSubModel->vertinfoindex );
 	pnormbone = ((byte *)m_pStudioHeader + m_pSubModel->norminfoindex );

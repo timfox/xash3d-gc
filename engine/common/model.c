@@ -1099,6 +1099,14 @@ qboolean Mod_GCPromoteStudioPath( const char *path )
 		if( loaded_hdr && loaded_hdr->length > 0 && (size_t)loaded_hdr->length < kept )
 			kept = (size_t)loaded_hdr->length;
 		Mod_GCNoteRealStudioLoaded( path, kept );
+		{
+			/* Flipper-skinned characters (ref/gx/r_gx_actor.c): their
+			 * display lists load beside the model, before the prop
+			 * cache claims the rest of the studio arena. */
+			extern void R_GXActorPreloadModel( model_t *mod );
+
+			R_GXActorPreloadModel( mod );
+		}
 		Mod_GCStudioNameAllowed( path, &is_view );
 		if( is_view )
 		{
