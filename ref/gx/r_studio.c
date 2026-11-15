@@ -4159,6 +4159,13 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 			}
 			else if( ptexture[i].index == tr.defaultTexture )
 				fallback++;
+			/* Player bodies: list every skin once, to find the part that
+			 * still draws white (the rifle, on ceres 80b9eda). */
+			if( Q_stristr( mod->name, "models/player/" ))
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: body skin '%s'[%d] '%s' %dx%d flags=0x%x -> tex=%d%s\n",
+					mod->name, i, ptexture[i].name, ptexture[i].width, ptexture[i].height,
+					ptexture[i].flags, ptexture[i].index,
+					ptexture[i].index == tr.defaultTexture ? " (default)" : "" );
 #else
 			if( ptexture[i].index )
 				loaded++;
