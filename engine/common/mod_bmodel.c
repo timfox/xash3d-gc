@@ -748,7 +748,18 @@ static void Mod_GCFreeBspPin( void **ptr )
 		return;
 	}
 
+	/* A lump that lives anywhere in the map-load arena is arena memory, even
+	 * when it sits past the scratch range (tail carves, the reserved surface
+	 * slot). Handing an interior pointer to free() corrupts the heap. */
+	if( GC_IsMapLoadBufferAddress( *ptr ))
+	{
+		Con_Reportf( "Xash3D GameCube: bsp pin %p is map arena outside scratch, dropped without free\n", *ptr );
+		*ptr = NULL;
+		return;
+	}
+
 	GC_WatchdogStage( "bsp pin heap free" );
+	Con_Reportf( "Xash3D GameCube: bsp pin heap free %p\n", *ptr );
 	free( *ptr );
 	*ptr = NULL;
 	GC_WatchdogStage( "bsp pin freed" );
@@ -11903,10 +11914,16 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	/* Stage names for the watchdog: a stall here used to report only the
 	 * last breadcrumb from the server ("map buffer prepared"). */
 	GC_WatchdogStage( "pre-surface lump free" );
+	Con_Reportf( "Xash3D GameCube: pre-surface lump free begin scratch=%p+%lu carve=%lu arena=%p+%lu\n",
+		gc_bsp_scratch_base, (unsigned long)gc_bsp_scratch_size, (unsigned long)gc_bsp_scratch_carve_high,
+		GC_MapLoadBufferBase(), (unsigned long)GC_MapLoadBufferCapacity() );
 	Mod_GCFreeGcmapPreSurfaceLumps( bmod );
 	GC_WatchdogStage( "pre-surface staging release" );
+	Con_Reportf( "Xash3D GameCube: pre-surface staging release begin base=%p len=%lu\n",
+		mod_base, (unsigned long)bufferlen );
 	Mod_GCReleaseGcmapPreSurfaceStaging( mod, bmod, mod_base, bufferlen );
 	GC_WatchdogStage( "pre-surface staging released" );
+	Con_Reportf( "Xash3D GameCube: pre-surface staging release done\n" );
 	if( !gc_capfaces_lean_surfaces )
 		Mod_GCRefreshClampedSurfaceSlot( mod, bmod );
 	else
