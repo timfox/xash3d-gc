@@ -1259,12 +1259,21 @@ extern int            r_currentbkey;
 extern qboolean       insubmodel;
 
 extern vec3_t         r_entorigin;
+#if XASH_GAMECUBE
+/* BSP30 addresses leafs with signed shorts, so no GoldSrc map has more than
+ * 32768 of them. The full MAX_MAP_LEAFS table costs 256 KiB of MEM1 BSS; this
+ * one costs 64 KiB. The index is masked so an oversized map can only missort. */
+#define R_LEAFKEYS_COUNT 32768
+extern unsigned short r_leafkeys[R_LEAFKEYS_COUNT];
+#define LEAF_KEY( pleaf ) r_leafkeys[( pleaf - WORLDMODEL->leafs ) & ( R_LEAFKEYS_COUNT - 1 )]
+#else
 #if XASH_LOW_MEMORY
 extern unsigned short r_leafkeys[MAX_MAP_LEAFS];
 #else
 extern int            r_leafkeys[MAX_MAP_LEAFS];
 #endif
 #define LEAF_KEY( pleaf ) r_leafkeys[( pleaf - WORLDMODEL->leafs )]
+#endif
 
 
 
