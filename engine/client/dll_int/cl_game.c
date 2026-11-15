@@ -1198,10 +1198,12 @@ remap_info_t *gc_gcmap_bootstrap_remap_info[GC_GCMAP_STATIC_CLIENT_EDICTS + 1];
 
 static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 {
-	/* Dual BBA listen needs maxplayers=2; heap Client Edicts (~1.42 Mb) soft-
-	 * NULLs and hangs mid-serverdata. Bootstrap tables still fit LM2 (128
-	 * packet ents). Cap stays at 2 so larger MP cannot silently under-alloc. */
-	if( maxclients > 2 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* Heap Client Edicts (744 Kb at 460 ents) cannot fit MEM1 once a map is
+	 * up, at any listen size: a 3-slot bot match hit mem FAIL with 380 Kb
+	 * free (ceres fsb). The static table holds 460 ents whatever maxclients
+	 * is, and cl_parse caps the map route to it, so nothing under-allocs;
+	 * maps over 460 take the map-arena path first. */
+	if( maxclients > 8 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	if( GC_MapLoadMemoryOpt()
@@ -1235,7 +1237,10 @@ static qboolean CL_GCArenaEdicts( int maxclients )
 
 	cl_gc_arena_entities = NULL;
 	cl_gc_arena_remaps = NULL;
-	if( !GC_MenuRunsServer() || maxclients > 2 || want <= GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* Any listen size: the table lives in the map arena, not the heap. Was
+	 * capped at 2 clients, so a 3-slot match (two bots and the player) fell
+	 * through to a 744 KiB heap calloc that cannot fit (ceres fra). */
+	if( !GC_MenuRunsServer() || maxclients > 8 || want <= GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	for( count = want; count > GC_GCMAP_STATIC_CLIENT_EDICTS; count -= 32 )
@@ -1331,7 +1336,7 @@ void CL_InitEdicts( int maxclients )
 #endif
 	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
 #if XASH_GAMECUBE
-	if( maxclients <= 2 )
+	if( maxclients <= 8 )
 		cls.num_client_entities = 128;
 	Con_Reportf( "Xash3D GameCube: client edicts alloc request max=%d bytes=%u packet_entities=%d\n",
 		clgame.maxEntities, (uint)( sizeof( cl_entity_t ) * clgame.maxEntities ),

@@ -1021,7 +1021,7 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 		clgame.maxEntities = Q_min( clgame.maxEntities, MAX_GOLDSRC_EDICTS );
 #if XASH_GAMECUBE
 			/* Allow 2P listen hosts — same MEM1 bootstrap path as SP map route. */
-			if( CL_GameCubeMapRoute() && cl.maxclients <= 2 )
+			if( CL_GameCubeMapRoute() && cl.maxclients <= 8 )
 				clgame.maxEntities = CL_GameCubeClientEdictLimit( clgame.maxEntities );
 #endif
 			clgame.maxModels = 512; // ???
@@ -1036,7 +1036,7 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 		clgame.maxEntities = MSG_ReadWord( msg );
 		clgame.maxEntities = bound( MIN_EDICTS, clgame.maxEntities, MAX_EDICTS );
 #if XASH_GAMECUBE
-			if( CL_GameCubeMapRoute() && cl.maxclients <= 2 )
+			if( CL_GameCubeMapRoute() && cl.maxclients <= 8 )
 				clgame.maxEntities = CL_GameCubeClientEdictLimit( clgame.maxEntities );
 #endif
 			clgame.maxModels = MSG_ReadWord( msg );
