@@ -1771,7 +1771,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			 * toward the nearest drawn player each frame, so a fixed test
 			 * run can capture a bot without steering. */
 			if( !gc_facebot )
-				gc_facebot = Cvar_Get( "gc_facebot", "0", 0, "GameCube test: aim the view at the nearest other player" );
+				gc_facebot = Cvar_FindVar( "gc_facebot" );
 
 			if( !player_scan_logged )
 			{
@@ -1913,7 +1913,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					}
 				}
 			}
-			if( near_e && gc_facebot && gc_facebot->value != 0.0f )
+			if( near_e && (( gc_facebot && gc_facebot->value != 0.0f ) || Sys_CheckParm( "-gcfacebot" )))
 			{
 				static int facebot_logs;
 				vec3_t dir, ang;
@@ -1925,6 +1925,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				cl.viewangles[PITCH] = -ang[PITCH];
 				cl.viewangles[YAW] = ang[YAW];
 				cl.viewangles[ROLL] = 0.0f;
+				/* Some lean camera paths read the local edict's v_angle. */
+				if( player && SV_IsValidEdict( player ))
+					VectorCopy( cl.viewangles, player->v.v_angle );
 				if( facebot_logs < 4 )
 				{
 					facebot_logs++;
