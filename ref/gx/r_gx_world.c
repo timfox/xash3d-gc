@@ -6832,10 +6832,19 @@ static void R_GXDrawUnderwaterFog( void )
 
 /* Flythrough (-gcvst): name each stage of the frame from t=32.5 s, so the last line
  * in the log before a crash is the stage that died. */
+/* Also name every stage of the first world DL frame: the menu route has died
+ * there with a DSI and no log line after "world draw route=worldDL". */
+static qboolean r_gx_first_worlddl_frame_done;
+
 static void R_GXTrace( const char *tag )
 {
 	static int on = -1;
 
+	if( !r_gx_first_worlddl_frame_done )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: first worldDL frame %s\n", tag );
+		return;
+	}
 	if( on < 0 )
 		on = gEngfuncs.Sys_CheckParm( "-gcvst" ) ? 1 : 0;
 	if( on && gp_cl && gp_cl->time > 32.5 && gp_cl->time < 40.0 )
@@ -6861,10 +6870,15 @@ static int R_GXDrawWorldDLFrame( void )
 	}
 #define ST_MARK( k ) do { if( st_on ) { st_t = gettime(); st_acc[k] += st_t - st_t0; st_t0 = st_t; } } while( 0 )
 
+	R_GXTrace( "hud pool" );
 	R_GXReserveHudPool();
+	R_GXTrace( "skybox prefetch" );
 	R_GXPrefetchMapSkybox();
+	R_GXTrace( "durable hot window" );
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
+	R_GXTrace( "hot service" );
 	R_GXHotService();
+	R_GXTrace( "3d state" );
 	R_GXSetupWorld3DState();
 	r_gx_face_mode = GC_GX_FACE_MODE_NONE;
 	r_gx_bound_texnum = 0;
@@ -6917,6 +6931,11 @@ static int R_GXDrawWorldDLFrame( void )
 		st_n = 0;
 	}
 #undef ST_MARK
+	if( !r_gx_first_worlddl_frame_done )
+	{
+		R_GXTrace( "complete" );
+		r_gx_first_worlddl_frame_done = true;
+	}
 	r_gx_world_drew = true;
 	GC_MarkGxWorldEfbReady();
 	return drawn > 0 ? drawn : 1;
