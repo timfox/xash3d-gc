@@ -62,6 +62,13 @@ while kill -0 "$dpid" 2>/dev/null && (( $(date +%s) < end )); do
 		break
 	fi
 	grep -aqs "fatal breadcrumb held" "$log" && break
+	# RIDE_STALL_SEC: stop early once the guest log has not grown for this
+	# long (a freeze); the time is recorded in summary.txt.
+	if [[ -n "${RIDE_STALL_SEC:-}" && -f "$log" ]] \
+		&& (( $(date +%s) - $(stat -c %Y "$log") > RIDE_STALL_SEC )); then
+		stalled=$(( $(date +%s) - $(stat -c %Y "$log") ))
+		break
+	fi
 	sleep 5
 done
 kill "$dpid" 2>/dev/null; sleep 3; kill -9 "$dpid" 2>/dev/null
@@ -74,6 +81,7 @@ kill "$dpid" 2>/dev/null; sleep 3; kill -9 "$dpid" 2>/dev/null
 	echo "fatal: $(grep -a -m1 -o 'fatal message=.*' "$log")"
 	echo "titles=$(grep -aho 'env_message, firing ([^)]*)' "$log" | sort -u | wc -l)"
 	echo "repeated_alerts=$(grep -ac 'previous alert repeated' "$log")"
+	echo "stalled_sec=${stalled:-0}"
 	echo "last: $(tail -1 "$log" | cut -c60-200)"
 	grep -a 'PLAYTEST\|mp4' "$out/playtest-record.log" 2>/dev/null | tail -1
 } | tee "$out/summary.txt"
