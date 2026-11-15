@@ -3361,12 +3361,18 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			cl_entity_t saveent = *RI.currententity;
 			model_t     *pweaponmodel = CL_ModelHandle( pplayer->weaponmodel );
 
-			m_pStudioHeader = (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel );
+			m_pStudioHeader = pweaponmodel ? (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel ) : NULL;
 
-			R_StudioMergeBones( RI.currententity, pweaponmodel );
-			R_StudioSetupLighting( &lighting );
-			R_StudioRenderModel( );
-			R_StudioCalcAttachments( );
+			/* The third-person p_*.mdl may not be resident on GameCube (the
+			 * studio budget defers it); a NULL header crashed MergeBones
+			 * (ceres 1ff66ba, DAR 0xA4 = studiohdr numseq). Skip the gun. */
+			if( m_pStudioHeader )
+			{
+				R_StudioMergeBones( RI.currententity, pweaponmodel );
+				R_StudioSetupLighting( &lighting );
+				R_StudioRenderModel( );
+				R_StudioCalcAttachments( );
+			}
 
 			*RI.currententity = saveent;
 		}
