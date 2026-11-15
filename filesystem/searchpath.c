@@ -42,6 +42,28 @@ static int fs_gc_miss_count;
 static int fs_gc_hit_count;
 static qboolean fs_gc_smoke_boot;
 
+/* A stomped count (negative or past the end) used to index the table and
+ * fault in Q_strncpy (ceres spectator spawn: DAR 0xBF512D34 at
+ * FS_AddToHitCache). Log it once with the neighbours so the writer can be
+ * found, and start the cache over instead of writing out of bounds. */
+static qboolean FS_GCCacheCountSane( int *count, int max, const char *what, const char *name )
+{
+	static qboolean reported;
+
+	if( *count >= 0 && *count <= max )
+		return true;
+	if( !reported )
+	{
+		reported = true;
+		Con_Printf( S_ERROR "Xash3D GameCube: FS %s cache count corrupted =%d (0x%08x) at %p name=%s hit=%d miss=%d\n",
+			what, *count, (uint)*count, (void *)count, name ? name : "(null)",
+			fs_gc_hit_count, fs_gc_miss_count );
+	}
+	*count = 0;
+	return false;
+}
+
+
 void FS_SetSmokeBootMode( qboolean enable )
 {
 	fs_gc_smoke_boot = enable;
@@ -61,6 +83,7 @@ static qboolean FS_FindMissCached( const char *name )
 {
 	int i;
 
+	FS_GCCacheCountSane( &fs_gc_miss_count, GC_FIND_MISS_CACHE, "miss", name );
 	for( i = 0; i < fs_gc_miss_count; i++ )
 	{
 		if( !Q_stricmp( fs_gc_miss_cache[i], name ))
@@ -74,6 +97,7 @@ static qboolean FS_FindHitCached( const char *name )
 {
 	int i;
 
+	FS_GCCacheCountSane( &fs_gc_hit_count, GC_FIND_HIT_CACHE, "hit", name );
 	for( i = 0; i < fs_gc_hit_count; i++ )
 	{
 		if( !Q_stricmp( fs_gc_hit_cache[i], name ))
@@ -85,6 +109,7 @@ static qboolean FS_FindHitCached( const char *name )
 
 static void FS_AddToHitCache( const char *name )
 {
+	FS_GCCacheCountSane( &fs_gc_hit_count, GC_FIND_HIT_CACHE, "hit", name );
 	if( fs_gc_hit_count >= GC_FIND_HIT_CACHE )
 		return;
 
@@ -94,6 +119,7 @@ static void FS_AddToHitCache( const char *name )
 
 static void FS_RememberFindMiss( const char *name )
 {
+	FS_GCCacheCountSane( &fs_gc_miss_count, GC_FIND_MISS_CACHE, "miss", name );
 	if( fs_gc_miss_count >= GC_FIND_MISS_CACHE )
 		return;
 
