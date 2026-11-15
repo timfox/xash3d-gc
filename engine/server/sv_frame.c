@@ -24,9 +24,25 @@ GNU General Public License for more details.
 typedef struct
 {
 	int		num_entities;
+#if XASH_GAMECUBE
+	entity_state_t	*entities;	// per-map scratch, see SV_GCSizePacketEntities
+#else
 	entity_state_t	entities[MAX_VISIBLE_PACKET];
+#endif
 	byte		sended[MAX_EDICTS_BYTES];
 } sv_ents_t;
+
+#if XASH_GAMECUBE
+/* Frame build list and packet history are sized per map from the World DL
+ * route's free map-arena tail (sv_init.c). This static list is the fallback
+ * when a map leaves no room for the full retail 256. */
+static entity_state_t sv_gc_frame_ents_static[128];
+entity_state_t *sv_gc_frame_scratch = sv_gc_frame_ents_static;
+int sv_gc_visible_cap = 128;
+#define SV_VISIBLE_CAP sv_gc_visible_cap
+#else
+#define SV_VISIBLE_CAP MAX_VISIBLE_PACKET
+#endif
 
 static int	c_fullsend;	// just a debug counter
 static int	c_notsend;
@@ -198,7 +214,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 				}
 			}
 
-			if( ents->num_entities >= ( MAX_VISIBLE_PACKET - 1 ))
+			if( ents->num_entities >= ( SV_VISIBLE_CAP - 1 ))
 			{
 				c_notsend++;
 				continue;
@@ -302,7 +318,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 			}
 
 			// if we are full, silently discard entities
-			if( ents->num_entities < ( MAX_VISIBLE_PACKET - 1 ))
+			if( ents->num_entities < ( SV_VISIBLE_CAP - 1 ))
 			{
 				ents->num_entities++;	// entity accepted
 				c_fullsend++;		// debug counter
@@ -838,6 +854,9 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	ClearBits( sv.hostflags, SVF_MERGE_VISIBILITY );
 
 	// clear everything in this snapshot
+#if XASH_GAMECUBE
+	frame_ents.entities = sv_gc_frame_scratch;
+#endif
 	frame_ents.num_entities = c_fullsend = c_notsend = 0;
 
 	// add all the entities directly visible to the eye, which
@@ -869,6 +888,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	{
 		if( c_notsend > 0 )
 			Con_Printf( S_ERROR "Too many entities in visible packet list. Ignored %d entities\n", c_notsend );
+
 		cl->ignored_ents = c_notsend;
 	}
 

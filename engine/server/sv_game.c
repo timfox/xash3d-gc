@@ -6402,14 +6402,24 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	 * surface table it was sized for is never built), so reserve here.
 	 * Start above the tail peak, not the highwater: a lean load lowers the
 	 * highwater to 0 while the world-texture carves above it stay live. */
+	if( GC_MenuRunsServer( ))
+	{
+		extern void Mod_GCWorldCanaryCheck( const char *when );
+		Mod_GCWorldCanaryCheck( "after load, before arena claims" );
+	}
 	if( GC_MenuRunsServer() && !SV_GCPrivateOverflowReserved())
 	{
-		SV_GCReservePrivateOverflow( Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()),
+		SV_GCReservePrivateOverflow( GC_MapArenaFind( GC_ENTITY_OVERFLOW_BYTES ),
 			GC_ENTITY_OVERFLOW_BYTES );
 		if( !SV_GCPrivateOverflowReserved())
 			Con_Reportf( S_WARN "Xash3D GameCube: entity overflow unavailable at spawn (tail high-water %s)\n",
 				Q_memprint( GC_MapLoadBufferTailHighwater()));
 	}
+	if( GC_MenuRunsServer( ))
+		Con_Reportf( "Xash3D GameCube: arena budget map=%s entity_overflow=%s arena_tail_left=%s\n", mapname,
+			SV_GCPrivateOverflowReserved() ? "64 Kb" : "none",
+			Q_memprint( GC_MapArenaLargestGap()));
+	SV_GCSizePacketEntities();
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;
 	memset( gc_ent_priv_slab_bits, 0, sizeof( gc_ent_priv_slab_bits ));

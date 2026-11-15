@@ -55,6 +55,8 @@ typedef int fixed16_t;
 #define MAX_LIGHTMAPS       256
 #define SUBDIVIDE_SIZE      64
 #define MAX_DRAW_STACK      2           // normal view and menu view
+#define GX_MAX_EDGE_ENTITIES 128
+#define GX_MAX_BEAM_ENTITIES 128
 
 #if XASH_GAMECUBE
 #define SW_SPAN_CHUNK       16
@@ -204,10 +206,13 @@ typedef struct
 
 typedef struct
 {
-	cl_entity_t *edge_entities[MAX_VISIBLE_PACKET];         // brush edge drawing
+	/* Every visible entity can be solid or translucent (retail 256); beam
+	 * entities stay at 128 and the soft-renderer edge list is never drawn on
+	 * GX, which keeps the MEM1 static budget where it was. */
+	cl_entity_t *edge_entities[GX_MAX_EDGE_ENTITIES];       // brush edge drawing
 	cl_entity_t *solid_entities[MAX_VISIBLE_PACKET];        // opaque moving or alpha brushes
 	cl_entity_t *trans_entities[MAX_VISIBLE_PACKET];        // translucent brushes
-	cl_entity_t *beam_entities[MAX_VISIBLE_PACKET];
+	cl_entity_t *beam_entities[GX_MAX_BEAM_ENTITIES];
 	uint        num_edge_entities;
 	uint        num_solid_entities;
 	uint        num_trans_entities;

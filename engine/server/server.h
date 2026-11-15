@@ -644,6 +644,7 @@ void SV_FreeEdicts( void );
 #if XASH_GAMECUBE
 #define GC_ENTITY_OVERFLOW_BYTES (64u * 1024u)
 void SV_GCReservePrivateOverflow( size_t after, size_t bytes );
+void SV_GCSizePacketEntities( void );
 qboolean SV_GCPrivateOverflowReserved( void );
 qboolean SV_GCPrivateOverflowPinsMapArena( void );
 #endif

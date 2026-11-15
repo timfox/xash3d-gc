@@ -15,6 +15,9 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "client.h"
+#if XASH_GAMECUBE
+#include "platform/gamecube/mem_gamecube.h"
+#endif
 
 #if XASH_GAMECUBE
 extern int GC_MapLoadMemoryOpt( void );
@@ -460,7 +463,7 @@ void CL_ClearAllRemaps( void )
 				CL_FreeRemapInfo( clgame.remap_info[i] );
 		}
 #if XASH_GAMECUBE
-		if( clgame.remap_info != gc_gcmap_bootstrap_remap_info )
+		if( clgame.remap_info != gc_gcmap_bootstrap_remap_info && !GC_IsMapLoadBufferAddress( clgame.remap_info ))
 			Mem_Free( clgame.remap_info );
 #else
 		Mem_Free( clgame.remap_info );

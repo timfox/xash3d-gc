@@ -78,6 +78,78 @@ qboolean SV_IsStaticPacketEntities( const entity_state_t *ents )
 	return ents == gc_singleplayer_packet_entities;
 }
 
+/*
+SV_GCSizePacketEntities
+
+Retail Half-Life sends up to 256 visible entities a frame; the 4 x 32 static
+history overflowed past 128 ("Ignored 87 entities" on c1a2a) and, because one
+frame filled the whole ring, every frame went out uncompressed. Size the frame
+build list and SV_UPDATE_BACKUP frames of history per map from the free tail
+of the map arena (World DL route: the live surface table it was sized for is
+never built). Falls back to fewer history frames, then to the static tables.
+*/
+extern entity_state_t *sv_gc_frame_scratch;
+extern int sv_gc_visible_cap;
+
+int SV_GCEntityCount( void )
+{
+	return svgame.numEntities;
+}
+
+void SV_GCSizePacketEntities( void )
+{
+	static entity_state_t *fallback_scratch;
+	const int visible = MAX_VISIBLE_PACKET;
+	int frames;
+
+	if( !fallback_scratch )
+		fallback_scratch = sv_gc_frame_scratch; // the static 128 list
+	/* New storage: no client may delta from a frame of the old one. */
+	svs.next_client_entities = 0;
+	if( svs.clients )
+	{
+		int i;
+
+		for( i = 0; i < svs.maxclients; i++ )
+		{
+			svs.clients[i].delta_sequence = -1;
+			if( svs.clients[i].frames )
+				memset( svs.clients[i].frames, 0, sizeof( client_frame_t ) * SV_UPDATE_BACKUP );
+		}
+	}
+	if( GC_MenuRunsServer() && svs.maxclients == 1 )
+	{
+		for( frames = SV_UPDATE_BACKUP - 1; frames >= 2; frames-- )
+		{
+			const size_t entries = (size_t)visible * ( frames + 1 );
+			const size_t at = GC_MapArenaFind( sizeof( entity_state_t ) * entries );
+			entity_state_t *block = at == (size_t)-1 ? NULL
+				: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, sizeof( entity_state_t ) * entries );
+
+			if( !block )
+				continue;
+			memset( block, 0, sizeof( entity_state_t ) * entries );
+			svs.packet_entities = block;
+			svs.num_client_entities = visible * frames;
+			sv_gc_frame_scratch = block + visible * frames;
+			sv_gc_visible_cap = visible;
+			Con_Reportf( "Xash3D GameCube: %sserver packet entities map=%s visible=%d frames=%d/%d bytes=%s arena_tail_left=%s\n",
+				frames < SV_UPDATE_BACKUP ? "Warning: REDUCED " : "", sv.name, visible, frames, SV_UPDATE_BACKUP,
+				Q_memprint( sizeof( entity_state_t ) * entries ),
+				Q_memprint( GC_MapArenaLargestGap()));
+			return;
+		}
+	}
+	svs.packet_entities = gc_singleplayer_packet_entities;
+	svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
+	sv_gc_frame_scratch = fallback_scratch;
+	sv_gc_visible_cap = 128;
+	if( GC_MenuRunsServer( ))
+		Con_Reportf( S_WARN "Xash3D GameCube: REDUCED server packet entities map=%s visible=128 frames=1/%d (static fallback, arena_tail_left=%s)\n",
+			sv.name, SV_UPDATE_BACKUP,
+			Q_memprint( GC_MapArenaLargestGap()));
+}
+
 qboolean SV_IsStaticListenClients( const sv_client_t *clients )
 {
 	return clients == gc_listen_clients;

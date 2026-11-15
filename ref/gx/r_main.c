@@ -396,7 +396,7 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 
 	if( type == ET_BEAM )
 	{
-		if( tr.draw_list->num_beam_entities >= MAX_VISIBLE_PACKET )
+		if( tr.draw_list->num_beam_entities >= GX_MAX_BEAM_ENTITIES )
 		{
 			gEngfuncs.Con_Printf( S_ERROR "Too many beams %d!\n", tr.draw_list->num_beam_entities );
 			return false;
@@ -411,7 +411,7 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 	{
 		if( clent->model->type == mod_brush )
 		{
-			if( tr.draw_list->num_edge_entities >= MAX_VISIBLE_PACKET )
+			if( tr.draw_list->num_edge_entities >= GX_MAX_EDGE_ENTITIES )
 				return false;
 
 			tr.draw_list->edge_entities[tr.draw_list->num_edge_entities] = clent;

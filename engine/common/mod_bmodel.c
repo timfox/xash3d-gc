@@ -364,6 +364,8 @@ static qboolean gc_world_msurface_retained;
  * below. Freeing any other brush model (a stale previous level after a
  * changelevel) must not tear the current world down. */
 static const model_t *gc_world_blocks_owner;
+/* World lighting/PVS sizes for the arena gap finder and canary (end of file). */
+static size_t gc_world_lightdata_bytes, gc_world_visdata_bytes;
 static byte *gc_bsp_scratch_base;
 static size_t gc_bsp_scratch_size;
 static size_t gc_bsp_scratch_carve_high;
@@ -10379,7 +10381,10 @@ static void Mod_LoadVisibility( model_t *mod, dbspmodel_t *bmod )
 	/* Optional: renderer can fall back to full-vis leaf marking. */
 #if XASH_GAMECUBE
 	if( GC_MapLoadMemoryOpt() && bmod->isworld )
+	{
 		mod->visdata = Mod_GCWorldArrayTryAlloc( mod, bmod, bmod->visdatasize, "visdata" );
+		gc_world_visdata_bytes = bmod->visdatasize;
+	}
 	else
 #endif
 		mod->visdata = Mem_TryMalloc( mod->mempool, bmod->visdatasize );
@@ -11141,6 +11146,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 			}
 
 			mod->lightdata = (color24 *)bmod->lightdata;
+			if( bmod->isworld ) gc_world_lightdata_bytes = bmod->lightdatasize;
 			SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 			for( i = 0; i < mod->numsurfaces; i++ )
 			{
@@ -11185,6 +11191,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		{
 			bmod->lightdatasize = bmod->rgblightdatasize;
 			mod->lightdata = Mem_Malloc( mod->mempool, bmod->rgblightdatasize );
+			if( bmod->isworld ) gc_world_lightdata_bytes = bmod->rgblightdatasize;
 			memcpy( mod->lightdata, bmod->rgblightdata, bmod->rgblightdatasize );
 			SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 		}
@@ -11195,6 +11202,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		else
 		{
 			mod->lightdata = (color24 *)Mem_Malloc( mod->mempool, bmod->lightdatasize * sizeof( color24 ));
+			if( bmod->isworld ) gc_world_lightdata_bytes = bmod->lightdatasize * sizeof( color24 );
 
 			// expand the white lighting data
 			for( int i = 0; i < bmod->lightdatasize; i++ )
@@ -11203,6 +11211,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		break;
 	case 3:	// load colored lighting
 		mod->lightdata = Mem_Malloc( mod->mempool, bmod->lightdatasize );
+		if( bmod->isworld ) gc_world_lightdata_bytes = bmod->lightdatasize;
 		memcpy( mod->lightdata, bmod->lightdata, bmod->lightdatasize );
 		SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 		break;
@@ -12590,3 +12599,139 @@ int GAME_EXPORT Mod_SaveLump( const char *filename, const int lump, void *lumpda
 	FS_Close( f );
 	return LUMP_SAVE_OK;
 }
+
+#if XASH_GAMECUBE
+/* Live world arrays inside the map arena. The lean World DL load leaves
+ * planes in the BSP image near the bottom and parks leafs/nodes in a high
+ * slot near the top, so the free space for post-load claims is a gap in the
+ * middle, not "everything above the tail". Collect every world array that
+ * points into the arena (lighting and PVS sizes come from the load). */
+typedef struct { size_t lo, hi; } gc_arena_range_t;
+
+
+static void Mod_GCLiveRange( gc_arena_range_t *r, int *n, int max, const byte *arena, size_t cap, const void *ptr, size_t bytes )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( !p || !bytes || p < arena || p >= arena + cap || *n >= max )
+		return;
+	r[*n].lo = (size_t)( p - arena );
+	r[*n].hi = Q_min( r[*n].lo + bytes, cap );
+	( *n )++;
+}
+
+static int Mod_GCWorldArenaRanges( gc_arena_range_t *r, int max, const byte *arena, size_t cap )
+{
+	const model_t *mod = worldmodel;
+	int n = 0, h;
+
+	if( !mod || mod->type != mod_brush )
+		return 0;
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->planes, mod->numplanes * sizeof( mplane_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->leafs, ( mod->numleafs + 1 ) * sizeof( mleaf_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->nodes, mod->numnodes * sizeof( mnode_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->vertexes, mod->numvertexes * sizeof( mvertex_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->edges16, mod->numedges * sizeof( medge32_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->texinfo, mod->numtexinfo * sizeof( mtexinfo_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->surfaces, mod->numsurfaces * ( sizeof( msurface_t ) + sizeof( mextrasurf_t )));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->surfedges, mod->numsurfedges * sizeof( int ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->clipnodes16, mod->numclipnodes * sizeof( mclipnode32_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->marksurfaces, mod->nummarksurfaces * sizeof( *mod->marksurfaces ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->textures, mod->numtextures * sizeof( *mod->textures ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->submodels, mod->numsubmodels * sizeof( dmodel_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->lightdata, gc_world_lightdata_bytes );
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->visdata, gc_world_visdata_bytes );
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->entities, mod->entities ? Q_strlen( mod->entities ) + 1 : 0 );
+	for( h = 0; h < MAX_MAP_HULLS; h++ )
+	{
+		Mod_GCLiveRange( r, &n, max, arena, cap, mod->hulls[h].planes, mod->numplanes * sizeof( mplane_t ));
+		Mod_GCLiveRange( r, &n, max, arena, cap, mod->hulls[h].clipnodes16,
+			( mod->hulls[h].lastclipnode + 1 ) * sizeof( mclipnode32_t ));
+	}
+	return n;
+}
+
+/* Free gap at or above `from` that no live world array touches:
+ * returns its start and writes its end. */
+size_t Mod_GCArenaGap( size_t from, size_t *gap_end )
+{
+	gc_arena_range_t r[48];
+	const byte *arena = GC_MapLoadBufferBase();
+	const size_t cap = GC_MapLoadBufferCapacity();
+	const int n = arena && cap ? Mod_GCWorldArenaRanges( r, ARRAYSIZE( r ), arena, cap ) : 0;
+	size_t start = from, end = cap;
+	qboolean moved = true;
+	int i;
+
+	while( moved )
+	{
+		moved = false;
+		for( i = 0; i < n; i++ )
+		{
+			if( r[i].lo <= start && r[i].hi > start )
+			{
+				start = r[i].hi;
+				moved = true;
+			}
+		}
+	}
+	for( i = 0; i < n; i++ )
+	{
+		if( r[i].lo >= start && r[i].lo < end )
+			end = r[i].lo;
+	}
+	if( gap_end )
+		*gap_end = start < end ? end : start;
+	return start;
+}
+
+/* Canary: CRC the arena-resident world data that never changes after load
+ * (planes, lighting, PVS, node links). Taken at the first check after load,
+ * compared on later ones; any change means a claim landed on world data. */
+static uint32_t gc_world_canary_crc;
+static const model_t *gc_world_canary_mod;
+
+static uint32_t Mod_GCWorldCanary( const model_t *mod )
+{
+	uint32_t crc;
+	int i;
+
+	CRC32_Init( &crc );
+	if( mod->planes )
+		CRC32_ProcessBuffer( &crc, mod->planes, mod->numplanes * sizeof( mplane_t ));
+	if( mod->lightdata && gc_world_lightdata_bytes )
+		CRC32_ProcessBuffer( &crc, mod->lightdata, gc_world_lightdata_bytes );
+	if( mod->visdata && gc_world_visdata_bytes )
+		CRC32_ProcessBuffer( &crc, mod->visdata, gc_world_visdata_bytes );
+	for( i = 0; mod->nodes && i < mod->numnodes; i++ )
+	{
+		CRC32_ProcessBuffer( &crc, &mod->nodes[i].plane, sizeof( mod->nodes[i].plane ));
+		CRC32_ProcessBuffer( &crc, &mod->nodes[i].contents, sizeof( mod->nodes[i].contents ));
+	}
+	return CRC32_Final( crc );
+}
+
+void Mod_GCWorldCanaryCheck( const char *when )
+{
+	const model_t *mod = worldmodel;
+	uint32_t crc;
+
+	if( !mod || mod->type != mod_brush )
+		return;
+	crc = Mod_GCWorldCanary( mod );
+	/* The world model reuses slot 0 across maps: (re)arm at every load. */
+	if( gc_world_canary_mod != mod || !Q_strncmp( when, "after load", 10 ))
+	{
+		gc_world_canary_mod = mod;
+		gc_world_canary_crc = crc;
+		Con_Reportf( "Xash3D GameCube: world canary armed %s crc=%08x (%s)\n", mod->name, crc, when );
+		return;
+	}
+	if( crc != gc_world_canary_crc )
+	{
+		Con_Reportf( S_ERROR "Xash3D GameCube: WORLD CANARY CHANGED %s crc %08x -> %08x (%s): arena claim overwrote world data\n",
+			mod->name, gc_world_canary_crc, crc, when );
+		gc_world_canary_crc = crc;
+	}
+}
+#endif

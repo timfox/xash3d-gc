@@ -1193,6 +1193,7 @@ void CL_ClearWorld( void )
 #define GC_GCMAP_STATIC_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
 static cl_entity_t gc_gcmap_bootstrap_entities[GC_GCMAP_STATIC_CLIENT_EDICTS];
 static entity_state_t gc_gcmap_bootstrap_packet_entities[128];
+static entity_state_t *cl_gc_arena_packet_entities; // per-map ring in the map arena
 remap_info_t *gc_gcmap_bootstrap_remap_info[GC_GCMAP_STATIC_CLIENT_EDICTS + 1];
 
 static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
@@ -1219,6 +1220,107 @@ static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 }
 #endif
 
+#if XASH_GAMECUBE
+static cl_entity_t *cl_gc_arena_entities;	// per-map table in the map arena
+static remap_info_t **cl_gc_arena_remaps;
+
+/* Maps over 460 entities (42 of HL1's campaign maps): put the whole client
+ * table in the free map-arena tail, and the packet ring in the static
+ * bootstrap block it no longer needs. Steps down if the tail is short,
+ * logging what the map got; the server never sends past the table. */
+static qboolean CL_GCArenaEdicts( int maxclients )
+{
+	const int want = clgame.maxEntities;
+	int count;
+
+	cl_gc_arena_entities = NULL;
+	cl_gc_arena_remaps = NULL;
+	if( !GC_MenuRunsServer() || maxclients > 2 || want <= GC_GCMAP_STATIC_CLIENT_EDICTS )
+		return false;
+
+	for( count = want; count > GC_GCMAP_STATIC_CLIENT_EDICTS; count -= 32 )
+	{
+		const size_t ent_bytes = ( sizeof( cl_entity_t ) * (size_t)count + 31u ) & ~(size_t)31u;
+		const size_t remap_bytes = sizeof( remap_info_t * ) * ( (size_t)count + 1 );
+		const size_t at = GC_MapArenaFind( ent_bytes + remap_bytes );
+		byte *block = at == (size_t)-1 ? NULL
+			: (byte *)GC_MapLoadBufferTailAlloc( at, ent_bytes + remap_bytes );
+
+		if( !block )
+			continue;
+		memset( block, 0, ent_bytes + remap_bytes );
+		cl_gc_arena_entities = (cl_entity_t *)block;
+		cl_gc_arena_remaps = (remap_info_t **)( block + ent_bytes );
+		break;
+	}
+	if( !cl_gc_arena_entities )
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client entities map=%s %d of %d (no arena room, arena_tail_left=%s)\n",
+			clgame.mapname, GC_GCMAP_STATIC_CLIENT_EDICTS, want,
+			Q_memprint( GC_MapArenaLargestGap()));
+		clgame.maxEntities = GC_GCMAP_STATIC_CLIENT_EDICTS;
+		return false;
+	}
+	clgame.maxEntities = count;
+	clgame.entities = cl_gc_arena_entities;
+	clgame.static_entities = NULL;
+	clgame.numStatics = 0;
+
+	/* The static block the table would have used holds the packet ring. */
+	cls.num_client_entities = MAX_VISIBLE_PACKET * CL_UPDATE_BACKUP;
+	while( sizeof( entity_state_t ) * (size_t)cls.num_client_entities > sizeof( gc_gcmap_bootstrap_entities ))
+		cls.num_client_entities -= MAX_VISIBLE_PACKET;
+	cls.packet_entities = (entity_state_t *)gc_gcmap_bootstrap_entities;
+	memset( cls.packet_entities, 0, sizeof( entity_state_t ) * cls.num_client_entities );
+
+	Con_Reportf( "Xash3D GameCube: %sclient entities map=%s %d of %d in map arena (%s), packet ring %d in static block, arena_tail_left=%s\n",
+		count < want ? "Warning: REDUCED " : "", clgame.mapname, count, want,
+		Q_memprint( sizeof( cl_entity_t ) * count ), cls.num_client_entities,
+		Q_memprint( GC_MapArenaLargestGap()));
+	return true;
+}
+#endif
+
+/* The server is about to hand this map's arena to the next map's BSP: move
+ * the client off it first (the transition hold still draws a few frames). */
+void CL_GCLeaveMapArena( void )
+{
+	if( !cl_gc_arena_entities && !cl_gc_arena_packet_entities )
+		return;
+	if( clgame.entities && clgame.entities == cl_gc_arena_entities )
+	{
+		const int keep = Q_min( clgame.maxEntities, GC_GCMAP_STATIC_CLIENT_EDICTS );
+
+		/* Remap entries are heap blocks listed in the arena: free them now. */
+		if( clgame.remap_info == cl_gc_arena_remaps )
+		{
+			CL_ClearAllRemaps();
+			clgame.maxRemapInfos = 0;
+		}
+
+		ref.dllFuncs.R_ProcessEntData( false, NULL, 0 );
+		/* The static block held the packet ring; it takes the table back. */
+		memcpy( gc_gcmap_bootstrap_entities, cl_gc_arena_entities, sizeof( cl_entity_t ) * keep );
+		clgame.entities = gc_gcmap_bootstrap_entities;
+		clgame.maxEntities = keep;
+		ref.dllFuncs.R_ProcessEntData( true, clgame.entities, clgame.maxEntities );
+	}
+	cls.packet_entities = gc_gcmap_bootstrap_packet_entities;
+	cls.num_client_entities = (int)ARRAYSIZE( gc_gcmap_bootstrap_packet_entities );
+	cls.next_client_entities = 0;
+	for( int i = 0; i < (int)ARRAYSIZE( cl.frames ); i++ )
+	{
+		cl.frames[i].num_entities = 0;
+		cl.frames[i].first_entity = 0;
+		cl.frames[i].valid = false;
+	}
+	cl.validsequence = 0;
+	cl_gc_arena_entities = NULL;
+	cl_gc_arena_remaps = NULL;
+	cl_gc_arena_packet_entities = NULL;
+	Con_Reportf( "Xash3D GameCube: client entity tables left the map arena (%d kept)\n", clgame.maxEntities );
+}
+
 void CL_InitEdicts( int maxclients )
 {
 	Assert( clgame.entities == NULL );
@@ -1235,11 +1337,44 @@ void CL_InitEdicts( int maxclients )
 		clgame.maxEntities, (uint)( sizeof( cl_entity_t ) * clgame.maxEntities ),
 		cls.num_client_entities );
 
+	if( CL_GCArenaEdicts( maxclients ))
+		goto init_remaps;
 	if( CL_GameCubeUseStaticGcmapBootstrapEdicts( maxclients ))
 	{
 		memset( gc_gcmap_bootstrap_entities, 0, sizeof( gc_gcmap_bootstrap_entities ));
 		memset( gc_gcmap_bootstrap_packet_entities, 0, sizeof( gc_gcmap_bootstrap_packet_entities ));
 		cls.packet_entities = gc_gcmap_bootstrap_packet_entities;
+		/* Retail sends up to 256 visible entities a frame. Hold CL_UPDATE_BACKUP
+		 * frames of them in the map arena tail the World DL route leaves free
+		 * (the server sized its own copy there first); the 128-entry static
+		 * table could not even hold one frame of c1a2a. */
+		if( GC_MenuRunsServer( ))
+		{
+			int frames;
+
+			for( frames = CL_UPDATE_BACKUP; frames >= 2; frames-- )
+			{
+				const size_t bytes = sizeof( entity_state_t ) * (size_t)MAX_VISIBLE_PACKET * frames;
+				const size_t at = GC_MapArenaFind( bytes );
+				entity_state_t *ring = at == (size_t)-1 ? NULL
+					: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+
+				if( !ring )
+					continue;
+				memset( ring, 0, bytes );
+				cls.packet_entities = ring;
+				cl_gc_arena_packet_entities = ring;
+				cls.num_client_entities = MAX_VISIBLE_PACKET * frames;
+				Con_Reportf( "Xash3D GameCube: %sclient packet entities map=%s visible=%d frames=%d/%d bytes=%s arena_tail_left=%s\n",
+					frames < CL_UPDATE_BACKUP ? "Warning: REDUCED " : "", clgame.mapname, MAX_VISIBLE_PACKET,
+					frames, CL_UPDATE_BACKUP, Q_memprint( bytes ),
+					Q_memprint( GC_MapArenaLargestGap()));
+				break;
+			}
+			if( !cl_gc_arena_packet_entities )
+				Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client packet entities map=%s 128 entries (static fallback, arena_tail_left=%s)\n",
+					clgame.mapname, Q_memprint( GC_MapArenaLargestGap()));
+		}
 		clgame.entities = gc_gcmap_bootstrap_entities;
 		clgame.static_entities = NULL;
 		clgame.numStatics = 0;
@@ -1261,7 +1396,9 @@ init_remaps:
 		CL_ClearAllRemaps (); // purge old remap info
 		clgame.maxRemapInfos = clgame.maxEntities + 1;
 #if XASH_GAMECUBE
-		if( CL_GameCubeUseStaticGcmapBootstrapEdicts( maxclients ))
+		if( cl_gc_arena_remaps && clgame.entities == cl_gc_arena_entities )
+			clgame.remap_info = cl_gc_arena_remaps;
+		else if( CL_GameCubeUseStaticGcmapBootstrapEdicts( maxclients ))
 		{
 			memset( gc_gcmap_bootstrap_remap_info, 0, sizeof( gc_gcmap_bootstrap_remap_info ));
 			clgame.remap_info = gc_gcmap_bootstrap_remap_info;
@@ -1281,8 +1418,9 @@ void CL_FreeEdicts( void )
 	if( clgame.entities )
 #if XASH_GAMECUBE
 	{
-		if( clgame.entities != gc_gcmap_bootstrap_entities )
+		if( clgame.entities != gc_gcmap_bootstrap_entities && clgame.entities != cl_gc_arena_entities )
 			Mem_Free( clgame.entities );
+		cl_gc_arena_entities = NULL;
 	}
 #else
 		Mem_Free( clgame.entities );
@@ -1296,8 +1434,12 @@ void CL_FreeEdicts( void )
 	if( cls.packet_entities )
 #if XASH_GAMECUBE
 	{
-		if( cls.packet_entities != gc_gcmap_bootstrap_packet_entities )
+		/* Map-arena rings go with the arena itself. */
+		if( cls.packet_entities != gc_gcmap_bootstrap_packet_entities
+			&& cls.packet_entities != cl_gc_arena_packet_entities
+			&& (void *)cls.packet_entities != (void *)gc_gcmap_bootstrap_entities )
 			Z_Free( cls.packet_entities );
+		cl_gc_arena_packet_entities = NULL;
 	}
 #else
 		Z_Free( cls.packet_entities );

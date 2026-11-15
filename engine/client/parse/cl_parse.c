@@ -63,6 +63,15 @@ static int CL_GameCubeClientEdictLimit( int requested )
 
 	if( Sys_GetParmFromCmdLine( "-gcmaxentities", value ))
 		limit = Q_atoi( value );
+	else if( GC_MenuRunsServer() && Host_IsLocalClient( ))
+	{
+		/* Retail New Game route: the local server's map is spawned (and any
+		 * transition restored) by now, so size the table from its real
+		 * entity count with room for what the map spawns at run time.
+		 * cl_game.c places a table above 460 in the map arena. */
+		extern int SV_GCEntityCount( void );
+		limit = Q_max( GC_GCMAP_DEFAULT_CLIENT_EDICTS, SV_GCEntityCount() + 160 );
+	}
 
 	/* Allow GC map-route caps below MIN_EDICTS when intentionally small. */
 	limit = bound( 2, limit, requested );

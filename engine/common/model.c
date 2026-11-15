@@ -2418,6 +2418,12 @@ static void Mod_PurgeStudioCache( void )
 	gc_pinned_viewmodel_count = 0;
 	memset( gc_pinned_viewmodels, 0, sizeof( gc_pinned_viewmodels ));
 #endif
+#if XASH_GAMECUBE && !XASH_DEDICATED
+	{
+		extern void CL_GCLeaveMapArena( void );
+		CL_GCLeaveMapArena();
+	}
+#endif
 	// release previois map
 	Mod_FreeModel( mod_known );	// world is stuck on slot #0 always
 #if XASH_GAMECUBE

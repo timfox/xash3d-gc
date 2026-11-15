@@ -754,12 +754,36 @@ static void CL_DeltaEntity( sizebuf_t *msg, frame_t *frame, int newnum, entity_s
 		if( clgame.maxEntities > 2 )
 #endif
 		Con_DPrintf( S_ERROR "%s: invalid newnum: %d\n", __func__, newnum );
+#if XASH_GAMECUBE
+		/* No cl_entity_t for it, but its state still belongs in this frame:
+		 * the server deltas the next frame against it. Leaving it out made
+		 * the client parse the next delta of that entity as a new entity and
+		 * misread the stream ("CL_ParsePacketEntities: overflow") once the
+		 * history ring was large enough for real delta compression. */
+		if( has_update )
+		{
+			entity_state_t base = { 0 };
+			/* Read with a valid index; OOB numbers reject without reading. */
+			alive = MSG_ReadDeltaEntity( msg, old ? old : &base, state, 1, delta_type, cl.mtime[0] );
+		}
+		else if( old )
+			*state = *old;
+		else
+			alive = false;
+		if( alive )
+		{
+			state->number = newnum;
+			cls.next_client_entities++;
+			frame->num_entities++;
+		}
+#else
 		if( has_update )
 		{
 			entity_state_t discarded = { 0 };
 			/* Consume bits with a valid index — OOB numbers reject without reading. */
 			MSG_ReadDeltaEntity( msg, old ? old : &discarded, &discarded, 1, delta_type, cl.mtime[0] );
 		}
+#endif
 		return;
 	}
 

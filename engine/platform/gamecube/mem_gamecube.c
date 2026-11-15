@@ -971,6 +971,57 @@ qboolean GC_IsMapLoadBuffer( const void *ptr )
 	return ptr != NULL && ptr == gc_mapload_buf;
 }
 
+const byte *GC_MapLoadBufferBase( void )
+{
+	return gc_mapload_buf;
+}
+
+/* Offset of a free arena gap that fits `bytes` for a post-load claim (entity
+ * overflow, packet rings, client entity table), or (size_t)-1. A lean load
+ * lowers the highwater to 0 and leaves world arrays both near the bottom
+ * (in-place planes) and in a high slot near the top (leafs/nodes); the gap
+ * finder in mod_bmodel.c knows every one of them. */
+size_t GC_MapArenaFind( size_t bytes )
+{
+	extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+	size_t from = gc_mapload_tail_highwater;
+
+	if( from < gc_mapload_tail_peak )
+		from = gc_mapload_tail_peak;
+	while( gc_mapload_buf && from < gc_mapload_buf_size )
+	{
+		size_t end;
+		const size_t start = ( Mod_GCArenaGap( from, &end ) + 31u ) & ~(size_t)31u;
+
+		if( start + bytes <= end )
+			return start;
+		if( end <= from )
+			break;
+		from = end;
+	}
+	return (size_t)-1;
+}
+
+/* Bytes in the largest free gap left above the tail, for budget logs. */
+size_t GC_MapArenaLargestGap( void )
+{
+	extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+	size_t from = Q_max( gc_mapload_tail_highwater, gc_mapload_tail_peak ), best = 0;
+
+	while( gc_mapload_buf && from < gc_mapload_buf_size )
+	{
+		size_t end;
+		const size_t start = Mod_GCArenaGap( from, &end );
+
+		if( end > start && end - start > best )
+			best = end - start;
+		if( end <= from )
+			break;
+		from = end;
+	}
+	return best;
+}
+
 qboolean GC_IsMapLoadBufferAddress( const void *ptr )
 {
 	const uintptr_t address = (uintptr_t)ptr;

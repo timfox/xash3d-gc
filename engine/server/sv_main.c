@@ -709,6 +709,14 @@ void Host_ServerFrame( void )
 {
 #if XASH_GAMECUBE
 	static int gc_fullphysics_log;
+	static unsigned gc_canary_frames;
+
+	/* Arena canary (mod_bmodel.c): world data must not change in play. */
+	if( GC_MenuRunsServer() && sv.state == ss_active && ( ++gc_canary_frames % 300 ) == 0 )
+	{
+		extern void Mod_GCWorldCanaryCheck( const char *when );
+		Mod_GCWorldCanaryCheck( "in play" );
+	}
 	qboolean gc_fullphysics = Sys_CheckParm( "-gcnewgame" )
 		&& Sys_CheckParm( "-gcfullphysics" ) && GC_IsNewGameG36Done();
 	qboolean gc_fullphysics_trace = Sys_CheckParm( "-gcnewgame" )
