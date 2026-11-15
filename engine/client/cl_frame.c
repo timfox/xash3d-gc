@@ -1438,6 +1438,41 @@ fills the draw list (G315 solid=0). Pull nearby server brush edicts plus at
 most one already-resident world studio (not v_*) into the Flipper list.
 ===============
 */
+/* First sequence of a studio header whose label contains `want`, or -1. */
+static int CL_GCLeanFindSeq( const studiohdr_t *hdr, const char *want )
+{
+	const mstudioseqdesc_t *sd;
+	int i;
+
+	if( !hdr || hdr->numseq <= 0 || hdr->seqindex <= 0 )
+		return -1;
+	sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	/* Exact label first, then a label starting with it, then any animated
+	 * (numframes > 1) label containing it: DoD's first "idle" match is
+	 * look_idle, a single-frame aim pose. */
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( !Q_stricmp( sd[i].label, want ))
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( !Q_strnicmp( sd[i].label, want, Q_strlen( want )) && sd[i].numframes > 1 )
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( Q_stristr( sd[i].label, want ) && sd[i].numframes > 1 )
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( Q_stristr( sd[i].label, want ))
+			return i;
+	}
+	return -1;
+}
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -1771,7 +1806,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			 * toward the nearest drawn player each frame, so a fixed test
 			 * run can capture a bot without steering. */
 			if( !gc_facebot )
-				gc_facebot = Cvar_Get( "gc_facebot", "0", 0, "GameCube test: aim the view at the nearest other player" );
+				gc_facebot = Cvar_FindVar( "gc_facebot" );
 
 			if( !player_scan_logged )
 			{
@@ -1879,7 +1914,60 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->curstate.skin = ed->v.skin;
 				ent->curstate.scale = 1.0f;
 				ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
-				ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : (float)cl.time;
+				/* The server's player model is a hull-only stub, so the game
+				 * code cannot look up sequences and leaves sequence 0 with
+				 * animtime 0 (ceres acf6eef: the bot held one pose). Pick the
+				 * body's own sequences by label from its speed, and keep a
+				 * fixed animtime so the frame advances with cl.time (stamping
+				 * cl.time every emit froze it at frame 0). */
+				/* DoD's server stamps animtime = time every think, but with the
+				 * hull stub its frame never advances, so animtime == time and
+				 * the pose stuck at frame 0 (ceres 2ee8fa7). Use a per-slot
+				 * base time, reset when the chosen sequence changes. */
+				{
+					static float anim_base[MAX_CLIENTS + 1];
+					static int anim_seq[MAX_CLIENTS + 1];
+
+					if( anim_base[e] <= 0.0f || anim_base[e] > (float)cl.time || anim_seq[e] != ent->curstate.sequence + 1 )
+					{
+						anim_base[e] = (float)cl.time > 0.0f ? (float)cl.time : 0.001f;
+						anim_seq[e] = ent->curstate.sequence + 1;
+					}
+					ent->curstate.animtime = anim_base[e];
+					ent->curstate.frame = 0.0f;
+				}
+				{
+					static int seq_logs;
+					const studiohdr_t *bh = (const studiohdr_t *)mod->cache.data;
+					float speed = sqrtf( ed->v.velocity[0] * ed->v.velocity[0] + ed->v.velocity[1] * ed->v.velocity[1] );
+					int idle = CL_GCLeanFindSeq( bh, "idle" );
+					int gait;
+
+					if( speed > 150.0f )
+						gait = CL_GCLeanFindSeq( bh, "run" );
+					else if( speed > 10.0f )
+						gait = CL_GCLeanFindSeq( bh, "walk" );
+					else
+						gait = idle;
+					if( ed->v.sequence == 0 && idle >= 0 )
+						ent->curstate.sequence = idle;
+					if( ed->v.gaitsequence == 0 && gait >= 0 )
+						ent->curstate.gaitsequence = gait;
+					if( seq_logs < 6 )
+					{
+						const mstudioseqdesc_t *sd = bh ? (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex ) : NULL;
+
+						seq_logs++;
+						int sq = ent->curstate.sequence, gq = ent->curstate.gaitsequence;
+						qboolean sok = sd && sq >= 0 && sq < bh->numseq;
+						qboolean gok = sd && gq >= 0 && gq < bh->numseq;
+
+						Con_Reportf( "Xash3D GameCube: lean player %d seq %d '%s' (%d frames %.0f fps) gait %d '%s' (%d frames) speed %.0f numseq %d\n",
+							e, sq, sok ? sd[sq].label : "?", sok ? sd[sq].numframes : -1, sok ? sd[sq].fps : 0.0f,
+							gq, gok ? sd[gq].label : "?", gok ? sd[gq].numframes : -1,
+							speed, bh ? bh->numseq : -1 );
+					}
+				}
 				ent->curstate.weaponmodel = ed->v.weaponmodel;
 				ent->curstate.rendermode = ed->v.rendermode;
 				ent->curstate.renderamt = (int)ed->v.renderamt;
@@ -1913,11 +2001,55 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					}
 				}
 			}
-			if( near_e && gc_facebot && gc_facebot->value != 0.0f )
+			if( near_e && (( gc_facebot && gc_facebot->value != 0.0f ) || Sys_CheckParm( "-gcfacebot" )))
 			{
 				static int facebot_logs;
+				static qboolean facebot_moved;
 				vec3_t dir, ang;
 
+				/* gc_facebot 2: also move the local player, once, to a free
+				 * spot next to the bot (a hull trace out from the bot in 8
+				 * directions, longest clear one), so walls between the spawn
+				 * and the bot cannot hide it. */
+				if( gc_facebot && gc_facebot->value >= 2.0f && !facebot_moved
+					&& player && SV_IsValidEdict( player ))
+				{
+					float best = 0.0f;
+					vec3_t best_pos;
+					int k;
+
+					for( k = 0; k < 8; k++ )
+					{
+						float a = (float)k * ( M_PI_F / 4.0f );
+						vec3_t end;
+						trace_t tr;
+						float clear;
+
+						end[0] = near_org[0] + cosf( a ) * 240.0f;
+						end[1] = near_org[1] + sinf( a ) * 240.0f;
+						end[2] = near_org[2];
+						tr = SV_MoveNoEnts( near_org, player->v.mins, player->v.maxs, end, MOVE_NOMONSTERS, player );
+						if( tr.allsolid || tr.startsolid )
+							continue;
+						clear = tr.fraction * 240.0f;
+						if( clear > best )
+						{
+							best = clear;
+							VectorLerp( near_org, Q_min( clear - 16.0f, 200.0f ) / 240.0f, end, best_pos );
+						}
+					}
+					facebot_moved = true;
+					if( best >= 96.0f )
+					{
+						VectorCopy( best_pos, player->v.origin );
+						VectorClear( player->v.velocity );
+						SV_LinkEdict( player, false );
+						VectorCopy( best_pos, view_org );
+					}
+					Con_Reportf( "Xash3D GameCube: gc_facebot move %s to (%.0f %.0f %.0f), clear %.0f from player %d\n",
+						best >= 96.0f ? "done" : "skipped", best >= 96.0f ? best_pos[0] : 0.0f,
+						best >= 96.0f ? best_pos[1] : 0.0f, best >= 96.0f ? best_pos[2] : 0.0f, best, near_e );
+				}
 				VectorSubtract( near_org, view_org, dir );
 				VectorAngles( dir, ang );
 				if( ang[0] > 180.0f )
@@ -1925,6 +2057,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				cl.viewangles[PITCH] = -ang[PITCH];
 				cl.viewangles[YAW] = ang[YAW];
 				cl.viewangles[ROLL] = 0.0f;
+				/* Some lean camera paths read the local edict's v_angle. */
+				if( player && SV_IsValidEdict( player ))
+					VectorCopy( cl.viewangles, player->v.v_angle );
 				if( facebot_logs < 4 )
 				{
 					facebot_logs++;

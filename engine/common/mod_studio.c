@@ -1784,9 +1784,24 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 			 * atlases mid-entity-lump hung c4a3 (probe 20261104-025929). */
 			if( !Q_stricmp( bare, "nihilanth" ) || !Q_stricmp( bare, "big_mom" ))
 				boss_skins = true;
+			/* DoD team bodies are the players: a mesh-only body draws as a
+			 * white silhouette (ceres acf6eef), so keep their baked skin
+			 * (gc_studio/<team>t.mdl) at any quality. */
+			if( Q_stristr( mod->name, "models/player/" ))
+			{
+				char tex[MAX_QPATH];
+
+				Q_snprintf( tex, sizeof( tex ), "gc_studio/%st.mdl", bare );
+				if( FS_FileExists( tex, false ))
+					boss_skins = true;
+			}
 
 			skip_studio_textures = Mod_GCStudioPreEntityMeshOnly()
 				|| (( GC_GetVisualQuality() == 0 ) && !boss_skins );
+			if( boss_skins && Q_stristr( mod->name, "models/player/" ))
+				Con_Reportf( "Xash3D GameCube: player body %s skins %s (quality %d, pre-entity %d)\n",
+					mod->name, skip_studio_textures ? "skipped" : "kept",
+					(int)GC_GetVisualQuality(), Mod_GCStudioPreEntityMeshOnly() ? 1 : 0 );
 		}
 		gc_real_studio = true;
 		gc_mesh_only = true;
