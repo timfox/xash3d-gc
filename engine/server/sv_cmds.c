@@ -47,6 +47,12 @@ static void SV_GameCubePlayStart_f( void )
 		Con_Reportf( "Xash3D GameCube: play start uses test start map %s\n", sv_gc_playstart_map_override );
 	if( !COM_StringEmpty( sv_gc_playstart_map_override ))
 		map = sv_gc_playstart_map_override;
+	else if( Cmd_Argc() > 1 && !COM_StringEmpty( Cmd_Argv( 1 )))
+	{
+		/* Create Game sends "gc_playstart <map>"; honor the chosen map. */
+		map = Cmd_Argv( 1 );
+		Con_Reportf( "Xash3D GameCube: play start uses requested map %s\n", map );
+	}
 	else
 		map = ( GI && !COM_StringEmpty( GI->startmap )) ? GI->startmap : "c0a0";
 	/* SpawnServer and map-load trimming can rewrite Cmd_Argv() storage. */
