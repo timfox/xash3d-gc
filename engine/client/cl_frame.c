@@ -1480,6 +1480,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	/* WorldDL listen: emit every nearby map prop (avalanche has ~dozen
 	 * env_model instances across 5 unique MDLs). Was 4 — only sandbags. */
 	static cl_entity_t lean_studio_ents[24];
+	static qboolean lean_player_seen;
 	edict_t *player;
 	vec3_t view_org;
 	int e, added = 0, studios = 0;
@@ -2001,6 +2002,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 
 					studios++;
 					studio_slots++;
+					lean_player_seen = true;
 					if( !near_e || d < near_d )
 					{
 						near_e = e;
@@ -2084,7 +2086,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 		}
-		if( studios == 0 )
+		/* Once a player body has been drawn the stub is not needed, and it
+		 * showed as a white plank on the floor near the bot (ceres fld). */
+		if( studios == 0 && !lean_player_seen )
 		{
 			/* Prefer tiny lean w_crowbar stub — v_crowbar hung Flipper
 			 * (probe 20260807-171034: studios=1 then silence). */
@@ -2108,7 +2112,17 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->prevstate = ent->curstate;
 				VectorCopy( ent->origin, ent->latched.prevorigin );
 				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					static int stub_logs;
+
 					studios++;
+					if( stub_logs < 4 )
+					{
+						stub_logs++;
+						Con_Reportf( "Xash3D GameCube: lean stub w_crowbar at (%.0f %.0f %.0f)\n",
+							ent->origin[0], ent->origin[1], ent->origin[2] );
+					}
+				}
 			}
 		}
 
