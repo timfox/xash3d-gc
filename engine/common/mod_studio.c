@@ -634,6 +634,7 @@ typedef struct
 static gc_animpack_t gc_animpack[GC_ANIMPACK_MAX];
 static gc_animent_t gc_animent[GC_ANIMPACK_ENTRIES];
 static byte *gc_animpool;
+static unsigned gc_animpool_size;
 static unsigned gc_animpool_cursor, gc_animpack_clock;
 static qboolean gc_animpool_failed;
 
@@ -642,6 +643,7 @@ void Mod_GCAnimPackReset( void )
 {
 	memset( gc_animent, 0, sizeof( gc_animent ));
 	gc_animpool = NULL;
+	gc_animpool_size = 0;
 	gc_animpool_cursor = 0;
 	gc_animpool_failed = false;
 }
@@ -673,14 +675,25 @@ static qboolean Mod_GCAnimPoolReady( void )
 		return true;
 	if( gc_animpool_failed )
 		return false;
-	gc_animpool = Mod_GCStudioBssAlloc( GC_ANIMPACK_POOL );
+	/* The ring works at any size that holds the sequences drawn in one
+	 * frame, so shrink it until it fits what the studio arena has left
+	 * (ceres 1ff66ba: 256 KiB did not fit next to the viewmodels, and the
+	 * team body fell back to its bind pose). */
+	for( gc_animpool_size = GC_ANIMPACK_POOL; gc_animpool_size >= GC_ANIMPACK_CHUNK; gc_animpool_size >>= 1 )
+	{
+		gc_animpool = Mod_GCStudioBssAlloc( gc_animpool_size );
+		if( gc_animpool )
+			break;
+	}
 	if( !gc_animpool )
 	{
+		gc_animpool_size = 0;
 		gc_animpool_failed = true;
-		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s) does not fit the studio arena\n",
-			Q_memprint( GC_ANIMPACK_POOL ));
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s down to %s) does not fit the studio arena\n",
+			Q_memprint( GC_ANIMPACK_POOL ), Q_memprint( GC_ANIMPACK_CHUNK ));
 		return false;
 	}
+	Con_Reportf( "Xash3D GameCube: animpack pool %s in the studio arena\n", Q_memprint( gc_animpool_size ));
 	gc_animpool_cursor = 0;
 	return true;
 }
@@ -810,7 +823,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	off = ((unsigned *)( dirbuf + ( diroff & 31u )))[0];
 	size = ((unsigned *)( dirbuf + ( diroff & 31u )))[1];
 	need = ( size + 31u ) & ~31u;
-	if( !off || !size || ( off & 31u ) || off + size > pk->size || need > GC_ANIMPACK_POOL )
+	if( !off || !size || ( off & 31u ) || off + size > pk->size || need > gc_animpool_size )
 		return NULL;
 
 	/* Place it at the cursor, stepping over blocks handed out this frame. */
@@ -819,7 +832,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	{
 		int pinned = -1;
 
-		if( start + need > GC_ANIMPACK_POOL )
+		if( start + need > gc_animpool_size )
 		{
 			if( wraps++ )
 				return NULL;

@@ -751,8 +751,50 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			( gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 				&& gEngfuncs.Sys_CheckParm( "-gcplayerinput" ))
 			? ( 192u * 1024u ) : ( 512u * 1024u );
+		unsigned cache_cap = cache_hi;
+		unsigned cache_lo = 96u * 1024u;
 
-		for( try_sz = cache_hi; try_sz >= 96u * 1024u; try_sz -= 32u * 1024u )
+		/* Day of Defeat team bodies (gc_studio/<team>.mdl, about 260 KiB each)
+		 * load into the spill when a player of that team shows up. Sizing the
+		 * chunk cache to all free spill left a bot's axis-inf core 29 KiB
+		 * short (ceres f152a6b: 229.78 of 259.16 Kb). Leave room for both
+		 * cores, or at least one if the cache would drop below its floor. */
+		if( cache_lo < gc_wd_hdr.max_chunk * 2u )
+			cache_lo = ( gc_wd_hdr.max_chunk * 2u + 32767u ) & ~32767u;
+		{
+			static const char *const team_cores[] = { "gc_studio/us-inf.mdl", "gc_studio/axis-inf.mdl" };
+			const size_t sfree = Mod_GCWorldArraySpillFree();
+			size_t core[2] = { 0, 0 };
+			int i, keep;
+
+			for( i = 0; i < 2; i++ )
+			{
+				fs_offset_t sz = gEngfuncs.fsapi->FileSize( team_cores[i], false );
+
+				if( sz > 0 )
+					core[i] = ALIGN( (size_t)sz, 32 ) + 4096u;
+			}
+			for( keep = 2; keep >= 1; keep-- )
+			{
+				size_t reserve = core[0] + ( keep == 2 ? core[1] : 0 );
+				size_t room;
+
+				if( !reserve )
+					break;
+				room = sfree > reserve ? ( sfree - reserve ) & ~(size_t)32767u : 0;
+				if( room >= cache_lo || keep == 1 )
+				{
+					if( room < cache_cap )
+						cache_cap = (unsigned)Q_max( room, (size_t)cache_lo );
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL chunk cache cap %u KiB, keeping %u KiB spill for %d team bod%s (spill free %u KiB)\n",
+						cache_cap / 1024u, (unsigned)( reserve / 1024u ), keep, keep == 1 ? "y" : "ies",
+						(unsigned)( sfree / 1024u ));
+					break;
+				}
+			}
+		}
+
+		for( try_sz = cache_cap; try_sz >= 96u * 1024u; try_sz -= 32u * 1024u )
 		{
 			gc_wd_cache = (byte *)Mod_GCWorldArraySpillTryAlloc( try_sz, "world DL chunk cache" );
 			if( gc_wd_cache )

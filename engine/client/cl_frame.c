@@ -1752,6 +1752,187 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				studio_slots++;
 			}
 		}
+		/* Other players and bots. The scan above starts after the client slots
+		 * and skips player.mdl, so on this route nobody else was ever drawn.
+		 * Emit them as players (ent->player) so the renderer swaps in the team
+		 * body from their "model" userinfo (models/player/<model>/<model>.mdl). */
+		{
+			static int player_logs;
+			static int player_reject_logs;
+			static int player_last_reject[MAX_CLIENTS + 1];
+			static qboolean player_body_tried[MAX_CLIENTS + 1];
+			static qboolean player_scan_logged;
+			static convar_t *gc_facebot;
+			int near_e = 0;
+			float near_d = 0.0f;
+			vec3_t near_org = { 0.0f, 0.0f, 0.0f };
+
+			/* gc_facebot 1 (console or listenserver.cfg): turn the local view
+			 * toward the nearest drawn player each frame, so a fixed test
+			 * run can capture a bot without steering. */
+			if( !gc_facebot )
+				gc_facebot = Cvar_Get( "gc_facebot", "0", 0, "GameCube test: aim the view at the nearest other player" );
+
+			if( !player_scan_logged )
+			{
+				player_scan_logged = true;
+				Con_Reportf( "Xash3D GameCube: lean emit player scan maxclients=%d local=%d slots=%d/%d\n",
+					svs.maxclients, cl.playernum + 1, studio_slots, studio_budget );
+			}
+
+			for( e = 1; e <= svs.maxclients && e <= MAX_CLIENTS && studio_slots < studio_budget; e++ )
+			{
+				edict_t *ed = SV_EdictNum( e );
+				model_t *mod = NULL;
+				cl_entity_t *ent;
+				vec3_t delta;
+				int reject = 0;
+
+				if( e == cl.playernum + 1 )
+					continue;
+				if( !SV_IsValidEdict( ed ))
+					reject = 1;
+				else if( FBitSet( ed->v.effects, EF_NODRAW ))
+					reject = 2;
+				else if( ed->v.iuser1 != 0 )
+					reject = 3;
+				else if( ed->v.deadflag >= DEAD_DEAD )
+					reject = 4;
+				else
+				{
+					if( ed->v.modelindex )
+						mod = SV_ModelHandle( ed->v.modelindex );
+					if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+					{
+						/* The lean player.mdl may be a spill stub (no cache.data)
+						 * or the bot may have no modelindex on this route. Any
+						 * resident studio will do as the entity's model: the
+						 * renderer swaps in the team body from the "model"
+						 * userinfo anyway. Load that body once per slot. */
+						const char *body = svs.clients ? Info_ValueForKey( svs.clients[e - 1].userinfo, "model" ) : "";
+						char path[MAX_QPATH];
+
+						mod = NULL;
+						if( body[0] && Q_snprintf( path, sizeof( path ), "models/player/%s/%s.mdl", body, body ) > 0 )
+						{
+							mod = Mod_FindName( path, false );
+							if(( !mod || mod->needload != NL_PRESENT ) && !player_body_tried[e] )
+							{
+								player_body_tried[e] = true;
+								mod = Mod_ForName( path, false, false );
+								Con_Reportf( "Xash3D GameCube: lean emit player %d fallback body %s %s\n",
+									e, path, mod && mod->cache.data ? "loaded" : "load failed" );
+							}
+						}
+						if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+							reject = ed->v.modelindex ? 5 : 6;
+					}
+				}
+				if( !reject )
+				{
+					VectorSubtract( ed->v.origin, view_org, delta );
+					if( VectorLength( delta ) > studio_max_dist )
+						reject = 7;
+				}
+				if( reject )
+				{
+					/* Log each slot's reason when it changes, so one run shows
+					 * why a bot is not drawn: 1 invalid/free, 2 nodraw,
+					 * 3 spectator, 4 dead, 5 model not resident, 6 no
+					 * modelindex and no body, 7 out of range. */
+					if( reject != 1 && player_last_reject[e] != reject && player_reject_logs < 32 )
+					{
+						model_t *sm = ( SV_IsValidEdict( ed ) && ed->v.modelindex ) ? SV_ModelHandle( ed->v.modelindex ) : NULL;
+
+						player_reject_logs++;
+						Con_Reportf( "Xash3D GameCube: lean emit player %d reject=%d modelindex=%d model=%s type=%d needload=%d cache=%s\n",
+							e, reject, SV_IsValidEdict( ed ) ? ed->v.modelindex : -1,
+							sm ? sm->name : "-", sm ? (int)sm->type : -1, sm ? (int)sm->needload : -1,
+							sm && sm->cache.data ? "yes" : "no" );
+					}
+					player_last_reject[e] = reject;
+					continue;
+				}
+				player_last_reject[e] = 0;
+				if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS && SV_ModelHandle( ed->v.modelindex ) == mod )
+					cl.models[ed->v.modelindex] = mod;
+				ent = &lean_studio_ents[studio_slots];
+				memset( ent, 0, sizeof( *ent ));
+				ent->index = e;
+				ent->player = true;
+				ent->model = mod;
+				VectorCopy( ed->v.origin, ent->origin );
+				VectorCopy( ed->v.angles, ent->angles );
+				ent->angles[0] = 0.0f;
+				VectorCopy( ent->origin, ent->curstate.origin );
+				VectorCopy( ent->angles, ent->curstate.angles );
+				VectorCopy( ed->v.mins, ent->curstate.mins );
+				VectorCopy( ed->v.maxs, ent->curstate.maxs );
+				ent->curstate.number = e;
+				ent->curstate.modelindex = ed->v.modelindex;
+				ent->curstate.solid = (int)ed->v.solid;
+				ent->curstate.movetype = (int)ed->v.movetype;
+				ent->curstate.sequence = ed->v.sequence;
+				ent->curstate.gaitsequence = ed->v.gaitsequence;
+				ent->curstate.frame = ed->v.frame;
+				ent->curstate.body = ed->v.body;
+				ent->curstate.skin = ed->v.skin;
+				ent->curstate.scale = 1.0f;
+				ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
+				ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : (float)cl.time;
+				ent->curstate.weaponmodel = ed->v.weaponmodel;
+				ent->curstate.rendermode = ed->v.rendermode;
+				ent->curstate.renderamt = (int)ed->v.renderamt;
+				ent->curstate.effects = ed->v.effects;
+				ent->curstate.entityType = ENTITY_NORMAL;
+				ent->curstate.blending[0] = 127;
+				ent->curstate.blending[1] = 127;
+				ent->prevstate = ent->curstate;
+				VectorCopy( ent->origin, ent->latched.prevorigin );
+				VectorCopy( ent->angles, ent->latched.prevangles );
+				ent->latched.prevanimtime = ent->curstate.animtime;
+				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					float d = VectorLength( delta );
+
+					studios++;
+					studio_slots++;
+					if( !near_e || d < near_d )
+					{
+						near_e = e;
+						near_d = d;
+						VectorCopy( ed->v.origin, near_org );
+					}
+					if( player_logs < 8 )
+					{
+						player_logs++;
+						Con_Reportf( "Xash3D GameCube: lean emit player %d model=%s userinfo=%s seq=%d dist=%.0f org=(%.0f %.0f %.0f) yaw=%.0f\n",
+							e, mod->name, cl.players[e - 1].model, ed->v.sequence, d,
+							ed->v.origin[0], ed->v.origin[1], ed->v.origin[2],
+							RAD2DEG( atan2f( delta[1], delta[0] )));
+					}
+				}
+			}
+			if( near_e && gc_facebot && gc_facebot->value != 0.0f )
+			{
+				static int facebot_logs;
+				vec3_t dir, ang;
+
+				VectorSubtract( near_org, view_org, dir );
+				VectorAngles( dir, ang );
+				if( ang[0] > 180.0f )
+					ang[0] -= 360.0f;
+				cl.viewangles[PITCH] = -ang[PITCH];
+				cl.viewangles[YAW] = ang[YAW];
+				cl.viewangles[ROLL] = 0.0f;
+				if( facebot_logs < 4 )
+				{
+					facebot_logs++;
+					Con_Reportf( "Xash3D GameCube: gc_facebot aim at player %d dist=%.0f angles=(%.0f %.0f)\n",
+						near_e, near_d, cl.viewangles[PITCH], cl.viewangles[YAW] );
+				}
+			}
+		}
 		if( studios == 0 )
 		{
 			/* Prefer tiny lean w_crowbar stub — v_crowbar hung Flipper

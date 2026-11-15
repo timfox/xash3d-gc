@@ -62,6 +62,8 @@ static qboolean Mod_GCMapModelSpillAfterWorldDL( void )
 /* Map props and player bodies go to the world-array spill first: a team
  * body's mesh core is about 265 KiB, and the studio arena has to keep room
  * for viewmodels, skins and the animation pool. */
+size_t Mod_GCWorldArraySpillFree( void );
+
 static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
 {
 	return Q_stristr( model_path, "mapmodels/" ) != NULL
@@ -765,6 +767,25 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 	COM_FileBase( model_path, bare, sizeof( bare ));
 	Q_snprintf( mirror, sizeof( mirror ), "gc_studio/%s.mdl", bare );
 
+	/* Day of Defeat ships split team bodies (gc_studio/us-inf.mdl etc.) and
+	 * the renderer draws those from each player's "model" userinfo. The HL1
+	 * player.mdl (about 275 KiB) would only be a fallback body, and holding it
+	 * in the world-array spill left no room for the team body a bot needs
+	 * (ceres 877bb27: axis-inf spill alloc miss, then heap alloc fail). The
+	 * server uses a hull-only stub for player.mdl, so skip it here. */
+	if( !Q_stricmp( bare, "player" ) && FS_FileExists( "gc_studio/us-inf.mdl", false ))
+	{
+		static qboolean logged;
+
+		if( !logged )
+		{
+			logged = true;
+			Con_Reportf( "Xash3D GameCube: skip HL1 player body '%s', DoD team bodies present (spill free %s)\n",
+				model_path, Q_memprint( Mod_GCWorldArraySpillFree()));
+		}
+		return NULL;
+	}
+
 	/* A model read once this boot stays in ARAM (raw file bytes, before the
 	 * in-place byte swap), so an arena reset, a team pick or a changelevel
 	 * reloads it by DMA instead of from disc. */
@@ -947,8 +968,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 						else
 						{
 							FS_Close( f );
-							Con_Reportf( "Xash3D GameCube: mapmodel spill alloc miss '%s' (%s)\n",
-								mirror, Q_memprint( (size_t)flen ));
+							Con_Reportf( "Xash3D GameCube: mapmodel spill alloc miss '%s' (%s, spill free %s)\n",
+								mirror, Q_memprint( (size_t)flen ), Q_memprint( Mod_GCWorldArraySpillFree()));
 						}
 					}
 				}
