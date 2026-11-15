@@ -21,7 +21,7 @@ iso="${1:?disc.iso}"; probe_dir="${2:?probe log dir}"; until_map="${3:-}"; minut
 DOLPHIN_EXE="$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin"
 [[ -x "$DOLPHIN_EXE" ]] || DOLPHIN_EXE="$ROOT/3rdparty/dolphin/build/Binaries/dolphin-emu"
 
-out=".ai/logs/ride-$(date +%Y%m%d-%H%M%S)"
+out=".ai/logs/ride-$(date +%Y%m%d-%H%M%S)${GC_PROBE_TAG:+-$GC_PROBE_TAG}"
 mkdir -p "$out/dolphin-user"
 cp -r "$probe_dir/dolphin-user/Config" "$out/dolphin-user/"
 # Smoke probes default to the deterministic interpreter (CPUCore 0), which

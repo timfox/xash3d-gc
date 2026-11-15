@@ -22,7 +22,8 @@ if [[ -f scripts/gamecube-env.sh ]]; then
 fi
 source scripts/dolphin-probe-lock.sh || exit $?
 source scripts/dolphin-probe-common.sh || exit $?
-LOG_DIR=".ai/logs/dolphin-probe-$(date +%Y%m%d-%H%M%S)"
+# GC_PROBE_TAG keeps concurrent sessions in one checkout from sharing a log/ISO dir.
+LOG_DIR=".ai/logs/dolphin-probe-$(date +%Y%m%d-%H%M%S)${GC_PROBE_TAG:+-$GC_PROBE_TAG}"
 ISO_PATH="$ROOT/$LOG_DIR/xash3d-gc.iso"
 PREBUILT_ISO="${1:-${DOLPHIN_PREBUILT_ISO:-}}"
 if [[ -n "$PREBUILT_ISO" && "$PREBUILT_ISO" != /* ]]; then

@@ -4044,7 +4044,9 @@ def main() -> None:
 	print("Xash3D GameCube: content build begins")
 	script_dir = Path(__file__).resolve().parent
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("--dol", type=Path, default=Path("OUT/bin/boot.dol"))
+	# XASH_GC_OUT: private install tree (scripts/build-gamecube.sh), default OUT.
+	gc_out = Path(os.environ.get("XASH_GC_OUT", "OUT"))
+	parser.add_argument("--dol", type=Path, default=gc_out / "bin" / "boot.dol")
 	parser.add_argument("--data", type=Path, default=Path("Half-Life/valve"))
 	parser.add_argument(
 		"--gamedir",
@@ -4063,7 +4065,7 @@ def main() -> None:
 		action="store_true",
 		help="do not auto-stage sibling gamedirs next to --data (dod, gearbox, …)",
 	)
-	parser.add_argument("--extras", type=Path, default=Path("OUT/valve/extras.pk3"))
+	parser.add_argument("--extras", type=Path, default=gc_out / "valve" / "extras.pk3")
 	parser.add_argument("--output", type=Path, default=Path("OUT/xash3d-gc.iso"))
 	parser.add_argument(
 		"--smoke-map",
