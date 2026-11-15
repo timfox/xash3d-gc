@@ -88,10 +88,16 @@ def _verify_signature(code: str, decompile) -> str | None:
 	# Extract function name from the decompiled code
 	decompile_name = decompile.name
 	# Try to extract function name from the candidate code
-	candidate_name_match = re.search(r'(\w+)\s*\([^)]*\)\s*\{', code)
-	if candidate_name_match:
+	candidate_name_match = re.search(r'([\w:~]+)\s*\([^)]*\)\s*\{', code)
+	if candidate_name_match and decompile_name:
 		candidate_name = candidate_name_match.group(1)
-		if candidate_name != decompile_name and decompile_name:
+		# A class-qualified name matches itself; an unqualified name on either
+		# side matches the other's last component.
+		if "::" in candidate_name and "::" in decompile_name:
+			same = candidate_name == decompile_name
+		else:
+			same = candidate_name.rsplit("::", 1)[-1] == decompile_name.rsplit("::", 1)[-1]
+		if not same:
 			return f"Function name mismatch: expected '{decompile_name}', got '{candidate_name}'"
 	return None
 

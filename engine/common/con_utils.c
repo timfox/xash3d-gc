@@ -1390,10 +1390,20 @@ void Host_FinalizeConfig( file_t *f, const char *config )
 	FS_Printf( f, "// end of %s\n", config );
 	FS_Close( f );
 	FS_Delete( backup );
-qboolean backed_up = FS_Rename( config, backup ); // might not exist yet
+	qboolean backed_up = FS_Rename( config, backup ); // might not exist yet
 
 	if( FS_Rename( newcfg, config ))
 		return;
+
+	/* SAVE-022: a one-shot rename fault leaves .new intact, so try once more
+	 * before falling back to the previous config. */
+	if( FS_Rename( newcfg, config ))
+	{
+#if XASH_GAMECUBE
+		Con_Reportf( "Xash3D GameCube: SAVE-022 recovered config from .new name=%s\n", config );
+#endif
+		return;
+	}
 
 	if( !backed_up )
 	{
