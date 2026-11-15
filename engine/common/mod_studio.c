@@ -586,6 +586,320 @@ void Mod_SwapStudioSeqGroupAnims( studiohdr_t *phdr, mstudioseqdesc_t *pseq, byt
 	}
 }
 
+#if XASH_GAMECUBE
+/*
+==============================================================================
+
+GameCube animation packs (.gca, written by dod-gc tools/split_studio_mdl.py)
+
+A DoD player model is about 3.9 MB, of which 3.7 MB is animation. The split
+model keeps bones, sequence descriptions and every mesh in a small core file
+and names one pack in its sequence group table. A pack is big-endian with a
+directory and one 32-byte aligned block per sequence, so a sequence is one
+ARAM DMA with no byte swapping. The whole pack lives in ARAM when there is
+room (models with identical animation share it by name), otherwise sequences
+are read from disc. MEM1 only holds the sequences in use, in a ring that
+recycles the oldest blocks and never a block handed out this frame.
+
+==============================================================================
+*/
+#ifndef GC_ANIMPACK_POOL
+#define GC_ANIMPACK_POOL ( 256u * 1024u )
+#endif
+#define GC_ANIMPACK_MAX     3
+#define GC_ANIMPACK_ENTRIES 64
+#define GC_ANIMPACK_MAGIC   0x47434150u /* "GCAP" */
+#define GC_ANIMPACK_HDR     32u
+#define GC_ANIMPACK_CHUNK   ( 32u * 1024u )
+
+typedef struct
+{
+	char     name[64];
+	unsigned aram;      /* 0: read from disc */
+	unsigned size;
+	unsigned numseq;
+	unsigned used;
+	file_t   *file;     /* disc mode only */
+	qboolean bad;
+} gc_animpack_t;
+
+typedef struct
+{
+	gc_animpack_t *pack;    /* NULL: free */
+	int      seq;
+	unsigned off, len;      /* in the pool, len rounded to 32 */
+	unsigned frame;
+} gc_animent_t;
+
+static gc_animpack_t gc_animpack[GC_ANIMPACK_MAX];
+static gc_animent_t gc_animent[GC_ANIMPACK_ENTRIES];
+static byte *gc_animpool;
+static unsigned gc_animpool_cursor, gc_animpack_clock;
+static qboolean gc_animpool_failed;
+
+/* The pool is in the studio arena: every arena reset drops it. */
+void Mod_GCAnimPackReset( void )
+{
+	memset( gc_animent, 0, sizeof( gc_animent ));
+	gc_animpool = NULL;
+	gc_animpool_cursor = 0;
+	gc_animpool_failed = false;
+}
+
+static void Mod_GCAnimPackDropEntries( const gc_animpack_t *pk )
+{
+	int i;
+
+	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+	{
+		if( gc_animent[i].pack == pk )
+			gc_animent[i].pack = NULL;
+	}
+}
+
+static void Mod_GCAnimPackClose( gc_animpack_t *pk )
+{
+	Mod_GCAnimPackDropEntries( pk );
+	if( pk->aram )
+		GC_AramFree( pk->aram );
+	if( pk->file )
+		FS_Close( pk->file );
+	memset( pk, 0, sizeof( *pk ));
+}
+
+static qboolean Mod_GCAnimPoolReady( void )
+{
+	if( gc_animpool )
+		return true;
+	if( gc_animpool_failed )
+		return false;
+	gc_animpool = Mod_GCStudioBssAlloc( GC_ANIMPACK_POOL );
+	if( !gc_animpool )
+	{
+		gc_animpool_failed = true;
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s) does not fit the studio arena\n",
+			Q_memprint( GC_ANIMPACK_POOL ));
+		return false;
+	}
+	gc_animpool_cursor = 0;
+	return true;
+}
+
+static gc_animpack_t *Mod_GCAnimPackOpen( const char *name )
+{
+	gc_animpack_t *pk = NULL;
+	unsigned hdr[GC_ANIMPACK_HDR / 4];
+	unsigned total, done;
+	int i;
+
+	for( i = 0; i < GC_ANIMPACK_MAX; i++ )
+	{
+		if( gc_animpack[i].name[0] && !Q_stricmp( gc_animpack[i].name, name ))
+		{
+			gc_animpack[i].used = ++gc_animpack_clock;
+			return gc_animpack[i].bad ? NULL : &gc_animpack[i];
+		}
+	}
+	if( !Mod_GCAnimPoolReady( ))
+		return NULL;
+	for( i = 0; i < GC_ANIMPACK_MAX; i++ )
+	{
+		if( !gc_animpack[i].name[0] )
+		{
+			pk = &gc_animpack[i];
+			break;
+		}
+		if( !pk || gc_animpack[i].used < pk->used )
+			pk = &gc_animpack[i];
+	}
+	if( pk->name[0] )
+		Mod_GCAnimPackClose( pk );
+	Q_strncpy( pk->name, name, sizeof( pk->name ));
+	pk->used = ++gc_animpack_clock;
+	pk->bad = true; /* until the header checks out */
+
+	pk->file = FS_Open( name, "rb", false );
+	if( !pk->file )
+	{
+		Con_Reportf( S_ERROR "Xash3D GameCube: animpack '%s' not found\n", name );
+		return NULL;
+	}
+	if( FS_Read( pk->file, hdr, sizeof( hdr )) != (fs_offset_t)sizeof( hdr )
+		|| hdr[0] != GC_ANIMPACK_MAGIC || hdr[1] != 1 )
+	{
+		Con_Reportf( S_ERROR "Xash3D GameCube: animpack '%s' has a bad header\n", name );
+		FS_Close( pk->file );
+		pk->file = NULL;
+		return NULL;
+	}
+	pk->numseq = hdr[2];
+	pk->size = total = hdr[5];
+	pk->bad = false;
+
+	/* Whole pack to ARAM through the (still empty) pool as the bounce. */
+	pk->aram = GC_AramAllocTagged(( total + 31u ) & ~31u, true, "animpack" );
+	if( pk->aram )
+	{
+		/* The pool is the bounce buffer here, so every cached block goes. */
+		memset( gc_animent, 0, sizeof( gc_animent ));
+		gc_animpool_cursor = 0;
+		FS_Seek( pk->file, 0, SEEK_SET );
+		for( done = 0; done < total; )
+		{
+			unsigned want = Q_min( total - done, GC_ANIMPACK_CHUNK );
+			fs_offset_t got = FS_Read( pk->file, gc_animpool, want );
+
+			if( got <= 0 )
+				break;
+			if( got & 31 )
+				memset( gc_animpool + got, 0, 32 - ( got & 31 ));
+			GC_AramTransfer( pk->aram + done, gc_animpool, ((unsigned)got + 31u ) & ~31u, true );
+			done += (unsigned)got;
+		}
+		if( done == total )
+		{
+			FS_Close( pk->file );
+			pk->file = NULL;
+		}
+		else
+		{
+			GC_AramFree( pk->aram );
+			pk->aram = 0;
+		}
+	}
+	Con_Reportf( "Xash3D GameCube: animpack '%s' %s, %u sequences, %s\n", name,
+		Q_memprint( total ), pk->numseq, pk->aram ? "in ARAM" : "streamed from disc" );
+	return pk;
+}
+
+/* One 32-byte aligned span of the pack into an aligned MEM1 buffer. */
+static qboolean Mod_GCAnimPackRead( gc_animpack_t *pk, unsigned off, byte *dst, unsigned len )
+{
+	if( pk->aram )
+	{
+		GC_AramTransfer( pk->aram + off, dst, len, false );
+		return true;
+	}
+	if( !pk->file || FS_Seek( pk->file, off, SEEK_SET ) != 0 )
+		return false;
+	return FS_Read( pk->file, dst, len ) > 0;
+}
+
+static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
+{
+	byte dirbuf[64] __attribute__((aligned( 32 )));
+	const unsigned frame = host.framecount;
+	unsigned diroff, off, size, need, start, tries = 0, wraps = 0;
+	int i, slot = -1, oldest = -1;
+
+	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+	{
+		if( gc_animent[i].pack == pk && gc_animent[i].seq == seq )
+		{
+			gc_animent[i].frame = frame;
+			return gc_animpool + gc_animent[i].off;
+		}
+	}
+	if( seq < 0 || (unsigned)seq >= pk->numseq || !Mod_GCAnimPoolReady( ))
+		return NULL;
+
+	/* Directory entry: 8 bytes at 32 + 8 * seq, never across a 32-byte block. */
+	diroff = GC_ANIMPACK_HDR + 8u * (unsigned)seq;
+	if( !Mod_GCAnimPackRead( pk, diroff & ~31u, dirbuf, 32 ))
+		return NULL;
+	off = ((unsigned *)( dirbuf + ( diroff & 31u )))[0];
+	size = ((unsigned *)( dirbuf + ( diroff & 31u )))[1];
+	need = ( size + 31u ) & ~31u;
+	if( !off || !size || ( off & 31u ) || off + size > pk->size || need > GC_ANIMPACK_POOL )
+		return NULL;
+
+	/* Place it at the cursor, stepping over blocks handed out this frame. */
+	start = gc_animpool_cursor;
+	for( ;; )
+	{
+		int pinned = -1;
+
+		if( start + need > GC_ANIMPACK_POOL )
+		{
+			if( wraps++ )
+				return NULL;
+			start = 0;
+		}
+		for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+		{
+			if( gc_animent[i].pack && gc_animent[i].frame == frame
+				&& gc_animent[i].off < start + need && gc_animent[i].off + gc_animent[i].len > start )
+			{
+				pinned = i;
+				break;
+			}
+		}
+		if( pinned < 0 )
+			break;
+		start = gc_animent[pinned].off + gc_animent[pinned].len;
+		if( ++tries > GC_ANIMPACK_ENTRIES )
+			return NULL;
+	}
+	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+	{
+		if( gc_animent[i].pack && gc_animent[i].off < start + need
+			&& gc_animent[i].off + gc_animent[i].len > start )
+			gc_animent[i].pack = NULL;
+		if( !gc_animent[i].pack )
+		{
+			if( slot < 0 )
+				slot = i;
+		}
+		else if( gc_animent[i].frame != frame
+			&& ( oldest < 0 || gc_animent[i].frame < gc_animent[oldest].frame ))
+			oldest = i;
+	}
+	if( slot < 0 )
+		slot = oldest;
+	if( slot < 0 || !Mod_GCAnimPackRead( pk, off, gc_animpool + start, need ))
+		return NULL;
+	gc_animent[slot].pack = pk;
+	gc_animent[slot].seq = seq;
+	gc_animent[slot].off = start;
+	gc_animent[slot].len = need;
+	gc_animent[slot].frame = frame;
+	gc_animpool_cursor = start + need;
+	return gc_animpool + start;
+}
+
+/* Animation for a sequence of a split model, or NULL when the model's group
+ * table does not name a pack. A sequence that cannot be fetched plays as the
+ * bind pose (an all-zero offset table) instead of ending the game. */
+static void *Mod_GCAnimPackGet( studiohdr_t *phdr, mstudioseqdesc_t *pseqdesc )
+{
+	static const byte bindpose[4096] __attribute__((aligned( 4 ))) = { 0 };
+	static int warned;
+	const mstudioseqgroup_t *group;
+	const char *ext;
+	gc_animpack_t *pk;
+	void *anim = NULL;
+
+	if( pseqdesc->seqgroup <= 0 || pseqdesc->seqgroup >= phdr->numseqgroups )
+		return NULL;
+	group = (const mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex ) + pseqdesc->seqgroup;
+	ext = COM_FileExtension( group->name );
+	if( Q_stricmp( ext, "gca" ))
+		return NULL;
+
+	pk = Mod_GCAnimPackOpen( group->name );
+	if( pk )
+		anim = Mod_GCAnimPackFetch( pk, (int)( pseqdesc - (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex )));
+	if( anim )
+		return anim;
+	if( warned++ < 8 )
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack '%s' sequence '%s' unavailable, bind pose\n",
+			group->name, pseqdesc->label );
+	if( (size_t)pseqdesc->numblends * phdr->numbones * sizeof( mstudioanim_t ) > sizeof( bindpose ))
+		Host_Error( "%s: no animation for %s\n", __func__, pseqdesc->label );
+	return (void *)bindpose;
+}
+#endif // XASH_GAMECUBE
+
 /*
 ====================
 StudioGetAnim
@@ -596,6 +910,15 @@ void *R_StudioGetAnim( studiohdr_t *m_pStudioHeader, model_t *m_pSubModel, mstud
 {
 	if( pseqdesc->seqgroup == 0 )
 		return ((byte *)m_pStudioHeader + pseqdesc->animindex);
+
+#if XASH_GAMECUBE
+	{
+		void *packed = Mod_GCAnimPackGet( m_pStudioHeader, pseqdesc );
+
+		if( packed )
+			return packed;
+	}
+#endif
 
 	cache_user_t *paSequences = (cache_user_t *)m_pSubModel->submodels;
 #if XASH_GAMECUBE

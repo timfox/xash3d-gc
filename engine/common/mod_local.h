@@ -209,6 +209,7 @@ byte *Mod_GCStudioArenaStage( size_t size, size_t *previous_bump );
 void Mod_GCStudioArenaUnstage( byte *slot, size_t size, size_t previous_bump );
 byte *Mod_GCStudioArenaLoadFile( const char *path, fs_offset_t *length );
 byte *Mod_GCSeqGroupLoad( const char *path, cache_user_t *cu, fs_offset_t *length );
+void Mod_GCAnimPackReset( void ); /* mod_studio.c: split-model animation packs */
 byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size );
 void Mod_GCStudioBssTrimLast( void *ptr, size_t kept );
 void Mod_GCUploadDeferredStudioSkins( void ); /* post-MAP_READY companion/view skins */

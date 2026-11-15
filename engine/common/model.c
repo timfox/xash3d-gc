@@ -312,6 +312,8 @@ static void Mod_GCVMSlotsReset( void )
 {
 	memset( gc_vm_slot, 0, sizeof( gc_vm_slot ));
 	gc_vm_clock = 0;
+	/* Called at every studio arena reset: the animation pool lives there too. */
+	Mod_GCAnimPackReset();
 }
 
 static void Mod_GCVMSlotEvict( int i )
