@@ -608,7 +608,7 @@ STATIC_CHECK_SIZEOF( mnode_t, 52, 72 );
 STATIC_CHECK_SIZEOF( mleaf_t, 56, 80 );
 STATIC_CHECK_SIZEOF( mextrasurf_t, 104, 384 );
 #else
-STATIC_CHECK_SIZEOF( mleaf_t, 64, 96 );
+STATIC_CHECK_SIZEOF( mleaf_t, 60, 80 );
 STATIC_CHECK_SIZEOF( mextrasurf_t, 324, 496 );
 #endif
 STATIC_CHECK_SIZEOF( decal_t, 60, 88 );
