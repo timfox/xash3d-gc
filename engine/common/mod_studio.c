@@ -1657,7 +1657,8 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 						phdr->skinindex = phdr->textureindex + (int)size1;
 						in = (byte *)thdr + thdr->textureindex;
 						out = (byte *)phdr + phdr->textureindex;
-						memcpy( out, in, size1 + size2 );
+						/* in may be the staged *T.mdl right above the mesh */
+						memmove( out, in, size1 + size2 );
 						phdr->length = (int)merged;
 						/* -gcmap CapFaces bake skips Mod_StudioLoadTextures —
 						 * zero .index so deferred attach does not treat file

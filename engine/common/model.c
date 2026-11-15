@@ -474,6 +474,10 @@ byte *Mod_GCStudioBssAlloc( size_t size )
 	return gc_studio_bss + align_off;
 }
 
+/* End of a slice grown in place into a staged companion's room (GrowLast);
+ * the unstage rollback must not drop the bump below it. */
+static size_t gc_studio_bss_grow_end;
+
 /* Roll back an unsuccessful read only while its slice is still last. */
 static void Mod_GCStudioBssRollbackLast( byte *slot, size_t size, size_t previous_bump )
 {
@@ -486,9 +490,18 @@ static void Mod_GCStudioBssRollbackLast( byte *slot, size_t size, size_t previou
 		return;
 	if( gc_studio_bss_bump == offset + size )
 	{
-		gc_studio_bss_bump = previous_bump;
-		gc_studio_bss_owners--;
+		/* A *T.mdl staged above a mesh is where that mesh's merged texture
+		 * headers and skin table were grown to: keep them reserved, or the
+		 * next model loads over them (garbage skinref -> white NPC). */
+		if( gc_studio_bss_grow_end > previous_bump && gc_studio_bss_grow_end <= offset + size )
+			gc_studio_bss_bump = gc_studio_bss_grow_end;
+		else
+		{
+			gc_studio_bss_bump = previous_bump;
+			gc_studio_bss_owners--;
+		}
 	}
+	gc_studio_bss_grow_end = 0;
 }
 
 /* Stage a transient file (a *T.mdl skin companion) at the bottom of the
@@ -527,7 +540,11 @@ byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size )
 	/* Deferred T.mdl headers: lean load reserved a pad so bump > old_end and
 	 * later companions (scientist) sit above that pad. Fit in-place. */
 	if( off + new_size <= gc_studio_bss_bump )
+	{
+		if( off + new_size > old_end )
+			gc_studio_bss_grow_end = off + new_size;
 		return p;
+	}
 	/* Accept either exact bump or 32-byte padded bump from Alloc. */
 	if( gc_studio_bss_bump != old_end
 		&& gc_studio_bss_bump != (( old_end + 31u ) & ~31u ))
