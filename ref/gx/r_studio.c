@@ -2663,6 +2663,9 @@ static model_t *R_StudioSetupPlayerModel( int index )
 {
 	player_info_t  *info = gEngfuncs.pfnPlayerInfo( index );
 	player_model_t *state;
+#if XASH_GAMECUBE
+	char mirror[MAX_QPATH];
+#endif
 
 	if( index < 0 || index >= gp_cl->maxclients )
 		return NULL;
@@ -2681,6 +2684,17 @@ static model_t *R_StudioSetupPlayerModel( int index )
 
 			if( gEngfuncs.fsapi->FileExists( state->modelname, false ))
 				state->model = gEngfuncs.Mod_ForName( state->modelname, false, true );
+#if XASH_GAMECUBE
+			/* The lean disc carries team bodies only as split gc_studio/<name>.mdl
+			 * cores (the studio loader reads that mirror for the retail path). */
+			else if( Q_snprintf( mirror, sizeof( mirror ), "gc_studio/%s.mdl", info->model ) > 0
+				&& gEngfuncs.fsapi->FileExists( mirror, false ))
+			{
+				state->model = gEngfuncs.Mod_ForName( state->modelname, false, true );
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d body %s %s\n", index,
+					state->modelname, state->model ? "loaded" : "load failed" );
+			}
+#endif
 			else
 				state->model = NULL;
 
