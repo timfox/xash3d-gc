@@ -1920,7 +1920,22 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				 * body's own sequences by label from its speed, and keep a
 				 * fixed animtime so the frame advances with cl.time (stamping
 				 * cl.time every emit froze it at frame 0). */
-				ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : 0.0f;
+				/* DoD's server stamps animtime = time every think, but with the
+				 * hull stub its frame never advances, so animtime == time and
+				 * the pose stuck at frame 0 (ceres 2ee8fa7). Use a per-slot
+				 * base time, reset when the chosen sequence changes. */
+				{
+					static float anim_base[MAX_CLIENTS + 1];
+					static int anim_seq[MAX_CLIENTS + 1];
+
+					if( anim_base[e] <= 0.0f || anim_base[e] > (float)cl.time || anim_seq[e] != ent->curstate.sequence + 1 )
+					{
+						anim_base[e] = (float)cl.time > 0.0f ? (float)cl.time : 0.001f;
+						anim_seq[e] = ent->curstate.sequence + 1;
+					}
+					ent->curstate.animtime = anim_base[e];
+					ent->curstate.frame = 0.0f;
+				}
 				{
 					static int seq_logs;
 					const studiohdr_t *bh = (const studiohdr_t *)mod->cache.data;
