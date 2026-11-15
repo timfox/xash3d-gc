@@ -470,6 +470,7 @@ static void CL_CheckClientState( void )
 		cls.state = ca_active;
 #if XASH_DODGC_NETWORK
 		Con_Reportf( "GameCube DoD: gameplay active server=%s signon=%d\n", cls.servername, cls.signon );
+		GC_HeapCheck( "gameplay active" );
 		GC_NetReportStatus( "gameplay" );
 		GCube_AppendSwissEvidence( "GameCube DoD: gameplay active signon=%d", cls.signon );
 #endif

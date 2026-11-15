@@ -844,6 +844,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			gc_wd_force_size = tail;
 		}
 	}
+	GC_HeapCheck( "world DL before mat pack" );
 	R_GXMatPackLoad();
 	gc_wd_state = 1;
 	gEngfuncs.Con_Reportf(
@@ -867,9 +868,11 @@ qboolean R_GXWorldDLActive( void )
 	if( gc_wd_state == 0 )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL Active load map=%s\n", base );
+		GC_HeapCheck( "world DL load begin" );
 		Q_strncpy( gc_wd_map, base, sizeof( gc_wd_map ));
 		R_GXWorldDLLoad( base );
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL Active done state=%d\n", gc_wd_state );
+		GC_HeapCheck( "world DL load done" );
 	}
 	return gc_wd_state == 1;
 }

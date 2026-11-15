@@ -133,6 +133,8 @@ void GC_EndMapLoadMemoryOpt( void );
 void GC_ClearMapLoadMemoryOpt( void );
 qboolean GC_MapLoadMemoryOpt( void );
 size_t GC_MemHeapFreeBytes( void );
+/* Walks newlib bins and chunks; logs and returns false on the first bad link. */
+qboolean GC_HeapCheck( const char *tag );
 /* Free bytes inside the current MEM1 arena only (excludes unclaimed top). */
 size_t GC_MemArenaFreeBytes( void );
 
