@@ -10897,6 +10897,9 @@ enum
 	GC_VGUI_PROGRESS_R = 202, GC_VGUI_PROGRESS_G = 153, GC_VGUI_PROGRESS_B = 42
 };
 
+/* Title shown in the loading plaque header (the glyph font is upper-case only). */
+#define GC_LOADING_PLAQUE_TITLE "DAY OF DEFEAT"
+
 static void GC_FillRect565( unsigned short *dst, int width, int height, int stride,
 	int x, int y, int w, int h, unsigned short color )
 {
@@ -11088,21 +11091,22 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( max_chars < 8 )
 		max_chars = 8;
 
+	/* Retail-style plaque: title in the header, progress bar centred in the
+	 * body. The status message/detail lines (CLIENT INIT, map names...) are
+	 * logged by the callers and no longer drawn: they crowded the panel. */
+	(void)message;
+	(void)details;
+	(void)msg_y;
+	(void)det_y;
+	(void)max_chars;
 	GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
-		"HALF-LIFE", text, text_scale, 24 );
-	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
-		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
-	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
-	GC_StatusDrawLine( dst, stride, width, height, text_x, det_y,
-		detail_line, text, line_scale, max_chars );
+		GC_LOADING_PLAQUE_TITLE, text, text_scale, 24 );
 
 #if XASH_GAMECUBE
 	bar_x = panel_x + pad + 2;
 	bar_w = panel_w - 2 * pad - 4;
 	bar_h = height >= 240 ? 12 : 6;
-	bar_y = panel_y + panel_h - bar_h - pad;
-	if( bar_y < det_y + 7 * line_scale + 2 )
-		bar_y = det_y + 7 * line_scale + 2;
+	bar_y = panel_y + header_h + ( panel_h - header_h - bar_h ) / 2;
 	GC_DrawProgressBar( dst, width, height, stride, bar_x, bar_y, bar_w, bar_h, gc_loading_progress );
 #else
 	(void)bar_x; (void)bar_y; (void)bar_w; (void)bar_h;

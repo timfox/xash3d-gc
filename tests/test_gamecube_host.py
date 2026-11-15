@@ -2004,6 +2004,15 @@ probe_collect_exit_status "$child"
 		self.assertEqual(bank.read("config.cfg"), b"unbindall\nhost_framerate \"0\"\n")
 		self.assertNotIn("config.cfg.new", bank.files)
 
+	def test_loading_plaque_is_dod_titled_title_and_bar_only(self) -> None:
+		vid = (ROOT / "engine/platform/gamecube/vid_gamecube.c").read_text(encoding="utf-8")
+		self.assertIn('#define GC_LOADING_PLAQUE_TITLE "DAY OF DEFEAT"', vid)
+		self.assertNotIn('"HALF-LIFE", text', vid)
+		body = vid.split("static void GC_DrawStatusPanelToBufferEx", 1)[1].split("static void GC_DrawStatusPanelToBuffer(", 1)[0]
+		self.assertIn("GC_LOADING_PLAQUE_TITLE", body)
+		# Message/detail lines are no longer drawn into the plaque.
+		self.assertEqual(body.count("GC_StatusDrawLine("), 1)
+
 
 if __name__ == "__main__":
 	unittest.main()
