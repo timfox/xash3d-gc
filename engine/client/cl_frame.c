@@ -1758,25 +1758,93 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		 * body from their "model" userinfo (models/player/<model>/<model>.mdl). */
 		{
 			static int player_logs;
+			static int player_reject_logs;
+			static int player_last_reject[MAX_CLIENTS + 1];
+			static qboolean player_body_tried[MAX_CLIENTS + 1];
+			static qboolean player_scan_logged;
 
-			for( e = 1; e <= svs.maxclients && studio_slots < studio_budget; e++ )
+			if( !player_scan_logged )
+			{
+				player_scan_logged = true;
+				Con_Reportf( "Xash3D GameCube: lean emit player scan maxclients=%d local=%d slots=%d/%d\n",
+					svs.maxclients, cl.playernum + 1, studio_slots, studio_budget );
+			}
+
+			for( e = 1; e <= svs.maxclients && e <= MAX_CLIENTS && studio_slots < studio_budget; e++ )
 			{
 				edict_t *ed = SV_EdictNum( e );
-				model_t *mod;
+				model_t *mod = NULL;
 				cl_entity_t *ent;
 				vec3_t delta;
+				int reject = 0;
 
-				if( e == cl.playernum + 1 || !SV_IsValidEdict( ed ) || !ed->v.modelindex )
+				if( e == cl.playernum + 1 )
 					continue;
-				if( FBitSet( ed->v.effects, EF_NODRAW ) || ed->v.iuser1 != 0 || ed->v.deadflag >= DEAD_DEAD )
+				if( !SV_IsValidEdict( ed ))
+					reject = 1;
+				else if( FBitSet( ed->v.effects, EF_NODRAW ))
+					reject = 2;
+				else if( ed->v.iuser1 != 0 )
+					reject = 3;
+				else if( ed->v.deadflag >= DEAD_DEAD )
+					reject = 4;
+				else
+				{
+					if( ed->v.modelindex )
+						mod = SV_ModelHandle( ed->v.modelindex );
+					if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+					{
+						/* The lean player.mdl may be a spill stub (no cache.data)
+						 * or the bot may have no modelindex on this route. Any
+						 * resident studio will do as the entity's model: the
+						 * renderer swaps in the team body from the "model"
+						 * userinfo anyway. Load that body once per slot. */
+						const char *body = svs.clients ? Info_ValueForKey( svs.clients[e - 1].userinfo, "model" ) : "";
+						char path[MAX_QPATH];
+
+						mod = NULL;
+						if( body[0] && Q_snprintf( path, sizeof( path ), "models/player/%s/%s.mdl", body, body ) > 0 )
+						{
+							mod = Mod_FindName( path, false );
+							if(( !mod || mod->needload != NL_PRESENT ) && !player_body_tried[e] )
+							{
+								player_body_tried[e] = true;
+								mod = Mod_ForName( path, false, false );
+								Con_Reportf( "Xash3D GameCube: lean emit player %d fallback body %s %s\n",
+									e, path, mod && mod->cache.data ? "loaded" : "load failed" );
+							}
+						}
+						if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+							reject = ed->v.modelindex ? 5 : 6;
+					}
+				}
+				if( !reject )
+				{
+					VectorSubtract( ed->v.origin, view_org, delta );
+					if( VectorLength( delta ) > studio_max_dist )
+						reject = 7;
+				}
+				if( reject )
+				{
+					/* Log each slot's reason when it changes, so one run shows
+					 * why a bot is not drawn: 1 invalid/free, 2 nodraw,
+					 * 3 spectator, 4 dead, 5 model not resident, 6 no
+					 * modelindex and no body, 7 out of range. */
+					if( reject != 1 && player_last_reject[e] != reject && player_reject_logs < 32 )
+					{
+						model_t *sm = ( SV_IsValidEdict( ed ) && ed->v.modelindex ) ? SV_ModelHandle( ed->v.modelindex ) : NULL;
+
+						player_reject_logs++;
+						Con_Reportf( "Xash3D GameCube: lean emit player %d reject=%d modelindex=%d model=%s type=%d needload=%d cache=%s\n",
+							e, reject, SV_IsValidEdict( ed ) ? ed->v.modelindex : -1,
+							sm ? sm->name : "-", sm ? (int)sm->type : -1, sm ? (int)sm->needload : -1,
+							sm && sm->cache.data ? "yes" : "no" );
+					}
+					player_last_reject[e] = reject;
 					continue;
-				mod = SV_ModelHandle( ed->v.modelindex );
-				if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
-					continue;
-				VectorSubtract( ed->v.origin, view_org, delta );
-				if( VectorLength( delta ) > studio_max_dist )
-					continue;
-				if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
+				}
+				player_last_reject[e] = 0;
+				if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS && SV_ModelHandle( ed->v.modelindex ) == mod )
 					cl.models[ed->v.modelindex] = mod;
 				ent = &lean_studio_ents[studio_slots];
 				memset( ent, 0, sizeof( *ent ));
