@@ -1198,10 +1198,12 @@ remap_info_t *gc_gcmap_bootstrap_remap_info[GC_GCMAP_STATIC_CLIENT_EDICTS + 1];
 
 static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 {
-	/* Dual BBA listen needs maxplayers=2; heap Client Edicts (~1.42 Mb) soft-
-	 * NULLs and hangs mid-serverdata. Bootstrap tables still fit LM2 (128
-	 * packet ents). Cap stays at 2 so larger MP cannot silently under-alloc. */
-	if( maxclients > 2 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* Heap Client Edicts (744 Kb at 460 ents) cannot fit MEM1 once a map is
+	 * up, at any listen size: a 3-slot bot match hit mem FAIL with 380 Kb
+	 * free (ceres fsb). The static table holds 460 ents whatever maxclients
+	 * is, and cl_parse caps the map route to it, so nothing under-allocs;
+	 * maps over 460 take the map-arena path first. */
+	if( maxclients > 8 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	if( GC_MapLoadMemoryOpt()
