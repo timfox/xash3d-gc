@@ -1005,6 +1005,30 @@ static void R_DrawEntitiesOnList( void )
 				lean_studios++;
 			}
 #endif
+			/* List each distinct studio entity drawn (first 16): the white
+			 * crowbar beside the bot body had no owner on any emit path. */
+			{
+				static const void *seen_ent[16];
+				static const void *seen_mod[16];
+				int k;
+
+				for( k = 0; k < 16; k++ )
+				{
+					if( seen_ent[k] == RI.currententity && seen_mod[k] == RI.currentmodel )
+						break;
+					if( !seen_ent[k] )
+					{
+						seen_ent[k] = RI.currententity;
+						seen_mod[k] = RI.currentmodel;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: draw studio %s ent=%p index=%d player=%d org=(%.0f %.0f %.0f) body=%d weaponmodel=%d\n",
+							RI.currentmodel->name, (void *)RI.currententity, RI.currententity->index,
+							RI.currententity->player ? 1 : 0,
+							RI.currententity->origin[0], RI.currententity->origin[1], RI.currententity->origin[2],
+							RI.currententity->curstate.body, RI.currententity->curstate.weaponmodel );
+						break;
+					}
+				}
+			}
 			R_SetUpWorldTransform();
 			R_DrawStudioModel( RI.currententity );
 			break;

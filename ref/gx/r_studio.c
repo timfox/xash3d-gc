@@ -3381,6 +3381,17 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 
 			m_pStudioHeader = pweaponmodel ? (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel ) : NULL;
 #if XASH_GAMECUBE
+			{
+				static int weapon_logs;
+
+				if( weapon_logs < 4 )
+				{
+					weapon_logs++;
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s\n",
+						pplayer->number, pplayer->weaponmodel, pweaponmodel ? pweaponmodel->name : "(null)",
+						m_pStudioHeader ? "yes" : "no" );
+				}
+			}
 			/* The lean precache can stand a resident w_crowbar in for a
 			 * p_*.mdl that is not loaded; merged onto player bones it lay
 			 * as a white crowbar at the bot's feet (ceres fmg). Attach
