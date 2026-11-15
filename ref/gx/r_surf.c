@@ -1237,6 +1237,12 @@ static void R_FreeGameCubeSurfaceCache( void )
 		free( sc_base );
 	else
 		Mem_Free( sc_base );
+	/* R_InitCaches re-creates the cache right after this; a stale sc_base
+	 * made R_TryInitGameCubeSurfaceCacheSized "reuse" the freed block, and the
+	 * next D_FlushCaches (first frame after R_NewMap) wrote next/owner/size
+	 * into it, corrupting a free 64 KiB heap chunk's bin links. */
+	sc_base = sc_rover = NULL;
+	gc_sc_heap = false;
 }
 
 qboolean R_TryInitGcmapSurfaceCache( void )
@@ -1397,6 +1403,12 @@ void D_FlushCaches( void )
 {
 	if( !sc_base )
 		return;
+#if XASH_GAMECUBE
+	static int flush_logs;
+	if( flush_logs++ < 8 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: D_FlushCaches sc_base=%p size=%d heap=%d static=%d map_unload=%d\n",
+		(void *)sc_base, sc_size, gc_sc_heap ? 1 : 0, gc_sc_static ? 1 : 0, tr.map_unload ? 1 : 0 );
+#endif
 
 	// if newmap, surfaces already freed
 	if( !tr.map_unload )

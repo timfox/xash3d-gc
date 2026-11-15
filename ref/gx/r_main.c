@@ -2478,11 +2478,17 @@ void GAME_EXPORT R_RenderScene( void )
 	}
 #endif
 
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene before flush" );
+#endif
 	if( tr.map_unload )
 	{
 		D_FlushCaches();
 		tr.map_unload = false;
 	}
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene after flush" );
+#endif
 
 
 	R_SetupFrustum();
@@ -2546,8 +2552,12 @@ void GAME_EXPORT R_RenderScene( void )
 //	R_SetupGL( true );
 	// R_Clear( ~0 );
 
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene before markleaves" );
+#endif
 	R_MarkLeaves();
 #if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene after markleaves" );
 	GC_WatchdogMark( "R_RenderScene setup+markleaves" );
 	if( tr.framecount <= 1
 		&& ( gEngfuncs.Sys_CheckParm( "-gcnewgame" )
