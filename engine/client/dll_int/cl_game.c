@@ -1235,7 +1235,10 @@ static qboolean CL_GCArenaEdicts( int maxclients )
 
 	cl_gc_arena_entities = NULL;
 	cl_gc_arena_remaps = NULL;
-	if( !GC_MenuRunsServer() || maxclients > 2 || want <= GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* Any listen size: the table lives in the map arena, not the heap. Was
+	 * capped at 2 clients, so a 3-slot match (two bots and the player) fell
+	 * through to a 744 KiB heap calloc that cannot fit (ceres fra). */
+	if( !GC_MenuRunsServer() || maxclients > 8 || want <= GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	for( count = want; count > GC_GCMAP_STATIC_CLIENT_EDICTS; count -= 32 )
@@ -1331,7 +1334,7 @@ void CL_InitEdicts( int maxclients )
 #endif
 	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
 #if XASH_GAMECUBE
-	if( maxclients <= 2 )
+	if( maxclients <= 8 )
 		cls.num_client_entities = 128;
 	Con_Reportf( "Xash3D GameCube: client edicts alloc request max=%d bytes=%u packet_entities=%d\n",
 		clgame.maxEntities, (uint)( sizeof( cl_entity_t ) * clgame.maxEntities ),
