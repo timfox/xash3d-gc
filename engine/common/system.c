@@ -98,8 +98,12 @@ static void Sys_GameCubeFatalBreadcrumb( const char *message )
 		route = "sd";
 	else if( GCube_GetWritablePath( base, sizeof( base )) && !Q_strnicmp( base, "gcprobe:", 8 ))
 		route = "probe";
-	else if( GCube_GetBasePath( base, sizeof( base )))
-		route = !Q_strnicmp( base, "gcdisc:", 7 ) ? "disc" : "other";
+	/* No GCube_GetBasePath() here: it opens directories on the disc (libiso9660), and this
+	 * function runs from a fatal allocation failure, when the heap is gone. On dod_charlie
+	 * the Cvar_Get OOM in CHud::Init reached it and took a NULL-path strlen inside
+	 * _ISO9660_dirreset_r, turning a reported fatal into a hard crash. */
+	else
+		route = "disc/other";
 
 	if( !Sys_GetParmFromCmdLine( "-gcmap", gcmap ))
 		gcmap[0] = '\0';
