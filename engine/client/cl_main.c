@@ -2378,6 +2378,8 @@ static void CL_ParseStatusMessage( netadr_t from, sizebuf_t *msg )
 	if( maxcl > MAX_CLIENTS || numcl > MAX_CLIENTS || numcl > maxcl || i != PROTOCOL_VERSION )
 		return;
 
+	Con_Reportf( "Xash3D GameCube: find servers: listed %s host=%s map=%s %s/%s\n", NET_AdrToString( from ),
+		Info_ValueForKey( infostring, "host" ), Info_ValueForKey( infostring, "map" ), Info_ValueForKey( infostring, "numcl" ), Info_ValueForKey( infostring, "maxcl" ));
 	UI_AddServerToList( from, infostring );
 }
 
@@ -3155,6 +3157,7 @@ static void CL_ServerList( netadr_t from, sizebuf_t *msg )
 			break;
 
 		NET_Config( true, false ); // allow remote
+		Con_Reportf( "Xash3D GameCube: find servers: master %s listed %s\n", NET_AdrToString( from ), NET_AdrToString( servadr ));
 		NET_QueryServerByAddress( servadr, proto );
 	}
 
