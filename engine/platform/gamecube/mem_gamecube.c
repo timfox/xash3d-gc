@@ -157,7 +157,7 @@ void __malloc_lock( struct _reent *r );
 void __malloc_unlock( struct _reent *r );
 
 #define GC_HC_NAV	128
-#define GC_HC_BIN( i )	((gc_mchunk_t *)((char *)&__malloc_av_[2 * ( i )] - 2 * sizeof( size_t )))
+#define GC_HC_BIN( i )	((gc_mchunk_t *)((char *)&__malloc_av_[2 * ( i ) + 2] - 2 * sizeof( size_t )))
 
 static qboolean GC_HeapCheckPtr( uintptr_t p, uintptr_t lo, uintptr_t hi )
 {
@@ -173,7 +173,7 @@ qboolean GC_HeapCheck( const char *tag )
 	qboolean ok = true;
 	char why[160];
 
-	if( failures >= 3 )
+	if( failures >= 8 )
 		return false;
 	why[0] = '\0';
 	__malloc_lock( _REENT );
