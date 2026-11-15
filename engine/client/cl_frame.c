@@ -1593,7 +1593,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				|| Q_stristr( mod->name, "roach" )
 				|| Q_stristr( mod->name, "nihilanth" )
 				|| Q_stristr( mod->name, "controller" )
-				|| Q_stristr( mod->name, "islave" ))
+				|| Q_stristr( mod->name, "islave" )
+				|| Q_stristr( mod->name, "models/lc/" ))	/* Lost Coast cast */
 				allow = true;
 			if( !allow || Q_stristr( mod->name, "player.mdl" ))
 			{

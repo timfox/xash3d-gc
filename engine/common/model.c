@@ -643,6 +643,8 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		"by_canopy", "arc_xer_tree2", "furniture", "bulb",
 		/* dod_avalanche env_models — full-fidelity props (ava-prop-1). */
 		"sherman", "jagd", "by_banister", "flags",
+		/* Lost Coast characters baked to studio v10 (models/lc/, monster_generic). */
+		"fisherman", "combine_soldier", "combine_super_soldier", "seagull",
 		NULL
 	};
 	static const char *views[] = {

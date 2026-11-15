@@ -2185,6 +2185,11 @@ void Mod_GCUploadDeferredStudioSkins( void )
 		"models/barney.mdl",
 		"models/controller.mdl",
 		"models/islave.mdl",
+		/* Lost Coast cast (studio v10 bakes; only where the map precaches). */
+		"models/lc/fisherman.mdl",
+		"models/lc/combine_soldier.mdl",
+		"models/lc/combine_super_soldier.mdl",
+		"models/lc/seagull.mdl",
 		"models/v_crowbar.mdl",
 		"models/v_9mmhandgun.mdl",
 		"models/v_colt.mdl",

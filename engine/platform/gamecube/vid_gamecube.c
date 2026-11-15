@@ -8321,8 +8321,20 @@ static u16 gc_tiled_rgb565[GC_GX_TILE_MAX_W * GC_GX_TILE_MAX_H] __attribute__((a
 static unsigned short gc_probe_rgb565[GC_VIDEO_NEWGAME_PROBE_WIDTH * GC_VIDEO_NEWGAME_PROBE_HEIGHT] __attribute__((aligned( 32 )));
 static qboolean gc_buffer_owns_heap;
 
+static int gc_tiled_tex_w;
+static int gc_tiled_tex_h;
+static void *gc_tiled_tex_ptr;
+
 static void GC_InitPresentTexture( void )
 {
+	/* gc_present_tex now points at the linear buffer: forget the tiled
+	 * staging cache so the next GC_InitPresentTextureTiled re-inits the
+	 * TexObj instead of sampling linear RGB565 as 4x4 tiles (the loading
+	 * plaque showed as four squeezed strips after the map-load restore). */
+	gc_tiled_tex_ptr = NULL;
+	gc_tiled_tex_w = 0;
+	gc_tiled_tex_h = 0;
+
 	if( !gc.buffer || gc.width <= 0 || gc.height <= 0 )
 	{
 		gc_present_tex_ready = false;
@@ -8335,9 +8347,6 @@ static void GC_InitPresentTexture( void )
 	gc_present_tex_ready = true;
 }
 
-static int gc_tiled_tex_w;
-static int gc_tiled_tex_h;
-static void *gc_tiled_tex_ptr;
 static qboolean gc_gx_present_pipe_ready;
 /* G151: live New Game draws world tris into EFB; DumpFrames stay on soft. */
 static qboolean gc_gx_world_live;
