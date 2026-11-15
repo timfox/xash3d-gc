@@ -1480,6 +1480,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	/* WorldDL listen: emit every nearby map prop (avalanche has ~dozen
 	 * env_model instances across 5 unique MDLs). Was 4 — only sandbags. */
 	static cl_entity_t lean_studio_ents[24];
+	static qboolean lean_player_seen;
 	edict_t *player;
 	vec3_t view_org;
 	int e, added = 0, studios = 0;
@@ -1624,6 +1625,24 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			mod = SV_ModelHandle( ed->v.modelindex );
 			if( !mod || mod->type != mod_studio )
 				continue;
+			/* A weapon a player carries keeps its w_ model at the player's
+			 * origin; it drew as a white rifle lying at the bot's feet
+			 * (ceres 18e0d6f). Carried items belong to the player model. */
+			if(( ed->v.owner && SV_IsValidEdict( ed->v.owner )
+					&& NUM_FOR_EDICT( ed->v.owner ) >= 1 && NUM_FOR_EDICT( ed->v.owner ) <= svs.maxclients )
+				|| ed->v.movetype == MOVETYPE_FOLLOW
+				|| ( ed->v.aiment && SV_IsValidEdict( ed->v.aiment )))
+			{
+				static int carried_logs;
+
+				if( carried_logs < 4 )
+				{
+					carried_logs++;
+					Con_Reportf( "Xash3D GameCube: lean skip carried %s (entity %d, owner %d)\n",
+						mod->name, e, NUM_FOR_EDICT( ed->v.owner ));
+				}
+				continue;
+			}
 			scan_studio++;
 			if( mod->needload != NL_PRESENT || !mod->name[0] || !mod->cache.data )
 			{
@@ -1665,6 +1684,19 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			{
 				scan_studio_skip++;
 				continue;
+			}
+			{
+				static int pick_logs;
+
+				if( pick_logs < 12 )
+				{
+					pick_logs++;
+					Con_Reportf( "Xash3D GameCube: lean studio candidate %d %s class=%s owner=%d aiment=%d movetype=%d org=(%.0f %.0f %.0f)\n",
+						e, mod->name, SV_GetString( ed->v.classname ),
+						ed->v.owner ? NUM_FOR_EDICT( ed->v.owner ) : 0,
+						ed->v.aiment ? NUM_FOR_EDICT( ed->v.aiment ) : 0,
+						ed->v.movetype, ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] );
+				}
 			}
 			/* Insert into nearest-N picks. */
 			if( n_picks < studio_budget )
@@ -1968,7 +2000,29 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							speed, bh ? bh->numseq : -1 );
 					}
 				}
-				ent->curstate.weaponmodel = ed->v.weaponmodel;
+				/* v.weaponmodel is a string_t (the p_ model path); the renderer
+				 * wants a model index (ceres fpa: weaponmodel=28156). Attach it
+				 * only when that model is resident. */
+				ent->curstate.weaponmodel = 0;
+				if( ed->v.weaponmodel )
+				{
+					const char *wpath = SV_GetString( ed->v.weaponmodel );
+					int widx = ( wpath && wpath[0] ) ? SV_ModelIndex( wpath ) : 0;
+					model_t *wm = ( widx > 0 && widx < MAX_MODELS ) ? SV_ModelHandle( widx ) : NULL;
+					static int wlogs;
+
+					if( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data )
+					{
+						cl.models[widx] = wm;
+						ent->curstate.weaponmodel = widx;
+					}
+					if( wlogs < 4 )
+					{
+						wlogs++;
+						Con_Reportf( "Xash3D GameCube: lean player %d weapon %s index %d %s\n",
+							e, wpath ? wpath : "?", widx, ent->curstate.weaponmodel ? "attached" : "not resident" );
+					}
+				}
 				ent->curstate.rendermode = ed->v.rendermode;
 				ent->curstate.renderamt = (int)ed->v.renderamt;
 				ent->curstate.effects = ed->v.effects;
@@ -1985,6 +2039,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 
 					studios++;
 					studio_slots++;
+					lean_player_seen = true;
 					if( !near_e || d < near_d )
 					{
 						near_e = e;
@@ -2068,7 +2123,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 		}
-		if( studios == 0 )
+		/* Once a player body has been drawn the stub is not needed, and it
+		 * showed as a white plank on the floor near the bot (ceres fld). */
+		if( studios == 0 && !lean_player_seen )
 		{
 			/* Prefer tiny lean w_crowbar stub — v_crowbar hung Flipper
 			 * (probe 20260807-171034: studios=1 then silence). */
@@ -2092,7 +2149,17 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->prevstate = ent->curstate;
 				VectorCopy( ent->origin, ent->latched.prevorigin );
 				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					static int stub_logs;
+
 					studios++;
+					if( stub_logs < 4 )
+					{
+						stub_logs++;
+						Con_Reportf( "Xash3D GameCube: lean stub w_crowbar at (%.0f %.0f %.0f)\n",
+							ent->origin[0], ent->origin[1], ent->origin[2] );
+					}
+				}
 			}
 		}
 
