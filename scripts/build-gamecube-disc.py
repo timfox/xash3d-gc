@@ -1448,6 +1448,11 @@ GC_STUDIO_MODELS = (
 	"models/v_tommy.mdl",
 	"models/v_colt.mdl",
 	"models/v_luger.mdl",
+	# DoD melee: every class spawns holding one. Without a lean gc_studio copy
+	# they load from models/ at full size (192/227 KiB) and the deferred studio
+	# budget skips them, so the player had no viewmodel (ceres fxa, 2026-11-15).
+	"models/v_amerk.mdl",
+	"models/v_spade.mdl",
 	# DoD hand grenades: viewmodels lean-stripped, thrown bodies mesh-only.
 	"models/v_grenade.mdl",
 	"models/v_stick.mdl",
