@@ -628,13 +628,19 @@ def configure(conf):
 			conf.define('DEFAULT_MAX_EDICTS', 460)
 			conf.define('GC_SP_EDICT_CAP', 460)
 		# Slim server client slots: more than two listen-server slots (bots), real
-		# clients still limited to two. Off unless asked for; see server.h.
-		if os.environ.get('XASH_GC_SLIM_CLIENTS', '').lower() in ('1', 'yes', 'true', 'on'):
+		# clients still limited to two; see server.h. DoD builds default to on
+		# with 3 slots (player + an Axis and an Allies bot, ceres 2026-11-15:
+		# 371 KiB free at client start); XASH_GC_SLIM_CLIENTS=0 turns it off.
+		is_dod = conf.options.GAMEDIR == 'dod'
+		slim_env = os.environ.get('XASH_GC_SLIM_CLIENTS', '1' if is_dod else '').lower()
+		if slim_env in ('1', 'yes', 'true', 'on'):
+			max_slots = os.environ.get('XASH_GC_MAX_SLOTS', '4')
+			default_slots = os.environ.get('XASH_GC_DEFAULT_SLOTS', '3' if is_dod else '2')
 			conf.define('XASH_GC_SLIM_CLIENTS', 1)
-			conf.define('GC_SV_MAX_SLOTS', int(os.environ.get('XASH_GC_MAX_SLOTS', '4')))
-			# The slot count a listen server starts with (sv_gc_slots default); 2 = as before.
-			conf.define('GC_SV_DEFAULT_SLOTS_STR', os.environ.get('XASH_GC_DEFAULT_SLOTS', '2'))
-			Logs.info('GameCube slim client slots: table %s, default %s' % (os.environ.get('XASH_GC_MAX_SLOTS', '4'), os.environ.get('XASH_GC_DEFAULT_SLOTS', '2')))
+			conf.define('GC_SV_MAX_SLOTS', int(max_slots))
+			# The slot count a listen server starts with (sv_gc_slots default).
+			conf.define('GC_SV_DEFAULT_SLOTS_STR', default_slots)
+			Logs.info('GameCube slim client slots: table %s, default %s' % (max_slots, default_slots))
 		if os.environ.get('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', 1)
 		# Broadband / eth2sp1: link -lbba and enable GC net headers when requested.
