@@ -396,6 +396,9 @@ void SNDDMA_BeginPainting( void )
 
 void SNDDMA_Submit( void )
 {
+#if XASH_GAMECUBE
+	{ void GC_HeapCheckArmed( const char *tag ); GC_HeapCheckArmed( "snddma submit enter" ); }
+#endif
 	if( gc_audio_real && !gc_audio_unpaused && GCube_AudioShouldStartVoice( ))
 	{
 		if( !gc_voice_started && !GCube_StartVoice( ))

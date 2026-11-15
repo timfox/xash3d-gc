@@ -1816,6 +1816,9 @@ Called once each time through the main loop
 */
 void SND_UpdateSound( void )
 {
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "sound update enter" );
+#endif
 	if( !snd.initialized ) return;
 
 	if( clgame.soundFuncs.pfnS_UpdateSound )

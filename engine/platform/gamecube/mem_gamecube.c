@@ -239,6 +239,21 @@ qboolean GC_HeapCheck( const char *tag )
 	return ok;
 }
 
+/* Armed from gameplay active until the first world DL frame (or the first
+ * failure): bisects the heap break between those two points frame by frame. */
+static qboolean gc_heap_check_armed;
+
+void GC_HeapCheckArm( qboolean on )
+{
+	gc_heap_check_armed = on;
+}
+
+void GC_HeapCheckArmed( const char *tag )
+{
+	if( gc_heap_check_armed && !GC_HeapCheck( tag ))
+		gc_heap_check_armed = false;
+}
+
 /* Heap bytes still allocatable: free inside the arena plus unclaimed MEM1. */
 size_t GC_MemHeapFreeBytes( void )
 {

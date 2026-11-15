@@ -16857,6 +16857,9 @@ static qboolean GC_G376AimDumpAtLeanNpc( const float *ref_org )
 qboolean GC_RenderNewGameWorldFrames( int count )
 {
 #if XASH_GAMECUBE
+	GC_HeapCheckArmed( "world frames enter" );
+#endif
+#if XASH_GAMECUBE
 	ref_viewpass_t rvp;
 	model_t *world;
 	vec3_t center;
@@ -16906,6 +16909,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 			gc_cpu_dump_presents_left );
 		gc_cpu_dump_presents_left = 0;
 	}
+	GC_HeapCheckArmed( "after dump latch retire" );
 	/* The menu-to-listen-server transition frees renderer video state while it
 	 * tears down the menu client. The deferred local-map path restores the soft
 	 * framebuffer itself, but must also bring Flipper back before the first BSP
@@ -16928,6 +16932,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		Cvar_Set( "gc_quality", "0" );
 		Con_Reportf( "Xash3D GameCube: local world HUD quality set to lean\n" );
 	}
+	GC_HeapCheckArmed( "after HUD quality lean" );
 	/* Full-physics TAS reaches this bounded renderer without the normal client
 	 * view setup. Bind the already mirrored landmark mesh here, after the
 	 * renderer/world guards above, and allow the existing GX viewmodel pass to
@@ -16956,6 +16961,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	cl.models[1] = world;
 	cl.worldmodel = world;
 	cl.video_prepped = true;
+	GC_HeapCheckArmed( "after world bind" );
 
 	/* Skip R_NewMap here: on New Game it re-enters texture/surface setup and
 	 * stalls Host_Frame. Prepare already allocated low-res screens, scratch,

@@ -708,6 +708,9 @@ Host_ServerFrame
 void Host_ServerFrame( void )
 {
 #if XASH_GAMECUBE
+	GC_HeapCheckArmed( "server frame enter" );
+#endif
+#if XASH_GAMECUBE
 	static int gc_fullphysics_log;
 	static unsigned gc_canary_frames;
 
