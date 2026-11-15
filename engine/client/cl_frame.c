@@ -1438,6 +1438,23 @@ fills the draw list (G315 solid=0). Pull nearby server brush edicts plus at
 most one already-resident world studio (not v_*) into the Flipper list.
 ===============
 */
+/* First sequence of a studio header whose label contains `want`, or -1. */
+static int CL_GCLeanFindSeq( const studiohdr_t *hdr, const char *want )
+{
+	const mstudioseqdesc_t *sd;
+	int i;
+
+	if( !hdr || hdr->numseq <= 0 || hdr->seqindex <= 0 )
+		return -1;
+	sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( Q_stristr( sd[i].label, want ))
+			return i;
+	}
+	return -1;
+}
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -1879,7 +1896,43 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->curstate.skin = ed->v.skin;
 				ent->curstate.scale = 1.0f;
 				ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
-				ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : (float)cl.time;
+				/* The server's player model is a hull-only stub, so the game
+				 * code cannot look up sequences and leaves sequence 0 with
+				 * animtime 0 (ceres acf6eef: the bot held one pose). Pick the
+				 * body's own sequences by label from its speed, and keep a
+				 * fixed animtime so the frame advances with cl.time (stamping
+				 * cl.time every emit froze it at frame 0). */
+				ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : 0.0f;
+				{
+					static int seq_logs;
+					const studiohdr_t *bh = (const studiohdr_t *)mod->cache.data;
+					float speed = sqrtf( ed->v.velocity[0] * ed->v.velocity[0] + ed->v.velocity[1] * ed->v.velocity[1] );
+					int idle = CL_GCLeanFindSeq( bh, "idle" );
+					int gait;
+
+					if( speed > 150.0f )
+						gait = CL_GCLeanFindSeq( bh, "run" );
+					else if( speed > 10.0f )
+						gait = CL_GCLeanFindSeq( bh, "walk" );
+					else
+						gait = idle;
+					if( ed->v.sequence == 0 && idle >= 0 )
+						ent->curstate.sequence = idle;
+					if( ed->v.gaitsequence == 0 && gait >= 0 )
+						ent->curstate.gaitsequence = gait;
+					if( seq_logs < 6 )
+					{
+						const mstudioseqdesc_t *sd = bh ? (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex ) : NULL;
+
+						seq_logs++;
+						Con_Reportf( "Xash3D GameCube: lean player %d seq %d '%s' gait %d '%s' speed %.0f numseq %d\n",
+							e, ent->curstate.sequence,
+							sd && ent->curstate.sequence < bh->numseq ? sd[ent->curstate.sequence].label : "?",
+							ent->curstate.gaitsequence,
+							sd && ent->curstate.gaitsequence < bh->numseq ? sd[ent->curstate.gaitsequence].label : "?",
+							speed, bh ? bh->numseq : -1 );
+					}
+				}
 				ent->curstate.weaponmodel = ed->v.weaponmodel;
 				ent->curstate.rendermode = ed->v.rendermode;
 				ent->curstate.renderamt = (int)ed->v.renderamt;
