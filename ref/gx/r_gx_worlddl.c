@@ -207,11 +207,11 @@ static int R_GXTevMatEnvMask( int id )
  */
 static byte *R_GXWorldDLLmPage( u32 page )
 {
-	static u8 hint[4096];	/* page & 4095 -> slot it was last found in */
+	static u8 hint[1024];	/* page & 1023 -> slot it was last found in */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
 
-	i = hint[page & 4095u];
+	i = hint[page & 1023u];
 	if( i < GC_WD_LM_SLOTS && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
@@ -222,7 +222,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		if( gc_wd_lm_slot_page[i] == (s32)page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
-			hint[page & 4095u] = (u8)i;
+			hint[page & 1023u] = (u8)i;
 			return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 		}
 		if( gc_wd_lm_slot_frame[i] < gc_wd_frame && gc_wd_lm_slot_frame[i] < oldest )
@@ -241,7 +241,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_slot_page[victim] = (s32)page;
 	gc_wd_lm_slot_frame[victim] = gc_wd_frame;
 	gc_wd_lm_miss++;
-	hint[page & 4095u] = (u8)victim;
+	hint[page & 1023u] = (u8)victim;
 	return gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES;
 }
 
@@ -1192,9 +1192,9 @@ static void R_GXWorldDLLoadView( Mtx mv, Mtx44 proj, const float *org, f32 z_nea
  */
 #define GC_WD_ENV_SLOTS_UP	16	/* ground views, side x side */
 #define GC_WD_ENV_SLOTS	48	/* then 32 small ones for walls, roofs, rock */
-#define GC_WD_ENV_MAXKEYS	512
+#define GC_WD_ENV_MAXKEYS	320
 #define GC_WD_ENV_AXES	17
-#define GC_WD_ENVQ_MAX	384
+#define GC_WD_ENVQ_MAX	224
 static int gc_wd_env_state;	/* 0 untried, 1 ready, -1 absent */
 static u32 gc_wd_env_aram, gc_wd_env_bytes, gc_wd_env_n;
 static u32 gc_wd_env_bytes_s, gc_wd_env_n_up;	/* small view bytes; views about the up axis come first */
