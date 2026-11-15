@@ -4855,7 +4855,18 @@ static void GAME_EXPORT pfnSetClientMaxspeed( const edict_t *pEdict, float fNewM
 		return;
 
 	// GoldSrc doesn't bound the value to the movevar here
-	fNewMaxspeed = bound( -svgame.movevars.maxspeed, fNewMaxspeed, svgame.movevars.maxspeed );
+	{
+		float limit = svgame.movevars.maxspeed;
+
+		/* The game sets client maxspeed at spawn; on the GameCube listen
+		 * route that can run before SV_UpdateMovevars( true ) fills
+		 * movevars, and bounding by 0 froze every player (ceres 2b22b9b:
+		 * bots and the human at maxspeed=0). Fall back to the cvar. */
+		if( limit <= 0.0f )
+			limit = Cvar_VariableValue( "sv_maxspeed" );
+		if( limit > 0.0f )
+			fNewMaxspeed = bound( -limit, fNewMaxspeed, limit );
+	}
 
 	// There isn't any reference to "maxspd" anywhere except some commented-out code in SDK
 	Info_SetValueForKeyf( cl->physinfo, "maxspd", MAX_INFO_STRING, "%.f", fNewMaxspeed );
