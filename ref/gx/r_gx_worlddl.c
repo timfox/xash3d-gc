@@ -2049,7 +2049,16 @@ int R_GXWorldDLDraw( void )
 			/* Past 1400 units a 128x128 texture is already on its 64x64
 			 * mip; bind it from the small-slot pool. */
 			/* Only when the pack has more textures than full-size slots. */
-			R_GXCmprSetFar( gc_wd_tex_overflow && R_GXWorldDLChunkD2( (u16)i ) > 1400.0f * 1400.0f );
+			{
+				const float d2 = R_GXWorldDLChunkD2( (u16)i );
+				const float dx = gc_wd_chunk_maxs[i * 3] - gc_wd_chunk_mins[i * 3];
+				const float dy = gc_wd_chunk_maxs[i * 3 + 1] - gc_wd_chunk_mins[i * 3 + 1];
+				const float dz = gc_wd_chunk_maxs[i * 3 + 2] - gc_wd_chunk_mins[i * 3 + 2];
+				const float span = Q_max( dx, Q_max( dy, dz ));
+				/* A large cliff can cover much of the view even at a distance. */
+				R_GXCmprSetFar( gc_wd_tex_overflow && d2 > 1400.0f * 1400.0f
+					&& span * span < d2 * 0.015625f );
+			}
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{

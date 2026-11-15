@@ -2089,7 +2089,10 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 
 	if( r_gx_durable_hot && r_gx_durable_hot_size >= want )
 	{
-		R_GCHotWindow( r_gx_durable_hot, r_gx_durable_hot_size );
+		/* This is called every world frame. Preserve queued/resident chains
+		 * until map loading switches the active window. */
+		if( r_gx_hot.base != r_gx_durable_hot || r_gx_hot.size != r_gx_durable_hot_size )
+			R_GCHotWindow( r_gx_durable_hot, r_gx_durable_hot_size );
 		return;
 	}
 	/* Tip is gone after WorldDL+studios — don't memalign-spam every frame. */
@@ -2194,6 +2197,7 @@ static void R_GXHotService( void )
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 	unsigned spent = 0;
 	int i, kept = 0;
+	qboolean retired = false;
 
 	r_gx_hot.frame++;
 	for( i = 0; i < r_gx_hot.queued; i++ )
@@ -2203,6 +2207,11 @@ static void R_GXHotService( void )
 
 		if( !img->gc_packed )
 			continue;
+		if( r_gx_hot.frame - img->gc_packed_used > GC_HOT_KEEP_FRAMES )
+		{
+			img->gc_packed_queued = false;
+			continue;
+		}
 		if( spent < GC_HOT_FRAME_BYTES && r_gx_hot.count < GC_HOT_LIST_MAX )
 			dst = R_GXHotAlloc( img->gc_packed_bytes );
 		if( !dst )
@@ -2211,12 +2220,21 @@ static void R_GXHotService( void )
 			r_gx_hot.deferred++;
 			continue;
 		}
+		/* A previous frame may still sample a slot we are about to reuse. */
+		if( !retired )
+		{
+			GX_DrawDone();
+			retired = true;
+		}
 		GC_AramTransfer( img->gc_packed_aram, dst, img->gc_packed_bytes, false );
 		img->gc_packed_hot = dst;
 		img->gc_packed_queued = false;
 		r_gx_hot.list[r_gx_hot.count++] = img;
 		r_gx_hot.uploads++;
 		r_gx_hot.bytes += img->gc_packed_bytes;
+		if( img->width >= 256 || img->height >= 256 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: promoted CMPR %s %dx%d bytes=%u\n",
+				img->name, img->width, img->height, img->gc_packed_bytes );
 		spent += img->gc_packed_bytes;
 	}
 	r_gx_hot.queued = kept;
@@ -2274,7 +2292,10 @@ static byte *R_GXCmprSlotPtr( int i )
 
 void R_GXCmprSetFar( qboolean far_pool )
 {
-	r_gx_cmpr_want_far = far_pool && r_gx_cmpr_far_n > 0;
+	qboolean want_far = far_pool && r_gx_cmpr_far_n > 0;
+	if( want_far != r_gx_cmpr_want_far )
+		r_gx_bound_texnum = 0;
+	r_gx_cmpr_want_far = want_far;
 }
 static struct
 {
@@ -2457,6 +2478,16 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 
 	img->gc_packed_used = r_gx_hot.frame;
+	/* With large adopted bounce pools, promote chains too large for a near
+	 * slot into the bounded hot window. Queue before the resident-slot hit. */
+	if( r_gx_cmpr_nslots > 8 && img->gc_packed_aram
+		&& img->gc_packed_bytes > r_gx_cmpr_bounce_cap
+		&& img->gc_packed_bytes <= r_gx_hot.size && !img->gc_packed_hot
+		&& !img->gc_packed_queued && r_gx_hot.queued < GC_HOT_QUEUE_MAX )
+	{
+		img->gc_packed_queued = true;
+		r_gx_hot.queue[r_gx_hot.queued++] = img;
+	}
 	if( !img->gc_packed_hot && texnum < MAX_TEXTURES && r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] )
 	{
 		const int hs = r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] - 1;
