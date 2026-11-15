@@ -453,7 +453,9 @@ void R_DrawSubmodelPolygons( model_t *pmodel, int clipflags, mnode_t *topnode )
 	}
 }
 
-#if XASH_LOW_MEMORY
+#if XASH_GAMECUBE
+unsigned short r_leafkeys[R_LEAFKEYS_COUNT];
+#elif XASH_LOW_MEMORY
 unsigned short r_leafkeys[MAX_MAP_LEAFS];
 #else
 int r_leafkeys[MAX_MAP_LEAFS];
