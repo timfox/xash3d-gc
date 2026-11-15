@@ -3380,6 +3380,24 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			model_t     *pweaponmodel = CL_ModelHandle( pplayer->weaponmodel );
 
 			m_pStudioHeader = pweaponmodel ? (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel ) : NULL;
+#if XASH_GAMECUBE
+			/* The lean precache can stand a resident w_crowbar in for a
+			 * p_*.mdl that is not loaded; merged onto player bones it lay
+			 * as a white crowbar at the bot's feet (ceres fmg). Attach
+			 * only real third-person weapon models. */
+			if( m_pStudioHeader && !Q_stristr( pweaponmodel->name, "/p_" ))
+			{
+				static int stand_in_logs;
+
+				if( stand_in_logs < 4 )
+				{
+					stand_in_logs++;
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: player weapon %d is %s, not a p_ model; not attached\n",
+						pplayer->weaponmodel, pweaponmodel->name );
+				}
+				m_pStudioHeader = NULL;
+			}
+#endif
 
 			/* The third-person p_*.mdl may not be resident on GameCube (the
 			 * studio budget defers it); a NULL header crashed MergeBones
