@@ -10,6 +10,7 @@ Copyright (C) 2026 xash3d-gc contributors
 #include "aram_core.h"
 #include <stdlib.h>
 #include <malloc.h>
+#include <reent.h>
 #include <ogc/system.h>
 #include <ogc/aram.h>
 #include <ogc/cache.h>
@@ -133,6 +134,109 @@ static void GC_MemHeapStats( size_t *used, size_t *free_in_heap, size_t *unclaim
 	*used = (size_t)mi.uordblks;
 	*free_in_heap = (size_t)mi.fordblks;
 	*unclaimed = hi > lo ? (size_t)( hi - lo ) : 0;
+}
+
+/*
+ * Heap consistency check (newlib dlmalloc 2.6 layout). Walks every bin's
+ * bk/fd chain and the contiguous chunk list from __malloc_sbrk_base to top,
+ * and logs the first bad pointer or size. Used to bisect heap corruption:
+ * the dod_charlie menu route faults in _malloc_r (DAR 0xC = NULL bin link)
+ * on the first world DL frame.
+ */
+typedef struct gc_mchunk_s
+{
+	size_t prev_size;
+	size_t size;
+	struct gc_mchunk_s *fd;
+	struct gc_mchunk_s *bk;
+} gc_mchunk_t;
+
+extern gc_mchunk_t *__malloc_av_[];
+extern char *__malloc_sbrk_base __attribute__(( weak ));
+void __malloc_lock( struct _reent *r );
+void __malloc_unlock( struct _reent *r );
+
+#define GC_HC_NAV	128
+#define GC_HC_BIN( i )	((gc_mchunk_t *)((char *)&__malloc_av_[2 * ( i )] - 2 * sizeof( size_t )))
+
+static qboolean GC_HeapCheckPtr( uintptr_t p, uintptr_t lo, uintptr_t hi )
+{
+	return p >= lo && p < hi && ( p & 7u ) == 0;
+}
+
+qboolean GC_HeapCheck( const char *tag )
+{
+	static int failures;
+	gc_mchunk_t *top;
+	uintptr_t lo, hi, p;
+	int i, steps, chunks = 0;
+	qboolean ok = true;
+	char why[160];
+
+	if( failures >= 3 )
+		return false;
+	why[0] = '\0';
+	__malloc_lock( _REENT );
+	top = GC_HC_BIN( 0 )->fd;
+	lo = ( &__malloc_sbrk_base && __malloc_sbrk_base != (char *)-1 )
+		? ( (uintptr_t)__malloc_sbrk_base + 7u ) & ~(uintptr_t)7u : 0x80000000u;
+	hi = (uintptr_t)top + ( top ? ( top->size & ~(size_t)3 ) : 0 );
+	if( !top || (uintptr_t)top < 0x80000000u || (uintptr_t)top >= 0x81800000u )
+	{
+		Q_snprintf( why, sizeof( why ), "top=%p outside MEM1", (void *)top );
+		ok = false;
+	}
+	/* Bins 1..127: every link must be the bin header or a heap chunk. */
+	for( i = 1; ok && i < GC_HC_NAV; i++ )
+	{
+		gc_mchunk_t *b = GC_HC_BIN( i );
+		gc_mchunk_t *c = b->bk, *prev = b;
+
+		for( steps = 0; c != b; steps++ )
+		{
+			if( steps > 8192 || !GC_HeapCheckPtr( (uintptr_t)c, lo, hi ))
+			{
+				Q_snprintf( why, sizeof( why ), "bin %d bk link %p after %p (step %d, heap %p..%p)",
+					i, (void *)c, (void *)prev, steps, (void *)lo, (void *)hi );
+				ok = false;
+				break;
+			}
+			if( c->fd != prev )
+			{
+				Q_snprintf( why, sizeof( why ), "bin %d chunk %p fd=%p expected %p size=0x%lx",
+					i, (void *)c, (void *)c->fd, (void *)prev, (unsigned long)c->size );
+				ok = false;
+				break;
+			}
+			prev = c;
+			c = c->bk;
+		}
+	}
+	/* Contiguous chunk walk up to top (stops at a foreign-sbrk fencepost). */
+	for( p = lo; ok && lo != 0x80000000u && p < (uintptr_t)top; chunks++ )
+	{
+		size_t sz = ((gc_mchunk_t *)p)->size & ~(size_t)3;
+
+		if( sz == 0 || ( sz & 7u ) || p + sz > (uintptr_t)top )
+		{
+			if( sz <= 2 * sizeof( size_t ))
+				break; /* fencepost before a non-contiguous region */
+			Q_snprintf( why, sizeof( why ), "chunk %p size=0x%lx (raw 0x%lx) past top %p after %d chunks",
+				(void *)p, (unsigned long)sz, (unsigned long)((gc_mchunk_t *)p)->size, (void *)top, chunks );
+			ok = false;
+			break;
+		}
+		p += sz;
+	}
+	__malloc_unlock( _REENT );
+	if( ok )
+		Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p\n", tag, chunks, (void *)top );
+	else
+	{
+		failures++;
+		Con_Reportf( S_ERROR "Xash3D GameCube: heap check FAILED %s: %s\n", tag, why );
+	}
+	return ok;
 }
 
 /* Heap bytes still allocatable: free inside the arena plus unclaimed MEM1. */

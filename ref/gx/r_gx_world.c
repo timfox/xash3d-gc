@@ -6870,6 +6870,8 @@ static int R_GXDrawWorldDLFrame( void )
 	}
 #define ST_MARK( k ) do { if( st_on ) { st_t = gettime(); st_acc[k] += st_t - st_t0; st_t0 = st_t; } } while( 0 )
 
+	if( !r_gx_first_worlddl_frame_done )
+		GC_HeapCheck( "first worldDL frame" );
 	R_GXTrace( "hud pool" );
 	R_GXReserveHudPool();
 	R_GXTrace( "skybox prefetch" );
