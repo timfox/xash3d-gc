@@ -353,6 +353,9 @@ def write_bootstrap_pk3(
 		studio_count = inject_gc_studio_into_bootstrap(archive, data)
 		if studio_count:
 			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
+		player_count = inject_gc_player_models(archive, data)
+		if player_count:
+			print(f"GameCube player models: injected {player_count} file(s) into bootstrap pk3")
 		hud_count = inject_gc_hud_into_bootstrap(archive, data)
 		if hud_count:
 			print(f"GameCube HUD mirror: injected {hud_count} sprite(s) into bootstrap pk3")
@@ -2609,6 +2612,120 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 					f"  lean studio tex {stem}t.mdl: {src.stat().st_size} → {len(tex_payload)} bytes"
 				)
 				staged += 1
+	return staged
+
+
+# DoD team bodies. Each retail model is about 3.9 MB, of which 3.7 MB is
+# animation. The splitter in dod-gc (tools/split_studio_mdl.py) moves the
+# animation into a big-endian pack the engine streams one sequence at a time
+# (Mod_GCAnimPackGet), leaving a mesh core of about 250 KB for gc_studio/.
+GC_PLAYER_MODELS = ("axis-inf", "axis-para", "brit-inf", "us-inf", "us-para")
+GC_PLAYER_PACK_PATH = "models/player/anim_%s.gca"
+
+
+def load_studio_splitter():
+	"""Import dod-gc's split_studio_mdl module, or None when it is not around."""
+	import importlib.util
+
+	here = Path(__file__).resolve().parent.parent
+	candidates = []
+	raw = os.environ.get("DODGC_TOOLS", "").strip()
+	if raw:
+		candidates.append(Path(raw))
+	candidates += [
+		here.parent / "dod-gc" / "tools",
+		here.parent / "tools",
+		Path("/home/tim/Desktop/dod-gc/tools"),
+	]
+	for root in candidates:
+		path = root / "split_studio_mdl.py"
+		if path.is_file():
+			spec = importlib.util.spec_from_file_location("split_studio_mdl", path)
+			module = importlib.util.module_from_spec(spec)
+			spec.loader.exec_module(module)
+			return module
+	return None
+
+
+def find_player_model(roots, stem: str, suffix: str) -> Path | None:
+	"""models/player/<stem>/<stem><suffix>.mdl, ignoring case (retail uses 'T')."""
+	want = f"{stem}{suffix}.mdl".lower()
+	for root in roots:
+		folder = root / "models" / "player" / stem
+		if not folder.is_dir():
+			continue
+		for child in folder.iterdir():
+			if child.name.lower() == want:
+				return child
+	return None
+
+
+def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=None) -> int:
+	"""Split the DoD team bodies: core into gc_studio/, animation pack loose in data."""
+	roots = [data]
+	raw = os.environ.get("DODGC_FULL_DOD", "").strip()
+	if raw:
+		roots.append(Path(raw))
+	roots += [
+		Path("/home/tim/Desktop/dod-gc/content/dod"),
+		Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
+	]
+	found = [(stem, find_player_model(roots, stem, "")) for stem in GC_PLAYER_MODELS]
+	found = [(stem, src) for stem, src in found if src is not None]
+	if not found:
+		return 0
+	if splitter is None:
+		splitter = load_studio_splitter()
+	if splitter is None:
+		print("  player models: split_studio_mdl.py not found (set DODGC_TOOLS); team bodies not staged")
+		return 0
+	staged = 0
+	packs: dict[str, int] = {}
+	for stem, src in found:
+		try:
+			files, _ = splitter.split(src.read_bytes(), stem, pack_path=GC_PLAYER_PACK_PATH)
+		except Exception as exc:  # StudioError or a malformed file: skip this body
+			print(f"  player model {stem}: split failed ({exc})")
+			continue
+		core = files.get(stem + ".mdl")
+		if core is None:
+			continue
+		pack_rel = ""
+		for name, payload in files.items():
+			if not name.endswith(".gca"):
+				continue
+			pack_rel = name
+			if name not in packs:
+				dest = data / Path(GC_PLAYER_PACK_PATH).parent / name
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				if not dest.is_file() or dest.stat().st_size != len(payload):
+					dest.write_bytes(payload)
+				packs[name] = len(payload)
+		arcname = f"gc_studio/{stem}.mdl"
+		if arcname in archive.NameToInfo:
+			continue
+		archive.writestr(arcname, core, compress_type=zipfile.ZIP_STORED)
+		staged += 1
+		print(f"  player model {stem}: {src.stat().st_size} → core {len(core)} bytes, animation {pack_rel}")
+		# Skins: the retail <stem>T.mdl, or the textures the splitter took out.
+		tex_arc = f"gc_studio/{stem}t.mdl"
+		if tex_arc in archive.NameToInfo:
+			continue
+		tex_src = find_player_model(roots, stem, "t")
+		tex_payload = None
+		if tex_src is not None:
+			tex_payload = lean_studio_tex_companion_bytes(tex_src, max_edge=128)
+			if tex_payload and len(tex_payload) > 96 * 1024:
+				tex_payload = lean_studio_tex_companion_bytes(tex_src, max_edge=64)
+		if tex_payload:
+			archive.writestr(tex_arc, tex_payload, compress_type=zipfile.ZIP_STORED)
+			staged += 1
+			print(f"  player skins {stem}t.mdl: {tex_src.stat().st_size} → {len(tex_payload)} bytes")
+		else:
+			print(f"  player skins {stem}: no {stem}T.mdl found, body will draw untextured")
+	if packs:
+		total = sum(packs.values())
+		print(f"  player animation: {len(packs)} pack(s), {total} bytes, in {data / 'models' / 'player'}")
 	return staged
 
 
