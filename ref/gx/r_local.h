@@ -276,9 +276,9 @@ typedef struct
 	lightstyle_t *lightstyles;
 	dlight_t     *elights;
 	byte         *texgammatable;
-	uint         *lightgammatable;
-	uint         *lineargammatable;
-	uint         *screengammatable;
+	uint16_t     *lightgammatable;
+	uint16_t     *lineargammatable;
+	uint16_t     *screengammatable;
 
 	uint         max_entities;
 } gl_globals_t;
@@ -447,6 +447,8 @@ qboolean R_GXDrawStretchPic( float x, float y, float w, float h,
 qboolean R_GXFillRGBA( float x, float y, float w, float h, int r, int g, int b, int a, int rendermode );
 int R_GXDrawNewGameCapFaces( void );
 qboolean R_GXStudioIsActive( void );
+qboolean R_GXStudioVmDirectReady( void );
+void R_GXStudioVmPushVerts( vec3_t *verts, int n );
 qboolean R_GXTriApiIsActive( void );
 void R_GXEffectsTriBegin( void );
 void R_GXEffectsTriEnd( void );

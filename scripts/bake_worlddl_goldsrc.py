@@ -577,6 +577,58 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	print(f"  wrote {out_path} ({len(body) // 1024} KB)")
 
 
+LF_FLAG_SKY = 1
+LF_FLAG_TILED = 2
+LF_NO_LIGHT = 0xFFFFFF
+
+
+def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
+	"""media/wd_<map>_lf.gcd: what GoldSrc's light point needs from each face
+	when the world is drawn from the world DL and no msurface table exists
+	(runtime ref/common/ref_light.c).  Header (32 bytes, big-endian):
+	"GClf", version, faces, record offset, lighting offset, lighting bytes.
+	Record (56 bytes): texinfo vecs[2][4] floats, texturemins[2] and
+	extents[2] ints (Mod_CalcSurfaceExtents, 16-unit luxels), flags << 24 |
+	lightofs (0xFFFFFF: none), styles[4].  Then the BSP lighting lump."""
+	bsp = Bsp(map_bsp)
+	recs = bytearray()
+	for f in bsp.faces:
+		_pn, _side, _first, _num, ti, styles, lightofs = f
+		vecs0, vecs1, miptex, tflags = bsp.texinfos[ti]
+		name = bsp.mip_names[miptex].lower() if 0 <= miptex < len(bsp.mip_names) else ""
+		flags = 0
+		if name.startswith("sky"):
+			flags |= LF_FLAG_SKY
+		if tflags & TEX_SPECIAL:
+			flags |= LF_FLAG_TILED
+		pts = bsp.face_pts(f)
+		mins = [1e30, 1e30]
+		maxs = [-1e30, -1e30]
+		for p in pts:
+			for j, v in enumerate((vecs0, vecs1)):
+				val = v[0] * p[0] + v[1] * p[1] + v[2] * p[2] + v[3]
+				mins[j] = min(mins[j], val)
+				maxs[j] = max(maxs[j], val)
+		if not pts:
+			mins = maxs = [0.0, 0.0]
+		bmins = [math.floor(mins[j] / 16) for j in range(2)]
+		bmaxs = [math.ceil(maxs[j] / 16) for j in range(2)]
+		tmins = [bmins[j] * 16 for j in range(2)]
+		ext = [(bmaxs[j] - bmins[j]) * 16 for j in range(2)]
+		lo = lightofs if 0 <= lightofs < len(bsp.lighting) else LF_NO_LIGHT
+		recs += struct.pack(">8f4iI4s", *vecs0, *vecs1, *tmins, *ext, (flags << 24) | (lo & LF_NO_LIGHT), styles)
+	body = bytearray(32)
+	body += recs
+	pad32(body)
+	lit_ofs = len(body)
+	body += bsp.lighting
+	pad32(body)
+	struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
+	out_path.parent.mkdir(parents=True, exist_ok=True)
+	out_path.write_bytes(body)
+	print(f"  light faces: {len(bsp.faces)} faces, lighting {len(bsp.lighting) // 1024} KB, wrote {out_path} ({len(body) // 1024} KB)")
+
+
 def main() -> int:
 	ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 	ap.add_argument("--map", type=Path, default=ROOT / "content/dod/maps/dod_avalanche.bsp")
@@ -589,6 +641,7 @@ def main() -> int:
 	args = ap.parse_args()
 	out = args.out or (ROOT / "content/dod/media" / f"wd_{args.map.stem}.gcd")
 	bake(args.map, out)
+	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"))
 	return 0
 
 

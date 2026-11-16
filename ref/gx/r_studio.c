@@ -15,6 +15,10 @@ GNU General Public License for more details.
 
 #include "r_local.h"
 #if XASH_GAMECUBE
+qboolean Mod_GCAramLightmapActive( void );
+qboolean Mod_GCLightPointsActive( const model_t *world );
+extern int r_gc_light_path;
+extern float r_gc_light_frac;
 extern void GC_ProfMark( const char *name );
 #define R_STUDIO_PROF( name ) GC_ProfMark( name )
 #else
@@ -852,6 +856,39 @@ static void R_StudioMergeBones( cl_entity_t *e, model_t *m_pSubModel )
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim, f );
 	pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
 
+#if XASH_GAMECUBE
+	/* Once per weapon model: how much of its skeleton found the player's. */
+	{
+		static char logged[24][24];
+		int li, matched = 0, k;
+
+		for( li = 0; li < 24 && logged[li][0] && Q_strcmp( logged[li], m_pSubModel->name + 7 ); li++ );
+		if( li < 24 && !logged[li][0] )
+		{
+			char miss[160];
+
+			Q_strncpy( logged[li], m_pSubModel->name + 7, sizeof( logged[li] ));
+			miss[0] = 0;
+			for( i = 0; i < m_pStudioHeader->numbones; i++ )
+			{
+				for( k = 0; k < g_studio.cached_numbones; k++ )
+					if( !Q_stricmp( pbones[i].name, g_studio.cached_bonenames[k] ))
+						break;
+				if( k < g_studio.cached_numbones )
+					matched++;
+				else if( Q_strlen( miss ) + Q_strlen( pbones[i].name ) + 2 < sizeof( miss ))
+				{
+					Q_strncat( miss, pbones[i].name, sizeof( miss ));
+					Q_strncat( miss, ",", sizeof( miss ));
+				}
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: merge %s bones=%d matched=%d player_bones=%d seq=%d/%d unmatched=[%s] player0=%s\n",
+				m_pSubModel->name, m_pStudioHeader->numbones, matched, g_studio.cached_numbones,
+				e->curstate.sequence, m_pStudioHeader->numseq, miss,
+				g_studio.cached_numbones ? g_studio.cached_bonenames[0] : "-" );
+		}
+	}
+#endif
 	for( i = 0; i < m_pStudioHeader->numbones; i++ )
 	{
 		for( j = 0; j < g_studio.cached_numbones; j++ )
@@ -1702,6 +1739,11 @@ static void R_StudioSetupLighting( alight_t *plight )
 	}
 
 	VectorCopy( plight->color, g_studio.lightcolor );
+#if XASH_GAMECUBE
+	/* Bisect switch: white light colour, keep the light level. */
+	if( gEngfuncs.Sys_CheckParm( "-gcstudiowhite" ))
+		VectorSet( g_studio.lightcolor, 1.0f, 1.0f, 1.0f );
+#endif
 }
 
 /*
@@ -2059,6 +2101,8 @@ generic path
 #define R_GX_STUDIO_COLOR_CACHE 2048
 static unsigned r_gx_studio_colors[R_GX_STUDIO_COLOR_CACHE]; /* packed RGBA per normal, 0 = not yet */
 static qboolean r_gc_studio_emit_logged; /* G376 one-time emit log done */
+static qboolean r_gx_studio_colors_ready; /* every normal of this submodel packed */
+static int r_gc_points_serial;	/* one per R_StudioDrawPoints */
 #endif
 
 static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float s, float t )
@@ -2075,7 +2119,7 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !R_GXStudioIsActive() )
 			R_GXStudioForceBegin( false );
 		/* G376: ForceBegin cleared bound_tex — rebind SetupSkin's texture. */
-		R_STUDIO_PROF( "studio: mesh setup" );
+		R_STUDIO_PROF( "studio: mesh setup (begin)" );
 		R_GXStudioRebindPending();
 		R_STUDIO_PROF( "studio: skin bind" );
 
@@ -2083,12 +2127,24 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		 * once, then emit the tricmds straight into the FIFO. */
 		if( r_gc_studio_emit_logged && !g_studio.numlocallights && m_pSubModel
 			&& m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
-			&& RI.currententity != tr.viewent )
+			&& ( RI.currententity != tr.viewent || R_GXStudioVmDirectReady() ))
 		{
 			const short *pc = ptricmds;
 			int n;
 
-			while(( n = *( pc++ )))
+			/* The viewmodel's behind-near verts go onto the near plane once
+			 * per submodel (the strip path did it per strip). */
+			if( RI.currententity == tr.viewent )
+			{
+				static int vm_pushed_serial = -1;
+
+				if( vm_pushed_serial != r_gc_points_serial )
+				{
+					vm_pushed_serial = r_gc_points_serial;
+					R_GXStudioVmPushVerts( g_studio.verts, m_pSubModel->numverts );
+				}
+			}
+			while( !r_gx_studio_colors_ready && ( n = *( pc++ )))
 			{
 				if( n < 0 )
 					n = -n;
@@ -2101,9 +2157,13 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 					}
 				}
 			}
+			R_STUDIO_PROF( "studio: color prepass" );
 			if( R_GXStudioEmitTricmds( ptricmds, (const float (*)[3])g_studio.verts,
 				m_pSubModel->numverts, r_gx_studio_colors, s, t ))
+			{
+				R_STUDIO_PROF( "studio: fifo emit" );
 				return;
+			}
 		}
 
 		{
@@ -2568,8 +2628,46 @@ static void R_StudioDrawPoints( void )
 	pstudionorms = (vec3_t *)(m_pSubModelBase + m_pSubModel->normindex );
 
 #if XASH_GAMECUBE
-	memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
-		* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	/* Without dynamic lights a vertex colour is its normal's light value
+	 * (R_LightLambert scales it by 255): pack every normal's once here
+	 * instead of walking each mesh's tricmds for it. */
+	r_gx_studio_colors_ready = false;
+	if( !g_studio.numlocallights && m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocolorpack" ))
+	{
+		for( i = 0; i < m_pSubModel->numnorms; i++ )
+		{
+			const float *lv = g_studio.lightvalues[i];
+			const unsigned cr = (byte)( lv[0] * 255.0f ), cg = (byte)( lv[1] * 255.0f ), cb = (byte)( lv[2] * 255.0f );
+
+			r_gx_studio_colors[i] = ( cr << 24 ) | ( cg << 16 ) | ( cb << 8 ) | 0xFFu;
+		}
+		{
+			/* What the packed light looks like (Tim: bodies dark / tinted). */
+			static double next_pack_log;
+			static int pack_logs;
+
+			if( pack_logs < 16 && g_studio.time >= next_pack_log && m_pSubModel->numnorms > 2 )
+			{
+				const float *a = g_studio.lightvalues[0], *b = g_studio.lightvalues[m_pSubModel->numnorms / 2];
+
+				next_pack_log = g_studio.time + 2.0;
+				pack_logs++;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio pack %s vm=%d lc=(%.2f,%.2f,%.2f) amb=%.0f shade=%.0f lv0=(%.3f,%.3f,%.3f)=%08x lvm=(%.3f,%.3f,%.3f)=%08x\n",
+					m_pSubModel->name, RI.currententity == tr.viewent ? 1 : 0,
+					g_studio.lightcolor[0], g_studio.lightcolor[1], g_studio.lightcolor[2],
+					g_studio.ambientlight, g_studio.shadelight,
+					a[0], a[1], a[2], r_gx_studio_colors[0], b[0], b[1], b[2],
+					r_gx_studio_colors[m_pSubModel->numnorms / 2] );
+			}
+		}
+		r_gx_studio_colors_ready = true;
+	}
+	else
+		memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
+			* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	r_gc_points_serial++;
+	R_STUDIO_PROF( "studio: sort+color clear" );
 #endif
 	for( j = 0; j < m_pSubModel->nummesh; j++ )
 	{
@@ -2612,7 +2710,9 @@ static void R_StudioDrawPoints( void )
 			// else pglBlendFunc( GL_SRC_ALPHA, GL_ONE );
 		}
 
+		R_STUDIO_PROF( "studio: mesh flags" );
 		R_StudioSetupSkin( m_pStudioHeader, mesh_only ? 0 : pskinref[pmesh->skinref] );
+		R_STUDIO_PROF( "studio: setup skin" );
 
 		{
 			if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
@@ -3387,16 +3487,54 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			RI.currententity->curstate.body = 255;
 		}
 
-		if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && ( RI.currentmodel == RI.currententity->model ))
+		if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && ( RI.currentmodel == RI.currententity->model )
+#if XASH_GAMECUBE
+			/* DoD player bodies are class body x helmet x head x gear; body 1
+			 * is another class's uniform (a blank one on brit-inf), not a
+			 * helmet. The game picks it. */
+			&& !( RI.currentmodel && ( Q_stristr( RI.currentmodel->name, "-inf/" ) || Q_stristr( RI.currentmodel->name, "-para/" )))
+#endif
+			)
 			RI.currententity->curstate.body = 1; // force helmet
 
 		lighting.plightvec = dir;
 		R_EntityDynamicLight( RI.currententity, &lighting, FBitSet( RI.rvp.flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
 
 		R_StudioEntityLight( &lighting );
+#if XASH_GAMECUBE
+		/* Bisect switch: light the bodies from the opposite side. */
+		if( gEngfuncs.Sys_CheckParm( "-gclightflip" ))
+			VectorNegate( lighting.plightvec, lighting.plightvec );
+#endif
 
 		// model and frame independant
 		R_StudioSetupLighting( &lighting );
+#if XASH_GAMECUBE
+		/* Every ~4 s: what lights a player body (Tim: bots lit from below). */
+		{
+			static double next_log;
+			static int light_logs;
+
+			if( light_logs < 12 && g_studio.time >= next_log )
+			{
+				const movevars_t *mv = gp_movevars;
+
+				next_log = g_studio.time + 4.0;
+				light_logs++;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: player light ent=%d org=(%.0f,%.0f,%.0f) amb=%d shade=%d vec=(%.2f,%.2f,%.2f) color=(%.2f,%.2f,%.2f) floor=(%d,%d,%d) skyvec=(%.2f,%.2f,%.2f) skycolor=(%.0f,%.0f,%.0f) bone0vec=(%.2f,%.2f,%.2f) aramlm=%d lp=%d skytrace=%d frac=%.3f\n",
+					RI.currententity->index, RI.currententity->origin[0], RI.currententity->origin[1], RI.currententity->origin[2],
+					lighting.ambientlight, lighting.shadelight,
+					lighting.plightvec[0], lighting.plightvec[1], lighting.plightvec[2],
+					lighting.color[0], lighting.color[1], lighting.color[2],
+					RI.currententity->cvFloorColor.r, RI.currententity->cvFloorColor.g, RI.currententity->cvFloorColor.b,
+					mv ? mv->skyvec[0] : 0.0f, mv ? mv->skyvec[1] : 0.0f, mv ? mv->skyvec[2] : 0.0f,
+					mv ? mv->skycolor[0] : 0.0f, mv ? mv->skycolor[1] : 0.0f, mv ? mv->skycolor[2] : 0.0f,
+					g_studio.blightvec[0][0], g_studio.blightvec[0][1], g_studio.blightvec[0][2],
+					Mod_GCAramLightmapActive() ? 1 : 0, Mod_GCLightPointsActive( gp_cl->models[1] ) ? 1 : 0,
+					r_gc_light_path, r_gc_light_frac );
+			}
+		}
+#endif
 
 		m_pPlayerInfo = pfnPlayerInfo( m_nPlayerIndex );
 
