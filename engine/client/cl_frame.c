@@ -2258,8 +2258,20 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( vpath[0] && Q_stristr( vpath, ".mdl" )
 				&& ( !held || held->type != mod_studio || !held->cache.data ))
 			{
-				if( Mod_GCEnsureLandmarkViewModel( vpath ))
-					held = Mod_FindName( vpath, false );
+				/* A failed load is retried once a second, not every frame:
+				 * each attempt clears the FS miss cache and probes the disc
+				 * (ceres b302741eb ran the budget-skip loop until exit). */
+				static int held_retry_vmi = -1;
+				static double held_retry_time;
+
+				if( vmi != held_retry_vmi || cl.time < held_retry_time
+					|| cl.time - held_retry_time >= 1.0 )
+				{
+					held_retry_vmi = vmi;
+					held_retry_time = cl.time;
+					if( Mod_GCEnsureLandmarkViewModel( vpath ))
+						held = Mod_FindName( vpath, false );
+				}
 			}
 			if( held && held->type == mod_studio && held->cache.data
 				&& clgame.viewent.model != held )
