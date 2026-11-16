@@ -95,6 +95,16 @@ extern size_t Mod_GCWorldArraySpillUsed( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
+
+/* Bytes of the map-load arena the live BSP scratch still occupies (master's
+ * fix for DoD maps). On Lost Coast the stub BSP's scratch is the whole 3.7 MB
+ * arena, which pushed the chunk ring to 234 KB and the texture slots out and
+ * took the harbor from 40 to 20 fps; its surface table is small and already
+ * under the highwater, so the floor is not applied there. */
+static size_t R_GXWorldDLBspFloor( void )
+{
+	return Q_stricmp( XASH_GAMEDIR, "lostcoast" ) ? Mod_GCBspScratchFloor() : 0;
+}
 extern size_t Mod_GCWorldArraySpillFree( void );
 extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
@@ -620,7 +630,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		/* The BSP surface table stays live inside the arena for the whole map and
 		 * the highwater does not cover it: slots carved there were overwritten by
 		 * its per-frame marks (and overwrote its records). */
-		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
+		const size_t hw = ( Q_max( live, R_GXWorldDLBspFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
 		 * 96 KB, prop far LODs about 360 KB, and entity overflow. */
@@ -678,7 +688,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		/* The BSP surface table stays live inside the arena for the whole map and
 		 * the highwater does not cover it: slots carved there were overwritten by
 		 * its per-frame marks (and overwrote its records). */
-		const size_t hw = ( Q_max( live, Mod_GCBspScratchFloor()) + 31u ) & ~(size_t)31u;
+		const size_t hw = ( Q_max( live, R_GXWorldDLBspFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		const size_t keep = 352u * 1024u;	/* water table, prop slots, entity overflow */
 		const size_t keep_tight = 64u * 1024u;	/* floor-limited arena: carves left above the slots */
