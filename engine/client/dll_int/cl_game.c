@@ -451,8 +451,12 @@ draw hudsprite routine
 static void SPR_DrawGeneric( int frame, float x, float y, float width, float height, const wrect_t *prc )
 {
 	float	s1, s2, t1, t2;
+	/* An explicit size scales the sprite (or its rectangle) to it; the
+	 * rectangle is still clamped and normalised against the image size. */
+	const qboolean sized = width > 0.0f && height > 0.0f;
+	const float dest_w = width, dest_h = height;
 
-	if( width == -1 && height == -1 )
+	if(( width == -1 && height == -1 ) || ( sized && prc ))
 	{
 		int	w, h;
 
@@ -493,8 +497,16 @@ static void SPR_DrawGeneric( int frame, float x, float y, float width, float hei
 
 		// calc user-defined rectangle
 		SPR_AdjustTexCoords( texnum, width, height, &s1, &t1, &s2, &t2 );
-		width = rc.right - rc.left;
-		height = rc.bottom - rc.top;
+		if( sized )
+		{
+			width = dest_w;
+			height = dest_h;
+		}
+		else
+		{
+			width = rc.right - rc.left;
+			height = rc.bottom - rc.top;
+		}
 	}
 	else
 	{
@@ -2210,15 +2222,6 @@ HSPRITE EXPORT pfnSPR_Load( const char *szPicName )
 	model_t *spr;
 
 	GC_HUD_CALL( "SPR_Load begin %s", szPicName ? szPicName : "(null)" );
-#if XASH_GAMECUBE
-	/* CapFaces Flipper listen is MEM1-tight; HUD SPR_Load after frame 1
-	 * Gurus (solo 20261107-123341 mid 320_pain.spr). CapFaces already drew. */
-	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw() )
-	{
-		GC_HUD_CALL( "SPR_Load skip CapFaces %s", szPicName ? szPicName : "(null)" );
-		return 0;
-	}
-#endif
 	spr = CL_LoadSpriteModel( szPicName, SPR_HUDSPRITE, 0 );
 	GC_HUD_CALL( "SPR_Load done %s ok=%d", szPicName ? szPicName : "(null)", spr != NULL );
 
@@ -3876,7 +3879,15 @@ static void GAME_EXPORT pfnSPR_DrawGeneric( int frame, int x, int y, const wrect
 	pglEnable( GL_BLEND );
 	pglBlendFunc( blendsrc, blenddst ); // g-cont. are params is valid?
 #endif
+#if XASH_GAMECUBE
+	/* The DoD retail HUD draws its 640-res art at real size on the 320x240
+	 * HUD space through this call: masked like SPR_DrawHoles. */
+	ref.dllFuncs.GL_SetRenderMode( kRenderTransColor );
 	SPR_DrawGeneric( frame, x, y, width, height, prc );
+	ref.dllFuncs.GL_SetRenderMode( kRenderNormal );
+#else
+	SPR_DrawGeneric( frame, x, y, width, height, prc );
+#endif
 }
 
 /*

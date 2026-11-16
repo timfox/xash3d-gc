@@ -208,6 +208,7 @@ void Image_Reset( void )
 	image.cubemap = NULL;
 	image.rgba = NULL;
 	image.mdl_decode = false;
+	image.hud_sprite = false;
 	image.ptr = 0;
 	image.size = 0;
 

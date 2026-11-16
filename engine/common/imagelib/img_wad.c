@@ -269,6 +269,8 @@ qboolean Image_LoadSPR( const char *name, const byte *buffer, fs_offset_t filesi
 	}
 
 	memcpy( &pin, buffer, sizeof( dspriteframe_t ));
+	/* HUD sprite frames are named "#HUD/<sprite>(...)" (Mod_SpriteLoadFrame). */
+	image.hud_sprite = name && Q_strstr( name, "HUD/" ) != NULL;
 	image.width = pin.width;
 	image.height = pin.height;
 

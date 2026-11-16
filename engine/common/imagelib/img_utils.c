@@ -1384,7 +1384,15 @@ qboolean Image_AddIndexedImageToPack( const byte *in, int width, int height )
 	{
 		/* Power-of-two halving only: 256→128→64. Use 128 for MDL so
 		 * viewmodels don't fall to the quality-0 64² floor (ava-play99-40). */
-		const int max_size = image.mdl_decode ? 128 : Image_GCMaxLoadDimension( NULL );
+		/* Small HUD sprite sheets (128² and under, e.g. the DoD crosshair)
+		 * keep their size: the quality-0 64² clamp decimates by nearest
+		 * texel and dropped their 1-px art (the crosshair's horizontal arms
+		 * and dot). The 256² sheets stay clamped: at 128 they did not fit
+		 * the lean MEM1 arena (OOM, 2x2 fallback). */
+		const qboolean small_hud = image.hud_sprite && width <= 128 && height <= 128;
+		const int max_size = image.mdl_decode ? 128
+			: small_hud ? Q_max( 128, Image_GCMaxLoadDimension( NULL ))
+			: Image_GCMaxLoadDimension( NULL );
 		if( scaled_width > max_size || scaled_height > max_size )
 		{
 			qboolean resampled = false;
