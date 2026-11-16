@@ -64,6 +64,30 @@ static qboolean Mod_GCMapModelSpillAfterWorldDL( void )
  * for viewmodels, skins and the animation pool. */
 size_t Mod_GCWorldArraySpillFree( void );
 
+/* Third-person weapons (models/p_*.mdl) the DoD weapon table precaches: what a
+ * bot or another player holds. Lean meshes with a small skin companion. */
+static qboolean Mod_GCIsWeaponModelPath( const char *path )
+{
+	static const char *pweapons[] = {
+		"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger",
+		"p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44",
+		"p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
+		NULL
+	};
+	char bare[64];
+	int i;
+
+	if( !path || !Q_stristr( path, "models/p_" ))
+		return false;
+	COM_FileBase( path, bare, sizeof( bare ));
+	for( i = 0; pweapons[i]; i++ )
+	{
+		if( !Q_stricmp( bare, pweapons[i] ))
+			return true;
+	}
+	return false;
+}
+
 static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
 {
 	return Q_stristr( model_path, "mapmodels/" ) != NULL
@@ -718,6 +742,8 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		*is_viewmodel = false;
 	if( !name || !name[0] )
 		return false;
+	if( Mod_GCIsWeaponModelPath( name ))
+		return true;
 
 	COM_FileBase( name, bare, sizeof( bare ));
 	for( i = 0; npcs[i]; i++ )
@@ -777,7 +803,7 @@ static qboolean Mod_GCAllowRealStudioLoad( const char *name, size_t filesize )
 		if( Mod_GCViewModelNeedsSpill( name, filesize ) && filesize <= ( 448 * 1024 ))
 			return true;
 	}
-	else if( gc_real_studio_npc >= max_npc )
+	else if( gc_real_studio_npc >= max_npc && !Mod_GCIsWeaponModelPath( name ))
 		return false;
 	/* The internally textured Nihilanth is approximately 420 KiB. */
 	if( filesize < sizeof( studiohdr_t ) || filesize > ( 448 * 1024 ))
@@ -794,7 +820,7 @@ static void Mod_GCNoteRealStudioLoaded( const char *name, size_t filesize )
 	Mod_GCStudioNameAllowed( name, &is_view );
 	if( is_view )
 		gc_real_studio_view++;
-	else
+	else if( !Mod_GCIsWeaponModelPath( name ))	/* small, own allowlist */
 		gc_real_studio_npc++;
 	gc_real_studio_bytes += filesize;
 	Con_Reportf( "Xash3D GameCube: real studio loaded '%s' (%s) npc=%d view=%d budget=%s/%s\n",
@@ -990,7 +1016,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				/* The lean HL1 player body (about 281 KiB) is over the BSS limit too and
 				 * has no heap fallback once client start has spent it, so it takes the
 				 * spill the same way, as do the split team bodies. */
-				if(( Mod_GCStudioPrefersSpill( model_path ) || !Q_stricmp( bare, "player" ))
+				if(( Mod_GCStudioPrefersSpill( model_path ) || !Q_stricmp( bare, "player" )
+					|| Mod_GCIsWeaponModelPath( model_path ))
 					&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 					&& Mod_GCAllowRealStudioLoad( model_path, (size_t)flen )
 					&& Mod_GCMapModelSpillAfterWorldDL())

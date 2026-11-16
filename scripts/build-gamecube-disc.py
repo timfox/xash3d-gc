@@ -1433,6 +1433,12 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 	return True
 
 
+# DoD third-person weapons (dod-gc src/dod_game.c weapon table); the engine
+# list is Mod_GCIsWeaponModelPath in engine/common/model.c.
+GC_STUDIO_PWEAPONS = (
+	"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger", "p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44", "p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
+)
+
 # Small allowlist injected into gamecube-bootstrap.pk3 as gc_studio/*.mdl so
 # New Game can load real meshes without ISO9660 lookups in huge models/, and
 # without mounting an extra ZIP (which tips the New Game MEM1 cliff).
@@ -1469,6 +1475,25 @@ GC_STUDIO_MODELS = (
 	"models/v_panzerschreck.mdl",
 	"models/w_bazooka_rocket.mdl",
 	"models/w_crowbar.mdl",
+	# Third-person weapons (what bots and other players hold): lean mesh plus
+	# a 64x64 skin companion, loaded when a player first holds one.
+	"models/p_garand.mdl",
+	"models/p_k98.mdl",
+	"models/p_mp40.mdl",
+	"models/p_tommy.mdl",
+	"models/p_colt.mdl",
+	"models/p_luger.mdl",
+	"models/p_amerk.mdl",
+	"models/p_spade.mdl",
+	"models/p_grenade.mdl",
+	"models/p_stick.mdl",
+	"models/p_bren.mdl",
+	"models/p_stg44.mdl",
+	"models/p_spring.mdl",
+	"models/p_30cal.mdl",
+	"models/p_mg42pr.mdl",
+	"models/p_bazooka.mdl",
+	"models/p_pschreck.mdl",
 	# DoD CapFaces map props (env_model / dod_object).
 	# Tip: skip forts/kingtiger; caen unique order saturates 6 slots before bulb.
 	"models/mapmodels/hk_satchel.mdl",
@@ -2684,6 +2709,7 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 		"v_grenade", "v_stick", "w_grenade", "w_stick",
 		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 		"v_bazooka", "v_panzerschreck", "w_bazooka_rocket",
+		*GC_STUDIO_PWEAPONS,
 		# CapFaces map props (env_model) — pull from Expansion1 / content/dod.
 		"sandbags", "bulb", "hk_satchel", "furniture", "by_rubble_set",
 		"arc_xer_tree2", "horse_statue", "by_canopy",
@@ -2729,6 +2755,7 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			"v_amerk", "v_spade", "v_grenade", "v_stick",
 			"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 			"v_bazooka", "v_panzerschreck",
+			*GC_STUDIO_PWEAPONS,
 			# Other CapFaces map props stay lean-stripped for tip maps.
 			"bulb", "hk_satchel", "furniture", "by_rubble_set",
 			"arc_xer_tree2", "horse_statue", "by_canopy",
@@ -2781,6 +2808,7 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			# banister 128² OOM → 2x2 fallback).
 			prop_tex64 = {
 				"sandbags", "sherman", "jagd", "by_banister", "flags",
+				*GC_STUDIO_PWEAPONS,
 			}
 			edge = 64 if stem in prop_tex64 else 128
 			tex_payload = lean_studio_tex_companion_bytes(src, max_edge=edge)
