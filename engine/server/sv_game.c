@@ -6039,7 +6039,9 @@ static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 	 * doors keep tip slots on dense maps (caen 621>460). Keeping func_wall /
 	 * cycler (props1) tip-starved caen to a black EFB — leave them skipped.
 	 * (20261110-032103 capped-32 allow also blacked caen; bake walls into
-	 * CapFaces spatial or defer post-densify instead.) */
+	 * CapFaces spatial or defer post-densify instead.)
+	 * multi_manager stays: DoD's round flow (allieswin_mm / axiswin_mm on
+	 * dod_charlie) runs through it, so without it no round ever ended. */
 	if( !Q_strcmp( classname, "func_wall" )
 		|| !Q_strcmp( classname, "func_illusionary" )
 		|| !Q_strcmp( classname, "func_wall_toggle" )
@@ -6061,7 +6063,6 @@ static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 		|| !Q_strcmp( classname, "info_null" )
 		|| !Q_strcmp( classname, "info_target" )
 		|| !Q_strcmp( classname, "info_landmark" )
-		|| !Q_strcmp( classname, "multi_manager" )
 		|| !Q_strcmp( classname, "trigger_auto" )
 		|| !Q_strcmp( classname, "trigger_relay" )
 		|| !Q_strcmp( classname, "trigger_changetarget" )
