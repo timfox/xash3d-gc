@@ -205,6 +205,7 @@ typedef enum
 void GCube_EarlyInit( void );
 void GC_EarlyBootSplash( void );
 void GC_RefreshBootSplash( void );
+void GC_PrintBuildInfo( void );
 void GC_DrawBootFatalPanel( const char *message, const char *details );
 void GCube_Init( void );
 void GCube_Shutdown( void );
