@@ -59,7 +59,14 @@ void CL_RunLightStyles( lightstyle_t *ls )
 	if( !world )
 		return;
 
-	if( r_fullbright->value || !world->lightdata )
+	qboolean have_light = world->lightdata != NULL;
+#if XASH_GAMECUBE
+	/* On the world DL route the lightmap lives in the baked light faces; the
+	 * light styles still scale it (65536 saturated every light point). */
+	have_light = have_light || R_GXLightFacesCount() > 0;
+#endif
+
+	if( r_fullbright->value || !have_light )
 	{
 		for( int i = 0; i < MAX_LIGHTSTYLES; i++ )
 			g_lightstylevalue[i] = 256 * 256;
