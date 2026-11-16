@@ -17661,6 +17661,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		const qboolean trace = frame_trace < 3;
 		const qboolean gx_world_frame = Sys_CheckParm( "-gcworldrender" )
 			&& GC_UseGxWorldDraw();
+		qboolean presented_this_frame = false;
 
 		if( trace )
 			frame_trace++;
@@ -18130,12 +18131,31 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				cl.video_prepped = saved_prepped;
 			}
 		}
-		ref.dllFuncs.R_EndFrame();
+		{
+			const unsigned presents_before_end = gc_present_count;
+
+			/* Arm the EFB present before R_EndFrame, which presents. */
+			if( gx_world_frame )
+			{
+				if( !xfb[0] && rmode )
+					GC_AllocXFB( 0, rmode );
+				if( !xfb[1] )
+					which_fb = 0;
+				GC_MarkGxWorldEfbReady();
+			}
+			ref.dllFuncs.R_EndFrame();
+			/* R_BlitScreen on the pure-GX path now presents through
+			 * SW_UnlockBuffer. Presenting again here showed every frame
+			 * twice and waited two vsyncs per host frame, which held the
+			 * DoD listen at 30 fps with ~12 ms of real work (ceres profile:
+			 * "present: VI vsync wait" hits=128 per 64 frames, avg 10.4 ms). */
+			presented_this_frame = gc_present_count != presents_before_end;
+		}
 		GC_WatchdogMark( "newgame frame after R_EndFrame" );
-		/* Pure-GX R_BlitScreen intentionally skips the software swap, but this
-		 * direct local-play renderer owns its frame loop. Present the EFB here
-		 * so the live BSP reaches the visible XFB during menu-driven play. */
-		if( gx_world_frame )
+		/* This direct local-play renderer owns its frame loop. If R_EndFrame
+		 * did not present (soft blit skipped), present the EFB here so the
+		 * live BSP reaches the visible XFB during menu-driven play. */
+		if( gx_world_frame && !presented_this_frame )
 		{
 			/* A single-XFB build must stay on slot zero. Menu teardown can leave
 			 * the old scanout slot unavailable while Flipper itself remains live. */
