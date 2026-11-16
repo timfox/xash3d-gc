@@ -9317,6 +9317,10 @@ static void R_GXStudioNoteNdcVert( float x, float y, float z )
 	r_gx_vm_ndc_samples++;
 }
 
+/* Far end of the EFB depth range the viewmodel pass draws into (see
+ * R_GXPrepareStudioState). */
+#define GC_GX_VIEWMODEL_DEPTH_FAR 0.001f
+
 static void R_GXPrepareStudioState( qboolean viewmodel )
 {
 	GXRModeObj *rmode = (GXRModeObj *)GC_GetGxVideoMode();
@@ -9357,13 +9361,20 @@ static void R_GXPrepareStudioState( qboolean viewmodel )
 	 */
 	if( viewmodel )
 	{
+		/* The gun still overlays the world (LEQUAL with the 0.3 retail
+		 * range let near WorldDL walls freckle through the Garand,
+		 * ava-play99-10), but it needs a depth test against itself:
+		 * Z-always with no Z write drew its triangles in submission
+		 * order, so the far side of the receiver, the inside of the
+		 * stock and the back of the hand showed through the near side
+		 * (Tim: "depth pass not used"). Squeeze the gun into the
+		 * nearest sliver of the EFB depth range, where no world pixel
+		 * sits, and test and write it normally there. 24-bit Z leaves
+		 * about 16k steps for the gun's own sorting. */
 		if( rmode )
 			GX_SetViewport( 0.0f, 0.0f, (f32)rmode->fbWidth, (f32)rmode->efbHeight,
-				0.0f, 1.0f );
-		/* LEQUAL+compressed depth let near WorldDL walls freckle through the
-		 * Garand (ava-play99-10). Overlay the gun like G155 until WorldDL Z
-		 * calibration catches up. */
-		GX_SetZMode( GX_TRUE, GX_ALWAYS, GX_FALSE );
+				0.0f, GC_GX_VIEWMODEL_DEPTH_FAR );
+		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 		R_GXSetTexAlphaTest( false );
 	}
 	else
