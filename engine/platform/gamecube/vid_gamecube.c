@@ -307,7 +307,7 @@ static unsigned int gc_present_count;
  * than silently dropping a requested viewmodel state. */
 static void GC_EnsureDrawViewmodelCvar( void )
 {
-	Cvar_Get( "r_drawviewmodel", "1", 0, "draw firstperson weapon model" );
+	Cvar_Get( "r_drawviewmodel", !Q_stricmp( XASH_GAMEDIR, "lostcoast" ) ? "0" : "1", 0, "draw firstperson weapon model" );
 }
 
 /* GX_DrawDone sleeps until Flipper retires the draw-done token and has no
@@ -13223,6 +13223,11 @@ static void GC_TryDeferredViewmodel( void )
 	model_t *vm;
 	char old_vm[16];
 
+	/* Lost Coast has no first-person weapon on the GameCube yet: the landmark
+	 * crowbar drew untextured white and floated in the sky (the camera is the
+	 * scripted eye, not the player's). */
+	if( !Q_stricmp( XASH_GAMEDIR, "lostcoast" ))
+		return;
 	if( !gc_newgame_world_ready )
 		return;
 	if( !( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gcmenuplaystart" )) )
