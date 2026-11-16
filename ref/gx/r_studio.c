@@ -1739,6 +1739,11 @@ static void R_StudioSetupLighting( alight_t *plight )
 	}
 
 	VectorCopy( plight->color, g_studio.lightcolor );
+#if XASH_GAMECUBE
+	/* Bisect switch: white light colour, keep the light level. */
+	if( gEngfuncs.Sys_CheckParm( "-gcstudiowhite" ))
+		VectorSet( g_studio.lightcolor, 1.0f, 1.0f, 1.0f );
+#endif
 }
 
 /*
@@ -2627,7 +2632,8 @@ static void R_StudioDrawPoints( void )
 	 * (R_LightLambert scales it by 255): pack every normal's once here
 	 * instead of walking each mesh's tricmds for it. */
 	r_gx_studio_colors_ready = false;
-	if( !g_studio.numlocallights && m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE )
+	if( !g_studio.numlocallights && m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocolorpack" ))
 	{
 		for( i = 0; i < m_pSubModel->numnorms; i++ )
 		{
@@ -2635,6 +2641,25 @@ static void R_StudioDrawPoints( void )
 			const unsigned cr = (byte)( lv[0] * 255.0f ), cg = (byte)( lv[1] * 255.0f ), cb = (byte)( lv[2] * 255.0f );
 
 			r_gx_studio_colors[i] = ( cr << 24 ) | ( cg << 16 ) | ( cb << 8 ) | 0xFFu;
+		}
+		{
+			/* What the packed light looks like (Tim: bodies dark / tinted). */
+			static double next_pack_log;
+			static int pack_logs;
+
+			if( pack_logs < 16 && g_studio.time >= next_pack_log && m_pSubModel->numnorms > 2 )
+			{
+				const float *a = g_studio.lightvalues[0], *b = g_studio.lightvalues[m_pSubModel->numnorms / 2];
+
+				next_pack_log = g_studio.time + 2.0;
+				pack_logs++;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio pack %s vm=%d lc=(%.2f,%.2f,%.2f) amb=%.0f shade=%.0f lv0=(%.3f,%.3f,%.3f)=%08x lvm=(%.3f,%.3f,%.3f)=%08x\n",
+					m_pSubModel->name, RI.currententity == tr.viewent ? 1 : 0,
+					g_studio.lightcolor[0], g_studio.lightcolor[1], g_studio.lightcolor[2],
+					g_studio.ambientlight, g_studio.shadelight,
+					a[0], a[1], a[2], r_gx_studio_colors[0], b[0], b[1], b[2],
+					r_gx_studio_colors[m_pSubModel->numnorms / 2] );
+			}
 		}
 		r_gx_studio_colors_ready = true;
 	}
