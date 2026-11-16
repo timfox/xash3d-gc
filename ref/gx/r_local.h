@@ -478,6 +478,8 @@ void R_GXStudioEmitTrianglesC( const gx_tri_vertex_t *verts, int count );
 /* Static mapmodel display lists (media/sd_<map>.gsd). */
 qboolean R_GXStudioDLActive( void );
 qboolean R_GXStudioDLTryDraw( cl_entity_t *e, model_t *mod );
+qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x4 *bones ); /* r_gx_actor.c */
+void R_GXInvalidateTriApiLayout( void );
 int R_GXDrawBrushModel( cl_entity_t *e );
 int R_GXDrawTramBaked( const float *origin, const float *angles );
 void R_GXHoldEfbForDump( int frames );

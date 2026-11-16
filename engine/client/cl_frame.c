@@ -1697,7 +1697,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				|| Q_stristr( mod->name, "roach" )
 				|| Q_stristr( mod->name, "nihilanth" )
 				|| Q_stristr( mod->name, "controller" )
-				|| Q_stristr( mod->name, "islave" ))
+				|| Q_stristr( mod->name, "islave" )
+				|| Q_stristr( mod->name, "models/lc/" ))	/* Lost Coast cast */
 				allow = true;
 			if( !allow || Q_stristr( mod->name, "player.mdl" ))
 			{
@@ -1710,6 +1711,25 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			{
 				scan_studio_skip++;
 				continue;
+			}
+			/* World DL maps carry their PVS: leave out what the eye cannot
+			 * see instead of animating and skinning the whole map's cast. */
+			{
+				extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+				vec3_t bmin, bmax;
+
+				VectorCopy( ed->v.absmin, bmin );
+				VectorCopy( ed->v.absmax, bmax );
+				if( bmax[0] - bmin[0] < 1.0f || bmax[2] - bmin[2] < 1.0f )
+				{
+					VectorSet( bmin, ed->v.origin[0] - 48.0f, ed->v.origin[1] - 48.0f, ed->v.origin[2] );
+					VectorSet( bmax, ed->v.origin[0] + 48.0f, ed->v.origin[1] + 48.0f, ed->v.origin[2] + 80.0f );
+				}
+				if( !R_GXWorldDLEntityVisible( e, bmin, bmax ))
+				{
+					scan_studio_skip++;
+					continue;
+				}
 			}
 			{
 				static int pick_logs;

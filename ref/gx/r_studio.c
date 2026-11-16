@@ -2349,6 +2349,14 @@ static void R_StudioDrawPoints( void )
 	if( !m_pStudioHeader )
 		return;
 
+#if XASH_GAMECUBE
+	/* Lost Coast characters: Flipper skins, lights and draws them from
+	 * prebuilt display lists (gc_studio/<name>.gca, r_gx_actor.c). */
+	if( GC_UseGxWorldDraw() && R_GXActorDraw( RI.currententity, RI.currentmodel,
+		m_pStudioHeader, g_studio.bonestransform ))
+		return;
+#endif
+
 	m_skinnum = RI.currententity->curstate.skin;
 	pvertbone = ((byte *)m_pStudioHeader + m_pSubModel->vertinfoindex );
 	pnormbone = ((byte *)m_pStudioHeader + m_pSubModel->norminfoindex );
@@ -3755,6 +3763,13 @@ void R_DrawViewModel( void )
 		&& view && view->model && view->model->type == mod_studio
 		&& view->model->cache.data
 		&& ( GC_UseLowResWorldProbe() || GC_UseGxWorldDraw() ));
+#endif
+
+#if XASH_GAMECUBE
+	/* The video stress test flythrough has no weapon in hand. Its skin is
+	 * also not resident on this route, so it drew as a white hook. */
+	if( gEngfuncs.Sys_CheckParm( "-gcvst" ))
+		return;
 #endif
 
 	R_GatherPlayerLight( view );
