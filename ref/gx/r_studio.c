@@ -2075,7 +2075,7 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !R_GXStudioIsActive() )
 			R_GXStudioForceBegin( false );
 		/* G376: ForceBegin cleared bound_tex — rebind SetupSkin's texture. */
-		R_STUDIO_PROF( "studio: mesh setup" );
+		R_STUDIO_PROF( "studio: mesh setup (begin)" );
 		R_GXStudioRebindPending();
 		R_STUDIO_PROF( "studio: skin bind" );
 
@@ -2101,9 +2101,13 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 					}
 				}
 			}
+			R_STUDIO_PROF( "studio: color prepass" );
 			if( R_GXStudioEmitTricmds( ptricmds, (const float (*)[3])g_studio.verts,
 				m_pSubModel->numverts, r_gx_studio_colors, s, t ))
+			{
+				R_STUDIO_PROF( "studio: fifo emit" );
 				return;
+			}
 		}
 
 		{
@@ -2570,6 +2574,7 @@ static void R_StudioDrawPoints( void )
 #if XASH_GAMECUBE
 	memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
 		* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	R_STUDIO_PROF( "studio: sort+color clear" );
 #endif
 	for( j = 0; j < m_pSubModel->nummesh; j++ )
 	{
@@ -2612,7 +2617,9 @@ static void R_StudioDrawPoints( void )
 			// else pglBlendFunc( GL_SRC_ALPHA, GL_ONE );
 		}
 
+		R_STUDIO_PROF( "studio: mesh flags" );
 		R_StudioSetupSkin( m_pStudioHeader, mesh_only ? 0 : pskinref[pmesh->skinref] );
+		R_STUDIO_PROF( "studio: setup skin" );
 
 		{
 			if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
