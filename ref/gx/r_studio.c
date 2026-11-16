@@ -3441,6 +3441,9 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			 * p_*.mdl that is not loaded; merged onto player bones it lay
 			 * as a white crowbar at the bot's feet (ceres fmg). Attach
 			 * only real third-person weapon models. */
+			/* Bisect switch for the third-person weapon draw. */
+			if( m_pStudioHeader && gEngfuncs.Sys_CheckParm( "-gcnopweapondraw" ))
+				m_pStudioHeader = NULL;
 			if( m_pStudioHeader && !Q_stristr( pweaponmodel->name, "/p_" ))
 			{
 				static int stand_in_logs;

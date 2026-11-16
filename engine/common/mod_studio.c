@@ -2044,7 +2044,8 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 			/* DoD team bodies are the players: a mesh-only body draws as a
 			 * white silhouette (ceres acf6eef), so keep their baked skin
 			 * (gc_studio/<team>t.mdl) at any quality. */
-			if( Q_stristr( mod->name, "models/player/" ))
+			/* Third-person weapons too: a bot's gun is part of the player. */
+			if( Q_stristr( mod->name, "models/player/" ) || Q_stristr( mod->name, "models/p_" ))
 			{
 				char tex[MAX_QPATH];
 
