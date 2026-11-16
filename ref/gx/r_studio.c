@@ -3465,6 +3465,11 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 		R_EntityDynamicLight( RI.currententity, &lighting, FBitSet( RI.rvp.flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
 
 		R_StudioEntityLight( &lighting );
+#if XASH_GAMECUBE
+		/* Bisect switch: light the bodies from the opposite side. */
+		if( gEngfuncs.Sys_CheckParm( "-gclightflip" ))
+			VectorNegate( lighting.plightvec, lighting.plightvec );
+#endif
 
 		// model and frame independant
 		R_StudioSetupLighting( &lighting );

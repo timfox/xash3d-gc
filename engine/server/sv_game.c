@@ -6059,7 +6059,9 @@ static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 		|| !Q_strcmp( classname, "env_bubbles" )
 		|| !Q_strcmp( classname, "light" )
 		|| !Q_strcmp( classname, "light_spot" )
-		|| !Q_strcmp( classname, "light_environment" )
+		/* light_environment stays: its Spawn sets sv_skyvec (KeyValue
+		 * alone set only the sky colour), and studio models take their
+		 * outdoor light direction from it, as in GoldSrc. */
 		|| !Q_strcmp( classname, "info_null" )
 		|| !Q_strcmp( classname, "info_target" )
 		|| !Q_strcmp( classname, "info_landmark" )
