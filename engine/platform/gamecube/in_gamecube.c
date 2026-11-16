@@ -114,13 +114,22 @@ static const gc_default_bind_t gc_default_binds[] =
 	{ K_X_BUTTON, "+reload" },
 	{ K_Y_BUTTON, "impulse 100" },
 	{ K_START_BUTTON, "cancelselect" },
-	{ K_DPAD_UP, "invprev" },
-	{ K_DPAD_DOWN, "invnext" },
-	{ K_DPAD_LEFT, "lastinv" },
+	/* invprev/invnext/lastinv are client HUD commands that need the HUD's weapon list and selection
+	 * overlay; the lean client does not run those, so the D-pad did nothing. The DoD game DLL handles
+	 * these server commands (cycle the carried weapons in slot order, and the last weapon). */
+	{ K_DPAD_UP, "dod_prevweapon" },
+	{ K_DPAD_DOWN, "dod_nextweapon" },
+	{ K_DPAD_LEFT, "dod_lastweapon" },
 	{ K_DPAD_RIGHT, "dod_score" },
 	{ K_L1_BUTTON, "+attack2" },
 	{ K_R1_BUTTON, "+attack" },
 	{ K_Z_BUTTON, "+duck" },
+	/* The analog trigger axes arrive as keys of their own (K_JOY1/K_JOY2) whose stock bindings are
+	 * +speed and +attack2. R and L are already bound as digital buttons above, so pulling R fired
+	 * +attack from the click and +attack2 from the axis; the weapon code handles IN_ATTACK2 first and
+	 * clears it, so the primary shot never fired. Leave the axis keys unbound. */
+	{ K_LTRIGGER, "" },
+	{ K_RTRIGGER, "" },
 };
 
 static qboolean GC_IsGameCubeControllerType( u32 type )
