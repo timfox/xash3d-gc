@@ -6918,6 +6918,7 @@ static int gc_wnrm_state;
  * reflection with its Fresnel weight and ripple offsets. */
 static GXTexObj gc_wsun_obj;
 static float gc_wsun_ik;
+static float gc_wsun_box[4];	/* lit part of the texture: u0 v0 u1 v1; empty = unknown */
 static s8 gc_wsun_state;	/* 0 untried, 1 ready, -1 none */
 static u16 gc_wsun_side;
 
@@ -6945,6 +6946,10 @@ static qboolean R_GXWaterSunReady( void )
 		GX_InitTexObj( &gc_wsun_obj, tex, hdr[3], hdr[3], GX_TF_CMPR, GX_CLAMP, GX_CLAMP, GX_FALSE );
 		GX_InitTexObjFilterMode( &gc_wsun_obj, GX_LINEAR, GX_LINEAR );
 		gc_wsun_side = hdr[3];
+		gc_wsun_box[0] = (float)hdr[5] * ( 1.0f / 65535.0f );
+		gc_wsun_box[1] = (float)hdr[6] * ( 1.0f / 65535.0f );
+		gc_wsun_box[2] = (float)hdr[7] * ( 1.0f / 65535.0f );
+		gc_wsun_box[3] = (float)hdr[8] * ( 1.0f / 65535.0f );
 		gc_wsun_ik = 0.5f * 256.0f / (float)hdr[4];
 		gc_wsun_state = 1;
 	}
@@ -7078,6 +7083,7 @@ static void R_GXDrawPackedWater( void )
 		u32 tint_c[1536];
 		u8 tint_r[1536];
 		int tint_n = 0, tint_i = 0;
+		u16 tint_at[320];	/* first cached node of each visible face */
 		float tmpf;
 
 		AngleVectors( RI.rvp.viewangles, forward, right, up );
@@ -7304,6 +7310,41 @@ static void R_GXDrawPackedWater( void )
 			nd = fabsf( DotProduct( forward, pl.normal ));
 			if( nd > 1.0f )
 				nd = 1.0f;
+			if( !refl_pass )
+				tint_at[a] = (u16)tint_n;
+			else
+				tint_i = tint_at[a];
+			/* Sun pass: the texture is black outside its lit box, and on the
+			 * flat sheet the lookup is affine, so a face whose corners all
+			 * fall to one side of the box adds nothing. Most do. */
+			if( refl_pass == 2 && gc_wsun_box[2] > gc_wsun_box[0] )
+			{
+				const float *eye = RI.rvp.vieworigin;
+				float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+				int q;
+
+				for( q = 0; q < nv; q++ )
+				{
+					const float w = eye[2] - pts[q][2];
+					float u, v;
+
+					if( w < 1.0f )
+					{
+						u0 = v0 = -1e9f; u1 = v1 = 1e9f;
+						break;
+					}
+					u = 0.5f + gc_wsun_ik * ( pts[q][0] - eye[0] ) / w;
+					v = 0.5f + gc_wsun_ik * ( pts[q][1] - eye[1] ) / w;
+					if( u < u0 ) u0 = u;
+					if( u > u1 ) u1 = u;
+					if( v < v0 ) v0 = v;
+					if( v > v1 ) v1 = v;
+				}
+				/* A ripple moves the lookup by about six texels of 64 at most. */
+				if( u1 < gc_wsun_box[0] - 0.1f || u0 > gc_wsun_box[2] + 0.1f
+					|| v1 < gc_wsun_box[1] - 0.1f || v0 > gc_wsun_box[3] + 0.1f )
+					continue;
+			}
 			if( wst_on && GC_GetWaterFaceST( wi, wst, 32 ) != nv )
 				memset( wst, 0, sizeof( wst ));
 			if( eye_dot > 0.0f && dists[a] < 3000.0f * 3000.0f && nv <= 8 )
