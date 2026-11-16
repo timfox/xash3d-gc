@@ -10015,10 +10015,14 @@ void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip
 			}
 			draw = local;
 		}
-		for( i = 0; i < count; i++ )
+		/* G157/G164 probes log once, on the first viewmodel pass. */
+		if( !r_gx_studio_vm_logged )
 		{
-			R_GXStudioNoteNdcVert( draw[i].x, draw[i].y, draw[i].z );
-			R_GXStudioNoteShade( draw[i].c );
+			for( i = 0; i < count; i++ )
+			{
+				R_GXStudioNoteNdcVert( draw[i].x, draw[i].y, draw[i].z );
+				R_GXStudioNoteShade( draw[i].c );
+			}
 		}
 	}
 	R_GXEnsureTriApiLayout();
@@ -10031,8 +10035,6 @@ void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip
 		GX_Color1u32( draw[i].c );
 		GX_TexCoord2f32( draw[i].u, draw[i].v );
 		GX_TexCoord2f32( 0.0f, 0.0f );
-		if( !r_gx_studio_viewmodel )
-			R_GXStudioNoteShade( draw[i].c );
 	}
 	GX_End();
 	if( r_gx_studio_active )

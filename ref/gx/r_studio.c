@@ -2074,7 +2074,9 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !R_GXStudioIsActive() )
 			R_GXStudioForceBegin( false );
 		/* G376: ForceBegin cleared bound_tex — rebind SetupSkin's texture. */
+		R_STUDIO_PROF( "studio: mesh setup" );
 		R_GXStudioRebindPending();
+		R_STUDIO_PROF( "studio: skin bind" );
 
 		{
 			static qboolean emit_bbox_logged;
