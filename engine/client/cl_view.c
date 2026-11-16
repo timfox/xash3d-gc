@@ -222,6 +222,26 @@ void V_GCPoseViewModelAt( const vec3_t vieworg, const vec3_t viewangles )
 	pp.onground = ( cl.local.onground != -1 );
 	pp.viewsize = scr_viewsize.value;
 	V_GCRetailViewModelPose( &pp );
+
+	/* V_SetupViewModel never runs on this route either, so the weapon's
+	 * animations (draw, fire, reload, idle) never reached the viewmodel: it
+	 * played sequence 0 once and froze on its last frame, hands and all
+	 * (ceres hal run: seq=0 f=60 for 679 of 738 samples while firing).
+	 * Apply the animation CL_WeaponAnim recorded, the way V_SetupViewModel
+	 * does. */
+	{
+		cl_entity_t *view = &clgame.viewent;
+
+		if( view->model && view->model->type == mod_studio )
+		{
+			if( !cl.local.weaponstarttime )
+				cl.local.weaponstarttime = cl.time;
+			view->curstate.sequence = V_GCViewAnimSequence( view->model, cl.local.weaponsequence );
+			view->curstate.animtime = cl.local.weaponstarttime;
+			view->curstate.frame = 0.0f;
+			view->curstate.framerate = 1.0f;
+		}
+	}
 }
 
 /*
