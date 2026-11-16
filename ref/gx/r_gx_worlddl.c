@@ -156,7 +156,7 @@ static byte gc_wd_lm_store[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__((
 static u32 gc_wd_lm_stream;	/* file offset of page 0 */
 static s32 gc_wd_lm_slot_page[GC_WD_LM_SLOTS];
 static s32 gc_wd_lm_slot_frame[GC_WD_LM_SLOTS];
-static int gc_wd_lm_miss;
+static int gc_wd_lm_miss, gc_wd_lm_miss_total;
 static int gc_wd_lm_binds;
 static int gc_wd_chunk_lm;	/* current chunk uses TEXMAP2 lightmap */
 static GXTexObj gc_wd_lm_obj;
@@ -224,32 +224,48 @@ static int R_GXTevMatEnvMask( int id )
  */
 static byte *R_GXWorldDLLmPage( u32 page )
 {
-	static u8 hint[1024];	/* page & 1023 -> slot it was last found in */
+	static u8 hint[2048];	/* page & 2047 -> slot it was last found in */
+	static int full_frame = -1;	/* frame in which every slot was already in use */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
 
-	i = hint[page & 1023u];
+	i = hint[page & 2047u];
 	if( i < GC_WD_LM_SLOTS && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
 		return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 	}
+	/* A wide view asks for more pages than there are slots (500 chunks in
+	 * the Lost Coast harbor, 192 slots). Once the cache is full for this
+	 * frame every further request walked all the slots to learn that again:
+	 * up to 2.5 ms a world pass. With at most 2048 pages the hint is exact,
+	 * so a hint miss on a full frame means the page is not resident. */
+	if( full_frame == gc_wd_frame && gc_wd_hdr.n_chunks <= 2048u )
+		return NULL;
 	for( i = 0; i < GC_WD_LM_SLOTS; i++ )
 	{
 		if( gc_wd_lm_slot_page[i] == (s32)page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
-			hint[page & 1023u] = (u8)i;
+			hint[page & 2047u] = (u8)i;
 			return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 		}
-		if( gc_wd_lm_slot_frame[i] < gc_wd_frame && gc_wd_lm_slot_frame[i] < oldest )
+		/* A page used by the previous world pass stays: with the water
+		 * mirror there are two passes a frame, and when the two together
+		 * want more pages than there are slots, the far chunks of one pass
+		 * evicted the near pages of the other and each pass refetched about
+		 * 50 pages from ARAM (2 ms a pass in the Lost Coast harbor). */
+		if( gc_wd_lm_slot_frame[i] < gc_wd_frame - 1 && gc_wd_lm_slot_frame[i] < oldest )
 		{
 			oldest = gc_wd_lm_slot_frame[i];
 			victim = i;
 		}
 	}
 	if( victim < 0 )
+	{
+		full_frame = gc_wd_frame;
 		return NULL;
+	}
 	if( !R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES,
 		gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES, GC_WD_LM_PAGE_BYTES ))
 		return NULL;
@@ -258,13 +274,21 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_slot_page[victim] = (s32)page;
 	gc_wd_lm_slot_frame[victim] = gc_wd_frame;
 	gc_wd_lm_miss++;
-	hint[page & 1023u] = (u8)victim;
+	gc_wd_lm_miss_total++;
+	hint[page & 2047u] = (u8)victim;
 	return gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES;
 }
 
 /* Diffuse × lightmap page (TEXMAP2), or diffuse × vertex colour when no page. */
+/* The TEV recipe R_GXTevMatAppend last left in place: ( id << 1 ) | lightmap,
+ * or -1 when anything else touched the stages. Most materials share recipe
+ * 0, and in the harbor nearly every batch changes material: skipping the
+ * identical setup saved 1.3 ms per world pass (two passes with the mirror). */
+static int gc_wd_tev_key = -1;
+
 static void R_GXWorldDLSetupLit( int lightmap )
 {
+	gc_wd_tev_key = -1;
 	GX_SetNumIndStages( 0 );
 	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	GX_SetZCompLoc( GX_TRUE );
@@ -315,9 +339,14 @@ static void R_GXTevMatAppend( int id, int a, int b )
 
 	(void)a;
 	(void)b;
-	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
-	base_stages = gc_wd_chunk_lm ? 2 : 1;
 	if( id < 1 || id > (int)gc_tev_nmat )
+		id = 0;
+	if( gc_wd_tev_key == (( id << 1 ) | ( gc_wd_chunk_lm ? 1 : 0 )))
+		return;
+	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
+	gc_wd_tev_key = ( id << 1 ) | ( gc_wd_chunk_lm ? 1 : 0 );
+	base_stages = gc_wd_chunk_lm ? 2 : 1;
+	if( !id )
 		return;
 	flags = gc_tev_rec[id - 1][0];
 	didx = gc_tev_rec[id - 1][1];
@@ -379,8 +408,9 @@ static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots t
  * texture across cubemap patch variants, so all of them stay at 128x128. */
 static qboolean gc_wd_tex_overflow;
 /* Flythrough profile of the draw loop (-gcvst), logged every 120 frames. */
-static u64 gc_wd_pf[6];
-static u32 gc_wd_pf_cnt[6];
+static u64 gc_wd_pf[10], gc_wd_pf_t0, gc_wd_pf_t1, gc_wd_pf_enter;
+static int gc_wd_pf_lm_miss;
+static u32 gc_wd_pf_cnt[10];
 static int gc_wd_pf_on = -1, gc_wd_pf_frames;
 static u32 gc_wd_pf_bytes, gc_wd_pf_bytes_max;	/* chunk bytes drawn this frame / peak */
 #define WD_PF( k, stmt ) do { if( gc_wd_pf_on > 0 ) { u64 pf_t = gettime(); stmt; gc_wd_pf[k] += gettime() - pf_t; gc_wd_pf_cnt[k]++; } else { stmt; } } while( 0 )
@@ -638,9 +668,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		const size_t hw = ( Q_max( live, R_GXWorldDLBspFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
-		 * 96 KB, prop far LODs about 360 KB, the fire atlas 33 KB, and entity
+		 * 96 KB, prop far LODs about 360 KB, the fire atlas 33 KB, the water sun 2 KB, the resident skyline 42 KB, and entity
 		 * overflow. The ring peaks near 915 KB in the Lost Coast harbor. */
-		const size_t keep = 462u * 1024u;
+		const size_t keep = 508u * 1024u;
 
 		if( cap > hw + keep + 512u * 1024u )
 		{
@@ -1622,6 +1652,7 @@ static qboolean R_GXWorldDLEnvBind( int view, int axis )
 /* State shared by every reflective batch. */
 static void R_GXWorldDLEnvBegin( void )
 {
+	gc_wd_tev_key = -1;
 	const GXColor black = { 0, 0, 0, 255 };
 	f32 zfar = RI.farClip > 1.0f ? RI.farClip : 4096.0f;
 	int st;
@@ -1987,6 +2018,28 @@ static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 }
 
+#define GC_WD_SKY_MAX	32
+static byte *gc_wd_sky_mem;
+static u16 gc_wd_sky_idx[GC_WD_SKY_MAX], gc_wd_sky_at[GC_WD_SKY_MAX];
+static int gc_wd_sky_cnt;
+static s8 gc_wd_sky_state;	/* 0 untried, 1 resident, -1 ring */
+
+/* A chunk of the 3D-skybox ridge (the filter the ring path below uses). */
+static qboolean R_GXWorldDLIsSkyline( int i )
+{
+	const float cz = ( (float)gc_wd_chunk_mins[i * 3 + 2] + (float)gc_wd_chunk_maxs[i * 3 + 2] ) * 0.5f;
+	const float hz = (float)gc_wd_chunk_maxs[i * 3 + 2] - (float)gc_wd_chunk_mins[i * 3 + 2];
+	const float cx = ( (float)gc_wd_chunk_mins[i * 3 + 0] + (float)gc_wd_chunk_maxs[i * 3 + 0] ) * 0.5f;
+	const float cy = ( (float)gc_wd_chunk_mins[i * 3 + 1] + (float)gc_wd_chunk_maxs[i * 3 + 1] ) * 0.5f;
+	const u32 bytes = gc_wd_chunk_bytes[i];
+
+	if( cz > -4000.0f || hz < 80.0f )
+		return false;
+	if( cx * cx + cy * cy < ( 500.0f * 500.0f ))
+		return false;
+	return bytes != 0 && bytes <= 4096;
+}
+
 static void R_GXWorldDLDrawSkyline( void )
 {
 	Mtx mv, trans, scale, placed, sky;
@@ -2011,6 +2064,47 @@ static void R_GXWorldDLDrawSkyline( void )
 	GX_LoadProjectionMtx( proj, GX_PERSPECTIVE );
 	GX_LoadPosMtxImm( sky, GX_PNMTX0 );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	/* The skyline is the same 15 or so chunks every frame. Refetching them
+	 * from ARAM through a 4-slot ring cost a DMA each and a GP drain every
+	 * fourth chunk, twice a frame with the water mirror (0.9 ms a pass).
+	 * They are fetched once into the map arena and stay there. */
+	if( !gc_wd_sky_state )
+	{
+		u32 total = 0;
+
+		gc_wd_sky_state = -1;
+		gc_wd_sky_cnt = 0;
+		for( i = 0; i < (int)gc_wd_hdr.n_chunks && gc_wd_sky_cnt < GC_WD_SKY_MAX; i++ )
+		{
+			if( !R_GXWorldDLIsSkyline( i ))
+				continue;
+			gc_wd_sky_idx[gc_wd_sky_cnt] = (u16)i;
+			gc_wd_sky_at[gc_wd_sky_cnt++] = (u16)( total >> 5 );
+			total += ( gc_wd_chunk_bytes[i] + 31u ) & ~31u;
+		}
+		if( i == (int)gc_wd_hdr.n_chunks && total && GC_MapLoadBufferTailPeak() != 0
+			&& ( gc_wd_sky_mem = (byte *)GC_MapLoadBufferTailAlloc(
+				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), total )) != NULL )
+		{
+			for( i = 0; i < gc_wd_sky_cnt; i++ )
+			{
+				if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_chunks + gc_wd_chunk_ofs[gc_wd_sky_idx[i]],
+					gc_wd_sky_mem + ( (u32)gc_wd_sky_at[i] << 5 ), gc_wd_chunk_bytes[gc_wd_sky_idx[i]] ))
+					break;
+			}
+			if( i == gc_wd_sky_cnt )
+				gc_wd_sky_state = 1;
+		}
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL skyline resident=%d chunks=%d bytes=%u\n",
+			gc_wd_sky_state > 0, gc_wd_sky_cnt, (unsigned)total );
+	}
+	if( gc_wd_sky_state > 0 )
+	{
+		for( i = 0; i < gc_wd_sky_cnt; i++ )
+			R_GXWorldDLEmitChunk( gc_wd_sky_mem + ( (u32)gc_wd_sky_at[i] << 5 ), &cur_mat );
+		n = gc_wd_sky_cnt;
+	}
+	else
 	for( i = 0; i < (int)gc_wd_hdr.n_chunks; i++ )
 	{
 		const float cz = ( (float)gc_wd_chunk_mins[i * 3 + 2]
@@ -2184,6 +2278,7 @@ int R_GXWorldDLDraw( void )
 	u32 i;
 	int cluster, drawn = 0, chunks = 0, waiting = 0, cur_mat = -1, bind_miss = 0;
 
+	gc_wd_pf_enter = gettime();
 	if( gc_wd_state != 1 )
 		return 0;
 	/* Retire last frame's display lists before this frame fills the FIFO.
@@ -2245,6 +2340,8 @@ int R_GXWorldDLDraw( void )
 	else if( gc_wd_pvs_cluster == -2 )
 		R_GXWorldDLLoadPVS( -1 );
 	R_GXWorldDLFrustum( normals );
+	gc_wd_pf_t0 = gettime();
+	gc_wd_pf[9] += gc_wd_pf_t0 - gc_wd_pf_enter;
 
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
@@ -2379,6 +2476,7 @@ int R_GXWorldDLDraw( void )
 		tower_grant = tower_budget;
 		shore_budget = budget - tower_grant;
 
+		gc_wd_pf_t1 = gettime();
 		for( pass = 0; pass < 2; pass++ )
 		{
 		u32 *bud;
@@ -2543,6 +2641,7 @@ int R_GXWorldDLDraw( void )
 						GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
 						GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
 						GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+						gc_wd_tev_key = -1;
 						GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
 						GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 						GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
@@ -2597,7 +2696,9 @@ int R_GXWorldDLDraw( void )
 			R_GXWorldDLDeferFlush( &deferred_drawn );
 			cur_mat = -1;
 		}
-		R_GXWorldDLEnvFlush();
+		gc_wd_pf[7] += gettime() - gc_wd_pf_t1;
+		gc_wd_pf[6] += gc_wd_pf_t1 - gc_wd_pf_t0;
+		{ const u64 e0 = gettime(); R_GXWorldDLEnvFlush(); gc_wd_pf[8] += gettime() - e0; }
 		if( !logged || ( gc_wd_frame & 255 ) == 0 )
 			gEngfuncs.Con_Reportf(
 				"Xash3D GameCube: world DL pvs=%d frustum_drop=%d cull=%d towers=%d forced=%d\n",
@@ -2632,6 +2733,13 @@ int R_GXWorldDLDraw( void )
 			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f lm_miss/call=%.1f\n",
+			(float)ticks_to_microsecs( gc_wd_pf[9] ) * k,
+			(float)ticks_to_microsecs( gc_wd_pf[6] ) * k,
+			(float)ticks_to_microsecs( gc_wd_pf[7] ) * k,
+			(float)ticks_to_microsecs( gc_wd_pf[8] ) * k,
+			(float)( gc_wd_lm_miss_total - gc_wd_pf_lm_miss ) / 120.0f );
+		gc_wd_pf_lm_miss = gc_wd_lm_miss_total;
 		memset( gc_wd_pf, 0, sizeof( gc_wd_pf ));
 		memset( gc_wd_pf_cnt, 0, sizeof( gc_wd_pf_cnt ));
 		gc_wd_pf_frames = 0;

@@ -905,9 +905,22 @@ static void R_GXBuildViewmodelProjection( Mtx44 out )
  */
 static void R_GXBuildWorldModelview( Mtx out )
 {
+	/* The view only changes between passes, but every prop instance asks for
+	 * this matrix (three prop passes a frame), and AngleVectors is six libm
+	 * sin/cos calls, software on the Gekko. Keep the last answer. */
+	static float last_ang[3], last_org[3];
+	static Mtx last;
+	static qboolean have;
 	vec3_t	forward, right, up;
 	const float *org = RI.rvp.vieworigin;
+	const float *ang = RI.rvp.viewangles;
 
+	if( have && ang[0] == last_ang[0] && ang[1] == last_ang[1] && ang[2] == last_ang[2]
+		&& org[0] == last_org[0] && org[1] == last_org[1] && org[2] == last_org[2] )
+	{
+		memcpy( out, last, sizeof( Mtx ));
+		return;
+	}
 	AngleVectors( RI.rvp.viewangles, forward, right, up );
 
 	out[0][0] = right[0];
@@ -924,6 +937,10 @@ static void R_GXBuildWorldModelview( Mtx out )
 	out[2][1] = -forward[1];
 	out[2][2] = -forward[2];
 	out[2][3] = DotProduct( forward, org );
+	memcpy( last, out, sizeof( Mtx ));
+	VectorCopy( ang, last_ang );
+	VectorCopy( org, last_org );
+	have = true;
 }
 
 static u32 R_GXFaceColor( const msurface_t *surf )
@@ -6870,6 +6887,48 @@ static qboolean R_GXWaterDepthReady( void )
 static GXTexObj gc_wnrm_obj;
 static int gc_wnrm_state;
 
+/* The sun on the water (media/ws_d2_lostcoast.gcx, lostcoast-gc
+ * tools/bake_water_sun.py). Retail reflects an HDR scene; the 565 mirror
+ * clips at white. The file is max( 0, cubemap - 1 ) of the water's own HDR
+ * env_cubemap looking up: the clipped light, added back over the mirror
+ * reflection with its Fresnel weight and ripple offsets. */
+static GXTexObj gc_wsun_obj;
+static float gc_wsun_ik;
+static s8 gc_wsun_state;	/* 0 untried, 1 ready, -1 none */
+static u16 gc_wsun_side;
+
+static qboolean R_GXWaterSunReady( void )
+{
+	file_t *f;
+	u16 hdr[16];
+	byte *tex;
+
+	if( gc_wsun_state )
+		return gc_wsun_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;
+	gc_wsun_state = -1;
+	f = gEngfuncs.fsapi->Open( "media/ws_d2_lostcoast.gcx", "rb", false );
+	if( !f )
+		return false;
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x4743 && hdr[1] == 0x7773 && hdr[2] == 1
+		&& hdr[3] >= 16 && hdr[3] <= 64 && hdr[4]
+		&& ( tex = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), (size_t)hdr[3] * hdr[3] / 2u )) != NULL
+		&& gEngfuncs.fsapi->Read( f, tex, hdr[3] * hdr[3] / 2 ) == (fs_offset_t)( hdr[3] * hdr[3] / 2 ))
+	{
+		DCFlushRange( tex, (u32)hdr[3] * hdr[3] / 2u );
+		GX_InitTexObj( &gc_wsun_obj, tex, hdr[3], hdr[3], GX_TF_CMPR, GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wsun_obj, GX_LINEAR, GX_LINEAR );
+		gc_wsun_side = hdr[3];
+		gc_wsun_ik = 0.5f * 256.0f / (float)hdr[4];
+		gc_wsun_state = 1;
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: water sun %s\n", gc_wsun_state > 0 ? "ready" : "FAIL" );
+	return gc_wsun_state > 0;
+}
+
 static qboolean R_GXWaterNormalReady( void )
 {
 	file_t *f;
@@ -6989,6 +7048,12 @@ static void R_GXDrawPackedWater( void )
 		int order[320];
 		float dists[320];
 		int nvis = 0, a, b, tmpi, refl_pass;
+		/* Body tint and reflection weight of every node, shaded in the first
+		 * pass and reused by the reflection and sun passes (the same nodes in
+		 * the same order): the shading was two thirds of the water's 3.4 ms. */
+		u32 tint_c[1536];
+		u8 tint_r[1536];
+		int tint_n = 0, tint_i = 0;
 		float tmpf;
 
 		AngleVectors( RI.rvp.viewangles, forward, right, up );
@@ -7064,8 +7129,9 @@ static void R_GXDrawPackedWater( void )
 			order[b + 1] = tmpi;
 			dists[b + 1] = tmpf;
 		}
-		for( refl_pass = 0; refl_pass < ( gc_mirror_valid ? 2 : 1 ); refl_pass++ )
+		for( refl_pass = 0; refl_pass < ( gc_mirror_valid ? ( R_GXWaterSunReady() ? 3 : 2 ) : 1 ); refl_pass++ )
 		{
+		tint_i = 0;
 		if( refl_pass )
 		{
 			/* Second pass: the mirrored scene over the body. Each water
@@ -7165,6 +7231,34 @@ static void R_GXDrawPackedWater( void )
 				GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
 				GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 			}
+			if( refl_pass == 2 )
+			{
+				/* Third pass: the clipped HDR light. Same stages; the
+				 * lookup is the mirrored ray on the plane above the
+				 * water, uv = 0.5 + R.xy / ( 2 k R.z ), R = ( x, y, -z ). */
+				const float *eye = RI.rvp.vieworigin;
+				Mtx sm;
+
+				memset( sm, 0, sizeof( sm ));
+				sm[0][0] = gc_wsun_ik; sm[0][2] = -0.5f;
+				sm[1][1] = gc_wsun_ik; sm[1][2] = -0.5f;
+				sm[2][2] = -1.0f;
+				sm[0][3] = -( sm[0][0] * eye[0] + sm[0][2] * eye[2] );
+				sm[1][3] = -( sm[1][1] * eye[1] + sm[1][2] * eye[2] );
+				sm[2][3] = eye[2];
+				GX_LoadTexMtxImm( sm, GX_TEXMTX3, GX_MTX3x4 );
+				GX_LoadTexObj( &gc_wsun_obj, GX_TEXMAP5 );
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
+				if( water_tex )
+				{
+					/* Ripple offsets in this texture's texels. */
+					f32 im[2][3];
+
+					memset( im, 0, sizeof( im ));
+					im[0][0] = im[1][1] = 0.75f * (float)gc_wsun_side / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
+					GX_SetIndTexMatrix( GX_ITM_0, im, -3 );
+				}
+			}
 		}
 		for( a = 0; a < nvis; a++ )
 		{
@@ -7218,8 +7312,21 @@ static void R_GXDrawPackedWater( void )
 							q[0] = A[0] + ( B[0] - A[0] ) * fv + ( C[0] - A[0] ) * fu;
 							q[1] = A[1] + ( B[1] - A[1] ) * fv + ( C[1] - A[1] ) * fu;
 							q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
-							nc[u][v] = R_GXWaterBodyTint( wi, q, eye_dot, nd );
-							nr[u][v] = (u8)gc_water_refl_a;
+							if( refl_pass && tint_i < tint_n )
+							{
+								nc[u][v] = tint_c[tint_i];
+								nr[u][v] = tint_r[tint_i++];
+							}
+							else
+							{
+								nc[u][v] = R_GXWaterBodyTint( wi, q, eye_dot, nd );
+								nr[u][v] = (u8)gc_water_refl_a;
+								if( !refl_pass && tint_n < 1536 )
+								{
+									tint_c[tint_n] = nc[u][v];
+									tint_r[tint_n++] = nr[u][v];
+								}
+							}
 							if( wst_on )
 							{
 								ns[u][v][0] = sA[0] + ( sB[0] - sA[0] ) * fv + ( sC[0] - sA[0] ) * fu;
@@ -7275,7 +7382,22 @@ static void R_GXDrawPackedWater( void )
 				GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
 				for( si = 0; si < nv; si++ )
 				{
-					const u32 col = R_GXWaterBodyTint( wi, pts[si], eye_dot, nd );
+					u32 col;
+
+					if( refl_pass && tint_i < tint_n )
+					{
+						col = tint_c[tint_i];
+						gc_water_refl_a = tint_r[tint_i++];
+					}
+					else
+					{
+						col = R_GXWaterBodyTint( wi, pts[si], eye_dot, nd );
+						if( !refl_pass && tint_n < 1536 )
+						{
+							tint_c[tint_n] = col;
+							tint_r[tint_n++] = (u8)gc_water_refl_a;
+						}
+					}
 
 					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
 					if( refl_pass )
@@ -7882,6 +8004,7 @@ static byte *gc_mirror_tex;
 static qboolean gc_mirror_tried;
 static GXTexObj gc_mirror_obj;
 static qboolean gc_mirror_valid;	/* this frame's water may project it */
+static u64 gc_mirror_ticks[3];	/* flythrough timing: world, props, copy */
 
 /* Height of the harbor sheet: the first up-facing packed water face. */
 static qboolean R_GXWaterPlaneZ( float *z )
@@ -7960,9 +8083,18 @@ static void R_GXWaterMirrorPass( void )
 	r_gx_bound_fmt = 0;
 	/* The sky is in; everything from here is cut at the water plane. */
 	R_GXMirrorClipSet( true );
-	R_GXWorldDLDraw();
-	R_GXPropDrawHorizon( RI.rvp.vieworigin );
-	R_GXPropDraw( RI.rvp.vieworigin );
+	{
+		const u64 m0 = gettime();
+		u64 m1, m2;
+
+		R_GXWorldDLDraw();
+		m1 = gettime();
+		R_GXPropDrawHorizon( RI.rvp.vieworigin );
+		R_GXPropDraw( RI.rvp.vieworigin );
+		m2 = gettime();
+		gc_mirror_ticks[0] += m1 - m0;
+		gc_mirror_ticks[1] += m2 - m1;
+	}
 	R_GXMirrorClipSet( false );
 	GX_SetTexCopySrc( 0, 0, GC_MIRROR_W, GC_MIRROR_H );
 	GX_SetTexCopyDst( GC_MIRROR_W, GC_MIRROR_H, GX_TF_RGB565, GX_FALSE );
@@ -7970,7 +8102,12 @@ static void R_GXWaterMirrorPass( void )
 	GX_PixModeSync();
 	/* The props' resident lists and the chunk ring may be reused by the
 	 * main pass: let the GP finish this one first. */
-	GX_DrawDone();
+	{
+		const u64 c0 = gettime();
+
+		GX_DrawDone();
+		gc_mirror_ticks[2] += gettime() - c0;
+	}
 	GX_InvalidateTexAll();
 
 	r_gx_mirror = false;
@@ -8100,6 +8237,11 @@ static int R_GXDrawWorldDLFrame( void )
 			(float)ticks_to_microsecs( st_acc[4] ) / ( 1000.0f * st_n ),
 			(float)ticks_to_microsecs( st_acc[5] ) / ( 1000.0f * st_n ),
 			st_acc[5] ? 1000000.0f * st_n / (float)ticks_to_microsecs( st_acc[5] ) : 0.0f );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: mirror ms/frame world=%.1f props=%.1f done=%.1f\n",
+			(float)ticks_to_microsecs( gc_mirror_ticks[0] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( gc_mirror_ticks[1] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( gc_mirror_ticks[2] ) / ( 1000.0f * st_n ));
+		memset( gc_mirror_ticks, 0, sizeof( gc_mirror_ticks ));
 		memset( st_acc, 0, sizeof( st_acc ));
 		st_n = 0;
 	}
