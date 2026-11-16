@@ -35,6 +35,65 @@ byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size );
 #if XASH_GAMECUBE
 static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr );
 static void Mod_GCForceVmChromakeyMasks( studiohdr_t *phdr );
+
+/* Heap copies of mesh-only viewmodels keep this much room after the mesh
+ * for the texture/skin headers their T.mdl merge appends later. */
+#define GC_VM_HEAP_SKIN_PAD ( 4 * 1024 )
+#define GC_VM_HEAP_PADS 8
+
+static struct
+{
+	const model_t *mod;
+	const void    *buf;
+	size_t        mesh;
+	size_t        cap;
+} gc_vm_heap_pad[GC_VM_HEAP_PADS];
+
+/* Record (cap > 0) or forget (cap 0) the padded heap copy of mod. */
+static void Mod_GCVMHeapPadNote( const model_t *mod, const void *buf, size_t mesh, size_t cap )
+{
+	int i, slot = -1;
+
+	for( i = 0; i < GC_VM_HEAP_PADS; i++ )
+	{
+		if( gc_vm_heap_pad[i].mod == mod )
+		{
+			gc_vm_heap_pad[i].mod = NULL;
+			gc_vm_heap_pad[i].buf = NULL;
+			gc_vm_heap_pad[i].mesh = 0;
+			gc_vm_heap_pad[i].cap = 0;
+		}
+		if( slot < 0 && !gc_vm_heap_pad[i].mod )
+			slot = i;
+	}
+	if( !buf || !cap || slot < 0 )
+		return;
+	gc_vm_heap_pad[slot].mod = mod;
+	gc_vm_heap_pad[slot].buf = buf;
+	gc_vm_heap_pad[slot].mesh = mesh;
+	gc_vm_heap_pad[slot].cap = cap;
+}
+
+/* True when mod's cache is still the padded block noted at load (same
+ * address and mesh length, so a freed and reused address never matches)
+ * and the merged mesh + headers fit in it. */
+static qboolean Mod_GCVMHeapPadFits( const model_t *mod, size_t size )
+{
+	int i;
+
+	for( i = 0; mod && i < GC_VM_HEAP_PADS; i++ )
+	{
+		if( gc_vm_heap_pad[i].mod == mod )
+		{
+			const studiohdr_t *hdr = (const studiohdr_t *)mod->cache.data;
+
+			return hdr && gc_vm_heap_pad[i].buf == hdr
+				&& (size_t)hdr->length == gc_vm_heap_pad[i].mesh
+				&& size <= gc_vm_heap_pad[i].cap;
+		}
+	}
+	return false;
+}
 #endif
 
 typedef int (*STUDIOAPI)( int, sv_blending_interface_t**, server_studio_api_t*,  float (*transform)[3][4], float (*bones)[MAXSTUDIOBONES][3][4] );
@@ -2240,7 +2299,19 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				thdr = NULL;
 			}
 #endif
-			mod->cache.data = calloc( 1, mesh );
+			{
+				/* Mesh-only viewmodels (gc_studio/v_amerk, v_grenade) get
+				 * their skin headers merged after the map is up, when the
+				 * heap is too full for a fresh copy: keep room for them
+				 * after the mesh now (see Mod_GCVMHeapPadFits). */
+				const size_t pad = Q_stristr( mod->name, "/v_" ) ? GC_VM_HEAP_SKIN_PAD : 0;
+
+				mod->cache.data = calloc( 1, mesh + pad );
+				if( !mod->cache.data && pad )
+					mod->cache.data = calloc( 1, mesh );
+				Mod_GCVMHeapPadNote( mod, mod->cache.data, mesh,
+					mod->cache.data && pad ? mesh + pad : 0 );
+			}
 			if( !mod->cache.data )
 			{
 				/* G287/G289: reuse tip-safe BSS bump slice as the resident cache.
@@ -2649,6 +2720,8 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 
 			slot = Mod_GCVMSlotGrow( mod->cache.data, merged );
 		}
+		if( !slot && Mod_GCVMHeapPadFits( mod, merged ))
+			slot = (byte *)mod->cache.data;
 		if( !slot && Mod_GCIsStudioBssCache( mod->cache.data ))
 			slot = Mod_GCStudioBssGrowLast( mod->cache.data, mesh, merged );
 		Image_GCPurgeDecodeScratch();
