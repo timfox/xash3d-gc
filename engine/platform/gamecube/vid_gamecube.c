@@ -16609,6 +16609,13 @@ static void GC_SpectatorEye( edict_t *player, vec3_t eye, vec3_t angles )
 		VectorCopy( target->v.v_angle, angles );
 		angles[PITCH] = 0.0f;
 	}
+	/* The observer's look can be pitched far down after the join (ceres:
+	 * the chase camera hung straight over the bot's helmet). Keep the
+	 * orbit to a shoulder-height arc like the client chase camera. */
+	if( angles[PITCH] > 30.0f )
+		angles[PITCH] = 30.0f;
+	else if( angles[PITCH] < -30.0f )
+		angles[PITCH] = -30.0f;
 	AngleVectors( angles, forward, NULL, NULL );
 	VectorMA( target_eye, -96.0f, forward, back );
 	tr = SV_Move( target_eye, vec3_origin, vec3_origin, back, MOVE_NOMONSTERS, target, false );
