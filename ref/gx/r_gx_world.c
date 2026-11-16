@@ -6096,6 +6096,10 @@ static u64 gc_prop_pf[4];
 static u32 gc_prop_pf_cnt[4];
 static int gc_prop_pf_frames;
 
+/* Position scale of the vertex layout in place for the props, -1 = not set.
+ * Each prop pass resets it after its own state setup. */
+static int gc_prop_vtx_frac = -1;
+
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
 	const gc_prop_model_t *m;
@@ -6124,14 +6128,21 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	col.g = (u8)( gc_prop_lit >> 16 );
 	col.b = (u8)( gc_prop_lit >> 8 );
 	col.a = 255;
-	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
-		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	/* The vertex layout only differs between models by the position scale.
+	 * Setting it again for every instance made libogc reload the vertex
+	 * descriptor and format registers before each one. */
+	if( gc_prop_vtx_frac != (int)m->frac )
+	{
+		GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
+			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+		GX_ClearVtxDesc();
+		GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
+		gc_prop_vtx_frac = (int)m->frac;
+	}
 	GX_SetChanMatColor( GX_COLOR0A0, col );
-	GX_ClearVtxDesc();
-	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
-	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
-	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
-	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
 	if( far_lod && !gc_prop_far_mem && !gc_prop_far_tried && gc_prop_far_size
 		&& GC_MapLoadBufferTailPeak() > 0 )
 	{
@@ -6413,6 +6424,7 @@ static void R_GXFishermanWalkDraw( const float *org )
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	gc_prop_vtx_frac = -1;
 	R_GXPropEmitModel( gc_prop_walk_model, pos, 0.0f, yaw, 0.0f, false );
 	if( !logged )
 	{
@@ -6462,6 +6474,7 @@ static void R_GXCanisterFlightDraw( const float *org )
 	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
 	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
 	R_GXPropSetLitAt( pos );
+	gc_prop_vtx_frac = -1;
 	R_GXPropEmitModel( gc_prop_flight_model, pos, 0.0f, 0.0f, 0.0f, false );
 	if( !logged )
 	{
@@ -6537,6 +6550,7 @@ void R_GXPropDrawHorizon( const float *org )
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_U16, 8 );
+	gc_prop_vtx_frac = -1;
 	R_GXBuildFrustum();
 	for( i = 0; i < (int)gc_prop_ninst; i++ )
 	{
@@ -6629,6 +6643,7 @@ static void R_GXPropDraw( const float *org )
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_U16, 8 );
+	gc_prop_vtx_frac = -1;
 	for( i = 0; i < (int)gc_prop_ninst; i++ )
 	{
 		const gc_prop_inst_t *in = &gc_prop_inst[i];
