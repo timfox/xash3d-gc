@@ -3758,7 +3758,8 @@ void R_DrawViewModel( void )
 	qboolean gx_studio = false;
 	extern qboolean GC_CapFacesWantViewmodel( void );
 	const qboolean lean_vm = (( gEngfuncs.Sys_CheckParm( "-gcnewgame" )
-			|| GC_CapFacesWantViewmodel())
+			|| GC_CapFacesWantViewmodel()
+			|| ( view && view->curstate.modelindex > 0 ))
 		&& !gEngfuncs.Sys_CheckParm( "-gcfullphysics" )
 		&& view && view->model && view->model->type == mod_studio
 		&& view->model->cache.data
@@ -3786,7 +3787,13 @@ void R_DrawViewModel( void )
 		static qboolean cap_vm_skip_logged;
 		static qboolean cap_vm_allow_logged;
 
-		if( !GC_CapFacesWantViewmodel())
+		/* The server handing us a held weapon (bound by the lean emitter
+		 * with its model index) is as good as a menu team pick: bot
+		 * matches and auto-joins never set the CapFaces pick latches. */
+		const qboolean held = view && view->model && view->curstate.modelindex > 0
+			&& view->model->type == mod_studio && view->model->cache.data;
+
+		if( !GC_CapFacesWantViewmodel() && !held )
 		{
 			if( !cap_vm_skip_logged )
 			{

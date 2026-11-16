@@ -296,6 +296,22 @@ static void V_SetupViewModel( void )
 	view->index = cl.playernum + 1;
 	view->model = CL_ModelHandle( cl.local.viewmodel );
 	view->curstate.modelindex = cl.local.viewmodel;
+#if XASH_GAMECUBE
+	{
+		/* Trace where the first-person model comes from (ceres: vm=0). */
+		static int last_vm = -1, vm_logs;
+		const int server_vm = cl.frames[cl.parsecountmod].clientdata.viewmodel;
+
+		if( cl.local.viewmodel != last_vm && vm_logs < 8 )
+		{
+			vm_logs++;
+			last_vm = cl.local.viewmodel;
+			Con_Reportf( "Xash3D GameCube: viewmodel index local=%d server=%d model=%s lw=%.0f\n",
+				cl.local.viewmodel, server_vm,
+				view->model ? view->model->name : "(null)", cl_lw.value );
+		}
+	}
+#endif
 	view->curstate.sequence = cl.local.weaponsequence;
 	view->curstate.rendermode = kRenderNormal;
 

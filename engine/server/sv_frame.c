@@ -761,7 +761,11 @@ static void SV_WriteClientdataToMessage( sv_client_t *cl, sizebuf_t *msg )
 		VectorCopy( clent->v.velocity, frame->clientdata.velocity );
 		VectorCopy( clent->v.view_ofs, frame->clientdata.view_ofs );
 		VectorCopy( clent->v.punchangle, frame->clientdata.punchangle );
-		frame->clientdata.viewmodel = (int)clent->v.viewmodel;
+		/* v.viewmodel is a string_t; clientdata wants a model index (what
+		 * the game's UpdateClientData sends). Passing the raw string offset
+		 * left the client with no viewmodel at all (ceres fza: vm=0). */
+		frame->clientdata.viewmodel = clent->v.viewmodel
+			? SV_ModelIndex( SV_GetString( clent->v.viewmodel )) : 0;
 		frame->clientdata.flags = (int)clent->v.flags;
 		frame->clientdata.waterlevel = (int)clent->v.waterlevel;
 		frame->clientdata.watertype = (int)clent->v.watertype;
