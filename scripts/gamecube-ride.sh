@@ -34,6 +34,14 @@ sed -i -e "s/^CPUCore = .*/CPUCore = ${RIDE_CPU_CORE:-1}/" \
 # that config wrote 20 GB of stills and filled the disk.  Rides record video
 # through playtest-record.py instead.
 sed -i -e "s/^DumpFrames = .*/DumpFrames = False/" "$out/dolphin-user/Config/Dolphin.ini"
+# Rides are muted unless RIDE_MUTE_AUDIO=0 (host volume only; guest audio still runs).
+if [[ "${RIDE_MUTE_AUDIO:-1}" != "0" ]]; then
+	if grep -q '^Volume = ' "$out/dolphin-user/Config/Dolphin.ini"; then
+		sed -i -e "s/^Volume = .*/Volume = 0/" "$out/dolphin-user/Config/Dolphin.ini"
+	else
+		printf '[DSP]\nVolume = 0\n' >> "$out/dolphin-user/Config/Dolphin.ini"
+	fi
+fi
 [[ -f "$out/dolphin-user/Config/GFX.ini" ]] && \
 	sed -i -e "s/^DumpFramesAsImages = .*/DumpFramesAsImages = False/" "$out/dolphin-user/Config/GFX.ini"
 user="$ROOT/$out/dolphin-user"
