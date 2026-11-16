@@ -410,6 +410,10 @@ SV_EmitPacketEntities
 Writes a delta update of an entity_state_t list to the message->
 =============
 */
+#if XASH_GAMECUBE
+/* -gcprofile: how each packet is built (delta vs from-baseline sends). */
+static int sv_gc_emit_delta, sv_gc_emit_new, sv_gc_emit_removed, sv_gc_emit_full;
+#endif
 static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_t *msg )
 {
 	entity_state_t	*oldent, *newent;
@@ -418,6 +422,9 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 	qboolean		player;
 	int		oldmax;
 	client_frame_t	*from;
+#if XASH_GAMECUBE
+	const qboolean	local_client = NET_IsLocalAddress( cl->netchan.remote_address );
+#endif
 
 	// this is the frame that we are going to delta update from
 	if( cl->delta_sequence != -1 )
@@ -428,7 +435,18 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 		// the snapshot's entities may still have rolled off the buffer, though
 		if( from->first_entity <= ( svs.next_client_entities - svs.num_client_entities ))
 		{
+#if XASH_GAMECUBE
+			/* Every packet with bots on the 128-entry listen ring: log rarely. */
+			static double next_warn;
+
+			if( host.realtime > next_warn )
+			{
+				Con_DPrintf( S_WARN "%s: delta request from out of date entities.\n", cl->name );
+				next_warn = host.realtime + 10.0;
+			}
+#else
 			Con_DPrintf( S_WARN "%s: delta request from out of date entities.\n", cl->name );
+#endif
 			MSG_BeginServerCmd( msg, svc_packetentities );
 			MSG_WriteUBitLong( msg, to->num_entities - 1, MAX_VISIBLE_PACKET_BITS );
 
@@ -446,6 +464,9 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 	{
 		from = NULL;
 		oldmax = 0;
+#if XASH_GAMECUBE
+		sv_gc_emit_full++;
+#endif
 
 		MSG_BeginServerCmd( msg, svc_packetentities );
 		MSG_WriteUBitLong( msg, to->num_entities - 1, MAX_VISIBLE_PACKET_BITS );
@@ -486,6 +507,9 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 			// because the force parm is false, this will not result
 			// in any bytes being emited if the entity has not changed at all
 			MSG_WriteDeltaEntity( oldent, newent, msg, false, player, sv.time, 0 );
+#if XASH_GAMECUBE
+			sv_gc_emit_delta++;
+#endif
 			oldindex++;
 			newindex++;
 			continue;
@@ -498,6 +522,16 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 			int		offset = 0;
 
 			// trying to reduce message by select optimal baseline
+#if XASH_GAMECUBE
+			/* A loopback client gets the bytes for free, but the search costs up
+			 * to MAX_CUSTOM_BASELINES delta tests per new entity. With bots the
+			 * listen ring (128 entries) cannot hold the previous frame, so every
+			 * entity of every packet is new: 5.5 ms a frame on dod_charlie.
+			 * Send loopback entities from their own baseline. */
+			if( local_client )
+				offset = 0;
+			else
+#endif
 			if( !sv_instancedbaseline.value || !sv.num_instanced || sv.last_valid_baseline > newnum )
 			{
 				offset = SV_FindBestBaseline( newindex, &baseline, newent, to, player );
@@ -517,6 +551,9 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 
 			// this is a new entity, send it from the baseline
 			MSG_WriteDeltaEntity( baseline, newent, msg, true, player, sv.time, offset );
+#if XASH_GAMECUBE
+			sv_gc_emit_new++;
+#endif
 			newindex++;
 			continue;
 		}
@@ -532,6 +569,9 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 
 			// remove from message
 			MSG_WriteDeltaEntity( oldent, NULL, msg, force, false, sv.time, 0 );
+#if XASH_GAMECUBE
+			sv_gc_emit_removed++;
+#endif
 			oldindex++;
 			continue;
 		}
@@ -883,6 +923,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	SV_AddEntitiesToPacket( cl->pViewEntity, cl->edict, frame, &frame_ents, true );
 #endif
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv send: add entities (AddToFullPack)" );
 	if( Sys_CheckParm( "-gclistenserver" ))
 		Con_Reportf( "Xash3D GameCube: AddEntitiesToPacket ready ents=%d\n",
 			frame_ents.num_entities );
@@ -945,14 +986,29 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 			frame->num_entities, svs.next_client_entities );
 #endif
 
+#if XASH_GAMECUBE
+	GC_ProfMark( "sv send: sort+copy entities" );
+#endif
 	SV_EmitPacketEntities( cl, frame, msg );
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv send: emit packet entities (delta)" );
+	{
+		static int frames;
+
+		if( ++frames % 600 == 0 )
+			Con_Reportf( "Xash3D GameCube: send stats over 600 packets ents=%d delta=%d new=%d removed=%d full=%d bytes=%d\n",
+				frame->num_entities, sv_gc_emit_delta, sv_gc_emit_new, sv_gc_emit_removed,
+				sv_gc_emit_full, MSG_GetNumBytesWritten( msg ));
+		if( frames % 600 == 0 )
+			sv_gc_emit_delta = sv_gc_emit_new = sv_gc_emit_removed = sv_gc_emit_full = 0;
+	}
 	if( Sys_CheckParm( "-gclistenserver" ))
 		Con_Reportf( "Xash3D GameCube: EmitPacketEntities ready\n" );
 #endif
 	SV_EmitEvents( cl, frame, msg );
 	if( send_pings ) SV_EmitPings( msg );
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv send: events+pings" );
 	if( Sys_CheckParm( "-gclistenserver" ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities complete\n" );
 #endif
@@ -1011,8 +1067,12 @@ static void SV_SendClientDatagram( sv_client_t *cl )
 		}
 	}
 #endif
+#if XASH_GAMECUBE
+	GC_ProfMark( "sv send: datagram setup" );
+#endif
 	SV_WriteClientdataToMessage( cl, &msg );
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv send: clientdata+weapons" );
 	if(( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gclistenserver" ))
 		&& cl->state == cs_spawned )
 	{
@@ -1081,6 +1141,9 @@ static void SV_SendClientDatagram( sv_client_t *cl )
 
 	// send the datagram
 	Netchan_TransmitBits( &cl->netchan, MSG_GetNumBitsWritten( &msg ), MSG_GetData( &msg ));
+#if XASH_GAMECUBE
+	GC_ProfMark( "sv send: netchan transmit" );
+#endif
 }
 
 /*
@@ -1202,6 +1265,9 @@ void SV_SendClientMessages( void )
 		return;
 
 	SV_UpdateToReliableMessages ();
+#if XASH_GAMECUBE
+	GC_ProfMark( "sv send: reliable updates" );
+#endif
 
 	// send a message to each connected client
 	for( i = 0, sv.current_client = svs.clients; i < svs.maxclients; i++, sv.current_client++ )
