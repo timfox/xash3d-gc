@@ -2014,5 +2014,29 @@ probe_collect_exit_status "$child"
 		self.assertEqual(body.count("GC_StatusDrawLine("), 1)
 
 
+	def test_heavy_viewmodel_split_writes_pack_and_returns_core(self) -> None:
+		import tempfile
+
+		disc = load_script("disc_vm_split", "scripts/build-gamecube-disc.py")
+
+		class FakeSplitter:
+			def split(self, data, name, pack_path=None):
+				self.pack_path = pack_path
+				return {name + ".mdl": b"C" * 1000, "anim_abc.gca": b"P" * 5000, name + "T.mdl": b"T"}, {}
+
+		fake = FakeSplitter()
+		with tempfile.TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			src = root / "v_mg42.mdl"
+			src.write_bytes(b"IDST" + b"\0" * 300)
+			core = disc.split_heavy_viewmodel(src, "v_mg42", root, splitter=fake)
+			self.assertEqual(core, b"C" * 1000)
+			self.assertEqual(fake.pack_path, disc.GC_VIEWMODEL_PACK_PATH)
+			self.assertEqual((root / "models" / "anim_abc.gca").read_bytes(), b"P" * 5000)
+		self.assertEqual(disc.GC_VIEWMODEL_SLOT_BYTES, 128 * 1024)
+		model = (ROOT / "engine/common/model.c").read_text(encoding="utf-8")
+		self.assertIn("#define GC_VM_SLOT_SIZE  ( 128 * 1024 )", model)
+
+
 if __name__ == "__main__":
 	unittest.main()
