@@ -1435,6 +1435,10 @@ qboolean Image_AddIndexedImageToPack( const byte *in, int width, int height )
 		: Mem_TryMalloc( host.imagepool, image.size );
 	if( !image.rgba && image.mdl_decode )
 		image.rgba = Mem_TryMalloc( host.imagepool, image.size );
+	/* A HUD sheet loaded mid-match (DoD clip sheets) finds no heap block for
+	 * its expansion; the transient slab is idle once nothing is resampled. */
+	if( !image.rgba && image.hud_sprite )
+		image.rgba = Image_GCAllocTransient( image.size );
 	if( !image.rgba )
 		return false;
 #else

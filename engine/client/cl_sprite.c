@@ -194,7 +194,9 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 		 * SPR_DrawHoles rectangles map onto the smaller texture unchanged. */
 		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width > 128 || pinframe.height > 128 ))
 		{
-			const int cap = Sys_CheckParm( "-gchudspr64" ) ? 64 : 128;
+			/* 128 keeps the art at the size it is drawn; its 32 KiB texture
+			 * needs some heap. Below that, 64 fits the small HUD slots. */
+			const int cap = ( Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 96 * 1024 ) ? 64 : 128;
 			int f = 1;
 
 			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
@@ -213,8 +215,9 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 						px[y * small.width + x] = px[( y * f ) * pinframe.width + x * f];
 				memcpy( (void *)pin, &small, sizeof( small ));
 				load_bytes = small.width * small.height;
-				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload\n",
-					texname, pinframe.width, pinframe.height, small.width, small.height );
+				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
+					texname, pinframe.width, pinframe.height, small.width, small.height,
+					Q_memprint( GC_MemHeapFreeBytes( )));
 			}
 		}
 #endif
