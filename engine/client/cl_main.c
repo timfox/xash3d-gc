@@ -4476,6 +4476,7 @@ void Host_ClientFrame( void )
 		CL_CheckForResend();
 		GC_UpdateNewGameIntroAudio();
 		GC_TryG94SaveLoad();
+		GC_ProfMark( "client: packets+state" );
 		/* Changelevel dest re-arms the G36 probe while g36_done stays sticky
 		 * from the source map. Full SCR CapFaces then scored ≈62ms WEAK
 		 * (c4a3→c5a1 probe 20261105-105312). Score presents without a world
@@ -4485,7 +4486,9 @@ void Host_ClientFrame( void )
 			ref.dllFuncs.R_EndFrame();
 		else
 			SCR_UpdateScreen();
+		GC_ProfMark( "client: screen tail" );
 		SND_UpdateSound();
+		GC_ProfMark( "client: sound" );
 		if( gc_scr_sustain_log < 4 )
 		{
 			Con_Reportf( "Xash3D GameCube: post-G36 SCR sustain ClientFrame (G278 snd) state=%d signon=%d/%d\n",

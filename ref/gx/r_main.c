@@ -1292,6 +1292,12 @@ static void R_DrawEntitiesOnList( void )
 	}
 
 	R_GC_ENTITY_TRACE( "Xash3D GameCube: DrawEntities trans EFX done\n" );
+#if XASH_GAMECUBE
+	{
+		extern void GC_ProfMark( const char *name );
+		GC_ProfMark( "render: entities solid+trans+EFX" );
+	}
+#endif
 	GL_SetRenderMode( kRenderNormal );
 	R_SetUpWorldTransform();
 	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
@@ -1346,6 +1352,12 @@ static void R_DrawEntitiesOnList( void )
 		R_DrawViewModel();
 	}
 	R_GC_ENTITY_TRACE( "Xash3D GameCube: DrawEntities viewmodel done\n" );
+#if XASH_GAMECUBE
+	{
+		extern void GC_ProfMark( const char *name );
+		GC_ProfMark( "render: viewmodel+lean EFX" );
+	}
+#endif
 #if XASH_GAMECUBE
 	if( lean_ents && tr.framecount <= 4 )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: lean DrawEntities f=%d brushes=%d studios=%d solid=%u vm=%d\n",
