@@ -475,6 +475,8 @@ typedef struct gx_tri_vertex_s
 } gx_tri_vertex_t;
 void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip );
 void R_GXStudioEmitTrianglesC( const gx_tri_vertex_t *verts, int count );
+qboolean R_GXStudioEmitTricmds( const short *cmds, const float (*verts)[3], int nverts,
+	const unsigned *colors, float s, float t );
 /* Static mapmodel display lists (media/sd_<map>.gsd). */
 qboolean R_GXStudioDLActive( void );
 qboolean R_GXStudioDLTryDraw( cl_entity_t *e, model_t *mod );

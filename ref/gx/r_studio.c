@@ -2058,6 +2058,7 @@ generic path
 #if XASH_GAMECUBE
 #define R_GX_STUDIO_COLOR_CACHE 2048
 static unsigned r_gx_studio_colors[R_GX_STUDIO_COLOR_CACHE]; /* packed RGBA per normal, 0 = not yet */
+static qboolean r_gc_studio_emit_logged; /* G376 one-time emit log done */
 #endif
 
 static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float s, float t )
@@ -2077,6 +2078,33 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		R_STUDIO_PROF( "studio: mesh setup" );
 		R_GXStudioRebindPending();
 		R_STUDIO_PROF( "studio: skin bind" );
+
+		/* World studios without dynamic lights: pack each normal's colour
+		 * once, then emit the tricmds straight into the FIFO. */
+		if( r_gc_studio_emit_logged && !g_studio.numlocallights && m_pSubModel
+			&& m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
+			&& RI.currententity != tr.viewent )
+		{
+			const short *pc = ptricmds;
+			int n;
+
+			while(( n = *( pc++ )))
+			{
+				if( n < 0 )
+					n = -n;
+				for( ; n > 0; n--, pc += 4 )
+				{
+					if( !r_gx_studio_colors[pc[1]] )
+					{
+						R_StudioSetColorBegin( (short *)pc, pstudionorms );
+						r_gx_studio_colors[pc[1]] = R_GXGetTriColorRGBA();
+					}
+				}
+			}
+			if( R_GXStudioEmitTricmds( ptricmds, (const float (*)[3])g_studio.verts,
+				m_pSubModel->numverts, r_gx_studio_colors, s, t ))
+				return;
+		}
 
 		{
 			static qboolean emit_bbox_logged;
@@ -2160,6 +2188,7 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !emit_bbox_logged && emit_n > 0 )
 		{
 			emit_bbox_logged = true;
+			r_gc_studio_emit_logged = true;
 			gEngfuncs.Con_Reportf(
 				"Xash3D GameCube: G376 studio emit %s n=%d oob=%d maxidx=%d first=%d bbox=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)\n",
 				( RI.currentmodel && RI.currentmodel->name[0] ) ? RI.currentmodel->name : "?",
