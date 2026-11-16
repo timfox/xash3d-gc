@@ -1347,12 +1347,31 @@ static qboolean R_TryInitGameCubeSurfaceCacheSized( int size, qboolean allow_low
 /* The GX live-BSP route draws through Flipper and never needs the soft
  * surface cache during a changelevel save: hand its static store to the
  * transition save (sv_save.c). The next map load re-creates the cache. */
-byte *R_GCBorrowSurfaceCacheStore( size_t *size )
+/* One borrower at a time.  Three engine paths borrow this store during a
+ * changelevel (entity text, the transition save/restore, AI .nod reads);
+ * unowned, a revisit's restore sat here while worldspawn read c1a4b.nod into
+ * the same bytes and LoadGameState walked a clobbered entity table (DSI). */
+static const char *gc_surfstore_owner;
+
+byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner )
 {
+	if( gc_surfstore_owner )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: surface-cache store busy (%s holds it, %s refused)\n",
+			gc_surfstore_owner, owner );
+		return NULL;
+	}
 	R_GcmapTrimSurfaceCache();
+	gc_surfstore_owner = owner;
 	if( size )
 		*size = GC_SURFACE_CACHE_LOWRES;
 	return gc_lowres_surfcache_store;
+}
+
+void R_GCReleaseSurfaceCacheStore( const char *owner )
+{
+	if( gc_surfstore_owner && !Q_strcmp( gc_surfstore_owner, owner ))
+		gc_surfstore_owner = NULL;
 }
 
 void R_GcmapTrimSurfaceCache( void )
@@ -1377,6 +1396,8 @@ qboolean R_TryInitLowResSurfaceCache( void )
 {
 	if( sc_base )
 		return true;
+	if( gc_surfstore_owner )
+		return false; // borrowed (changelevel save/restore); next map load retries
 
 	sc_base = (surfcache_t *)gc_lowres_surfcache_store;
 	sc_size = GC_SURFACE_CACHE_LOWRES;

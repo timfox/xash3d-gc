@@ -638,14 +638,20 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 	 * The game copies what it needs and frees the buffer right away. */
 	if( !pfile && GC_MenuRunsServer() && sv.state == ss_loading && !com_gc_borrowed_file )
 	{
-		extern byte *R_GCBorrowSurfaceCacheStore( size_t *size );
+		extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 		const fs_offset_t want = FS_FileSize( name, false );
 		size_t store_size = 0;
-		byte *store;
-		file_t *f;
+		byte *store = NULL;
+		file_t *f = NULL;
 
-		if( want > 0 && ( store = R_GCBorrowSurfaceCacheStore( &store_size )) != NULL
-			&& (size_t)want + 1 <= store_size && ( f = FS_Open( name, "rb", false )) != NULL )
+		if( want > 0 && ( store = R_GCClaimSurfaceCacheStore( &store_size, "file" )) != NULL
+			&& ( (size_t)want + 1 > store_size || ( f = FS_Open( name, "rb", false )) == NULL ))
+		{
+			R_GCReleaseSurfaceCacheStore( "file" );
+			store = NULL;
+		}
+		if( store && f )
 		{
 			iLength = FS_Read( f, store, want );
 			FS_Close( f );
@@ -657,6 +663,7 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 				Con_Reportf( "Xash3D GameCube: %s read into the idle surface-cache store (%s)\n",
 					name, Q_memprint( want ));
 			}
+			else R_GCReleaseSurfaceCacheStore( "file" );
 		}
 	}
 #endif
@@ -706,7 +713,9 @@ void GAME_EXPORT COM_FreeFile( void *buffer )
 #if XASH_GAMECUBE
 	if( buffer && buffer == com_gc_borrowed_file )
 	{
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 		com_gc_borrowed_file = NULL;
+		R_GCReleaseSurfaceCacheStore( "file" );
 		return;
 	}
 #endif

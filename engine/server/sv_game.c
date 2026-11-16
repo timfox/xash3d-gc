@@ -1398,7 +1398,9 @@ static void SV_FreeEntityScript( char *ents )
 #if XASH_GAMECUBE
 	if( ents && ents == sv_gc_ents_borrowed )
 	{
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 		sv_gc_ents_borrowed = NULL;
+		R_GCReleaseSurfaceCacheStore( "entities" );
 		return;
 	}
 #endif
@@ -1464,11 +1466,17 @@ static char *SV_ReadEntityScript( const char *filename, int *flags )
 		 * it next anyway). */
 		if( GC_MenuRunsServer())
 		{
-			extern byte *R_GCBorrowSurfaceCacheStore( size_t *size );
+			extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
+			extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 			size_t store_size = 0;
-			byte *store = R_GCBorrowSurfaceCacheStore( &store_size );
+			byte *store = R_GCClaimSurfaceCacheStore( &store_size, "entities" );
 
-			if( store && store_size > (size_t)lumplen )
+			if( store && store_size <= (size_t)lumplen )
+			{
+				R_GCReleaseSurfaceCacheStore( "entities" );
+				store = NULL;
+			}
+			if( store )
 			{
 				memset( store, 0, lumplen + 1 );
 				ents = (char *)store;

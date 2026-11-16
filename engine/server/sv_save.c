@@ -967,13 +967,14 @@ static SAVERESTOREDATA *SaveInit( int size, int tokenCount )
 gc_save_try_borrow:
 	if( gc_save_borrow_next )
 	{
-		extern byte *R_GCBorrowSurfaceCacheStore( size_t *size );
+		extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 		/* Data gets what remains after the header, tokens and entity table. */
 		const size_t table = (size_t)Q_max( svgame.numEntities, gc_save_table_hint ) * sizeof( ENTITYTABLE ) + 64;
 		const size_t tokens = (size_t)tokenCount * sizeof( char * ) + 32;
 
 		gc_save_borrow_next = false;
-		gc_save_borrow_base = R_GCBorrowSurfaceCacheStore( &gc_save_borrow_size );
+		gc_save_borrow_base = R_GCClaimSurfaceCacheStore( &gc_save_borrow_size, "save" );
 		gc_save_borrow_used = 0;
 		if( gc_save_borrow_base && gc_save_borrow_size > sizeof( SAVERESTOREDATA ) + tokens + table + 4096
 			/* A restore needs its whole file; a save sizes itself to the store. */
@@ -986,6 +987,11 @@ gc_save_try_borrow:
 			Con_Reportf( "Xash3D GameCube: transition save in surface-cache store data=%s tokens=%d\n",
 				Q_memprint( size ), tokenCount );
 			goto gc_save_init_done;
+		}
+		if( gc_save_borrow_base )
+		{
+			R_GCReleaseSurfaceCacheStore( "save" ); // too small for this restore
+			gc_save_borrow_base = NULL;
 		}
 	}
 	/* Transition saves on the menu route too: a failed calloc returns NULL
@@ -1081,8 +1087,10 @@ static void SaveFinish( SAVERESTOREDATA *pSaveData )
 	 * reclaimed it during SV_SpawnServer, so do not touch pSaveData. */
 	if( gc_save_use_borrowed )
 	{
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 		svgame.globals->pSaveData = NULL;
 		gc_save_use_borrowed = false;
+		R_GCReleaseSurfaceCacheStore( "save" );
 		if( gc_save_table_heaped )
 		{
 			free( gc_save_table_heaped );
@@ -2591,6 +2599,15 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 	}
 
 #if XASH_GAMECUBE
+	/* The outgoing level is on disk now; a borrowed transition save is dead
+	 * weight (SaveFinish does not read it).  Hand the surface-cache store
+	 * back before SV_SpawnServer, whose entity text and the restore below
+	 * claim it next. */
+	if( gc_save_use_borrowed )
+	{
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
+		R_GCReleaseSurfaceCacheStore( "save" );
+	}
 	Con_Reportf( "Xash3D GameCube: SV_ChangeLevel deactivate begin\n" );
 #endif
 	SV_InactivateClients ();
