@@ -20,6 +20,7 @@ GNU General Public License for more details.
 
 #if XASH_GAMECUBE
 #include "platform/platform.h"
+#include "platform/gamecube/mem_gamecube.h"
 /* Client-side sprite loading cannot access the renderer's GC_GetVisualQuality()
  * because r_local.h is a renderer-local header. Use a compile-time consistent
  * low-memory guard instead. Runtime quality adjustments for sprites are handled
@@ -181,8 +182,51 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 	// build unique frame name
 	if( FBitSet( mod->flags, MODEL_CLIENT )) // it's a HUD sprite
 	{
+		size_t load_bytes = pinframe.width * pinframe.height * bytes;
+
 		Q_snprintf( texname, sizeof( texname ), "#HUD/%s(%s:%i%i).spr", sprite_name, group_suffix, num / 10, num % 10 );
-		gl_texturenum = ref.dllFuncs.GL_LoadTexture( texname, pin, pinframe.width * pinframe.height * bytes, r_texFlags );
+#if XASH_GAMECUBE
+		/* DoD's clip sheets are 256x256 and load mid-match, when MEM1 can no
+		 * longer hold their RGBA expansion (texture=0, never drawn). The HUD
+		 * is laid out at 640 and drawn at 320, so a sheet past 128 px is
+		 * shown at half size anyway: shrink its indexed pixels in place
+		 * (nearest) before the upload. The frame keeps its source size, so
+		 * SPR_DrawHoles rectangles map onto the smaller texture unchanged. */
+		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width > 128 || pinframe.height > 128 ))
+		{
+			/* 128 keeps the art at the size it is drawn; its 32 KiB texture
+			 * needs some heap. Below that, 64 fits the small HUD slots. */
+			const int cap = ( Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 96 * 1024 ) ? 64 : 128;
+			int f = 1;
+
+			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
+				&& ( pinframe.width / f > cap || pinframe.height / f > cap ))
+				f *= 2;
+			if( f > 1 )
+			{
+				dspriteframe_t small = pinframe;
+				byte *px = (byte *)pin + sizeof( dspriteframe_t );
+				int x, y;
+
+				small.width = pinframe.width / f;
+				small.height = pinframe.height / f;
+				for( y = 0; y < small.height; y++ )
+					for( x = 0; x < small.width; x++ )
+						px[y * small.width + x] = px[( y * f ) * pinframe.width + x * f];
+				memcpy( (void *)pin, &small, sizeof( small ));
+				load_bytes = small.width * small.height;
+				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
+					texname, pinframe.width, pinframe.height, small.width, small.height,
+					Q_memprint( GC_MemHeapFreeBytes( )));
+			}
+		}
+#endif
+		gl_texturenum = ref.dllFuncs.GL_LoadTexture( texname, pin, load_bytes, r_texFlags );
+#if XASH_GAMECUBE
+		if( !gl_texturenum )
+			Con_Reportf( S_WARN "Xash3D GameCube: HUD sprite %s texture failed (%dx%d)\n",
+				texname, pinframe.width, pinframe.height );
+#endif
 	}
 	else
 	{

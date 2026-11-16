@@ -688,7 +688,9 @@ void FS_FreeImage( rgbdata_t *pack )
 {
 	if( !pack ) return;
 	#if XASH_GAMECUBE
-	if( pack->buffer && !Image_GCIsMdlDecode( pack->buffer ))
+	if( pack->buffer && Image_GCIsTransient( pack->buffer ))
+		Image_GCReleaseTransient();
+	else if( pack->buffer && !Image_GCIsMdlDecode( pack->buffer ))
 		Mem_Free( pack->buffer );
 	if( gc_mdl_decode_busy )
 		gc_mdl_decode_busy = false;
