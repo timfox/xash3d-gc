@@ -10570,19 +10570,6 @@ qboolean R_GXDrawStretchPic( float x, float y, float w, float h,
 	if( !r_gx_hud_2d_ready )
 		return false;
 
-	{
-		/* Clip-sheet draws (DoD HUD) that never reached the screen. */
-		static int clip_draw_logs;
-		image_t *img = R_GetTexture( texnum );
-
-		if( clip_draw_logs < 12 && img && Q_stristr( img->name, "clip_" ))
-		{
-			clip_draw_logs++;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD clip draw %s tex=%dx%d at %.0f,%.0f %.0fx%.0f st=(%.3f,%.3f)-(%.3f,%.3f) rgba=%08x mode=%d alpha=%d\n",
-				img->name, img->width, img->height, x, y, w, h, s1, t1, s2, t2,
-				R_GXGetTriColorRGBA(), vid.rendermode, vid.alpha );
-		}
-	}
 	gxt = R_GXBindTexnum( (unsigned)texnum, true );
 	if( !gxt )
 	{

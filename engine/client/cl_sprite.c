@@ -215,14 +215,6 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 						px[y * small.width + x] = px[( y * f ) * pinframe.width + x * f];
 				memcpy( (void *)pin, &small, sizeof( small ));
 				load_bytes = small.width * small.height;
-				{
-					int opaque = 0, k;
-
-					for( k = 0; k < small.width * small.height; k++ )
-						opaque += px[k] != 255;
-					Con_Reportf( "Xash3D GameCube: HUD sprite %s non-255 texels %d/%d\n",
-						texname, opaque, small.width * small.height );
-				}
 				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
 					texname, pinframe.width, pinframe.height, small.width, small.height,
 					Q_memprint( GC_MemHeapFreeBytes( )));
