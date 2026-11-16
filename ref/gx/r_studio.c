@@ -1553,7 +1553,7 @@ static void R_StudioSetupModel( int bodypart, void **ppbodypart, void **ppsubmod
 		static mstudiomodel_t empty; /* not available this frame: draw nothing */
 
 		m_pSubModelBase = Mod_GCStudioMeshBase( m_pStudioHeader, m_pSubModel );
-		if( !m_pSubModelBase )
+		if( (uintptr_t)m_pSubModelBase < 0x80000000u )
 		{
 			memcpy( empty.name, m_pSubModel->name, sizeof( empty.name ));
 			m_pSubModel = &empty;

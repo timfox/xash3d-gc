@@ -637,6 +637,7 @@ static byte *gc_animpool;
 static unsigned gc_animpool_size;
 static unsigned gc_animpool_cursor, gc_animpack_clock;
 static qboolean gc_animpool_failed, gc_animpool_in_spill;
+static unsigned gc_animpack_fetch_len; /* bytes of the block the last Fetch returned */
 
 /* The pool is in the studio arena: every arena reset drops it. */
 void Mod_GCAnimPackReset( void )
@@ -832,6 +833,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( gc_animent[i].pack == pk && gc_animent[i].seq == seq )
 		{
 			gc_animent[i].frame = frame;
+			gc_animpack_fetch_len = gc_animent[i].len;
 			return gc_animpool + gc_animent[i].off;
 		}
 	}
@@ -899,6 +901,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	gc_animent[slot].len = need;
 	gc_animent[slot].frame = frame;
 	gc_animpool_cursor = start + need;
+	gc_animpack_fetch_len = need;
 	return gc_animpool + start;
 }
 
@@ -995,6 +998,33 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
 		blob = Mod_GCAnimPackFetch( pk, pmodel->unused2 );
+	if( blob )
+	{
+		/* A blob starts with "GCMB" and every offset the model uses must
+		 * land inside it; anything else draws nothing instead of reading
+		 * wild memory (ceres PR 108: DSI at DAR 0xb30 in DrawPoints). */
+		const unsigned len = gc_animpack_fetch_len;
+		const unsigned vend = (unsigned)pmodel->vertindex + (unsigned)pmodel->numverts * 12u;
+		const unsigned nend = (unsigned)pmodel->normindex + (unsigned)pmodel->numnorms * 12u;
+		const unsigned iend = (unsigned)pmodel->vertinfoindex + (unsigned)pmodel->numverts;
+		const unsigned jend = (unsigned)pmodel->norminfoindex + (unsigned)pmodel->numnorms;
+		const unsigned mend = (unsigned)pmodel->meshindex + (unsigned)pmodel->nummesh * sizeof( mstudiomesh_t );
+		static int logged;
+
+		if( memcmp( blob, "GCMB", 4 ) || pmodel->numverts < 0 || pmodel->numnorms < 0 || pmodel->nummesh < 0
+			|| vend > len || nend > len || iend > len || jend > len || mend > len )
+		{
+			if( warned++ < 8 )
+				Con_Reportf( S_ERROR "Xash3D GameCube: mesh pack '%s' model '%s' entry %d bad blob (len %u magic %.4s v %d/%d n %d/%d m %d/%d)\n",
+					group->name, pmodel->name, pmodel->unused2, len, (const char *)blob,
+					pmodel->vertindex, pmodel->numverts, pmodel->normindex, pmodel->numnorms,
+					pmodel->meshindex, pmodel->nummesh );
+			return NULL;
+		}
+		if( logged++ < 12 )
+			Con_Reportf( "Xash3D GameCube: mesh pack '%s' model '%s' entry %d at %p len %u verts %d norms %d meshes %d\n",
+				group->name, pmodel->name, pmodel->unused2, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
+	}
 	if( !blob && warned++ < 8 )
 		Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame\n",
 			group->name, pmodel->name );
