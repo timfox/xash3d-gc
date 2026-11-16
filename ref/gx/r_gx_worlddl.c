@@ -402,7 +402,7 @@ static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots t
  * texture across cubemap patch variants, so all of them stay at 128x128. */
 static qboolean gc_wd_tex_overflow;
 /* Flythrough profile of the draw loop (-gcvst), logged every 120 frames. */
-static u64 gc_wd_pf[10], gc_wd_pf_t0, gc_wd_pf_t1;
+static u64 gc_wd_pf[10], gc_wd_pf_t0, gc_wd_pf_t1, gc_wd_pf_enter;
 static u32 gc_wd_pf_cnt[10];
 static int gc_wd_pf_on = -1, gc_wd_pf_frames;
 static u32 gc_wd_pf_bytes, gc_wd_pf_bytes_max;	/* chunk bytes drawn this frame / peak */
@@ -2271,6 +2271,7 @@ int R_GXWorldDLDraw( void )
 	u32 i;
 	int cluster, drawn = 0, chunks = 0, waiting = 0, cur_mat = -1, bind_miss = 0;
 
+	gc_wd_pf_enter = gettime();
 	if( gc_wd_state != 1 )
 		return 0;
 	/* Retire last frame's display lists before this frame fills the FIFO.
@@ -2333,6 +2334,7 @@ int R_GXWorldDLDraw( void )
 		R_GXWorldDLLoadPVS( -1 );
 	R_GXWorldDLFrustum( normals );
 	gc_wd_pf_t0 = gettime();
+	gc_wd_pf[9] += gc_wd_pf_t0 - gc_wd_pf_enter;
 
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
@@ -2724,7 +2726,8 @@ int R_GXWorldDLDraw( void )
 			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call select+sky=%.1f chunks=%.1f envflush=%.1f\n",
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f\n",
+			(float)ticks_to_microsecs( gc_wd_pf[9] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[6] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[7] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[8] ) * k );
