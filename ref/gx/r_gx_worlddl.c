@@ -373,6 +373,7 @@ static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
+static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots this map */
 /* More distinct world textures than full-size slots: distant chunks then
  * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
  * texture across cubemap patch variants, so all of them stay at 128x128. */
@@ -619,6 +620,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	gc_wd_cache = NULL;
 	try_sz = 0;
 	gc_wd_cache_in_arena = false;
+	cmpr_adopted = false;
 	/* Large worlds (Lost Coast, 3.5 MB of lists): the renderer's static
 	 * map-load arena is idle once the BSP is in, with about 3 MB above its
 	 * tail highwater. Keeping the whole visible set resident there ends
@@ -661,6 +663,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				if( tex )
 				{
 					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+					cmpr_adopted = true;
 					gc_wd_tex_overflow = GC_WorldTexCount() > nslots;
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
@@ -685,7 +688,13 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	 * arena above its carves unused. Lend the texture cache a share of that
 	 * remainder, scaled to what is there; give the cache up to the old
 	 * full set only when the arena is large. */
-	if( gc_wd_hdr.file_size < 1536u * 1024u && !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" )
+	/* A large world whose arena is too full for the branch above (dod_charlie:
+	 * 2.4 MB of lists, 742 KB of arena left) took neither the chunk cache nor
+	 * the slots there and fell back to one 24 KB heap slot: every packed bind
+	 * missed and fence-waited, 60-120 ms of a 95-150 ms frame. It gets the same
+	 * scaled share as a small world, provided nothing was carved above. */
+	if(( gc_wd_hdr.file_size < 1536u * 1024u || ( !cmpr_adopted && !gc_wd_cache_in_arena ))
+		&& !gEngfuncs.Sys_CheckParm( "-gcworlddlsmallcache" )
 		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprarena" ))
 	{
 		const size_t live = Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak());
