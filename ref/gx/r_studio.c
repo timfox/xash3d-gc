@@ -14,6 +14,12 @@ GNU General Public License for more details.
 */
 
 #include "r_local.h"
+#if XASH_GAMECUBE
+extern void GC_ProfMark( const char *name );
+#define R_STUDIO_PROF( name ) GC_ProfMark( name )
+#else
+#define R_STUDIO_PROF( name )
+#endif
 #include "xash3d_mathlib.h"
 #include "const.h"
 #include "r_studioint.h"
@@ -2068,7 +2074,9 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !R_GXStudioIsActive() )
 			R_GXStudioForceBegin( false );
 		/* G376: ForceBegin cleared bound_tex — rebind SetupSkin's texture. */
+		R_STUDIO_PROF( "studio: mesh setup" );
 		R_GXStudioRebindPending();
+		R_STUDIO_PROF( "studio: skin bind" );
 
 		{
 			static qboolean emit_bbox_logged;
@@ -2339,6 +2347,9 @@ R_StudioDrawPoints
 
 ===============
 */
+#if XASH_GAMECUBE
+static qboolean r_gc_vm_bbox_logged;
+#endif
 static void R_StudioDrawPoints( void )
 {
 	int              i, j, k, m_skinnum;
@@ -2419,9 +2430,10 @@ static void R_StudioDrawPoints( void )
 #if XASH_GAMECUBE
 		if(( gEngfuncs.Sys_CheckParm( "-gcnewgame" ) || GC_UseGxWorldDraw())
 			&& m_pSubModel->numverts > 0
-			&& RI.currententity == tr.viewent )
+			&& RI.currententity == tr.viewent
+			&& !r_gc_vm_bbox_logged ) /* one-time log: no per-frame vertex scan */
 		{
-			static qboolean bbox_logged;
+			qboolean bbox_logged = false;
 			float mn[3], mx[3];
 			int b0 = pvertbone[0];
 
@@ -2442,6 +2454,7 @@ static void R_StudioDrawPoints( void )
 				float dmin = 1e9f, dmax = -1e9f;
 
 				bbox_logged = true;
+				r_gc_vm_bbox_logged = true;
 				AngleVectors( RI.rvp.viewangles, eye_fwd, NULL, NULL );
 				for( i = 0; i < m_pSubModel->numverts; i++ )
 				{
@@ -2463,6 +2476,8 @@ static void R_StudioDrawPoints( void )
 		}
 #endif
 	}
+
+	R_STUDIO_PROF( "studio: vertex transform" );
 
 	// generate shared normals for properly scaling glowing shell
 	if( RI.currententity->curstate.renderfx == kRenderFxGlowShell )
@@ -2511,6 +2526,8 @@ static void R_StudioDrawPoints( void )
 			}
 		}
 	}
+
+	R_STUDIO_PROF( "studio: normal lighting" );
 
 	if( r_studio_sort_textures.value && need_sort )
 	{
@@ -2592,6 +2609,7 @@ static void R_StudioDrawPoints( void )
 		r_stats.c_studio_polys += pmesh->numtris;
 		tr.blend = oldblend;
 	}
+	R_STUDIO_PROF( "studio: mesh emit" );
 }
 
 /*
@@ -3309,6 +3327,7 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 	m_pPlayerInfo = pfnPlayerInfo( m_nPlayerIndex );
 	R_StudioSetupBones( RI.currententity );
 	R_StudioSaveBones( );
+	R_STUDIO_PROF( "studio: bones" );
 
 	m_pPlayerInfo->renderframe = tr.realframecount;
 	m_pPlayerInfo = NULL;
@@ -3366,6 +3385,7 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			g_nBottomColor = 360;
 
 		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+		R_STUDIO_PROF( "studio: events+light setup" );
 
 		R_StudioRenderModel( );
 		m_pPlayerInfo = NULL;
@@ -3510,6 +3530,7 @@ static int R_StudioDrawModel( int flags )
 		R_StudioSetupBones( RI.currententity );
 
 	R_StudioSaveBones();
+	R_STUDIO_PROF( "studio: bones" );
 
 	if( flags & STUDIO_EVENTS )
 	{
@@ -3541,6 +3562,7 @@ static int R_StudioDrawModel( int flags )
 		g_nBottomColor = ( RI.currententity->curstate.colormap & 0xFF00 ) >> 8;
 
 		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+		R_STUDIO_PROF( "studio: events+light setup" );
 
 		R_StudioRenderModel();
 	}
