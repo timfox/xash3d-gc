@@ -2148,7 +2148,11 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							memset( fails, 0, sizeof( fails ));
 							fails_spawn = svs.spawncount;
 						}
-						if( fails[wk] < 3 && host.realtime >= next_try[wk] )
+						static int noload = -1;
+
+						if( noload < 0 )
+							noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
+						if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
 						{
 							if( Mod_GCPromoteStudioPath( wpath ))
 							{
