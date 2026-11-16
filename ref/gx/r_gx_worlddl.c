@@ -96,6 +96,7 @@ extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
 extern size_t Mod_GCWorldArraySpillFree( void );
+extern size_t Mod_GCWorldArraySpillFreeLasting( void );
 extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
@@ -727,7 +728,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			 * from the world-array spill, leaving 48 KiB for props. */
 			if( gEngfuncs.Sys_CheckParm( "-gcslotsspill" ))
 			{
-				const size_t sfree = Mod_GCWorldArraySpillFree();
+				/* What stays free after the CMPR bounce borrow, which comes
+			 * later and takes the top 32 KiB of the spill. */
+			const size_t sfree = Mod_GCWorldArraySpillFreeLasting();
 				const size_t keep_props = 48u * 1024u;
 				const size_t sb = sfree > keep_props ? sfree - keep_props : 0;
 				const int sn = (int)Q_min( sb / slot_bytes, 64u );
@@ -765,7 +768,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			cache_lo = ( gc_wd_hdr.max_chunk * 2u + 32767u ) & ~32767u;
 		{
 			static const char *const team_cores[] = { "gc_studio/us-inf.mdl", "gc_studio/axis-inf.mdl" };
-			const size_t sfree = Mod_GCWorldArraySpillFree();
+			/* What stays free after the CMPR bounce borrow, which comes
+			 * later and takes the top 32 KiB of the spill. */
+			const size_t sfree = Mod_GCWorldArraySpillFreeLasting();
 			size_t core[2] = { 0, 0 };
 			int i, keep;
 
@@ -778,7 +783,8 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			}
 			for( keep = 2; keep >= 1; keep-- )
 			{
-				size_t reserve = core[0] + ( keep == 2 ? core[1] : 0 );
+				/* One body: whichever team core is larger. */
+				size_t reserve = keep == 2 ? core[0] + core[1] : Q_max( core[0], core[1] );
 				size_t room;
 
 				if( !reserve )
