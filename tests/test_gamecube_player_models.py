@@ -143,6 +143,30 @@ class PlayerSkinBakeTests(unittest.TestCase):
 		self.assertEqual(disc.gc_cmpr_skin_edge(68, 128), 64)
 		self.assertEqual(disc.gc_cmpr_skin_edge(512, 128), 128)
 
+	def test_cmpr_companion_caps_small_parts(self):
+		try:
+			import numpy  # noqa: F401
+			import PIL  # noqa: F401
+		except ImportError:
+			self.skipTest("numpy and Pillow needed for the bake")
+		disc = load("build_gamecube_disc", ROOT / "scripts/build-gamecube-disc.py")
+		palette = bytes(768)
+		px = bytes(256 * 256)
+		model = make_tex_model([
+			("main1.bmp", 0, 256, 256, px, palette),
+			("face0.bmp", 0, 256, 256, px, palette),
+			("k43_face.bmp", 0, 256, 256, px, palette),
+			("helmet.bmp", 0, 256, 256, px, palette),
+		])
+		with tempfile.TemporaryDirectory() as tmp:
+			src = Path(tmp) / "axis-infT.mdl"
+			src.write_bytes(model)
+			out = disc.gc_cmpr_skin_companion_bytes(src, max_edge=128, part_edge=64)
+		self.assertIsNotNone(out)
+		table = struct.unpack_from("<i", out, 184)[0]
+		sizes = [struct.unpack_from("<ii", out, table + i * 80 + 68) for i in range(4)]
+		self.assertEqual(sizes, [(128, 128), (64, 64), (64, 64), (64, 64)])
+
 
 if __name__ == "__main__":
 	unittest.main()
