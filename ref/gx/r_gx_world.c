@@ -905,9 +905,22 @@ static void R_GXBuildViewmodelProjection( Mtx44 out )
  */
 static void R_GXBuildWorldModelview( Mtx out )
 {
+	/* The view only changes between passes, but every prop instance asks for
+	 * this matrix (three prop passes a frame), and AngleVectors is six libm
+	 * sin/cos calls, software on the Gekko. Keep the last answer. */
+	static float last_ang[3], last_org[3];
+	static Mtx last;
+	static qboolean have;
 	vec3_t	forward, right, up;
 	const float *org = RI.rvp.vieworigin;
+	const float *ang = RI.rvp.viewangles;
 
+	if( have && ang[0] == last_ang[0] && ang[1] == last_ang[1] && ang[2] == last_ang[2]
+		&& org[0] == last_org[0] && org[1] == last_org[1] && org[2] == last_org[2] )
+	{
+		memcpy( out, last, sizeof( Mtx ));
+		return;
+	}
 	AngleVectors( RI.rvp.viewangles, forward, right, up );
 
 	out[0][0] = right[0];
@@ -924,6 +937,10 @@ static void R_GXBuildWorldModelview( Mtx out )
 	out[2][1] = -forward[1];
 	out[2][2] = -forward[2];
 	out[2][3] = DotProduct( forward, org );
+	memcpy( last, out, sizeof( Mtx ));
+	VectorCopy( ang, last_ang );
+	VectorCopy( org, last_org );
+	have = true;
 }
 
 static u32 R_GXFaceColor( const msurface_t *surf )

@@ -156,7 +156,7 @@ static byte gc_wd_lm_store[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__((
 static u32 gc_wd_lm_stream;	/* file offset of page 0 */
 static s32 gc_wd_lm_slot_page[GC_WD_LM_SLOTS];
 static s32 gc_wd_lm_slot_frame[GC_WD_LM_SLOTS];
-static int gc_wd_lm_miss;
+static int gc_wd_lm_miss, gc_wd_lm_miss_total;
 static int gc_wd_lm_binds;
 static int gc_wd_chunk_lm;	/* current chunk uses TEXMAP2 lightmap */
 static GXTexObj gc_wd_lm_obj;
@@ -250,7 +250,12 @@ static byte *R_GXWorldDLLmPage( u32 page )
 			hint[page & 2047u] = (u8)i;
 			return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 		}
-		if( gc_wd_lm_slot_frame[i] < gc_wd_frame && gc_wd_lm_slot_frame[i] < oldest )
+		/* A page used by the previous world pass stays: with the water
+		 * mirror there are two passes a frame, and when the two together
+		 * want more pages than there are slots, the far chunks of one pass
+		 * evicted the near pages of the other and each pass refetched about
+		 * 50 pages from ARAM (2 ms a pass in the Lost Coast harbor). */
+		if( gc_wd_lm_slot_frame[i] < gc_wd_frame - 1 && gc_wd_lm_slot_frame[i] < oldest )
 		{
 			oldest = gc_wd_lm_slot_frame[i];
 			victim = i;
@@ -269,6 +274,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_slot_page[victim] = (s32)page;
 	gc_wd_lm_slot_frame[victim] = gc_wd_frame;
 	gc_wd_lm_miss++;
+	gc_wd_lm_miss_total++;
 	hint[page & 2047u] = (u8)victim;
 	return gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES;
 }
@@ -403,6 +409,7 @@ static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots t
 static qboolean gc_wd_tex_overflow;
 /* Flythrough profile of the draw loop (-gcvst), logged every 120 frames. */
 static u64 gc_wd_pf[10], gc_wd_pf_t0, gc_wd_pf_t1, gc_wd_pf_enter;
+static int gc_wd_pf_lm_miss;
 static u32 gc_wd_pf_cnt[10];
 static int gc_wd_pf_on = -1, gc_wd_pf_frames;
 static u32 gc_wd_pf_bytes, gc_wd_pf_bytes_max;	/* chunk bytes drawn this frame / peak */
@@ -2726,11 +2733,13 @@ int R_GXWorldDLDraw( void )
 			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f\n",
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f lm_miss/call=%.1f\n",
 			(float)ticks_to_microsecs( gc_wd_pf[9] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[6] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[7] ) * k,
-			(float)ticks_to_microsecs( gc_wd_pf[8] ) * k );
+			(float)ticks_to_microsecs( gc_wd_pf[8] ) * k,
+			(float)( gc_wd_lm_miss_total - gc_wd_pf_lm_miss ) / 120.0f );
+		gc_wd_pf_lm_miss = gc_wd_lm_miss_total;
 		memset( gc_wd_pf, 0, sizeof( gc_wd_pf ));
 		memset( gc_wd_pf_cnt, 0, sizeof( gc_wd_pf_cnt ));
 		gc_wd_pf_frames = 0;
