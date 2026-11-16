@@ -402,12 +402,16 @@ void GC_PerfFrameEnd( void )
  * frame and charges the gap since the last mark of the previous frame to
  * "frame tail". Every 64 frames it logs the per-stage average and resets.
  * Without -gcprofile both calls return before reading the clock. */
-#define GC_PROF_MAX_STAGES 64
+/* Watchdog stages (one per HUD engine call, EFX step, ...) also charge
+ * here: 64 filled up and the rest of the frame went unreported. */
+#define GC_PROF_MAX_STAGES 192
 #define GC_PROF_REPORT_FRAMES 64
 static const char *gc_prof_name[GC_PROF_MAX_STAGES];
 static double gc_prof_acc[GC_PROF_MAX_STAGES];
 static int gc_prof_hits[GC_PROF_MAX_STAGES];
 static int gc_prof_count;
+static double gc_prof_over_acc;	/* stages past GC_PROF_MAX_STAGES */
+static int gc_prof_over_hits;
 static double gc_prof_last;
 static double gc_prof_window_start;
 static int gc_prof_frames;
@@ -442,6 +446,11 @@ static void GC_ProfCharge( const char *name, double now )
 		{
 			gc_prof_acc[i] += now - gc_prof_last;
 			gc_prof_hits[i]++;
+		}
+		else
+		{
+			gc_prof_over_acc += now - gc_prof_last;
+			gc_prof_over_hits++;
 		}
 	}
 	gc_prof_last = now;
@@ -480,6 +489,11 @@ void GC_ProfFrame( void )
 		gc_prof_acc[i] = 0.0;
 		gc_prof_hits[i] = 0;
 	}
+	if( gc_prof_over_hits )
+		Con_Reportf( "Xash3D GameCube: profile stage=\"(over stage limit)\" avg=%.2fms per_frame=%.2fms hits=%d\n",
+			gc_prof_over_acc * 1000.0 / gc_prof_over_hits, gc_prof_over_acc * 1000.0 / gc_prof_frames, gc_prof_over_hits );
+	gc_prof_over_acc = 0.0;
+	gc_prof_over_hits = 0;
 	gc_prof_frames = 0;
 	gc_prof_window_start = now;
 }
