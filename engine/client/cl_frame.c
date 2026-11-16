@@ -2113,7 +2113,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					studios++;
 					studio_slots++;
 					lean_player_seen = true;
-					if( !near_e || d < near_d )
+					/* gc_facebot 10+N: face player N instead of the nearest
+					 * (a test aid: e.g. 12 = move to and aim at player 2). */
+					const int facebot_pick = gc_facebot && gc_facebot->value >= 10.0f
+						? (int)gc_facebot->value - 10 : 0;
+
+					if( facebot_pick ? e == facebot_pick : ( !near_e || d < near_d ))
 					{
 						near_e = e;
 						near_d = d;
