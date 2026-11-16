@@ -97,6 +97,8 @@ extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
 extern size_t Mod_GCWorldArraySpillFree( void );
 extern size_t Mod_GCWorldArraySpillFreeLasting( void );
+/* Spill kept for the team bodies' animation and streamed-mesh ring. */
+#define GC_WD_BODY_RING_RESERVE ( 128u * 1024u )
 extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
@@ -789,6 +791,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 
 				if( !reserve )
 					break;
+				/* Plus the animation/mesh ring (Mod_GCAnimPoolReady), which
+				 * falls back to the spill when the studio arena is full. */
+				reserve += GC_WD_BODY_RING_RESERVE;
 				room = sfree > reserve ? ( sfree - reserve ) & ~(size_t)32767u : 0;
 				if( room >= cache_lo || keep == 1 )
 				{

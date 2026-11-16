@@ -606,8 +606,8 @@ recycles the oldest blocks and never a block handed out this frame.
 #ifndef GC_ANIMPACK_POOL
 #define GC_ANIMPACK_POOL ( 256u * 1024u )
 #endif
-#define GC_ANIMPACK_MAX     3
-#define GC_ANIMPACK_ENTRIES 64
+#define GC_ANIMPACK_MAX     8   /* team animation, team meshes, viewmodel animation */
+#define GC_ANIMPACK_ENTRIES 96
 #define GC_ANIMPACK_MAGIC   0x47434150u /* "GCAP" */
 #define GC_ANIMPACK_HDR     32u
 #define GC_ANIMPACK_CHUNK   ( 32u * 1024u )
@@ -636,7 +636,8 @@ static gc_animent_t gc_animent[GC_ANIMPACK_ENTRIES];
 static byte *gc_animpool;
 static unsigned gc_animpool_size;
 static unsigned gc_animpool_cursor, gc_animpack_clock;
-static qboolean gc_animpool_failed;
+static qboolean gc_animpool_failed, gc_animpool_in_spill;
+static unsigned gc_animpack_fetch_len; /* bytes of the block the last Fetch returned */
 
 /* The pool is in the studio arena: every arena reset drops it. */
 void Mod_GCAnimPackReset( void )
@@ -646,6 +647,15 @@ void Mod_GCAnimPackReset( void )
 	gc_animpool_size = 0;
 	gc_animpool_cursor = 0;
 	gc_animpool_failed = false;
+	gc_animpool_in_spill = false;
+}
+
+/* The world-array spill is rewound at every map load: drop a ring parked
+ * there (an arena ring stays until the arena reset). */
+void Mod_GCAnimPackSpillReset( void )
+{
+	if( gc_animpool_in_spill )
+		Mod_GCAnimPackReset();
 }
 
 static void Mod_GCAnimPackDropEntries( const gc_animpack_t *pk )
@@ -685,15 +695,28 @@ static qboolean Mod_GCAnimPoolReady( void )
 		if( gc_animpool )
 			break;
 	}
+	/* Then the world-array spill, where r_gx_worlddl.c keeps room for the
+	 * ring next to the DoD team cores (ceres PR 108: viewmodel skins had
+	 * filled the arena and the bodies drew nothing). */
+	for( gc_animpool_size = GC_ANIMPACK_POOL; !gc_animpool && gc_animpool_size >= GC_ANIMPACK_CHUNK; gc_animpool_size >>= 1 )
+	{
+		gc_animpool = (byte *)Mod_GCWorldArraySpillTryAlloc( gc_animpool_size, "animpack ring" );
+		if( gc_animpool )
+		{
+			Mod_GCWorldArraySpillPinBase( gc_animpool, gc_animpool_size );
+			gc_animpool_in_spill = true;
+		}
+	}
 	if( !gc_animpool )
 	{
 		gc_animpool_size = 0;
 		gc_animpool_failed = true;
-		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s down to %s) does not fit the studio arena\n",
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s down to %s) fits neither the studio arena nor the spill\n",
 			Q_memprint( GC_ANIMPACK_POOL ), Q_memprint( GC_ANIMPACK_CHUNK ));
 		return false;
 	}
-	Con_Reportf( "Xash3D GameCube: animpack pool %s in the studio arena\n", Q_memprint( gc_animpool_size ));
+	Con_Reportf( "Xash3D GameCube: animpack pool %s in the %s\n", Q_memprint( gc_animpool_size ),
+		gc_animpool_in_spill ? "world-array spill" : "studio arena" );
 	gc_animpool_cursor = 0;
 	return true;
 }
@@ -810,6 +833,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( gc_animent[i].pack == pk && gc_animent[i].seq == seq )
 		{
 			gc_animent[i].frame = frame;
+			gc_animpack_fetch_len = gc_animent[i].len;
 			return gc_animpool + gc_animent[i].off;
 		}
 	}
@@ -877,6 +901,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	gc_animent[slot].len = need;
 	gc_animent[slot].frame = frame;
 	gc_animpool_cursor = start + need;
+	gc_animpack_fetch_len = need;
 	return gc_animpool + start;
 }
 
@@ -910,6 +935,162 @@ static void *Mod_GCAnimPackGet( studiohdr_t *phdr, mstudioseqdesc_t *pseqdesc )
 	if( (size_t)pseqdesc->numblends * phdr->numbones * sizeof( mstudioanim_t ) > sizeof( bindpose ))
 		Host_Error( "%s: no animation for %s\n", __func__, pseqdesc->label );
 	return (void *)bindpose;
+}
+
+/*
+ * Streamed body-group meshes (dod-gc split_studio_mdl.py --mesh-pack). A DoD
+ * soldier core carries every outfit variant but draws one model per body
+ * part, so the variants' meshes, triangle commands, vertices, normals and
+ * bone bytes live in a big-endian pack (".gcm", same GCAP layout as the
+ * animation packs) kept in ARAM. A streamed mstudiomodel_t keeps its counts,
+ * has unused == GC_STUDIO_MESH_STREAMED, unused2 == its pack entry, and its
+ * offsets are relative to that entry's blob. The drawn blobs share the
+ * animation ring, pinned for the frame that fetched them.
+ */
+static int Mod_GCStudioMeshGroup( const studiohdr_t *phdr )
+{
+	const mstudioseqgroup_t *group;
+	int i;
+
+	if( phdr->numseqgroups <= 1 || phdr->seqgroupindex <= 0 )
+		return 0;
+	group = (const mstudioseqgroup_t *)((const byte *)phdr + phdr->seqgroupindex );
+	for( i = phdr->numseqgroups - 1; i > 0; i-- )
+	{
+		if( !Q_stricmp( COM_FileExtension( group[i].name ), "gcm" ))
+			return i;
+	}
+	return 0;
+}
+
+static qboolean Mod_GCStudioModelStreamed( const mstudiomodel_t *pmodel )
+{
+	return pmodel->unused == GC_STUDIO_MESH_STREAMED;
+}
+
+/* The pack entry is an integer stored in the float "unused2" (was
+ * boundingradius). Read its bits: converting the float gave entry 0 for
+ * every model (a denormal), and passing it to printf as %d shifted the
+ * arguments (ceres PR 108: wrong blob per model, DSI in DrawPoints). */
+#define GC_STUDIO_MESH_UV_DONE 0x40000000 /* in the entry bits: UV domain fixed */
+
+static int Mod_GCStudioMeshEntry( const mstudiomodel_t *pmodel )
+{
+	int32_t entry;
+
+	memcpy( &entry, &pmodel->unused2, sizeof( entry ));
+	return entry & ~GC_STUDIO_MESH_UV_DONE;
+}
+
+/* The UV domain fix (G378) for one streamed model, from its blob: grow the
+ * lean skin headers to the retail UV range its triangle commands use, once,
+ * on the model's first fetch (with skins attached). */
+static void Mod_GCStudioMeshUvFix( studiohdr_t *phdr, mstudiomodel_t *pmodel, const byte *base )
+{
+	mstudiotexture_t *ptexture;
+	const short *pskinref;
+	const mstudiomesh_t *pmesh;
+	int32_t bits;
+	int k;
+
+	memcpy( &bits, &pmodel->unused2, sizeof( bits ));
+	if( bits & GC_STUDIO_MESH_UV_DONE )
+		return;
+	if( phdr->numtextures <= 0 || phdr->textureindex <= 0 || phdr->numskinref <= 0 || phdr->skinindex <= 0 )
+		return; /* skins not attached yet: try again on a later fetch */
+	ptexture = (mstudiotexture_t *)((byte *)phdr + phdr->textureindex );
+	pskinref = (const short *)((byte *)phdr + phdr->skinindex );
+	pmesh = (const mstudiomesh_t *)( base + pmodel->meshindex );
+	for( k = 0; k < pmodel->nummesh; k++, pmesh++ )
+	{
+		const short *cmd = (const short *)( base + pmesh->triindex );
+		int tex, n, max_s = 0, max_t = 0;
+
+		if( pmesh->skinref < 0 || pmesh->skinref >= phdr->numskinref )
+			continue;
+		tex = pskinref[pmesh->skinref];
+		if( tex < 0 || tex >= phdr->numtextures )
+			continue;
+		while(( n = *cmd++ ))
+		{
+			for( n = n < 0 ? -n : n; n > 0; n--, cmd += 4 )
+			{
+				if( cmd[2] > max_s ) max_s = cmd[2];
+				if( cmd[3] > max_t ) max_t = cmd[3];
+			}
+		}
+		if( max_s >= ptexture[tex].width )
+			ptexture[tex].width = max_s + 1;
+		if( max_t >= ptexture[tex].height )
+			ptexture[tex].height = max_t + 1;
+	}
+	bits |= GC_STUDIO_MESH_UV_DONE;
+	memcpy( &pmodel->unused2, &bits, sizeof( bits ));
+}
+
+/* Open the mesh pack at load time, so its ARAM upload (which uses the ring
+ * as the bounce buffer) never lands between a fetch and its draw. */
+static void Mod_GCStudioMeshPackPreload( const studiohdr_t *phdr )
+{
+	const int g = Mod_GCStudioMeshGroup( phdr );
+
+	if( g > 0 )
+		Mod_GCAnimPackOpen( ((const mstudioseqgroup_t *)((const byte *)phdr + phdr->seqgroupindex ))[g].name );
+}
+
+/* Base for a body-group model's mesh offsets: the header itself, or the
+ * model's blob fetched from the mesh pack. NULL when the blob cannot be had
+ * this frame; the caller draws nothing for that body part. */
+byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
+{
+	static int warned;
+	const mstudioseqgroup_t *group;
+	gc_animpack_t *pk;
+	void *blob = NULL;
+	int g, entry;
+
+	if( !Mod_GCStudioModelStreamed( pmodel ))
+		return (byte *)phdr;
+	entry = Mod_GCStudioMeshEntry( pmodel );
+	g = Mod_GCStudioMeshGroup( phdr );
+	if( g <= 0 )
+		return NULL;
+	group = (const mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex ) + g;
+	pk = Mod_GCAnimPackOpen( group->name );
+	if( pk )
+		blob = Mod_GCAnimPackFetch( pk, entry );
+	if( blob )
+	{
+		/* A blob starts with "GCMB" and every offset the model uses must
+		 * land inside it; anything else draws nothing instead of reading
+		 * wild memory (ceres PR 108: DSI at DAR 0xb30 in DrawPoints). */
+		const unsigned len = gc_animpack_fetch_len;
+		const unsigned vend = (unsigned)pmodel->vertindex + (unsigned)pmodel->numverts * 12u;
+		const unsigned nend = (unsigned)pmodel->normindex + (unsigned)pmodel->numnorms * 12u;
+		const unsigned iend = (unsigned)pmodel->vertinfoindex + (unsigned)pmodel->numverts;
+		const unsigned jend = (unsigned)pmodel->norminfoindex + (unsigned)pmodel->numnorms;
+		const unsigned mend = (unsigned)pmodel->meshindex + (unsigned)pmodel->nummesh * sizeof( mstudiomesh_t );
+		static int logged;
+
+		if( memcmp( blob, "GCMB", 4 ) || pmodel->numverts < 0 || pmodel->numnorms < 0 || pmodel->nummesh < 0
+			|| vend > len || nend > len || iend > len || jend > len || mend > len )
+		{
+			if( warned++ < 8 )
+				Con_Reportf( S_ERROR "Xash3D GameCube: mesh pack '%s' model '%s' entry %d bad blob (len %u magic %.4s v %d/%d n %d/%d m %d/%d)\n",
+					group->name, pmodel->name, entry, len, (const char *)blob,
+					pmodel->vertindex, pmodel->numverts, pmodel->normindex, pmodel->numnorms,
+					pmodel->meshindex, pmodel->nummesh );
+			return NULL;
+		}
+		Mod_GCStudioMeshUvFix( phdr, pmodel, (const byte *)blob );
+		if( logged++ < 12 )
+			Con_Reportf( "Xash3D GameCube: mesh pack '%s' model '%s' entry %d at %p len %u verts %d norms %d meshes %d\n",
+				group->name, pmodel->name, entry, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
+	}
+	if( !blob && warned++ < 8 )
+		Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame\n",
+			group->name, pmodel->name );
+	return (byte *)blob;
 }
 #endif // XASH_GAMECUBE
 
@@ -1268,6 +1449,10 @@ static void Mod_StudioComputeBounds( void *buffer, vec3_t mins, vec3_t maxs, qbo
 
 		for( j = 0; j < pbodypart[i].nummodels; j++ )
 		{
+#if XASH_GAMECUBE
+			if( Mod_GCStudioModelStreamed( &m_pSubModel[j] ))
+				continue; /* vertices are in the ARAM mesh pack */
+#endif
 			pverts = (vec3_t *)((byte *)pstudiohdr + m_pSubModel[j].vertindex);
 
 			for( k = 0; k < m_pSubModel[j].numverts; k++ )
@@ -1298,6 +1483,15 @@ static void Mod_StudioComputeBounds( void *buffer, vec3_t mins, vec3_t maxs, qbo
 		Mod_StudioAccumulateBoneVerts( bone_mins, bone_maxs, &vert_count, vert_mins, vert_maxs, &bone_count );
 	}
 
+#if XASH_GAMECUBE
+	if( !vert_count && pstudiohdr->numseq > 0 )
+	{
+		/* Every mesh streamed and no resident animation: sequence 0's box. */
+		pseqdesc = (mstudioseqdesc_t *)((byte *)pstudiohdr + pstudiohdr->seqindex);
+		Mod_StudioBoundVertex( bone_mins, bone_maxs, &vert_count, pseqdesc->bbmin );
+		Mod_StudioBoundVertex( bone_mins, bone_maxs, &vert_count, pseqdesc->bbmax );
+	}
+#endif
 	VectorCopy( bone_mins, mins );
 	VectorCopy( bone_maxs, maxs );
 }
@@ -1589,6 +1783,10 @@ static qboolean Mod_SwapStudioModel( const char *name, void *buffer, size_t buff
 		{
 			mstudiomodel_t *pmodel = (mstudiomodel_t *)( mod_base + pbodypart->modelindex ) + j;
 			le_struct_swap( mstudiomodel_swap, pmodel );
+#if XASH_GAMECUBE
+			if( Mod_GCStudioModelStreamed( pmodel ))
+				continue; /* mesh data is in the big-endian ARAM pack */
+#endif
 
 			le_array_swap((float *)( mod_base + pmodel->vertindex ), pmodel->numverts * 3 );
 			le_array_swap((float *)( mod_base + pmodel->normindex ), pmodel->numnorms * 3 );
@@ -2162,6 +2360,9 @@ gc_mesh_only_done: ;
 	mod->numframes = Mod_StudioBodyVariations( mod );
 	mod->radius = RadiusFromBounds( mod->mins, mod->maxs );
 	mod->flags = phdr->flags; // copy header flags
+#if XASH_GAMECUBE
+	Mod_GCStudioMeshPackPreload( phdr );
+#endif
 
 	if( loaded ) *loaded = true;
 }
@@ -2207,11 +2408,20 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 
 		for( j = 0; j < pbodypart[i].nummodels; j++, pmodel++ )
 		{
-			mstudiomesh_t *pmesh = (mstudiomesh_t *)((byte *)phdr + pmodel->meshindex );
+			mstudiomesh_t *pmesh;
+			byte *base = (byte *)phdr;
+
+			/* Streamed: done per model on its first fetch at draw time
+			 * (Mod_GCStudioMeshUvFix). Fetching here, inside the load, put
+			 * the ring next to the staged *T.mdl and the Axis body bound
+			 * the wrong texels (ceres PR 108: rainbow skin). */
+			if( Mod_GCStudioModelStreamed( pmodel ))
+				continue;
+			pmesh = (mstudiomesh_t *)( base + pmodel->meshindex );
 
 			for( k = 0; k < pmodel->nummesh; k++, pmesh++ )
 			{
-				short *cmd = (short *)((byte *)phdr + pmesh->triindex );
+				short *cmd = (short *)( base + pmesh->triindex );
 				int tex, max_s = 0, max_t = 0;
 				int n;
 
@@ -2477,11 +2687,15 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 			phdr->skinindex = phdr->textureindex + (int)size1;
 			in = (byte *)src_hdr + src_hdr->textureindex;
 			out = (byte *)phdr + phdr->textureindex;
-			memcpy( out, in, size1 + size2 );
-			src_tex = (mstudiotexture_t *)((byte *)src_hdr + src_hdr->textureindex );
+			/* The staged *T.mdl can sit right after a mesh grown in place
+			 * (Mod_GCStudioBssGrowLast), so source and destination may
+			 * overlap: move, which copies each texture's GL index with it.
+			 * Re-reading src_tex[i].index after an overlapping memcpy
+			 * picked up other textures' bytes (ceres PR 108: the Axis body
+			 * bound wrong textures, rainbow skin). */
+			memmove( out, in, size1 + size2 );
+			(void)src_tex;
 			dst_tex = (mstudiotexture_t *)out;
-			for( i = 0; i < phdr->numtextures; i++ )
-				dst_tex[i].index = src_tex[i].index;
 			Con_Reportf( "Xash3D GameCube: deferred T.mdl skins '%s' n=%d kept=%s\n",
 				mod->name, phdr->numtextures, Q_memprint( merged ));
 			Mod_GCFixStudioUvDomains( phdr );

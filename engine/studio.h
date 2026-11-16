@@ -969,6 +969,10 @@ typedef struct
 	int32_t		blendnorminfoindex;
 } mstudiomodel_t;
 
+// GameCube: a body-group model whose mesh data lives in an ARAM mesh pack
+// (unused == this, unused2 == pack entry, offsets relative to that blob)
+#define GC_STUDIO_MESH_STREAMED 0x534D4347 // "GCMS" little-endian
+
 // vec3_t	boundingbox[model][bone][2];		// complex intersection info
 
 // meshes
