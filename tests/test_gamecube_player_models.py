@@ -49,6 +49,31 @@ class PlayerModelStagingTests(unittest.TestCase):
 			self.assertEqual(name, "models/player/" + packs[0].name)
 			self.assertLess(len(core), len(model))
 
+	def test_meshes_streamed_to_pack(self):
+		disc = load("build_gamecube_disc", ROOT / "scripts/build-gamecube-disc.py")
+		splitter = load("split_studio_mdl", DODGC / "tools/split_studio_mdl.py")
+		fixture = load("split_fixture", DODGC / "tests/test_split_studio_mdl.py")
+		if not hasattr(splitter, "stream_meshes") or not hasattr(fixture, "build_body_model"):
+			self.skipTest("dod-gc splitter without mesh streaming")
+		model, want, _ = fixture.build_body_model()
+		with tempfile.TemporaryDirectory() as tmp:
+			data = Path(tmp)
+			folder = data / "models/player/us-inf"
+			folder.mkdir(parents=True)
+			(folder / "us-inf.mdl").write_bytes(model)
+			with zipfile.ZipFile(io.BytesIO(), "w") as archive:
+				self.assertEqual(disc.inject_gc_player_models(archive, data, splitter), 1)
+				core = archive.read("gc_studio/us-inf.mdl")
+			meshes = list((data / "models/player").glob("mesh_*.gcm"))
+			self.assertEqual(len(meshes), 1)
+			self.assertEqual(meshes[0].read_bytes()[:4], b"GCAP")
+			numgroups, groupindex = struct.unpack_from("<ii", core, 172)
+			last = groupindex + 104 * (numgroups - 1)
+			self.assertEqual(core[last + 32 : last + 96].split(b"\0")[0].decode(), "models/player/" + meshes[0].name)
+			bodypart = struct.unpack_from("<i", core, 140 + 4 * splitter.HDR_FIELDS.index("bodypartindex"))[0]
+			models = struct.unpack_from("<i", core, bodypart + 72)[0]
+			self.assertEqual(struct.unpack_from("<i", core, models + 64)[0], splitter.MESH_STREAMED)
+
 
 
 def make_tex_model(textures):

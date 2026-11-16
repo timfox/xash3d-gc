@@ -2794,6 +2794,10 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 # (Mod_GCAnimPackGet), leaving a mesh core of about 250 KB for gc_studio/.
 GC_PLAYER_MODELS = ("axis-inf", "axis-para", "brit-inf", "us-inf", "us-para")
 GC_PLAYER_PACK_PATH = "models/player/anim_%s.gca"
+# Outfit variants (bodies, heads, helmets, gear) are ~70-80% of a core's mesh
+# bytes but one model per body part is drawn: their meshes go to a pack the
+# engine keeps in ARAM (Mod_GCStudioMeshBase), so both team cores fit MEM1.
+GC_PLAYER_MESH_PATH = "models/player/mesh_%s.gcm"
 GC_PLAYER_SKIN_EDGE = 128  # longest edge of a baked player skin
 
 
@@ -2864,11 +2868,22 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 		core = files.get(stem + ".mdl")
 		if core is None:
 			continue
+		mesh_note = ""
+		if hasattr(splitter, "stream_meshes"):
+			try:
+				streamed, mesh_packs = splitter.stream_meshes(core, GC_PLAYER_MESH_PATH)
+			except Exception as exc:  # keep the resident-mesh core
+				print(f"  player model {stem}: meshes stay resident ({exc})")
+			else:
+				mesh_note = f", meshes {len(core) - len(streamed)} bytes to " + ", ".join(mesh_packs)
+				core = streamed
+				files.update(mesh_packs)
 		pack_rel = ""
 		for name, payload in files.items():
-			if not name.endswith(".gca"):
+			if not name.endswith((".gca", ".gcm")):
 				continue
-			pack_rel = name
+			if name.endswith(".gca"):
+				pack_rel = name
 			if name not in packs:
 				dest = data / Path(GC_PLAYER_PACK_PATH).parent / name
 				dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2880,7 +2895,7 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 			continue
 		archive.writestr(arcname, core, compress_type=zipfile.ZIP_STORED)
 		staged += 1
-		print(f"  player model {stem}: {src.stat().st_size} → core {len(core)} bytes, animation {pack_rel}")
+		print(f"  player model {stem}: {src.stat().st_size} → core {len(core)} bytes, animation {pack_rel}{mesh_note}")
 		# Skins: the retail <stem>T.mdl, or the textures the splitter took out.
 		tex_arc = f"gc_studio/{stem}t.mdl"
 		if tex_arc in archive.NameToInfo:
@@ -2905,7 +2920,7 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 			print(f"  player skins {stem}: no {stem}T.mdl found, body will draw untextured")
 	if packs:
 		total = sum(packs.values())
-		print(f"  player animation: {len(packs)} pack(s), {total} bytes, in {data / 'models' / 'player'}")
+		print(f"  player animation and mesh packs: {len(packs)}, {total} bytes, in {data / 'models' / 'player'}")
 	return staged
 
 

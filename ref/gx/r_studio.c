@@ -113,6 +113,9 @@ static studio_draw_state_t  g_studio;                   // global studio state
 // global variables
 static qboolean m_fDoRemap;
 static mstudiomodel_t *m_pSubModel;
+// mesh offsets are relative to this: the header, or (GameCube) the model's
+// blob fetched from its ARAM mesh pack
+static byte *m_pSubModelBase;
 static mstudiobodyparts_t *m_pBodyPart;
 static player_info_t *m_pPlayerInfo;
 static studiohdr_t *m_pStudioHeader;
@@ -1332,8 +1335,8 @@ static void R_StudioBuildNormalTable( void )
 	{
 		short *ptricmds;
 
-		pmesh = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex ) + j;
-		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex );
+		pmesh = (mstudiomesh_t *)(m_pSubModelBase + m_pSubModel->meshindex ) + j;
+		ptricmds = (short *)(m_pSubModelBase + pmesh->triindex );
 
 		while(( i = *( ptricmds++ )))
 		{
@@ -1382,8 +1385,8 @@ static void R_StudioGenerateNormals( void )
 	{
 		short *ptricmds;
 
-		pmesh = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex ) + j;
-		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex );
+		pmesh = (mstudiomesh_t *)(m_pSubModelBase + m_pSubModel->meshindex ) + j;
+		ptricmds = (short *)(m_pSubModelBase + pmesh->triindex );
 
 		while(( i = *( ptricmds++ )))
 		{
@@ -1542,6 +1545,22 @@ static void R_StudioSetupModel( int bodypart, void **ppbodypart, void **ppsubmod
 	index = index % m_pBodyPart->nummodels;
 
 	m_pSubModel = (mstudiomodel_t *)((byte *)m_pStudioHeader + m_pBodyPart->modelindex ) + index;
+	m_pSubModelBase = (byte *)m_pStudioHeader;
+#if XASH_GAMECUBE
+	if( m_pSubModel->unused == GC_STUDIO_MESH_STREAMED )
+	{
+		extern byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel );
+		static mstudiomodel_t empty; /* not available this frame: draw nothing */
+
+		m_pSubModelBase = Mod_GCStudioMeshBase( m_pStudioHeader, m_pSubModel );
+		if( !m_pSubModelBase )
+		{
+			memcpy( empty.name, m_pSubModel->name, sizeof( empty.name ));
+			m_pSubModel = &empty;
+			m_pSubModelBase = (byte *)m_pStudioHeader;
+		}
+	}
+#endif
 
 	if( ppbodypart )
 		*ppbodypart = m_pBodyPart;
@@ -2358,12 +2377,12 @@ static void R_StudioDrawPoints( void )
 #endif
 
 	m_skinnum = RI.currententity->curstate.skin;
-	pvertbone = ((byte *)m_pStudioHeader + m_pSubModel->vertinfoindex );
-	pnormbone = ((byte *)m_pStudioHeader + m_pSubModel->norminfoindex );
+	pvertbone = (m_pSubModelBase + m_pSubModel->vertinfoindex );
+	pnormbone = (m_pSubModelBase + m_pSubModel->norminfoindex );
 
-	pmesh = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex );
-	pstudioverts = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->vertindex );
-	pstudionorms = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->normindex );
+	pmesh = (mstudiomesh_t *)(m_pSubModelBase + m_pSubModel->meshindex );
+	pstudioverts = (vec3_t *)(m_pSubModelBase + m_pSubModel->vertindex );
+	pstudionorms = (vec3_t *)(m_pSubModelBase + m_pSubModel->normindex );
 
 #if XASH_GAMECUBE
 	/* Mesh-only lean stubs (w_crowbar): textureindex/skinindex are 0. Treating
@@ -2523,7 +2542,7 @@ static void R_StudioDrawPoints( void )
 	}
 
 	// NOTE: rewind normals at start
-	pstudionorms = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->normindex );
+	pstudionorms = (vec3_t *)(m_pSubModelBase + m_pSubModel->normindex );
 
 #if XASH_GAMECUBE
 	memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
@@ -2536,7 +2555,7 @@ static void R_StudioDrawPoints( void )
 		float s, t;
 
 		pmesh = g_studio.meshes[j].mesh;
-		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex );
+		ptricmds = (short *)(m_pSubModelBase + pmesh->triindex );
 
 		if( mesh_only )
 		{

@@ -606,8 +606,8 @@ recycles the oldest blocks and never a block handed out this frame.
 #ifndef GC_ANIMPACK_POOL
 #define GC_ANIMPACK_POOL ( 256u * 1024u )
 #endif
-#define GC_ANIMPACK_MAX     3
-#define GC_ANIMPACK_ENTRIES 64
+#define GC_ANIMPACK_MAX     8   /* team animation, team meshes, viewmodel animation */
+#define GC_ANIMPACK_ENTRIES 96
 #define GC_ANIMPACK_MAGIC   0x47434150u /* "GCAP" */
 #define GC_ANIMPACK_HDR     32u
 #define GC_ANIMPACK_CHUNK   ( 32u * 1024u )
@@ -910,6 +910,73 @@ static void *Mod_GCAnimPackGet( studiohdr_t *phdr, mstudioseqdesc_t *pseqdesc )
 	if( (size_t)pseqdesc->numblends * phdr->numbones * sizeof( mstudioanim_t ) > sizeof( bindpose ))
 		Host_Error( "%s: no animation for %s\n", __func__, pseqdesc->label );
 	return (void *)bindpose;
+}
+
+/*
+ * Streamed body-group meshes (dod-gc split_studio_mdl.py --mesh-pack). A DoD
+ * soldier core carries every outfit variant but draws one model per body
+ * part, so the variants' meshes, triangle commands, vertices, normals and
+ * bone bytes live in a big-endian pack (".gcm", same GCAP layout as the
+ * animation packs) kept in ARAM. A streamed mstudiomodel_t keeps its counts,
+ * has unused == GC_STUDIO_MESH_STREAMED, unused2 == its pack entry, and its
+ * offsets are relative to that entry's blob. The drawn blobs share the
+ * animation ring, pinned for the frame that fetched them.
+ */
+static int Mod_GCStudioMeshGroup( const studiohdr_t *phdr )
+{
+	const mstudioseqgroup_t *group;
+	int i;
+
+	if( phdr->numseqgroups <= 1 || phdr->seqgroupindex <= 0 )
+		return 0;
+	group = (const mstudioseqgroup_t *)((const byte *)phdr + phdr->seqgroupindex );
+	for( i = phdr->numseqgroups - 1; i > 0; i-- )
+	{
+		if( !Q_stricmp( COM_FileExtension( group[i].name ), "gcm" ))
+			return i;
+	}
+	return 0;
+}
+
+static qboolean Mod_GCStudioModelStreamed( const mstudiomodel_t *pmodel )
+{
+	return pmodel->unused == GC_STUDIO_MESH_STREAMED;
+}
+
+/* Open the mesh pack at load time, so its ARAM upload (which uses the ring
+ * as the bounce buffer) never lands between a fetch and its draw. */
+static void Mod_GCStudioMeshPackPreload( const studiohdr_t *phdr )
+{
+	const int g = Mod_GCStudioMeshGroup( phdr );
+
+	if( g > 0 )
+		Mod_GCAnimPackOpen( ((const mstudioseqgroup_t *)((const byte *)phdr + phdr->seqgroupindex ))[g].name );
+}
+
+/* Base for a body-group model's mesh offsets: the header itself, or the
+ * model's blob fetched from the mesh pack. NULL when the blob cannot be had
+ * this frame; the caller draws nothing for that body part. */
+byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
+{
+	static int warned;
+	const mstudioseqgroup_t *group;
+	gc_animpack_t *pk;
+	void *blob = NULL;
+	int g;
+
+	if( !Mod_GCStudioModelStreamed( pmodel ))
+		return (byte *)phdr;
+	g = Mod_GCStudioMeshGroup( phdr );
+	if( g <= 0 )
+		return NULL;
+	group = (const mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex ) + g;
+	pk = Mod_GCAnimPackOpen( group->name );
+	if( pk )
+		blob = Mod_GCAnimPackFetch( pk, pmodel->unused2 );
+	if( !blob && warned++ < 8 )
+		Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame\n",
+			group->name, pmodel->name );
+	return (byte *)blob;
 }
 #endif // XASH_GAMECUBE
 
@@ -1268,6 +1335,10 @@ static void Mod_StudioComputeBounds( void *buffer, vec3_t mins, vec3_t maxs, qbo
 
 		for( j = 0; j < pbodypart[i].nummodels; j++ )
 		{
+#if XASH_GAMECUBE
+			if( Mod_GCStudioModelStreamed( &m_pSubModel[j] ))
+				continue; /* vertices are in the ARAM mesh pack */
+#endif
 			pverts = (vec3_t *)((byte *)pstudiohdr + m_pSubModel[j].vertindex);
 
 			for( k = 0; k < m_pSubModel[j].numverts; k++ )
@@ -1298,6 +1369,15 @@ static void Mod_StudioComputeBounds( void *buffer, vec3_t mins, vec3_t maxs, qbo
 		Mod_StudioAccumulateBoneVerts( bone_mins, bone_maxs, &vert_count, vert_mins, vert_maxs, &bone_count );
 	}
 
+#if XASH_GAMECUBE
+	if( !vert_count && pstudiohdr->numseq > 0 )
+	{
+		/* Every mesh streamed and no resident animation: sequence 0's box. */
+		pseqdesc = (mstudioseqdesc_t *)((byte *)pstudiohdr + pstudiohdr->seqindex);
+		Mod_StudioBoundVertex( bone_mins, bone_maxs, &vert_count, pseqdesc->bbmin );
+		Mod_StudioBoundVertex( bone_mins, bone_maxs, &vert_count, pseqdesc->bbmax );
+	}
+#endif
 	VectorCopy( bone_mins, mins );
 	VectorCopy( bone_maxs, maxs );
 }
@@ -1589,6 +1669,10 @@ static qboolean Mod_SwapStudioModel( const char *name, void *buffer, size_t buff
 		{
 			mstudiomodel_t *pmodel = (mstudiomodel_t *)( mod_base + pbodypart->modelindex ) + j;
 			le_struct_swap( mstudiomodel_swap, pmodel );
+#if XASH_GAMECUBE
+			if( Mod_GCStudioModelStreamed( pmodel ))
+				continue; /* mesh data is in the big-endian ARAM pack */
+#endif
 
 			le_array_swap((float *)( mod_base + pmodel->vertindex ), pmodel->numverts * 3 );
 			le_array_swap((float *)( mod_base + pmodel->normindex ), pmodel->numnorms * 3 );
@@ -2162,6 +2246,9 @@ gc_mesh_only_done: ;
 	mod->numframes = Mod_StudioBodyVariations( mod );
 	mod->radius = RadiusFromBounds( mod->mins, mod->maxs );
 	mod->flags = phdr->flags; // copy header flags
+#if XASH_GAMECUBE
+	Mod_GCStudioMeshPackPreload( phdr );
+#endif
 
 	if( loaded ) *loaded = true;
 }
@@ -2207,7 +2294,11 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 
 		for( j = 0; j < pbodypart[i].nummodels; j++, pmodel++ )
 		{
-			mstudiomesh_t *pmesh = (mstudiomesh_t *)((byte *)phdr + pmodel->meshindex );
+			mstudiomesh_t *pmesh;
+
+			if( Mod_GCStudioModelStreamed( pmodel ))
+				continue; /* triangle commands are in the ARAM mesh pack */
+			pmesh = (mstudiomesh_t *)((byte *)phdr + pmodel->meshindex );
 
 			for( k = 0; k < pmodel->nummesh; k++, pmesh++ )
 			{
