@@ -451,6 +451,8 @@ draw hudsprite routine
 static void SPR_DrawGeneric( int frame, float x, float y, float width, float height, const wrect_t *prc )
 {
 	float	s1, s2, t1, t2;
+	/* An explicit size scales the sprite (or its rectangle) to it. */
+	const qboolean sized = width > 0.0f && height > 0.0f;
 
 	if( width == -1 && height == -1 )
 	{
@@ -493,8 +495,11 @@ static void SPR_DrawGeneric( int frame, float x, float y, float width, float hei
 
 		// calc user-defined rectangle
 		SPR_AdjustTexCoords( texnum, width, height, &s1, &t1, &s2, &t2 );
-		width = rc.right - rc.left;
-		height = rc.bottom - rc.top;
+		if( !sized )
+		{
+			width = rc.right - rc.left;
+			height = rc.bottom - rc.top;
+		}
 	}
 	else
 	{
@@ -3867,7 +3872,15 @@ static void GAME_EXPORT pfnSPR_DrawGeneric( int frame, int x, int y, const wrect
 	pglEnable( GL_BLEND );
 	pglBlendFunc( blendsrc, blenddst ); // g-cont. are params is valid?
 #endif
+#if XASH_GAMECUBE
+	/* The DoD retail HUD draws its 640-res art at real size on the 320x240
+	 * HUD space through this call: masked like SPR_DrawHoles. */
+	ref.dllFuncs.GL_SetRenderMode( kRenderTransColor );
 	SPR_DrawGeneric( frame, x, y, width, height, prc );
+	ref.dllFuncs.GL_SetRenderMode( kRenderNormal );
+#else
+	SPR_DrawGeneric( frame, x, y, width, height, prc );
+#endif
 }
 
 /*
