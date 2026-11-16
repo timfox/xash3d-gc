@@ -55,7 +55,14 @@ static qboolean Mem_GCMenuIdleSoftFail( void )
  * room for both indexes after ZIP_NAME_MAX shrink without starving HUDs. */
 #define GC_FS_ARENA_SIZE (192u * 1024u)
 #else
-#define GC_FS_ARENA_SIZE (512u * 1024u)
+/* No FileSystem Pool arena on the HL1 build.  The old 512 KiB grab only
+ * succeeded when the heap happened to have that much unclaimed at FS init:
+ * every working retail route ran with it failing (284-456 KiB unclaimed),
+ * and once unrelated BSS savings let it succeed (640 KiB unclaimed) it pinned
+ * ~420 KiB idle and starved boot -- every chapter hung in HUD InitInput with
+ * "can't alloc ... no free memory".  FS blocks use the heap and the boot
+ * arena fallback, as on every route that worked. */
+#define GC_FS_ARENA_SIZE 0u
 #endif
 #define GC_FS_ARENA_MIN (2u * 1024u)
 #endif
@@ -1011,7 +1018,7 @@ static poolhandle_t Mem_InitPool( mempool_t *pool, const char *name, unsigned in
 	pool->realsize = sizeof( mempool_t );
 	Q_strncpy( pool->name, name, sizeof( pool->name ));
 #if XASH_GAMECUBE
-	if( !Q_stricmp( name, "FileSystem Pool" ))
+	if( GC_FS_ARENA_SIZE > 0 && !Q_stricmp( name, "FileSystem Pool" ))
 	{
 		pool->gc_arena = Q_malloc( GC_FS_ARENA_SIZE );
 		if( pool->gc_arena )

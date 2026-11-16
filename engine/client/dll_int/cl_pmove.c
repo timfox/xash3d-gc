@@ -1219,6 +1219,13 @@ void CL_PredictMovement( qboolean repredicting )
 	cl.local.usehull = to->playerstate.usehull;
 	if( !repredicting || !cl_lw.value )
 		cl.local.viewmodel = to->client.viewmodel;
+#if XASH_GAMECUBE
+	/* The DoD client's local weapon prediction knows no DoD weapons and
+	 * predicts viewmodel 0, which hid the held gun on every frame (ceres
+	 * lt2: vm=0 with the v_ model resident). Keep the server's choice. */
+	if( !cl.local.viewmodel && frame->clientdata.viewmodel )
+		cl.local.viewmodel = frame->clientdata.viewmodel;
+#endif
 
 	if( FBitSet( to->client.flags, FL_ONGROUND ))
 	{

@@ -37,7 +37,7 @@ static GXTexObj gc_bloom_tex;
 /* Floor sits under the sky and pale hulls, above sand and water.
  * A floor of 112 let the sunlit ground through and the add clipped it white.
  * Scale stays 1 so the halo does not reprint the mesh. */
-#define GC_BLOOM_THRESHOLD 188 /* 0..255 luma floor — keep glow, kill shift */
+#define GC_BLOOM_THRESHOLD 172 /* 0..255 luma floor. 188 suited the old clipped lighting; sunlit plaster now sits near 190 */
 #define GC_BLOOM_TINT_R 255
 #define GC_BLOOM_TINT_G 236
 #define GC_BLOOM_TINT_B 196

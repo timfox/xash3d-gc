@@ -2349,6 +2349,14 @@ static void R_StudioDrawPoints( void )
 	if( !m_pStudioHeader )
 		return;
 
+#if XASH_GAMECUBE
+	/* Lost Coast characters: Flipper skins, lights and draws them from
+	 * prebuilt display lists (gc_studio/<name>.gca, r_gx_actor.c). */
+	if( GC_UseGxWorldDraw() && R_GXActorDraw( RI.currententity, RI.currentmodel,
+		m_pStudioHeader, g_studio.bonestransform ))
+		return;
+#endif
+
 	m_skinnum = RI.currententity->curstate.skin;
 	pvertbone = ((byte *)m_pStudioHeader + m_pSubModel->vertinfoindex );
 	pnormbone = ((byte *)m_pStudioHeader + m_pSubModel->norminfoindex );
@@ -3750,11 +3758,19 @@ void R_DrawViewModel( void )
 	qboolean gx_studio = false;
 	extern qboolean GC_CapFacesWantViewmodel( void );
 	const qboolean lean_vm = (( gEngfuncs.Sys_CheckParm( "-gcnewgame" )
-			|| GC_CapFacesWantViewmodel())
+			|| GC_CapFacesWantViewmodel()
+			|| ( view && view->curstate.modelindex > 0 ))
 		&& !gEngfuncs.Sys_CheckParm( "-gcfullphysics" )
 		&& view && view->model && view->model->type == mod_studio
 		&& view->model->cache.data
 		&& ( GC_UseLowResWorldProbe() || GC_UseGxWorldDraw() ));
+#endif
+
+#if XASH_GAMECUBE
+	/* The video stress test flythrough has no weapon in hand. Its skin is
+	 * also not resident on this route, so it drew as a white hook. */
+	if( gEngfuncs.Sys_CheckParm( "-gcvst" ))
+		return;
 #endif
 
 	R_GatherPlayerLight( view );
@@ -3771,7 +3787,13 @@ void R_DrawViewModel( void )
 		static qboolean cap_vm_skip_logged;
 		static qboolean cap_vm_allow_logged;
 
-		if( !GC_CapFacesWantViewmodel())
+		/* The server handing us a held weapon (bound by the lean emitter
+		 * with its model index) is as good as a menu team pick: bot
+		 * matches and auto-joins never set the CapFaces pick latches. */
+		const qboolean held = view && view->model && view->curstate.modelindex > 0
+			&& view->model->type == mod_studio && view->model->cache.data;
+
+		if( !GC_CapFacesWantViewmodel() && !held )
 		{
 			if( !cap_vm_skip_logged )
 			{
