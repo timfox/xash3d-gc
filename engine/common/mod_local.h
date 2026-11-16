@@ -187,6 +187,9 @@ qboolean Mod_GCWorldSurfacesPinned( model_t *mod ); /* G213: surfaces outside sc
 qboolean Mod_GCWorldSurfacesScratchRetained( model_t *mod ); /* G283: scratch retain-pin */
 /* G92: retained BSP scratch is not a Mem_ block — skip Mem_Free on changelevel. */
 qboolean Mod_GCIsRetainedBspScratch( const void *buf );
+/* True when the world keeps real hull0 clipnodes (WorldDL pack present), so
+ * point traces are safe on the CapFaces (-gcworldrender) route. */
+qboolean Mod_GCWorldTraceReady( const model_t *world );
 void Mod_GCClearRetainedBspScratch( void );
 #if XASH_GAMECUBE
 /* G154: when LUMP_LIGHTING lives in ARAM (c5a1 tip/scratch OOM), CapFaces/G180

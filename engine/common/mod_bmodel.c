@@ -9084,6 +9084,11 @@ static qboolean Mod_GCWorldDLPackPresent( const model_t *mod )
 		Con_Reportf( "Xash3D GameCube: world DL pack hit %s\n", path );
 	return cached_yes > 0;
 }
+
+qboolean Mod_GCWorldTraceReady( const model_t *world )
+{
+	return Mod_GCWorldDLPackPresent( world );
+}
 #endif
 
 static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod, byte *mod_base, size_t bufferlen )

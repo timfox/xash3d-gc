@@ -2946,8 +2946,12 @@ static void GAME_EXPORT pfnTraceLine( const float *v1, const float *v2, int fNoM
 
 #if XASH_GAMECUBE
 	/* CapFaces: hull0/planes may still sit in BSP scratch. UpdateStatusBar →
-	 * SV_Move → PM_RecursiveHullCheck Guru'd after drawn=365 (014249/015156). */
-	if( Sys_CheckParm( "-gcworldrender" ))
+	 * SV_Move → PM_RecursiveHullCheck Guru'd after drawn=365 (014249/015156).
+	 * With a WorldDL pack the load keeps real hull0 clipnodes (bots already
+	 * PM_Move on them), and stubbing every trace to fraction 1 meant no
+	 * bullet ever hit a player or the floor (ceres lt3: frac=1.00 into a
+	 * target's box). Only stub when hull0 was collapsed. */
+	if( Sys_CheckParm( "-gcworldrender" ) && !Mod_GCWorldTraceReady( sv.worldmodel ))
 	{
 		memset( &trace, 0, sizeof( trace ));
 		trace.fraction = 1.0f;
