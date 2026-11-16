@@ -1170,8 +1170,12 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	 * PM_Move even on this route. WorldDL keeps the hull0 clipnodes resident
 	 * ("WorldDL keep hull0 clipnodes" in the load log), which is what the skip
 	 * below was protecting. */
+	/* A match started from the in-game Create Server menu runs without -gclistenserver, but it
+	 * hosts several slots (bots and a human): the human must walk there too. Only the single-slot
+	 * capture/solo routes keep the skip. */
 	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw()
 		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" )
+		&& svs.maxclients <= 1
 		&& !FBitSet( cl->flags, FCL_FAKECLIENT ))
 	{
 		static qboolean gc_pm_skip_logged;
