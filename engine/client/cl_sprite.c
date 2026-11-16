@@ -197,9 +197,11 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 		 * SPR_DrawHoles rectangles map onto the smaller texture unchanged. */
 		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width > 128 || pinframe.height > 128 ))
 		{
-			/* 128 keeps the art at the size it is drawn; its 32 KiB texture
-			 * needs some heap. Below that, 64 fits the small HUD slots. */
-			const int cap = ( Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 96 * 1024 ) ? 64 : 128;
+			/* 128 keeps the art at the size it is drawn, but its texture
+			 * needs contiguous heap: on dod_caen 101 KiB free still could not
+			 * hold the 16 KiB pixels and the sheet fell to a 2x2 fallback.
+			 * Below 256 KiB free, 64 fits the small HUD slots. */
+			const int cap = ( Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
 			int f = 1;
 
 			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
