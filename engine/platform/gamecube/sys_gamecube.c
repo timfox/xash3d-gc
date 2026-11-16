@@ -5,6 +5,7 @@ Copyright (C) 2026 xash3d-gc contributors
 Platform layer ported from Division-Zero-GX/xash3d-wii.
 */
 #include "platform/platform.h"
+#include "common.h"
 #include "cvar.h"
 #include "net_ws.h"
 #include "system.h"
@@ -2235,4 +2236,49 @@ void GCube_Shutdown( void )
 	gc_fat_write_root[0] = '\0';
 	gc_fat_base_root[0] = '\0';
 #endif
+}
+
+/*
+================
+GC_PrintBuildInfo
+
+build-info.txt is the short stamp dod-gc's scripts/build-info.sh puts in the disc's game
+directory: which repos and commits the disc was built from. Print it once at boot so every log
+says what it was running.
+================
+*/
+void GC_PrintBuildInfo( void )
+{
+	fs_offset_t size = 0;
+	byte *data = FS_LoadFile( "build-info.txt", &size, false );
+	const char *p, *end;
+	int lines = 0;
+
+	if( !data )
+	{
+		SYS_Report( "Xash3D GameCube: build-info.txt not on this disc\n" );
+		return;
+	}
+
+	p = (const char *)data;
+	end = p + size;
+	while( p < end && lines < 24 )
+	{
+		char line[200];
+		size_t len = 0;
+
+		while( p + len < end && p[len] != '\n' && p[len] != '\r' && len < sizeof( line ) - 1 )
+			len++;
+		memcpy( line, p, len );
+		line[len] = '\0';
+		if( len )
+			SYS_Report( "Xash3D GameCube: build-info: %s\n", line );
+		p += len;
+		while( p < end && *p != '\n' )
+			p++;
+		if( p < end )
+			p++;
+		lines++;
+	}
+	Mem_Free( data );
 }

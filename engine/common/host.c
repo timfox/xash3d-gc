@@ -1560,6 +1560,9 @@ static void Host_InitCommon( int argc, char **argv, const char *progname, qboole
 	FS_LoadGameInfo();
 	Host_CheckGameLibraries();
 	Cvar_PostFSInit();
+#if XASH_GAMECUBE
+	GC_PrintBuildInfo();
+#endif
 
 	// NOTE: only once resource without which engine can't continue work
 	#if XASH_GAMECUBE
