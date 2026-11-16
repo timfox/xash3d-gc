@@ -2053,6 +2053,126 @@ static void R_GXWorldDLDrawSkyline( void )
 	}
 }
 
+/* Chunk sort keys, then (after the chunk loop) the frame's deferred batches.
+ * One array: the keys are dead by the time batches are recorded. */
+static u64 gc_wd_keys[GC_WD_MAX_CHUNKS];
+static u16 gc_wd_mat_count[GC_WD_MAX_MATS * 2 + 1];
+
+/* Material-grouped world draw. Every packed bind that misses the texture slot
+ * cache DMAs the texture from ARAM and waits on the GP; drawn chunk by chunk
+ * front to back, a frame of dod_charlie changed texture 450-700 times for 36
+ * materials (70-120 ms). Resident chunks stay put for the whole frame (the
+ * cache never evicts a chunk drawn this frame, nor a lightmap page), so their
+ * batches are recorded and drawn grouped by material, front to back inside
+ * each group: one bind per material and pool. Forced chunks (shared bounce)
+ * and the two-layer blend / env batches still draw in place.
+ * Record: chunk(16) batch(16) key = mat*2+far (16) lightmap slot+1 (8). */
+static int gc_wd_defer_n;
+static int gc_wd_defer_on = -1;
+
+static int R_GXWorldDLMatTexnum( u32 mat )
+{
+	if( gc_wd_texnum[mat] <= 0 )
+	{
+		const int again = GC_WorldTexnumByHash( gc_wd_mats[mat].tex_hash );
+
+		if( again <= 0 )
+			return 0;
+		gc_wd_texnum[mat] = (s16)again;
+	}
+	return gc_wd_texnum[mat];
+}
+
+static void R_GXWorldDLDeferFlush( int *drawn )
+{
+	static u16 idx[GC_WD_MAX_CHUNKS];
+	const int nkeys = (int)gc_wd_hdr.n_mats * 2;
+	int k, cur_chunk = -1, cur_lm = -1, cur_key = -1, cur_far = -1;
+	qboolean bound = false;
+
+	if( gc_wd_defer_n <= 0 )
+		return;
+	/* Counting sort by key: stable, so each material keeps front-to-back. */
+	memset( gc_wd_mat_count, 0, sizeof( gc_wd_mat_count[0] ) * ( nkeys + 1 ));
+	for( k = 0; k < gc_wd_defer_n; k++ )
+		gc_wd_mat_count[(( gc_wd_keys[k] >> 16 ) & 0xffffu ) + 1]++;
+	for( k = 1; k <= nkeys; k++ )
+		gc_wd_mat_count[k] += gc_wd_mat_count[k - 1];
+	for( k = 0; k < gc_wd_defer_n; k++ )
+		idx[gc_wd_mat_count[( gc_wd_keys[k] >> 16 ) & 0xffffu]++] = (u16)k;
+
+	for( k = 0; k < gc_wd_defer_n; k++ )
+	{
+		const u64 r = gc_wd_keys[idx[k]];
+		const int ci = (int)( r >> 48 );
+		const int bi = (int)(( r >> 32 ) & 0xffffu );
+		const int key = (int)(( r >> 16 ) & 0xffffu );
+		const int lm = (int)(( r >> 8 ) & 0xffu );
+		const u32 mat = (u32)key >> 1;
+		const int far_pool = key & 1;
+		byte *chunk;
+		const gc_wd_batch_t *b;
+
+		if( gc_wd_slots[ci].cache_ofs < 0 )
+			continue;	/* cannot happen: drawn-this-frame chunks are kept */
+		chunk = gc_wd_cache + gc_wd_slots[ci].cache_ofs;
+		b = (const gc_wd_batch_t *)( chunk + ( gc_wd_hdr.version == 2 ? 16 : 8 )) + bi;
+		if( ci != cur_chunk )
+		{
+			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			cur_chunk = ci;
+		}
+		if( lm != cur_lm )
+		{
+			const int had = gc_wd_chunk_lm;
+
+			gc_wd_chunk_lm = 0;
+			if( lm > 0 )
+			{
+				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * GC_WD_LM_PAGE_BYTES,
+					32, 32, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE );
+				GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
+				GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
+				gc_wd_chunk_lm = 1;
+				gc_wd_lm_binds++;
+			}
+			if( had != gc_wd_chunk_lm )
+				cur_key = -1;	/* lit TEV differs: rebuild the material */
+			cur_lm = lm;
+		}
+		if( key != cur_key )
+		{
+			const int texnum = R_GXWorldDLMatTexnum( mat );
+			const gc_wd_mat_t *m = &gc_wd_mats[mat];
+
+			if( far_pool != cur_far )
+			{
+				R_GXCmprSetFar( far_pool ? true : false );
+				cur_far = far_pool;
+			}
+			bound = false;
+			if( texnum > 0 )
+			{
+				qboolean ok;
+
+				WD_PF( 4, ok = R_GXWorldDLBindTex( (unsigned)texnum ));
+				if( ok )
+				{
+					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
+					bound = true;
+				}
+			}
+			cur_key = key;
+		}
+		if( !bound )
+			continue;
+		GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+		( *drawn )++;
+	}
+	gc_wd_defer_n = 0;
+	R_GXCmprSetFar( false );
+}
+
 int R_GXWorldDLDraw( void )
 {
 	static qboolean logged;
@@ -2176,6 +2296,9 @@ int R_GXWorldDLDraw( void )
 	R_GXWorldDLSetupLit( 0 );
 
 	gc_wd_envq_n = 0;
+	gc_wd_defer_n = 0;
+	if( gc_wd_defer_on < 0 )
+		gc_wd_defer_on = gEngfuncs.Sys_CheckParm( "-gcnomatsort" ) ? 0 : 1;
 	/* Full world first: draw every PVS-visible chunk. Frustum cull is a later
 	 * speed knob (ava-play99-60 sat at 20 chunks with waiting=0 while the
 	 * alley still looked starved). Lazy-load still gates on budget/cache. */
@@ -2218,7 +2341,7 @@ int R_GXWorldDLDraw( void )
 		 * the harbor), then shell-sort the packed keys. Distances are
 		 * positive, so their float bits order like integers. */
 		{
-			static u64 keys[GC_WD_MAX_CHUNKS];
+			u64 *const keys = gc_wd_keys;
 			u64 pf_t = gc_wd_pf_on > 0 ? gettime() : 0;
 			int gap, a, bq;
 
@@ -2271,6 +2394,8 @@ int R_GXWorldDLDraw( void )
 			byte *chunk;
 			u32 nb, k;
 			qboolean forced = false;
+			qboolean chunk_far = false;
+			int lm_slot = 0;	/* lightmap store slot + 1, 0 = unlit */
 
 			i = order[oi];
 			if( R_GXWorldDLIsTower( i ) != want_tower )
@@ -2285,8 +2410,9 @@ int R_GXWorldDLDraw( void )
 				const float dz = gc_wd_chunk_maxs[i * 3 + 2] - gc_wd_chunk_mins[i * 3 + 2];
 				const float span = Q_max( dx, Q_max( dy, dz ));
 				/* A large cliff can cover much of the view even at a distance. */
-				R_GXCmprSetFar( gc_wd_tex_overflow && d2 > 1400.0f * 1400.0f
-					&& span * span < d2 * 0.015625f );
+				chunk_far = gc_wd_tex_overflow && d2 > 1400.0f * 1400.0f
+					&& span * span < d2 * 0.015625f;
+				R_GXCmprSetFar( chunk_far );
 			}
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
@@ -2320,6 +2446,7 @@ int R_GXWorldDLDraw( void )
 					WD_PF( 3, lm_page = R_GXWorldDLLmPage( lm_ofs - 1u ));
 					if( lm_page )
 					{
+						lm_slot = (int)(( lm_page - gc_wd_lm_store ) / GC_WD_LM_PAGE_BYTES ) + 1;
 						GX_InitTexObj( &gc_wd_lm_obj, lm_page, 32, 32, GX_TF_RGB565,
 							GX_CLAMP, GX_CLAMP, GX_FALSE );
 						GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
@@ -2346,6 +2473,19 @@ int R_GXWorldDLDraw( void )
 				if( ( m->flags & GC_WD_MAT_WATER ) && skip_water
 					&& gc_wd_chunk_maxs[i * 3 + 2] > -1024 )
 					continue;
+				/* Plain batch of a resident chunk: draw it with its material
+				 * group after the chunk loop (R_GXWorldDLDeferFlush). */
+				if( gc_wd_defer_on > 0 && !forced && gc_wd_defer_n < GC_WD_MAX_CHUNKS
+					&& !( gc_wd_hdr.version == 2 && m->hash2 && b->mat < GC_WD_BLEND_MATS )
+					&& !(( b->pad & 0x8000u ) && ( m->flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
+						&& gc_wd_hdr.version == 2 ))
+				{
+					gc_wd_keys[gc_wd_defer_n++] = ( (u64)i << 48 ) | ( (u64)k << 32 )
+						| ( (u64)( b->mat * 2u + ( chunk_far ? 1u : 0u )) << 16 )
+						| ( (u64)( lm_slot & 0xff ) << 8 );
+					drawn++;
+					continue;
+				}
 				if( (int)b->mat != cur_mat )
 				{
 					if( gc_wd_texnum[b->mat] < 0 )
@@ -2450,6 +2590,12 @@ int R_GXWorldDLDraw( void )
 				GX_DrawDone();
 			}
 		}
+		}
+		{
+			int deferred_drawn = 0;
+
+			R_GXWorldDLDeferFlush( &deferred_drawn );
+			cur_mat = -1;
 		}
 		R_GXWorldDLEnvFlush();
 		if( !logged || ( gc_wd_frame & 255 ) == 0 )
