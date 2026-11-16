@@ -9618,8 +9618,21 @@ static void R_GXPrepareStudioState( qboolean viewmodel )
 	 * was a compact 27×13×60u scientist 845u from the dump eye).
 	 * GX_Flush alone is not a GP wait — CapFaces still in-flight when the
 	 * vtx desc flips produced the invariant ~28k pure-white silhouettes on
-	 * caen/flash CapFaces listens (identical screen mask across maps). */
-	GX_DrawDone();
+	 * caen/flash CapFaces listens (identical screen mask across maps).
+	 * Only the first studio prep of a frame, or one after another layout,
+	 * drains: back-to-back bots and props already sit on this layout, and
+	 * a drain per model stalled the CPU on the whole world queue (dod_charlie
+	 * spawn). -gcstudiodrain drains every time, as before. */
+	{
+		static int prep_frame = -1;
+		static int always = -1;
+
+		if( always < 0 )
+			always = gEngfuncs.Sys_CheckParm( "-gcstudiodrain" ) ? 1 : 0;
+		if( always || !r_gx_studio_layout || prep_frame != tr.framecount )
+			GX_DrawDone();
+		prep_frame = tr.framecount;
+	}
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
