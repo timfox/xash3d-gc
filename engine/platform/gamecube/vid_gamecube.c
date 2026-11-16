@@ -9612,6 +9612,9 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
 	Cvar_Get( "gc_telemetry", "0", FCVAR_ARCHIVE, "Enable GameCube telemetry reporting (0=disabled, 1=enabled)" );
 	Cvar_Get( "gc_telemetry_format", "0", FCVAR_ARCHIVE, "Telemetry output format (0=short, 1=detailed)" );
 	Cvar_Get( "gc_hud_probe_skip", "0", 0, "GameCube HUD UpdateClientData skip gate during post-map probe" );
+	/* The client picks its HUD tier from this, not gc_quality: the world
+	 * renderer forces gc_quality 0 for its own memory budget. */
+	Cvar_Get( "gc_hud", "1", FCVAR_ARCHIVE, "GameCube HUD: 0=lean sprites, 1=full game HUD" );
 	GC_ReportQualityProfile( "video-init" );
 #endif
 
