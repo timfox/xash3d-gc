@@ -968,6 +968,18 @@ static qboolean Mod_GCStudioModelStreamed( const mstudiomodel_t *pmodel )
 	return pmodel->unused == GC_STUDIO_MESH_STREAMED;
 }
 
+/* The pack entry is an integer stored in the float "unused2" (was
+ * boundingradius). Read its bits: converting the float gave entry 0 for
+ * every model (a denormal), and passing it to printf as %d shifted the
+ * arguments (ceres PR 108: wrong blob per model, DSI in DrawPoints). */
+static int Mod_GCStudioMeshEntry( const mstudiomodel_t *pmodel )
+{
+	int32_t entry;
+
+	memcpy( &entry, &pmodel->unused2, sizeof( entry ));
+	return entry;
+}
+
 /* Open the mesh pack at load time, so its ARAM upload (which uses the ring
  * as the bounce buffer) never lands between a fetch and its draw. */
 static void Mod_GCStudioMeshPackPreload( const studiohdr_t *phdr )
@@ -987,17 +999,18 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 	const mstudioseqgroup_t *group;
 	gc_animpack_t *pk;
 	void *blob = NULL;
-	int g;
+	int g, entry;
 
 	if( !Mod_GCStudioModelStreamed( pmodel ))
 		return (byte *)phdr;
+	entry = Mod_GCStudioMeshEntry( pmodel );
 	g = Mod_GCStudioMeshGroup( phdr );
 	if( g <= 0 )
 		return NULL;
 	group = (const mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex ) + g;
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
-		blob = Mod_GCAnimPackFetch( pk, pmodel->unused2 );
+		blob = Mod_GCAnimPackFetch( pk, entry );
 	if( blob )
 	{
 		/* A blob starts with "GCMB" and every offset the model uses must
@@ -1016,14 +1029,14 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 		{
 			if( warned++ < 8 )
 				Con_Reportf( S_ERROR "Xash3D GameCube: mesh pack '%s' model '%s' entry %d bad blob (len %u magic %.4s v %d/%d n %d/%d m %d/%d)\n",
-					group->name, pmodel->name, pmodel->unused2, len, (const char *)blob,
+					group->name, pmodel->name, entry, len, (const char *)blob,
 					pmodel->vertindex, pmodel->numverts, pmodel->normindex, pmodel->numnorms,
 					pmodel->meshindex, pmodel->nummesh );
 			return NULL;
 		}
 		if( logged++ < 12 )
 			Con_Reportf( "Xash3D GameCube: mesh pack '%s' model '%s' entry %d at %p len %u verts %d norms %d meshes %d\n",
-				group->name, pmodel->name, pmodel->unused2, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
+				group->name, pmodel->name, entry, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
 	}
 	if( !blob && warned++ < 8 )
 		Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame\n",
