@@ -2643,8 +2643,11 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				}
 				r_gx_cmpr_use_big = false;
 			}
-			/* Stub+ARAM without a successful bounce: keep grey 8×8, not rainbow. */
-			if( is_stub && data != bounce && !img->gc_packed_hot )
+			/* Stub+ARAM without a successful bounce: keep grey 8×8, not rainbow.
+			 * With more than one slot the chain sits in slot N, not at the
+			 * bounce base: compare on whether a slot was filled, or every
+			 * stub texture in slots 1..N drew as one 8x8 level (soft ground). */
+			if( is_stub && !used_bounce && !img->gc_packed_hot )
 			{
 				w = 8;
 				h = 8;

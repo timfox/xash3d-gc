@@ -788,13 +788,14 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			{
 				/* Plus a few whole-chain slots for 256x256 textures (about
 				 * 43 KB with L0): in a 24 KB slot they lose L0 and the beach
-				 * and trench ground goes soft. -gccmprbig N sets how many. */
+				 * and trench ground goes soft. -gccmprbig N adds N (default none:
+				 * on charlie fewer 24 KB slots cost more misses than they save). */
 				const size_t small = 24u * 1024u;
 				const size_t big = 44u * 1024u;
 				const size_t keep_gap = 160u * 1024u;	/* later claims (overflow, entity tables) */
 				const size_t gap = GC_MapArenaLargestGap();
 				const size_t avail = gap > keep_gap ? gap - keep_gap : 0;
-				int bn = 8, gn;
+				int bn = 0, gn;
 				byte *gt = NULL;
 				char nb[8];
 
