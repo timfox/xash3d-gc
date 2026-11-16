@@ -17693,7 +17693,9 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		if( ( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gcworldrender" ))
 			&& GC_UseGxWorldDraw() )
 			CL_GameCubeLeanEmitBrushEntities();
+		GC_ProfMark( "render: lean entity emit" );
 		ref.dllFuncs.GL_RenderFrame( &rvp );
+		GC_ProfMark( "render: GL_RenderFrame after world" );
 		GC_WatchdogMark( "newgame frame after GL_RenderFrame" );
 		if( trace )
 			Con_Reportf( "Xash3D GameCube: newgame frame %d after GL_RenderFrame\n", frame_trace );
@@ -17728,6 +17730,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				if( trace )
 					Con_Reportf( "Xash3D GameCube: newgame frame %d HUD begin\n", frame_trace );
 				CL_DrawHUD( CL_ACTIVE );
+				GC_ProfMark( "render: HUD" );
 				/* VGUI is skipped on GC — CapFaces listen team picker painted
 				 * to match DoD Teammenu.res (dark/tan ClassMenu palette).
 				 * Never use kRenderTransAdd here: additive FillRGBA brightens
