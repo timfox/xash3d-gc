@@ -2411,6 +2411,15 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 					}
 				}
 
+				if(( max_s >= ptexture[tex].width || max_t >= ptexture[tex].height ) && base != (byte *)phdr )
+				{
+					static int streamed_logs;
+
+					if( streamed_logs++ < 24 )
+						Con_Reportf( "Xash3D GameCube: G378 streamed '%s' model '%s' mesh %d tex %d '%s' %dx%d uv max %d,%d\n",
+							phdr->name, pmodel->name, k, tex, ptexture[tex].name,
+							ptexture[tex].width, ptexture[tex].height, max_s, max_t );
+				}
 				if( max_s >= ptexture[tex].width )
 				{
 					need_log = 1;
