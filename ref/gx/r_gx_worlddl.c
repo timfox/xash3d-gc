@@ -113,6 +113,7 @@ extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
+extern qboolean R_GXCmprWantsFarShrink( void );
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
@@ -2508,7 +2509,10 @@ int R_GXWorldDLDraw( void )
 				const float dz = gc_wd_chunk_maxs[i * 3 + 2] - gc_wd_chunk_mins[i * 3 + 2];
 				const float span = Q_max( dx, Q_max( dy, dz ));
 				/* A large cliff can cover much of the view even at a distance. */
-				chunk_far = gc_wd_tex_overflow && d2 > 1400.0f * 1400.0f
+				/* Or when there is only the one bounce: a far bind then
+				 * DMAs a quarter of the bytes (R_GXCmprSetFar). */
+				chunk_far = ( gc_wd_tex_overflow || R_GXCmprWantsFarShrink())
+					&& d2 > 1400.0f * 1400.0f
 					&& span * span < d2 * 0.015625f;
 				R_GXCmprSetFar( chunk_far );
 			}

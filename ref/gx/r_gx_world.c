@@ -2296,6 +2296,11 @@ static int r_gx_cmpr_nslots;
 static int r_gx_cmpr_far_n;
 static unsigned r_gx_cmpr_far_cap;
 static qboolean r_gx_cmpr_want_far;
+/* No far pool (a world that got no slots: one 24 KB bounce): a far chunk
+ * still binds one mip down, so its DMA is a quarter of the bytes. Past the
+ * world DL's far distance the 128x128 level is never sampled anyway. */
+static qboolean r_gx_cmpr_far_shrink;
+#define GC_CMPR_FAR_SHRINK_BYTES 2752u	/* 64x64 CMPR chain */
 
 static byte *R_GXCmprSlotPtr( int i )
 {
@@ -2310,9 +2315,12 @@ static byte *R_GXCmprSlotPtr( int i )
 void R_GXCmprSetFar( qboolean far_pool )
 {
 	qboolean want_far = far_pool && r_gx_cmpr_far_n > 0;
-	if( want_far != r_gx_cmpr_want_far )
+	qboolean shrink = far_pool && !r_gx_cmpr_far_n && r_gx_cmpr_nslots <= 2
+		&& !gEngfuncs.Sys_CheckParm( "-gcnofarshrink" );
+	if( want_far != r_gx_cmpr_want_far || shrink != r_gx_cmpr_far_shrink )
 		r_gx_bound_texnum = 0;
 	r_gx_cmpr_want_far = want_far;
+	r_gx_cmpr_far_shrink = shrink;
 }
 static struct
 {
@@ -2321,6 +2329,7 @@ static struct
 	unsigned used;
 	qboolean valid;
 	unsigned texnum;		/* texture whose object is cached below, 0 = none */
+	qboolean far;			/* that object is a far (pool or shrunk) one */
 	GXTexObj obj;			/* ready to load: a resident hit is one GX call */
 } r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
 /* texnum -> slot + 1. A bind of a resident texture skips the mip walk, the
@@ -2419,6 +2428,7 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	r_gx_cmpr_far_n = far_n;
 	r_gx_cmpr_far_cap = far_bytes;
 	r_gx_cmpr_want_far = false;
+	r_gx_cmpr_far_shrink = false;
 	R_GXCmprSlotsReset();
 	GX_InvalidateTexAll();
 	r_gx_bound_texnum = 0;
@@ -2432,6 +2442,12 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 void R_GXPreallocCmprBounce( void )
 {
 	(void)R_GXCmprBounce();
+}
+
+/* True when far chunks should bind one mip down from the lone bounce. */
+qboolean R_GXCmprWantsFarShrink( void )
+{
+	return !r_gx_cmpr_far_n && r_gx_cmpr_nslots <= 2;
 }
 
 /*
@@ -2493,6 +2509,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	gc_gx_tex_t *t = &r_gx_tex_native;
 	static qboolean cap_pack_diag;
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
+	const int hint_i = ( r_gx_cmpr_want_far || r_gx_cmpr_far_shrink ) ? 1 : 0;
 
 	img->gc_packed_used = r_gx_hot.frame;
 	/* With large adopted bounce pools, promote chains too large for a near
@@ -2505,12 +2522,12 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 		img->gc_packed_queued = true;
 		r_gx_hot.queue[r_gx_hot.queued++] = img;
 	}
-	if( !img->gc_packed_hot && texnum < MAX_TEXTURES && r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] )
+	if( !img->gc_packed_hot && texnum < MAX_TEXTURES && r_gx_cmpr_hint[hint_i][texnum] )
 	{
-		const int hs = r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] - 1;
+		const int hs = r_gx_cmpr_hint[hint_i][texnum] - 1;
 
 		if( hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
-			&& r_gx_cmpr_slot[hs].texnum == texnum )
+			&& r_gx_cmpr_slot[hs].texnum == texnum && r_gx_cmpr_slot[hs].far == hint_i )
 		{
 			if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR )
 			{
@@ -2567,7 +2584,9 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				&& ( bounce = R_GXCmprBounce()) != NULL
 				&& r_gx_cmpr_bounce_cap > 0 )
 			{
-				const unsigned slot_cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
+				const unsigned slot_cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap
+					: r_gx_cmpr_far_shrink ? Q_min( GC_CMPR_FAR_SHRINK_BYTES, r_gx_cmpr_bounce_cap )
+					: r_gx_cmpr_bounce_cap;
 				unsigned skip = 0;
 				unsigned remain = img->gc_packed_bytes;
 				unsigned use_shift = 0;
@@ -2653,7 +2672,8 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 			{
 				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].obj = t->obj;
 				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].texnum = texnum;
-				r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] = (u16)( r_gx_cmpr_cur_slot + 1 );
+				r_gx_cmpr_slot[r_gx_cmpr_cur_slot].far = hint_i;
+				r_gx_cmpr_hint[hint_i][texnum] = (u16)( r_gx_cmpr_cur_slot + 1 );
 			}
 		}
 		else
