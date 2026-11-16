@@ -386,7 +386,11 @@ static byte *Mod_GCVMSlotAlloc( size_t size )
 			pick = i;
 	}
 	if( pick < 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: viewmodel slot alloc failed (%s, studio bump=%s)\n",
+			Q_memprint( size ), Q_memprint( gc_studio_bss_bump ));
 		return NULL;
+	}
 	Mod_GCVMSlotEvict( pick );
 	return gc_vm_slot[pick].buf;
 }
@@ -731,6 +735,15 @@ static qboolean Mod_GCAllowRealStudioLoad( const char *name, size_t filesize )
 
 	if( is_view )
 	{
+		/* A viewmodel that fits a viewmodel slot replaces the slot's least
+		 * recently used owner (Mod_GCVMSlotEvict gives back its count and
+		 * bytes), so the slots are its reserved budget. Without this the
+		 * team rifle never loaded once props and bodies had spent the byte
+		 * budget (ceres b302741eb: "deferred studio budget skip
+		 * 'models/v_garand.mdl' (113.42 Kb)" every frame, vm unbound). */
+		if( Mod_GCIsViewModelPath( name ) && filesize >= sizeof( studiohdr_t )
+			&& filesize <= GC_VM_SLOT_SIZE )
+			return true;
 		if( gc_real_studio_view >= GC_REAL_STUDIO_MAX_VIEW )
 			return false;
 	}
