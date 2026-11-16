@@ -1698,7 +1698,7 @@ in `.ai/logs/dolphin-probe-*/stderr.log` or hardware captures.
   for BSP, WAD, MDL, SPR, WAV, TGA/BMP, sentences/titles, and config/script
   files. The RC suite now runs the same audit as the `GoldSrc content format
   audit` gate.
-- Boundary: local Steam-style assets contain no `.pak` sample, so PAK remains
+- Boundary: local retail assets contain no `.pak` sample, so PAK remains
   source-covered by `filesystem/pak.c` with a warning rather than fabricated
   runtime evidence. Intro/media video is reported as a warning and remains
   separate from the core G67 asset-loader gate.

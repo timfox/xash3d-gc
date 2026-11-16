@@ -2409,7 +2409,7 @@ asset tree. It recorded the largest tested samples, including
   or sample validation failure.
 
 **Boundaries:**
-- The local Steam-style `Half-Life/valve` tree has no `.pak` sample. PAK is
+- The local retail `Half-Life/valve` tree has no `.pak` sample. PAK is
   source-covered by `filesystem/pak.c` and reported as a warning rather than
   invented runtime evidence.
 - Intro/media video is reported as a warning and remains outside the core G67

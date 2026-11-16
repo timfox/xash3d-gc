@@ -403,7 +403,7 @@ static void UI_GCDrawFallbackMenu( void )
 		/* Retail composites already include their own lettering and buttons. */
 		if( !gc_menu_reported_retail_ready )
 		{
-			Con_Reportf( "Xash3D GameCube: retail menu steam background ready\n" );
+			Con_Reportf( "Xash3D GameCube: retail menu background ready\n" );
 			gc_menu_reported_retail_ready = true;
 		}
 		return;
@@ -413,7 +413,7 @@ static void UI_GCDrawFallbackMenu( void )
 
 	if( gc_menu_use_baked_retail && !gc_menu_reported_retail_ready )
 	{
-		Con_Reportf( "Xash3D GameCube: retail menu steam background ready\n" );
+		Con_Reportf( "Xash3D GameCube: retail menu background ready\n" );
 		gc_menu_reported_retail_ready = true;
 	}
 

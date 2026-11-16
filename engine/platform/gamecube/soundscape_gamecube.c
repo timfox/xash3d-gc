@@ -143,7 +143,7 @@ static void GC_SoundscapePlay( const gc_ss_rule_t *r )
 	int i;
 
 	if( !r->n_ref || r->mode == 2 )
-		return;	/* fixed positions: none resolve in this map (suppressed on PC too) */
+		return;	/* fixed positions: none resolve in this map (suppressed in retail too) */
 	w = &gc_ss_waves[gc_ss_refs[r->first_ref + COM_RandomLong( 0, r->n_ref - 1 )] % GC_SS_MAX_WAVES];
 	if( !w->samples )
 		return;
@@ -263,7 +263,7 @@ void GC_CapFacesSoundscapeFrame( void )
 	if( cls.state != ca_active || !GC_SoundscapeLoad( ))
 		return;
 	/* The env_soundscape whose radius holds the listener takes over; the
-	 * current one stays until another does. (The PC server also wants a
+	 * current one stays until another does. (The retail server also wants a
 	 * clear line of sight to the entity.) */
 	for( i = 0; i < gc_ss_n_ent; i++ )
 	{

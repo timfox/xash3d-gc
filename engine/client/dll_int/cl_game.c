@@ -80,7 +80,7 @@ static void CL_GameCubeApplySmokeClientBudgets( void )
 		}
 		else
 		{
-			/* Standard: zombie blood + weapon tracers without desktop 256/64. */
+			/* Standard: zombie blood + weapon tracers without the retail 256/64. */
 			particles = 96;
 			beams = 12;
 			tents = 32;

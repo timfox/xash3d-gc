@@ -89,7 +89,7 @@ DOLPHIN_TAS="${DOLPHIN_TAS:-}"
 probe_set_default_landmarks
 GUEST_MARKER="Xash3D GameCube: bootstrap"
 READY_MARKER="Xash3D GameCube: engine subsystems ready"
-RETAIL_MENU_MARKER="Xash3D GameCube: retail menu steam background ready"
+RETAIL_MENU_MARKER="Xash3D GameCube: retail menu background ready"
 RETAIL_MENU_INTERACTIVE_MARKER="Xash3D GameCube: retail menu button text ready"
 RETAIL_MENU_BG_FALLBACK_MARKER="Xash3D GameCube: mainui vidinit background ready"
 RETAIL_MENU_READY_FALLBACK_MARKER="Xash3D GameCube: mainui vidinit menu ready"

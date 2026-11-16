@@ -660,16 +660,15 @@ typedef struct
 
 	// server's build number (might be zero)
 	int build_num;
-	uint8_t steamid[8];
-	uint64_t server_steamid;
+	uint8_t authid[8];
+	uint64_t server_authid;
 
 	// whether server allows cheats or not
 	// set differently depending on protocol and extensions
 	qboolean allow_cheats;
 
-	// if server declares steam auth method, we can use our broker software to get the ticket
-	qboolean steam_auth;
-	qboolean broker_wait;
+	// server declared GoldSrc auth type 3 in its challenge reply
+	qboolean gs_auth;
 	qboolean vac2_secure;
 } client_static_t;
 
@@ -1256,15 +1255,6 @@ void Mobile_StopVibration( void );
 // cl_securedstub.c
 //
 void CL_GetSecuredClientAPI( CL_EXPORT_FUNCS F );
-
-//
-// cl_steam.c
-//
-void SteamBroker_Init( void );
-void SteamBroker_Shutdown( void );
-void SteamBroker_Frame( void );
-qboolean SteamBroker_InitiateGameConnection( netadr_t serveradr, int challenge );
-void SteamBroker_TerminateGameConnection( void );
 
 //
 // cl_video.c

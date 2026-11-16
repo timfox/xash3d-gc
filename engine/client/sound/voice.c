@@ -730,9 +730,9 @@ static uint Voice_CreateGSVoicePacket( byte *out, const byte *voice_data, uint v
 		return 0;
 	}
 
-	if( cls.steamid )
+	if( cls.authid )
 	{
-		memcpy( out + offset, cls.steamid, 8 );
+		memcpy( out + offset, cls.authid, 8 );
 	}
 	else
 	{

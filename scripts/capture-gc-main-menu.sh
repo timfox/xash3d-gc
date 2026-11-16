@@ -113,5 +113,5 @@ if [[ -f "$OUT_DIR/gc-main-menu-vs-retail.png" ]]; then
 	echo "Comparison image: $OUT_DIR/gc-main-menu-vs-retail.png"
 fi
 
-grep -a 'retail menu steam background ready\|RETAIL_READY\|MAP_READY' "$LOG_DIR/probe.log" || true
+grep -a 'retail menu background ready\|RETAIL_READY\|MAP_READY' "$LOG_DIR/probe.log" || true
 exit 0

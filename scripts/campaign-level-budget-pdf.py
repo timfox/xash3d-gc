@@ -258,7 +258,7 @@ def extract_wad_lmp(wad: Path, lump_name: str) -> Image.Image | None:
 
 def chapter_art(chapter: str, bg_dir: Path) -> Image.Image | None:
 	"""Pick a retail loading TGA tile for the chapter."""
-	# Steam loading tiles are lettered; map chapter index to a tile letter.
+	# Retail loading tiles are lettered; map chapter index to a tile letter.
 	letters = "abcdefghijklmnop"
 	idx = 0
 	for i, (name, _, _) in enumerate(CHAPTERS):
