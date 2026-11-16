@@ -6033,7 +6033,7 @@ static qboolean SV_GCEntityKeptWhenStarved( const char *classname )
 
 /* Entities retail DoD maps need for parity: brush walls players collide with
  * or see, and the map logic their target chains run through. They spawn on
- * the DoD route unless the heap or the edict table is nearly spent; then they
+ * the DoD route unless the entity slab or edict table is nearly spent; then they
  * fall back to the old soft-skip so the map still loads. */
 static qboolean SV_GCParityEntity( const char *classname )
 {
@@ -6046,9 +6046,14 @@ static qboolean SV_GCParityEntity( const char *classname )
 		|| !Q_strcmp( classname, "trigger_changetarget" );
 }
 
+/* Their private data comes from the static entity slab, not the heap (on
+ * dod_charlie the heap is already under 48 KiB during the entity loop, which
+ * skipped every func_wall). So the guard is the slab and the edict table,
+ * plus a true heap floor for the strings and links each one adds. */
 static qboolean SV_GCEntityPressure( void )
 {
-	return GC_MemHeapFreeBytes() < 48u * 1024u
+	return GC_MemHeapFreeBytes() < 16u * 1024u
+		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
 		|| svgame.numEntities >= GI->max_edicts - 64;
 }
 
