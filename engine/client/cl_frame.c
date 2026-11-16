@@ -1448,6 +1448,10 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 		{ "p_colt", "pistol" }, { "p_luger", "pistol" }, { "p_bar", "mg" }, { "p_mg42", "mg" },
 		{ "p_30cal", "30cal" }, { "p_bren", "bren" }, { "p_bazooka", "bazooka" }, { "p_pschreck", "pschreck" },
 		{ "p_spade", "spade" }, { "p_grenade", "gren" }, { "p_stick", "stick" },
+		/* BAR, British and para guns, on the body's nearest aim pose. */
+		{ "p_barbu", "mg" }, { "p_enfield", "bolt" }, { "p_enfields", "bolt" }, { "p_sten", "mp40" },
+		{ "p_piat", "bazooka" }, { "p_webley", "pistol" }, { "p_fairbairn", "knife" }, { "p_paraknife", "knife" },
+		{ "p_mills", "gren" }, { "p_m1carb", "rifle" }, { "p_grease", "tommy" }, { "p_fg42", "stg44" },
 	};
 	const char *name;
 	int i;

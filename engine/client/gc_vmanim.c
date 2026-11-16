@@ -37,6 +37,19 @@ static const gc_vm_model_t gc_vm_models[] =
 	{ "v_spade",		GC_VMF_CROWBAR },
 	{ "v_grenade",		GC_VMF_GRENADE },
 	{ "v_stick",		GC_VMF_GRENADE },
+	// BAR, British and para loadouts
+	{ "v_bar",		GC_VMF_DODGUN },
+	{ "v_enfield",		GC_VMF_DODGUN },
+	{ "v_enfield_scoped",	GC_VMF_DODGUN },
+	{ "v_sten",		GC_VMF_DODGUN },
+	{ "v_piat",		GC_VMF_DODGUN },
+	{ "v_webley",		GC_VMF_DODGUN },
+	{ "v_m1carbine",		GC_VMF_DODGUN },
+	{ "v_greasegun",		GC_VMF_DODGUN },
+	{ "v_fg42",		GC_VMF_DODGUN },
+	{ "v_fairbairn",		GC_VMF_CROWBAR },
+	{ "v_paraknife",		GC_VMF_CROWBAR },
+	{ "v_mills",		GC_VMF_GRENADE },
 };
 
 static char GC_VMLower( char c )
