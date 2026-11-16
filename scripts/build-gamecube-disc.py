@@ -2623,6 +2623,40 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128) -> bytes | None
 	return bytes(out)
 
 
+# engine/common/model.c GC_VM_SLOT_SIZE: a viewmodel above this cannot use a
+# reserved viewmodel slot.
+GC_VIEWMODEL_SLOT_BYTES = 128 * 1024
+GC_VIEWMODEL_PACK_PATH = "models/anim_%s.gca"
+
+
+def split_heavy_viewmodel(src: Path, stem: str, data: Path, splitter=None) -> bytes | None:
+	"""Mesh core for an oversized viewmodel; its animation pack goes loose in data."""
+	if splitter is None:
+		splitter = load_studio_splitter()
+	if splitter is None:
+		print(f"  viewmodel {stem}: split_studio_mdl.py not found (set DODGC_TOOLS); left whole")
+		return None
+	try:
+		files, _ = splitter.split(src.read_bytes(), stem, pack_path=GC_VIEWMODEL_PACK_PATH)
+	except Exception as exc:  # StudioError or a malformed file: keep the lean model
+		print(f"  viewmodel {stem}: split failed ({exc})")
+		return None
+	core = files.get(stem + ".mdl")
+	if core is None:
+		return None
+	for name, blob in files.items():
+		if not name.endswith(".gca"):
+			continue
+		dest = data / Path(GC_VIEWMODEL_PACK_PATH).parent / name
+		dest.parent.mkdir(parents=True, exist_ok=True)
+		if not dest.is_file() or dest.stat().st_size != len(blob):
+			dest.write_bytes(blob)
+		print(f"  viewmodel {stem}: core {len(core)} bytes, animation {name} ({len(blob)} bytes)")
+	if len(core) > GC_VIEWMODEL_SLOT_BYTES:
+		print(f"  viewmodel {stem}: core still over the {GC_VIEWMODEL_SLOT_BYTES} byte slot")
+	return core
+
+
 def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
 	"""Add allowlisted MDLs into an existing bootstrap ZIP under gc_studio/."""
 	staged = 0
@@ -2705,6 +2739,19 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			del archive.NameToInfo[arcname]
 			archive.filelist = [zi for zi in archive.filelist if zi.filename != arcname]
 		payload = None if is_tex_companion or keep_skins else lean_studio_mesh_bytes(src)
+		# Heavy DoD viewmodels (lean v_30cal ~186 KiB, v_mg42 ~268 KiB) do
+		# not fit a 128 KiB engine viewmodel slot, and most of the bytes
+		# are animation. Split them like the team bodies: a mesh core in
+		# gc_studio/ plus an animation pack streamed one sequence at a time.
+		if (
+			payload is not None
+			and stem.startswith("v_")
+			and stem in dod_capfaces_lean
+			and len(payload) > GC_VIEWMODEL_SLOT_BYTES
+		):
+			core = split_heavy_viewmodel(src, stem, data)
+			if core is not None:
+				payload = core
 		if payload is None:
 			archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
 			if is_tex_companion:
