@@ -14,6 +14,10 @@ GNU General Public License for more details.
 */
 
 #include "ref_common.h"
+#if XASH_GAMECUBE
+color24 *Mod_GCHydrateSurfaceLightmap( const msurface_t *surf );
+qboolean Mod_GCAramLightmapActive( void );
+#endif
 #include "xash3d_mathlib.h"
 #include "enginefeatures.h"
 #include "pm_local.h"
@@ -294,7 +298,13 @@ start:
 
 		cv->r = cv->g = cv->b = cv->a = 0;
 
-		if( !surf->samples )
+		const color24 *samples = surf->samples;
+#if XASH_GAMECUBE
+		/* The world lightmap lives in ARAM: fetch this face's samples. */
+		if( !samples )
+			samples = Mod_GCHydrateSurfaceLightmap( surf );
+#endif
+		if( !samples )
 			return true;
 
 		int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
@@ -306,7 +316,7 @@ start:
 
 		g_trace_fraction = midf;
 
-		const color24 *lm = surf->samples + Q_rint( dt ) * smax + Q_rint( ds );
+		const color24 *lm = samples + Q_rint( dt ) * smax + Q_rint( ds );
 		const color24 *dm = NULL;
 		matrix3x4 tbn = { 0 };
 
@@ -388,7 +398,11 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 	if( lvec )
 		VectorClear( lvec );
 
-	if( !gp_cl->models[1] || !gp_cl->models[1]->lightdata )
+	if( !gp_cl->models[1] || ( !gp_cl->models[1]->lightdata
+#if XASH_GAMECUBE
+		&& !Mod_GCAramLightmapActive()
+#endif
+		))
 		return (colorVec){ 255, 255, 255, 0 };
 
 	float last_fraction = 1.0f;

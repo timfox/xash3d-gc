@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "r_local.h"
 #if XASH_GAMECUBE
+qboolean Mod_GCAramLightmapActive( void );
 extern void GC_ProfMark( const char *name );
 #define R_STUDIO_PROF( name ) GC_ProfMark( name )
 #else
@@ -3492,7 +3493,7 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 
 				next_log = g_studio.time + 4.0;
 				light_logs++;
-				gEngfuncs.Con_Reportf( "Xash3D GameCube: player light ent=%d org=(%.0f,%.0f,%.0f) amb=%d shade=%d vec=(%.2f,%.2f,%.2f) color=(%.2f,%.2f,%.2f) floor=(%d,%d,%d) skyvec=(%.2f,%.2f,%.2f) skycolor=(%.0f,%.0f,%.0f) bone0vec=(%.2f,%.2f,%.2f)\n",
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: player light ent=%d org=(%.0f,%.0f,%.0f) amb=%d shade=%d vec=(%.2f,%.2f,%.2f) color=(%.2f,%.2f,%.2f) floor=(%d,%d,%d) skyvec=(%.2f,%.2f,%.2f) skycolor=(%.0f,%.0f,%.0f) bone0vec=(%.2f,%.2f,%.2f) aramlm=%d\n",
 					RI.currententity->index, RI.currententity->origin[0], RI.currententity->origin[1], RI.currententity->origin[2],
 					lighting.ambientlight, lighting.shadelight,
 					lighting.plightvec[0], lighting.plightvec[1], lighting.plightvec[2],
@@ -3500,7 +3501,8 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 					RI.currententity->cvFloorColor.r, RI.currententity->cvFloorColor.g, RI.currententity->cvFloorColor.b,
 					mv ? mv->skyvec[0] : 0.0f, mv ? mv->skyvec[1] : 0.0f, mv ? mv->skyvec[2] : 0.0f,
 					mv ? mv->skycolor[0] : 0.0f, mv ? mv->skycolor[1] : 0.0f, mv ? mv->skycolor[2] : 0.0f,
-					g_studio.blightvec[0][0], g_studio.blightvec[0][1], g_studio.blightvec[0][2] );
+					g_studio.blightvec[0][0], g_studio.blightvec[0][1], g_studio.blightvec[0][2],
+					Mod_GCAramLightmapActive() ? 1 : 0 );
 			}
 		}
 #endif
