@@ -72,6 +72,9 @@ static qboolean Mod_GCIsWeaponModelPath( const char *path )
 		"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger",
 		"p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44",
 		"p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
+		/* BAR, British and para loadouts. */
+		"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley",
+		"p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
 		NULL
 	};
 	char bare[64];
@@ -734,6 +737,9 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		/* The rest of the table-driven DoD gun set (dod_weapon.cpp). */
 		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 		"v_bazooka", "v_panzerschreck",
+		/* BAR, British and para loadouts. */
+		"v_bar", "v_enfield", "v_enfield_scoped", "v_sten", "v_piat", "v_webley",
+		"v_fairbairn", "v_mills", "v_m1carbine", "v_greasegun", "v_fg42", "v_paraknife",
 		NULL
 	};
 	int i;

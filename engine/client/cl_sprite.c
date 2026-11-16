@@ -31,6 +31,9 @@ static char  sprite_name[MAX_QPATH];
 static char  group_suffix[8];
 static uint  r_texFlags = 0;
 static int   sprite_version;
+#if XASH_GAMECUBE
+static qboolean sprite_masked;	/* SPR_ALPHTEST: index 255 is the hole */
+#endif
 
 /*
 ================
@@ -210,9 +213,46 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 
 				small.width = pinframe.width / f;
 				small.height = pinframe.height / f;
+				/* Each texel covers an f x f block. Plain nearest picks its
+				 * corner, which drops thin art such as the Lee-Enfield clip
+				 * (index 255 is the hole in alphatest sheets). There, keep the
+				 * opaque texel nearest the block centre when the block holds
+				 * at least f opaque texels (a one-texel line across it).
+				 * Writes land at or before the block being read, so this
+				 * works in place. */
 				for( y = 0; y < small.height; y++ )
+				{
 					for( x = 0; x < small.width; x++ )
-						px[y * small.width + x] = px[( y * f ) * pinframe.width + x * f];
+					{
+						const byte *blk = px + ( y * f ) * pinframe.width + x * f;
+						int bx, by, opaque = 0, best = -1, best_d = 0x7fffffff;
+						byte pick = 255;
+
+						for( by = 0; by < f; by++ )
+						{
+							for( bx = 0; bx < f; bx++ )
+							{
+								const byte c = blk[by * pinframe.width + bx];
+								int d;
+
+								if( c == 255 )
+									continue;
+								opaque++;
+								d = ( 2 * bx + 1 - f ) * ( 2 * bx + 1 - f ) + ( 2 * by + 1 - f ) * ( 2 * by + 1 - f );
+								if( d < best_d )
+								{
+									best_d = d;
+									best = c;
+								}
+							}
+						}
+						if( !sprite_masked )
+							pick = blk[0];
+						else if( best >= 0 && opaque >= f )
+							pick = (byte)best;
+						px[y * small.width + x] = pick;
+					}
+				}
 				memcpy( (void *)pin, &small, sizeof( small ));
 				load_bytes = small.width * small.height;
 				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
@@ -313,6 +353,9 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 
 	r_texFlags = mod->numtexinfo;
 	sprite_version = pin->version;
+#if XASH_GAMECUBE
+	sprite_masked = false;
+#endif
 	Q_strncpy( sprite_name, mod->name, sizeof( sprite_name ));
 	COM_StripExtension( sprite_name );
 
@@ -330,6 +373,9 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 		rgbdata_t  *pal;
 		size_t      pal_bytes = *numi * 3;
 
+#if XASH_GAMECUBE
+		sprite_masked = psprite->texFormat == SPR_ALPHTEST;
+#endif
 		// install palette
 		switch( psprite->texFormat )
 		{

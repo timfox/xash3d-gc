@@ -6215,10 +6215,22 @@ static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index )
 		if( !Q_strcmp( keyname, "classname" ))
 		{
 #if XASH_DODGC_NETWORK
-			/* The current game DLL selects DM spawns by classname. Merely
-			 * exporting DoD aliases left both players at info_player_start. */
-			if( !Q_strcmp( value, "info_player_allies" ) || !Q_strcmp( value, "info_player_axis" ))
-				Q_strncpy( value, "info_player_deathmatch", sizeof( value ));
+			/* Team spawns keep their retail classname when the game DLL
+			 * exports it. A DLL that only knows DM starts gets them as
+			 * info_player_deathmatch, with the side kept in v.team
+			 * (1 Allies, 2 Axis) so spawns stay on the right side. */
+			int spawn_team = 0;
+
+			if( !Q_strcmp( value, "info_player_allies" ))
+				spawn_team = 1;
+			else if( !Q_strcmp( value, "info_player_axis" ))
+				spawn_team = 2;
+			if( spawn_team )
+			{
+				ent->v.team = spawn_team;
+				if( !SV_GetEntityClass( value ))
+					Q_strncpy( value, "info_player_deathmatch", sizeof( value ));
+			}
 #endif
 			KeyValueData kvd = {
 				.szClassName = NULL,

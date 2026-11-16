@@ -1437,6 +1437,8 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 # list is Mod_GCIsWeaponModelPath in engine/common/model.c.
 GC_STUDIO_PWEAPONS = (
 	"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger", "p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44", "p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
+	# British (Allies on British maps) and para loadouts.
+	"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley", "p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
 )
 
 # Small allowlist injected into gamecube-bootstrap.pk3 as gc_studio/*.mdl so
@@ -1475,6 +1477,21 @@ GC_STUDIO_MODELS = (
 	"models/v_panzerschreck.mdl",
 	"models/w_bazooka_rocket.mdl",
 	"models/w_crowbar.mdl",
+	# BAR, British and para view models: the game precaches them late, on the
+	# maps whose loadouts use them, and without a gc_studio copy they never load.
+	"models/v_bar.mdl",
+	"models/v_enfield.mdl",
+	"models/v_enfield_scoped.mdl",
+	"models/v_sten.mdl",
+	"models/v_piat.mdl",
+	"models/v_webley.mdl",
+	"models/v_fairbairn.mdl",
+	"models/v_mills.mdl",
+	"models/v_m1carbine.mdl",
+	"models/v_greasegun.mdl",
+	"models/v_fg42.mdl",
+	"models/v_paraknife.mdl",
+	"models/w_mills.mdl",
 	# Third-person weapons (what bots and other players hold): lean mesh plus
 	# a 64x64 skin companion, loaded when a player first holds one.
 	"models/p_garand.mdl",
@@ -1494,6 +1511,18 @@ GC_STUDIO_MODELS = (
 	"models/p_mg42pr.mdl",
 	"models/p_bazooka.mdl",
 	"models/p_pschreck.mdl",
+	"models/p_barbu.mdl",
+	"models/p_enfield.mdl",
+	"models/p_enfields.mdl",
+	"models/p_sten.mdl",
+	"models/p_piat.mdl",
+	"models/p_webley.mdl",
+	"models/p_fairbairn.mdl",
+	"models/p_mills.mdl",
+	"models/p_m1carb.mdl",
+	"models/p_grease.mdl",
+	"models/p_fg42.mdl",
+	"models/p_paraknife.mdl",
 	# DoD CapFaces map props (env_model / dod_object).
 	# Tip: skip forts/kingtiger; caen unique order saturates 6 slots before bulb.
 	"models/mapmodels/hk_satchel.mdl",
@@ -2715,6 +2744,7 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 		"v_grenade", "v_stick", "w_grenade", "w_stick",
 		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 		"v_bazooka", "v_panzerschreck", "w_bazooka_rocket",
+		"v_bar", "v_enfield", "v_enfield_scoped", "v_sten", "v_piat", "v_webley", "v_fairbairn", "v_mills", "v_m1carbine", "v_greasegun", "v_fg42", "v_paraknife", "w_mills",
 		*GC_STUDIO_PWEAPONS,
 		# CapFaces map props (env_model) — pull from Expansion1 / content/dod.
 		"sandbags", "bulb", "hk_satchel", "furniture", "by_rubble_set",
@@ -2761,6 +2791,7 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			"v_amerk", "v_spade", "v_grenade", "v_stick",
 			"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 			"v_bazooka", "v_panzerschreck",
+			"v_bar", "v_enfield", "v_enfield_scoped", "v_sten", "v_piat", "v_webley", "v_fairbairn", "v_mills", "v_m1carbine", "v_greasegun", "v_fg42", "v_paraknife",
 			*GC_STUDIO_PWEAPONS,
 			# Other CapFaces map props stay lean-stripped for tip maps.
 			"bulb", "hk_satchel", "furniture", "by_rubble_set",
