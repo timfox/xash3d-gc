@@ -5906,7 +5906,8 @@ static int R_GXPropBind( u8 mat )
 				if( hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
 					&& r_gx_cmpr_slot[hs].aram == key && r_gx_cmpr_slot[hs].skip == skip_b
 					&& r_gx_cmpr_slot[hs].bytes == remain
-					&& ( hs >= r_gx_cmpr_nslots - r_gx_cmpr_far_n ) == ( r_gx_cmpr_want_far ? 1 : 0 ))
+					&& hs < r_gx_cmpr_nslots - r_gx_cmpr_big_n
+					&& ( hs >= r_gx_cmpr_nslots - r_gx_cmpr_big_n - r_gx_cmpr_far_n ) == ( r_gx_cmpr_want_far ? 1 : 0 ))
 				{
 					r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
 					r_gx_cmpr_hits++;
