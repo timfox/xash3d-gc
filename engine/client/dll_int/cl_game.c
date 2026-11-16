@@ -451,10 +451,12 @@ draw hudsprite routine
 static void SPR_DrawGeneric( int frame, float x, float y, float width, float height, const wrect_t *prc )
 {
 	float	s1, s2, t1, t2;
-	/* An explicit size scales the sprite (or its rectangle) to it. */
+	/* An explicit size scales the sprite (or its rectangle) to it; the
+	 * rectangle is still clamped and normalised against the image size. */
 	const qboolean sized = width > 0.0f && height > 0.0f;
+	const float dest_w = width, dest_h = height;
 
-	if( width == -1 && height == -1 )
+	if(( width == -1 && height == -1 ) || ( sized && prc ))
 	{
 		int	w, h;
 
@@ -495,7 +497,12 @@ static void SPR_DrawGeneric( int frame, float x, float y, float width, float hei
 
 		// calc user-defined rectangle
 		SPR_AdjustTexCoords( texnum, width, height, &s1, &t1, &s2, &t2 );
-		if( !sized )
+		if( sized )
+		{
+			width = dest_w;
+			height = dest_h;
+		}
+		else
 		{
 			width = rc.right - rc.left;
 			height = rc.bottom - rc.top;
