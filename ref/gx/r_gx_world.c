@@ -5998,7 +5998,10 @@ static byte *R_GXPropCacheGet( unsigned model )
 		if( gc_prop_cache_tried || r_gx_cmpr_nslots <= 8 )
 			return NULL;
 		gc_prop_cache_tried = true;
-		for( try_sz = 640u * 1024u; try_sz >= 256u * 1024u && !gc_prop_cache; try_sz -= 128u * 1024u )
+		/* In 16 KB steps: 640 KB did not fit, the next try was 512 KB, and
+		 * the harbor wants up to 621 KB of full-detail chains. Whatever did
+		 * not fit was streamed from ARAM every frame (13 reads, 3.2 ms). */
+		for( try_sz = 704u * 1024u; try_sz >= 256u * 1024u && !gc_prop_cache; try_sz -= 16u * 1024u )
 		{
 			gc_prop_cache = Mod_GCStudioSkinAlloc( try_sz );
 			if( gc_prop_cache )
