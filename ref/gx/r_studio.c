@@ -841,7 +841,7 @@ static void R_StudioMergeBones( cl_entity_t *e, model_t *m_pSubModel )
 	static float     pos[MAXSTUDIOBONES][3];
 	float f;
 
-	if( e->curstate.sequence >= m_pStudioHeader->numseq )
+	if( e->curstate.sequence < 0 || e->curstate.sequence >= m_pStudioHeader->numseq )
 		e->curstate.sequence = 0;
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + e->curstate.sequence;
@@ -1025,7 +1025,7 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	}
 #endif
 
-	if( e->curstate.sequence >= m_pStudioHeader->numseq )
+	if( e->curstate.sequence < 0 || e->curstate.sequence >= m_pStudioHeader->numseq )
 		e->curstate.sequence = 0;
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + e->curstate.sequence;
@@ -1172,7 +1172,7 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	{
 		qboolean copy_bones = true;
 
-		if( m_pPlayerInfo->gaitsequence >= m_pStudioHeader->numseq )
+		if( m_pPlayerInfo->gaitsequence < 0 || m_pPlayerInfo->gaitsequence >= m_pStudioHeader->numseq )
 			m_pPlayerInfo->gaitsequence = 0;
 
 		pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + m_pPlayerInfo->gaitsequence;
@@ -3180,7 +3180,7 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 	int   iBlend;
 	float dt, flYaw; // view direction relative to movement
 
-	if( RI.currententity->curstate.sequence >= m_pStudioHeader->numseq )
+	if( RI.currententity->curstate.sequence < 0 || RI.currententity->curstate.sequence >= m_pStudioHeader->numseq )
 		RI.currententity->curstate.sequence = 0;
 
 	dt = bound( 0.0f, g_studio.frametime, 1.0f );
@@ -3231,7 +3231,7 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 		RI.currententity->angles[YAW] += 360.0f;
 	RI.currententity->latched.prevangles[YAW] = RI.currententity->angles[YAW];
 
-	if( pplayer->gaitsequence >= m_pStudioHeader->numseq )
+	if( pplayer->gaitsequence < 0 || pplayer->gaitsequence >= m_pStudioHeader->numseq )
 		pplayer->gaitsequence = 0;
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + pplayer->gaitsequence;
@@ -3444,6 +3444,19 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			/* Bisect switch for the third-person weapon draw. */
 			if( m_pStudioHeader && gEngfuncs.Sys_CheckParm( "-gcnopweapondraw" ))
 				m_pStudioHeader = NULL;
+			/* A runtime-loaded p_ whose cache was reused would hand MergeBones
+			 * a garbage header (a wild seqdesc in EstimateFrame). */
+			if( m_pStudioHeader && ( m_pStudioHeader->ident != IDSTUDIOHEADER
+				|| m_pStudioHeader->numseq <= 0 || m_pStudioHeader->numbones <= 0
+				|| m_pStudioHeader->numbones > MAXSTUDIOBONES ))
+			{
+				static int bad_logs;
+
+				if( bad_logs++ < 4 )
+					gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: player weapon %s header is not a studio header (ident %08x); not drawn\n",
+						pweaponmodel->name, (unsigned)m_pStudioHeader->ident );
+				m_pStudioHeader = NULL;
+			}
 			if( m_pStudioHeader && !Q_stristr( pweaponmodel->name, "/p_" ))
 			{
 				static int stand_in_logs;
