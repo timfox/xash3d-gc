@@ -1198,7 +1198,24 @@ qboolean Mod_GCEnsureLandmarkViewModel( const char *model_path )
 	Image_GCPurgeDecodeScratch();
 	ok = Mod_GCPromoteStudioPath( model_path );
 	if( ok )
+	{
+		extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+
 		Q_strncpy( gc_landmark_viewmodel, model_path, sizeof( gc_landmark_viewmodel ));
+		/* The map-load skin pass skips viewmodels nobody holds yet
+		 * ("deferred skins skip ... viewmodel not held"), so a weapon
+		 * promoted here when it is first held needs its *t skins now, or
+		 * it draws flat grey (ceres PR 97: v_garand bound, untextured). */
+		mod = Mod_FindName( model_path, false );
+		if( mod && mod->cache.data && Mod_GCIsViewModelPath( model_path ))
+		{
+			qboolean skinned = Mod_GCAttachStudioSkins( mod );
+
+			Con_Reportf( "Xash3D GameCube: held viewmodel skins '%s' ok=%d\n",
+				model_path, skinned ? 1 : 0 );
+			R_GXStudioInvalidateBindings();
+		}
+	}
 	return ok;
 }
 
