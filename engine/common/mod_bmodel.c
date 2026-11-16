@@ -1024,6 +1024,16 @@ size_t Mod_GCWorldArraySpillFree( void )
 	return cap > gc_world_array_spill_used ? cap - gc_world_array_spill_used : 0;
 }
 
+/* Free spill once the CapFaces CMPR bounce has borrowed its high 32 KiB.
+ * Mod_GCWorldArraySpillFree reports the full cap until that borrow, so a
+ * reserve sized from it came up 32 KiB short later (ceres: us-inf core
+ * 238.45 Kb against 236.19 Kb free after a 242 KiB reserve). */
+size_t Mod_GCWorldArraySpillFreeLasting( void )
+{
+	return GC_WORLD_ARRAY_SPILL_USABLE > gc_world_array_spill_used
+		? GC_WORLD_ARRAY_SPILL_USABLE - gc_world_array_spill_used : 0;
+}
+
 size_t Mod_GCWorldArraySpillUsed( void )
 {
 	return gc_world_array_spill_used;

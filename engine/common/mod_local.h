@@ -198,6 +198,7 @@ color24 *Mod_GCHydrateSurfaceLightmap( const msurface_t *surf );
 qboolean Mod_GCAramLightmapActive( void );
 byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
 void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+size_t Mod_GCWorldArraySpillFreeLasting( void );
 void *Mod_GCWorldArraySpillTryGrow( const void *ptr, size_t old_bytes, size_t new_bytes, const char *what );
 size_t Mod_GCWorldArraySpillUsed( void );
 void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
