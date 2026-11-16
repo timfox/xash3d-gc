@@ -7489,6 +7489,202 @@ static void R_GXSmokeDraw( void )
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 }
 
+/* Fires (Source env_fire, media/fi_d2_lostcoast.gcf): the flame layers of
+ * the retail particle system (env_fire_large in particles/fire_01.pcf), baked
+ * by tools/bake_lostcoast_fire.py in lostcoast-gc. Every rate, size, speed and
+ * fade below is read from that file; the frames are the system's own sprite
+ * sheet in one CMPR atlas, premultiplied and added to the scene ($addself).
+ * As with the smoke, a particle's age is a phase of the clock: no state. */
+typedef struct
+{
+	float	rate, grav, fps;
+	u8	rmin, rmax, amin, amax, cmin, cmax, seq0, nseq, spread, maxp, fade, zoff;
+	float	vz0, vz1, cf0, cf1;
+} gc_fire_layer_t;
+
+typedef struct
+{
+	u16		ver, n, layers, nseq, side, cell;
+	gc_fire_layer_t	layer[2];
+	struct { u8 first, count; u16 life; } seq[8];
+	float		org[8][3];
+	GXTexObj	obj;
+} gc_fire_t;
+
+static gc_fire_t *gc_fire;
+static s8 gc_fire_state;	/* 0 untried, 1 ready, -1 none */
+
+static void R_GXFireLoad( void )
+{
+	file_t *f;
+	gc_fire_t *fi;
+	u32 magic, bytes, at;
+
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return;
+	gc_fire_state = -1;
+	f = gEngfuncs.fsapi->Open( "media/fi_d2_lostcoast.gcf", "rb", false );
+	if( !f )
+		return;
+	fi = (gc_fire_t *)GC_MapLoadBufferTailAlloc(
+		Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), 512u + 256u * 256u / 2u );
+	if( fi && gEngfuncs.fsapi->Read( f, &magic, 4 ) == 4 && magic == 0x47436669u
+		&& gEngfuncs.fsapi->Read( f, fi, 12 ) == 12 && fi->ver == 1 && fi->n <= 8 && fi->layers <= 2
+		&& fi->nseq <= 8 && fi->side == 256 && fi->cell
+		&& gEngfuncs.fsapi->Read( f, fi->layer, fi->layers * 40 ) == (fs_offset_t)( fi->layers * 40 )
+		&& gEngfuncs.fsapi->Read( f, fi->seq, fi->nseq * 4 ) == (fs_offset_t)( fi->nseq * 4 )
+		&& gEngfuncs.fsapi->Read( f, fi->org, fi->n * 12 ) == (fs_offset_t)( fi->n * 12 ))
+	{
+		at = 16u + fi->layers * 40u + fi->nseq * 4u + fi->n * 12u;
+		bytes = (u32)fi->side * fi->side / 2u;
+		gEngfuncs.fsapi->Seek( f, (fs_offset_t)(( at + 31u ) & ~31u ), SEEK_SET );
+		if( gEngfuncs.fsapi->Read( f, (byte *)fi + 512, bytes ) == (fs_offset_t)bytes )
+		{
+			DCFlushRange( (byte *)fi + 512, bytes );
+			GX_InitTexObj( &fi->obj, (byte *)fi + 512, fi->side, fi->side, GX_TF_CMPR, GX_CLAMP, GX_CLAMP, GX_FALSE );
+			GX_InitTexObjFilterMode( &fi->obj, GX_LINEAR, GX_LINEAR );
+			gc_fire = fi;
+			gc_fire_state = 1;
+		}
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: fires=%d\n", gc_fire ? gc_fire->n : 0 );
+}
+
+static void R_GXFireDraw( void )
+{
+	vec3_t forward, right, up;
+	const float *eye = RI.rvp.vieworigin;
+	const float now = gp_cl ? (float)gp_cl->time : 0.0f;
+	const gc_fire_t *fi;
+	float cell;
+	int per_row, fn, ln, sn, i;
+	Mtx mv;
+
+	if( !gc_fire_state )
+		R_GXFireLoad();
+	if( gc_fire_state <= 0 )
+		return;
+	fi = gc_fire;
+	per_row = fi->side / fi->cell;
+	cell = 1.0f / (float)per_row;
+	AngleVectors( RI.rvp.viewangles, forward, right, up );
+	R_GXBuildWorldModelview( mv );
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetNumTexGens( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+	/* texture x particle colour, x2 ($overbrightfactor 2.15) */
+	GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
+	GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_LoadTexObj( (GXTexObj *)&fi->obj, GX_TEXMAP0 );
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
+	for( fn = 0; fn < fi->n; fn++ )
+	{
+		const float *org = fi->org[fn];
+		const float dx = org[0] - eye[0], dy = org[1] - eye[1], dz = org[2] - eye[2];
+		const float along = dx * forward[0] + dy * forward[1] + dz * forward[2];
+
+		/* Behind the eye, or under about two pixels across. */
+		if( along < -200.0f || along > 12000.0f )
+			continue;
+		for( ln = 0; ln < fi->layers; ln++ )
+		{
+			const gc_fire_layer_t *l = &fi->layer[ln];
+
+			for( sn = 0; sn < l->nseq && l->seq0 + sn < fi->nseq; sn++ )
+			{
+				const float life = (float)fi->seq[l->seq0 + sn].life * 0.01f;
+				const int first = fi->seq[l->seq0 + sn].first, count = fi->seq[l->seq0 + sn].count;
+				int n = (int)( l->rate * life / (float)l->nseq + 0.5f );
+
+				if( n > l->maxp / l->nseq ) n = l->maxp / l->nseq;
+				if( n < 1 || life <= 0.0f || count < 1 )
+					continue;
+				GX_Begin( GX_QUADS, GX_VTXFMT0, (u16)( n * 4 ));
+				for( i = 0; i < n; i++ )
+				{
+					u32 h = (u32)( fn * 7919 + ln * 15485863 + sn * 32452843 + i * 104729 + 12345 );
+					float ph, t, rad, ang, d, px, py, pz, a, c, u0, u1, v0, fr;
+					int cyc, tile;
+					u32 col;
+
+					h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+					ph = now / life + ( (float)i + (float)( h & 255u ) * ( 1.0f / 256.0f )) / (float)n;
+					cyc = (int)ph;
+					t = ( ph - (float)cyc ) * life;
+					/* A new particle each cycle. */
+					h += (u32)cyc * 2654435761u;
+					h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+					rad = (float)l->rmin + (float)( l->rmax - l->rmin ) * (float)( h & 255u ) * ( 1.0f / 255.0f );
+					ang = (float)(( h >> 8 ) & 1023u ) * ( 6.2831853f / 1024.0f );
+					d = (float)l->spread * (float)(( h >> 18 ) & 63u ) * ( 1.0f / 63.0f );
+					px = org[0] + cosf( ang ) * d;
+					py = org[1] + sinf( ang ) * d;
+					pz = org[2] + (float)l->zoff * 0.01f * rad
+						+ ( l->vz0 + ( l->vz1 - l->vz0 ) * (float)(( h >> 24 ) & 15u ) * ( 1.0f / 15.0f )) * t
+						+ 0.5f * l->grav * t * t;
+					a = (float)l->amin + (float)( l->amax - l->amin ) * (float)(( h >> 4 ) & 15u ) * ( 1.0f / 15.0f );
+					if( l->fade && life - t < (float)l->fade * 0.01f )
+						a *= ( life - t ) / ( (float)l->fade * 0.01f );
+					c = (float)l->cmin + (float)( l->cmax - l->cmin ) * (float)(( h >> 28 ) & 15u ) * ( 1.0f / 15.0f );
+					fr = t / life;
+					if( l->cf1 > l->cf0 && fr > l->cf0 )
+						c *= 1.0f - ( fr - l->cf0 ) / ( l->cf1 - l->cf0 );
+					c *= a * ( 1.0f / 255.0f );
+					col = (u32)c;
+					col = ( col << 24 ) | ( col << 16 ) | ( col << 8 ) | 255u;
+					tile = (int)( t * l->fps );
+					if( tile >= count ) tile = count - 1;
+					tile += first;
+					u0 = (float)( tile % per_row ) * cell;
+					u1 = u0 + cell;
+					v0 = (float)( tile / per_row ) * cell;
+					if( h & 0x400000u )
+					{
+						/* "Rotation Yaw Flip Random": half the particles mirrored */
+						const float sw = u0;
+						u0 = u1; u1 = sw;
+					}
+					GX_Position3f32( px - ( right[0] + up[0] ) * rad, py - ( right[1] + up[1] ) * rad, pz - ( right[2] + up[2] ) * rad );
+					GX_Color1u32( col );
+					GX_TexCoord2f32( u0, v0 + cell );
+					GX_Position3f32( px + ( right[0] - up[0] ) * rad, py + ( right[1] - up[1] ) * rad, pz + ( right[2] - up[2] ) * rad );
+					GX_Color1u32( col );
+					GX_TexCoord2f32( u1, v0 + cell );
+					GX_Position3f32( px + ( right[0] + up[0] ) * rad, py + ( right[1] + up[1] ) * rad, pz + ( right[2] + up[2] ) * rad );
+					GX_Color1u32( col );
+					GX_TexCoord2f32( u1, v0 );
+					GX_Position3f32( px - ( right[0] - up[0] ) * rad, py - ( right[1] - up[1] ) * rad, pz - ( right[2] - up[2] ) * rad );
+					GX_Color1u32( col );
+					GX_TexCoord2f32( u0, v0 );
+				}
+				GX_End();
+			}
+		}
+	}
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+}
+
 /* Ropes and cables (Source move_rope / keyframe_rope, media/rp_d2_lostcoast.gcr):
  * a baked 7-point sagging strip per span, drawn as GX lines. */
 #define GC_ROPE_MAX	64
@@ -7871,6 +8067,7 @@ static int R_GXDrawWorldDLFrame( void )
 		a2 = st_on ? gettime() : 0;
 		R_GXTrace( "smoke" );
 		R_GXSmokeDraw();
+		R_GXFireDraw();
 		a3 = st_on ? gettime() : 0;
 		sub[0] += a1 - a0; sub[1] += a2 - a1; sub[2] += a3 - a2;
 		if( st_on && ++sub_n >= 120 )
