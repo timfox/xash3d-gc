@@ -1305,7 +1305,8 @@ static void R_DrawEntitiesOnList( void )
 
 			/* Landmark crowbar is bound on viewent; do not require world NPC
 			 * studios (lean_studios) or tip-safe maps never reach G155/G164. */
-			if( tr.viewent && tr.viewent->model
+			if( Q_stricmp( XASH_GAMEDIR, "lostcoast" )
+				&& tr.viewent && tr.viewent->model
 				&& tr.viewent->model->type == mod_studio
 				&& tr.viewent->model->cache.data
 				&& !( r_drawviewmodel && r_drawviewmodel->value == 0
