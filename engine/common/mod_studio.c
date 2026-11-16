@@ -905,22 +905,6 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	return gc_animpool + start;
 }
 
-/* Release a block fetched this frame early (a load-time scan), so the
- * ring can reuse it for the next one instead of stepping over it. */
-static void Mod_GCAnimPackUnpin( const void *ptr )
-{
-	int i;
-
-	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
-	{
-		if( gc_animent[i].pack && gc_animpool + gc_animent[i].off == (const byte *)ptr )
-		{
-			gc_animent[i].frame = host.framecount - 1;
-			return;
-		}
-	}
-}
-
 /* Animation for a sequence of a split model, or NULL when the model's group
  * table does not name a pack. A sequence that cannot be fetched plays as the
  * bind pose (an all-zero offset table) instead of ending the game. */
@@ -988,12 +972,60 @@ static qboolean Mod_GCStudioModelStreamed( const mstudiomodel_t *pmodel )
  * boundingradius). Read its bits: converting the float gave entry 0 for
  * every model (a denormal), and passing it to printf as %d shifted the
  * arguments (ceres PR 108: wrong blob per model, DSI in DrawPoints). */
+#define GC_STUDIO_MESH_UV_DONE 0x40000000 /* in the entry bits: UV domain fixed */
+
 static int Mod_GCStudioMeshEntry( const mstudiomodel_t *pmodel )
 {
 	int32_t entry;
 
 	memcpy( &entry, &pmodel->unused2, sizeof( entry ));
-	return entry;
+	return entry & ~GC_STUDIO_MESH_UV_DONE;
+}
+
+/* The UV domain fix (G378) for one streamed model, from its blob: grow the
+ * lean skin headers to the retail UV range its triangle commands use, once,
+ * on the model's first fetch (with skins attached). */
+static void Mod_GCStudioMeshUvFix( studiohdr_t *phdr, mstudiomodel_t *pmodel, const byte *base )
+{
+	mstudiotexture_t *ptexture;
+	const short *pskinref;
+	const mstudiomesh_t *pmesh;
+	int32_t bits;
+	int k;
+
+	memcpy( &bits, &pmodel->unused2, sizeof( bits ));
+	if( bits & GC_STUDIO_MESH_UV_DONE )
+		return;
+	if( phdr->numtextures <= 0 || phdr->textureindex <= 0 || phdr->numskinref <= 0 || phdr->skinindex <= 0 )
+		return; /* skins not attached yet: try again on a later fetch */
+	ptexture = (mstudiotexture_t *)((byte *)phdr + phdr->textureindex );
+	pskinref = (const short *)((byte *)phdr + phdr->skinindex );
+	pmesh = (const mstudiomesh_t *)( base + pmodel->meshindex );
+	for( k = 0; k < pmodel->nummesh; k++, pmesh++ )
+	{
+		const short *cmd = (const short *)( base + pmesh->triindex );
+		int tex, n, max_s = 0, max_t = 0;
+
+		if( pmesh->skinref < 0 || pmesh->skinref >= phdr->numskinref )
+			continue;
+		tex = pskinref[pmesh->skinref];
+		if( tex < 0 || tex >= phdr->numtextures )
+			continue;
+		while(( n = *cmd++ ))
+		{
+			for( n = n < 0 ? -n : n; n > 0; n--, cmd += 4 )
+			{
+				if( cmd[2] > max_s ) max_s = cmd[2];
+				if( cmd[3] > max_t ) max_t = cmd[3];
+			}
+		}
+		if( max_s >= ptexture[tex].width )
+			ptexture[tex].width = max_s + 1;
+		if( max_t >= ptexture[tex].height )
+			ptexture[tex].height = max_t + 1;
+	}
+	bits |= GC_STUDIO_MESH_UV_DONE;
+	memcpy( &pmodel->unused2, &bits, sizeof( bits ));
 }
 
 /* Open the mesh pack at load time, so its ARAM upload (which uses the ring
@@ -1050,6 +1082,7 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 					pmodel->meshindex, pmodel->nummesh );
 			return NULL;
 		}
+		Mod_GCStudioMeshUvFix( phdr, pmodel, (const byte *)blob );
 		if( logged++ < 12 )
 			Con_Reportf( "Xash3D GameCube: mesh pack '%s' model '%s' entry %d at %p len %u verts %d norms %d meshes %d\n",
 				group->name, pmodel->name, entry, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
@@ -2378,15 +2411,12 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 			mstudiomesh_t *pmesh;
 			byte *base = (byte *)phdr;
 
-			/* Streamed: scan the blob from the ARAM mesh pack. Skipping these
-			 * left the lean 128 px skin widths in place, so the retail UVs
-			 * tiled the atlas several times over (ceres: speckled bodies). */
+			/* Streamed: done per model on its first fetch at draw time
+			 * (Mod_GCStudioMeshUvFix). Fetching here, inside the load, put
+			 * the ring next to the staged *T.mdl and the Axis body bound
+			 * the wrong texels (ceres PR 108: rainbow skin). */
 			if( Mod_GCStudioModelStreamed( pmodel ))
-			{
-				base = Mod_GCStudioMeshBase( phdr, pmodel );
-				if( !base )
-					continue;
-			}
+				continue;
 			pmesh = (mstudiomesh_t *)( base + pmodel->meshindex );
 
 			for( k = 0; k < pmodel->nummesh; k++, pmesh++ )
@@ -2411,15 +2441,6 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 					}
 				}
 
-				if(( max_s >= ptexture[tex].width || max_t >= ptexture[tex].height ) && base != (byte *)phdr )
-				{
-					static int streamed_logs;
-
-					if( streamed_logs++ < 24 )
-						Con_Reportf( "Xash3D GameCube: G378 streamed '%s' model '%s' mesh %d tex %d '%s' %dx%d uv max %d,%d\n",
-							phdr->name, pmodel->name, k, tex, ptexture[tex].name,
-							ptexture[tex].width, ptexture[tex].height, max_s, max_t );
-				}
 				if( max_s >= ptexture[tex].width )
 				{
 					need_log = 1;
@@ -2431,8 +2452,6 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 					ptexture[tex].height = max_t + 1;
 				}
 			}
-			if( base != (byte *)phdr )
-				Mod_GCAnimPackUnpin( base ); /* scanned; let the ring reuse it */
 		}
 	}
 
@@ -2663,11 +2682,15 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 			phdr->skinindex = phdr->textureindex + (int)size1;
 			in = (byte *)src_hdr + src_hdr->textureindex;
 			out = (byte *)phdr + phdr->textureindex;
-			memcpy( out, in, size1 + size2 );
-			src_tex = (mstudiotexture_t *)((byte *)src_hdr + src_hdr->textureindex );
+			/* The staged *T.mdl can sit right after a mesh grown in place
+			 * (Mod_GCStudioBssGrowLast), so source and destination may
+			 * overlap: move, which copies each texture's GL index with it.
+			 * Re-reading src_tex[i].index after an overlapping memcpy
+			 * picked up other textures' bytes (ceres PR 108: the Axis body
+			 * bound wrong textures, rainbow skin). */
+			memmove( out, in, size1 + size2 );
+			(void)src_tex;
 			dst_tex = (mstudiotexture_t *)out;
-			for( i = 0; i < phdr->numtextures; i++ )
-				dst_tex[i].index = src_tex[i].index;
 			Con_Reportf( "Xash3D GameCube: deferred T.mdl skins '%s' n=%d kept=%s\n",
 				mod->name, phdr->numtextures, Q_memprint( merged ));
 			Mod_GCFixStudioUvDomains( phdr );
