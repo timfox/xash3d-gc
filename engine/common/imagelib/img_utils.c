@@ -1384,7 +1384,14 @@ qboolean Image_AddIndexedImageToPack( const byte *in, int width, int height )
 	{
 		/* Power-of-two halving only: 256→128→64. Use 128 for MDL so
 		 * viewmodels don't fall to the quality-0 64² floor (ava-play99-40). */
-		const int max_size = image.mdl_decode ? 128 : Image_GCMaxLoadDimension( NULL );
+		/* HUD sprite sheets keep 128: the retail DoD HUD draws its 640-res
+		 * 256² sheets at half size on the 320×240 HUD space, so 128 is the
+		 * resolution that reaches the screen. The quality-0 64² clamp
+		 * decimated them 4:1 by nearest texel and dropped 1-px art (the
+		 * crosshair's horizontal arms and dot, the timer digits). */
+		const int max_size = image.mdl_decode ? 128
+			: image.hud_sprite ? Q_max( 128, Image_GCMaxLoadDimension( NULL ))
+			: Image_GCMaxLoadDimension( NULL );
 		if( scaled_width > max_size || scaled_height > max_size )
 		{
 			qboolean resampled = false;

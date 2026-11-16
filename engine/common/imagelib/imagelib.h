@@ -97,6 +97,7 @@ typedef struct imglib_s
 	int			force_flags;	// override cmd_flags
 	qboolean			custom_palette;	// custom palette was installed
 	qboolean			mdl_decode;		// current image is an embedded studio texture
+	qboolean			hud_sprite;		// current image is a client (HUD) sprite frame
 } imglib_t;
 
 // imagelib definitions
