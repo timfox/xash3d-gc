@@ -852,6 +852,39 @@ static void R_StudioMergeBones( cl_entity_t *e, model_t *m_pSubModel )
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim, f );
 	pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
 
+#if XASH_GAMECUBE
+	/* Once per weapon model: how much of its skeleton found the player's. */
+	{
+		static char logged[24][24];
+		int li, matched = 0, k;
+
+		for( li = 0; li < 24 && logged[li][0] && Q_strcmp( logged[li], m_pSubModel->name + 7 ); li++ );
+		if( li < 24 && !logged[li][0] )
+		{
+			char miss[160];
+
+			Q_strncpy( logged[li], m_pSubModel->name + 7, sizeof( logged[li] ));
+			miss[0] = 0;
+			for( i = 0; i < m_pStudioHeader->numbones; i++ )
+			{
+				for( k = 0; k < g_studio.cached_numbones; k++ )
+					if( !Q_stricmp( pbones[i].name, g_studio.cached_bonenames[k] ))
+						break;
+				if( k < g_studio.cached_numbones )
+					matched++;
+				else if( Q_strlen( miss ) + Q_strlen( pbones[i].name ) + 2 < sizeof( miss ))
+				{
+					Q_strncat( miss, pbones[i].name, sizeof( miss ));
+					Q_strncat( miss, ",", sizeof( miss ));
+				}
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: merge %s bones=%d matched=%d player_bones=%d seq=%d/%d unmatched=[%s] player0=%s\n",
+				m_pSubModel->name, m_pStudioHeader->numbones, matched, g_studio.cached_numbones,
+				e->curstate.sequence, m_pStudioHeader->numseq, miss,
+				g_studio.cached_numbones ? g_studio.cached_bonenames[0] : "-" );
+		}
+	}
+#endif
 	for( i = 0; i < m_pStudioHeader->numbones; i++ )
 	{
 		for( j = 0; j < g_studio.cached_numbones; j++ )
