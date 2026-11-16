@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
 if [[ "${1:-}" == "--status" ]]; then
-	dir=$(find .ai/sweeps -maxdepth 1 -type d -name '20*' | sort | tail -1)
+	dir=$(ls -td .ai/sweeps/*/ 2>/dev/null | grep -v smoke | head -1 | sed 's:/$::')
 	[[ -n "$dir" ]] || { echo "no sweep"; exit 0; }
 	rows=$(( $(wc -l < "$dir/sweep.csv") - 1 ))
 	if pgrep -f gamecube-chapter-sweep.sh >/dev/null; then state=running; else state=stopped; fi
@@ -19,7 +19,7 @@ if [[ "${1:-}" == "--status" ]]; then
 	exit 0
 fi
 
-dir="${1:-$(find .ai/sweeps -maxdepth 1 -type d -name '20*' | sort | tail -1)}"
+dir="${1:-$(ls -td .ai/sweeps/*/ 2>/dev/null | grep -v smoke | head -1 | sed 's:/$::')}"
 csv="$dir/sweep.csv"
 [[ -f "$csv" ]] || { echo "no $csv"; exit 1; }
 
