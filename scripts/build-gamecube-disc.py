@@ -2525,7 +2525,7 @@ def gc_cmpr_skin_edge(size: int, cap: int) -> int:
 	return edge
 
 
-def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128) -> bytes | None:
+def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int | None = None) -> bytes | None:
 	"""A gc_studio/<stem>t.mdl whose skins are already GX CMPR.
 
 	Same layout as lean_studio_tex_companion_bytes (header, texture structs,
@@ -2534,6 +2534,10 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128) -> bytes | None
 	aligned in the file. The engine copies them into the skin window as they
 	are (R_GCBakedCmprSkin): no palette decode and no encode at load.
 	Colour-remap textures (DM_Base, remap*) stay palettised.
+	part_edge, when set, caps the small parts (faces, hats, helmets, hair) at
+	that edge: they are a few dozen pixels on screen, and at full size a
+	team's six faces overflowed the studio skin window (ceres: Axis faces
+	"no room", grey heads).
 	"""
 	try:
 		import numpy as np
@@ -2589,7 +2593,10 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128) -> bytes | None
 			struct.pack_into("<iiii", out, dst + 64, flags, width, height, len(out))
 			out += pixels + palette
 			continue
-		nw, nh = gc_cmpr_skin_edge(width, max_edge), gc_cmpr_skin_edge(height, max_edge)
+		edge = max_edge
+		if part_edge and label.startswith(GC_SKIN_PART_PREFIXES):
+			edge = min(edge, part_edge)
+		nw, nh = gc_cmpr_skin_edge(width, edge), gc_cmpr_skin_edge(height, edge)
 		pal = np.frombuffer(palette, np.uint8).reshape(256, 3)
 		idx = np.frombuffer(pixels, np.uint8).reshape(height, width)
 		masked = bool(flags & STUDIO_NF_MASKED)
@@ -2799,6 +2806,8 @@ GC_PLAYER_PACK_PATH = "models/player/anim_%s.gca"
 # engine keeps in ARAM (Mod_GCStudioMeshBase), so both team cores fit MEM1.
 GC_PLAYER_MESH_PATH = "models/player/mesh_%s.gcm"
 GC_PLAYER_SKIN_EDGE = 128  # longest edge of a baked player skin
+GC_PLAYER_PART_EDGE = 64  # faces, hats, helmets, hair
+GC_SKIN_PART_PREFIXES = (b"face", b"k43_face", b"hat", b"helmet", b"hair", b"head")
 
 
 def load_studio_splitter():
@@ -2905,7 +2914,9 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 		kind = "palettised"
 		if tex_src is not None:
 			# Native first: 128 px CMPR is 8 KB a skin, less than 64 px palettised.
-			tex_payload = gc_cmpr_skin_companion_bytes(tex_src, max_edge=GC_PLAYER_SKIN_EDGE)
+			tex_payload = gc_cmpr_skin_companion_bytes(
+				tex_src, max_edge=GC_PLAYER_SKIN_EDGE, part_edge=GC_PLAYER_PART_EDGE
+			)
 			if tex_payload:
 				kind = f"GX CMPR up to {GC_PLAYER_SKIN_EDGE} px"
 			else:
