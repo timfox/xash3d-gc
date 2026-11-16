@@ -636,7 +636,7 @@ static gc_animent_t gc_animent[GC_ANIMPACK_ENTRIES];
 static byte *gc_animpool;
 static unsigned gc_animpool_size;
 static unsigned gc_animpool_cursor, gc_animpack_clock;
-static qboolean gc_animpool_failed;
+static qboolean gc_animpool_failed, gc_animpool_in_spill;
 
 /* The pool is in the studio arena: every arena reset drops it. */
 void Mod_GCAnimPackReset( void )
@@ -646,6 +646,15 @@ void Mod_GCAnimPackReset( void )
 	gc_animpool_size = 0;
 	gc_animpool_cursor = 0;
 	gc_animpool_failed = false;
+	gc_animpool_in_spill = false;
+}
+
+/* The world-array spill is rewound at every map load: drop a ring parked
+ * there (an arena ring stays until the arena reset). */
+void Mod_GCAnimPackSpillReset( void )
+{
+	if( gc_animpool_in_spill )
+		Mod_GCAnimPackReset();
 }
 
 static void Mod_GCAnimPackDropEntries( const gc_animpack_t *pk )
@@ -685,15 +694,28 @@ static qboolean Mod_GCAnimPoolReady( void )
 		if( gc_animpool )
 			break;
 	}
+	/* Then the world-array spill, where r_gx_worlddl.c keeps room for the
+	 * ring next to the DoD team cores (ceres PR 108: viewmodel skins had
+	 * filled the arena and the bodies drew nothing). */
+	for( gc_animpool_size = GC_ANIMPACK_POOL; !gc_animpool && gc_animpool_size >= GC_ANIMPACK_CHUNK; gc_animpool_size >>= 1 )
+	{
+		gc_animpool = (byte *)Mod_GCWorldArraySpillTryAlloc( gc_animpool_size, "animpack ring" );
+		if( gc_animpool )
+		{
+			Mod_GCWorldArraySpillPinBase( gc_animpool, gc_animpool_size );
+			gc_animpool_in_spill = true;
+		}
+	}
 	if( !gc_animpool )
 	{
 		gc_animpool_size = 0;
 		gc_animpool_failed = true;
-		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s down to %s) does not fit the studio arena\n",
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack pool (%s down to %s) fits neither the studio arena nor the spill\n",
 			Q_memprint( GC_ANIMPACK_POOL ), Q_memprint( GC_ANIMPACK_CHUNK ));
 		return false;
 	}
-	Con_Reportf( "Xash3D GameCube: animpack pool %s in the studio arena\n", Q_memprint( gc_animpool_size ));
+	Con_Reportf( "Xash3D GameCube: animpack pool %s in the %s\n", Q_memprint( gc_animpool_size ),
+		gc_animpool_in_spill ? "world-array spill" : "studio arena" );
 	gc_animpool_cursor = 0;
 	return true;
 }

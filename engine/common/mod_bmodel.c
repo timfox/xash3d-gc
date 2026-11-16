@@ -589,6 +589,7 @@ void Mod_GCClearRetainedBspScratch( void )
 		SV_GCDropSpillStringArena();
 		gc_world_array_spill_pin = 0;
 		gc_world_array_spill_used = 0;
+		Mod_GCAnimPackSpillReset();
 		SV_GCEnsureStringArena();
 	}
 	/* Bounce carve stays for the session — CapFaces may still hold the ptr. */
