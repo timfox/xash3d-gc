@@ -9343,12 +9343,12 @@ static void R_GXPrepareStudioState( qboolean viewmodel )
 	GX_SetNumTexGens( 1 );
 	GX_SetNumTevStages( 1 );
 	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
-	/* Viewmodel: MODULATE for hand/gun gouraud. REPLACE left flesh flat
-	 * salmon (ava-play99-86). CapFaces lean-black crush (ava-play99-19) is
-	 * floored in R_StudioSetupLighting for viewent. World studio stays
-	 * REPLACE until NPC light is similarly gated. */
+	/* Studio models are skin x per-vertex light (R_StudioLighting), as in
+	 * GoldSrc. REPLACE threw the light away, so players and bots drew flat
+	 * at full texture brightness. TriAPI effects (no studio pass active)
+	 * keep REPLACE. */
 	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
-	GX_SetTevOp( GX_TEVSTAGE0, viewmodel ? GX_MODULATE : GX_REPLACE );
+	GX_SetTevOp( GX_TEVSTAGE0, ( viewmodel || r_gx_studio_active ) ? GX_MODULATE : GX_REPLACE );
 	GX_SetNumChans( 1 );
 	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
