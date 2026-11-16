@@ -3458,7 +3458,14 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			RI.currententity->curstate.body = 255;
 		}
 
-		if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && ( RI.currentmodel == RI.currententity->model ))
+		if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && ( RI.currentmodel == RI.currententity->model )
+#if XASH_GAMECUBE
+			/* DoD player bodies are class body x helmet x head x gear; body 1
+			 * is another class's uniform (a blank one on brit-inf), not a
+			 * helmet. The game picks it. */
+			&& !( RI.currentmodel && ( Q_stristr( RI.currentmodel->name, "-inf/" ) || Q_stristr( RI.currentmodel->name, "-para/" )))
+#endif
+			)
 			RI.currententity->curstate.body = 1; // force helmet
 
 		lighting.plightvec = dir;
