@@ -6400,6 +6400,27 @@ static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index )
 		}
 
 		pkvd[i].szClassName = (char *)classname;
+		/* light_environment: "pitch" overrides the pitch of "angles" whatever
+		 * the key order (the compile tools read it that way). dod_charlie
+		 * writes pitch first, so "angles" reset it to 0 and the sun lay flat. */
+		if( !Q_strcmp( classname, "light_environment" ) && !Q_strcmp( keyname, "pitch" ))
+		{
+			int k;
+
+			for( k = i + 1; k < numpairs; k++ )
+				if( !Q_strcmp( pkvd[k].szKeyName, "angles" ) || !Q_strcmp( pkvd[k].szKeyName, "angle" ))
+					break;
+			if( k < numpairs )
+			{
+				/* Swap it behind the later angles key; handled there. */
+				KeyValueData tmp = pkvd[i];
+
+				pkvd[i] = pkvd[k];
+				pkvd[k] = tmp;
+				i--;
+				continue;
+			}
+		}
 		svgame.dllFuncs.pfnKeyValue( ent, &pkvd[i] );
 
 		SV_FreeKeyValueString( keyname );
