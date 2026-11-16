@@ -721,6 +721,15 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 	return false;
 }
 
+/* Lean v_30cal (~186 KiB) and v_mg42 (~268 KiB) are bigger than a viewmodel
+ * slot and than the whole DoD studio model share, so they stream into the
+ * world-array spill like the team bodies. Once loaded they stay resident
+ * until the map arena resets, so a switch back costs nothing. */
+static qboolean Mod_GCViewModelNeedsSpill( const char *path, size_t size )
+{
+	return Mod_GCIsViewModelPath( path ) && size > GC_VM_SLOT_SIZE;
+}
+
 static qboolean Mod_GCAllowRealStudioLoad( const char *name, size_t filesize )
 {
 	qboolean is_view = false;
@@ -746,6 +755,11 @@ static qboolean Mod_GCAllowRealStudioLoad( const char *name, size_t filesize )
 			return true;
 		if( gc_real_studio_view >= GC_REAL_STUDIO_MAX_VIEW )
 			return false;
+		/* The spill has its own limit (the allocation fails cleanly), so
+		 * the shared byte budget, spent on props and bodies, does not
+		 * apply (ceres PR 98: v_30cal/v_mg42 budget skip). */
+		if( Mod_GCViewModelNeedsSpill( name, filesize ) && filesize <= ( 448 * 1024 ))
+			return true;
 	}
 	else if( gc_real_studio_npc >= max_npc )
 		return false;
@@ -835,7 +849,9 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			}
 			previous_bump = gc_studio_bss_bump;
 			slot = Mod_GCIsViewModelPath( model_path ) ? Mod_GCVMSlotAlloc( (size_t)cached ) : NULL;
-			if( !slot )
+			/* Oversized viewmodels belong in the spill (disc path below),
+			 * not in the studio arena the skins share. */
+			if( !slot && !Mod_GCViewModelNeedsSpill( model_path, (size_t)cached ))
 				slot = Mod_GCStudioBssAlloc( (size_t)cached );
 			if( slot && GC_AssetCacheRead( mirror, slot, cached ))
 			{
@@ -873,7 +889,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			/* Mapmodels prefer world-array spill so the 184 KiB studio BSS
 			 * stays free for the team viewmodel (ava-prop-2 tip≈6 KiB).
 			 * Only after WorldDL owns its chunk-cache slice. */
-			if( Mod_GCStudioPrefersSpill( model_path )
+			if(( Mod_GCStudioPrefersSpill( model_path )
+				|| Mod_GCViewModelNeedsSpill( model_path, (size_t)flen ))
 				&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 				&& Mod_GCMapModelSpillAfterWorldDL())
 			{
@@ -914,7 +931,7 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			{
 				if( Mod_GCIsViewModelPath( model_path ))
 					slot = Mod_GCVMSlotAlloc( (size_t)flen );
-				if( !slot )
+				if( !slot && !Mod_GCViewModelNeedsSpill( model_path, (size_t)flen ))
 					slot = Mod_GCStudioBssAlloc( (size_t)flen );
 			}
 			if( slot )
