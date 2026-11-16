@@ -2224,13 +2224,20 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				: cl.frames[cl.parsecountmod].clientdata.viewmodel;
 			model_t *held = vmi > 0 ? CL_ModelHandle( vmi ) : NULL;
 			static int held_logged = -1, held_logs;
+			char vpath[MAX_QPATH];
 
-			if( held && held->name[0] && Q_stristr( held->name, ".mdl" )
-				&& ( held->type != mod_studio || !held->cache.data ))
-			{
-				char vpath[MAX_QPATH];
-
+			vpath[0] = '\0';
+			if( held && held->name[0] )
 				Q_strncpy( vpath, held->name, sizeof( vpath ));
+			/* Listen server: a late precache (game Deploy after connect) may
+			 * not have reached cl.models yet (ceres: index=294 model=(null)).
+			 * The name is in our own server's precache table. */
+			else if( vmi > 0 && vmi < MAX_MODELS && sv.model_precache[vmi][0] )
+				Q_strncpy( vpath, sv.model_precache[vmi], sizeof( vpath ));
+
+			if( vpath[0] && Q_stristr( vpath, ".mdl" )
+				&& ( !held || held->type != mod_studio || !held->cache.data ))
+			{
 				if( Mod_GCEnsureLandmarkViewModel( vpath ))
 					held = Mod_FindName( vpath, false );
 			}
@@ -2249,8 +2256,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			{
 				held_logs++;
 				held_logged = vmi;
-				Con_Reportf( "Xash3D GameCube: lean held viewmodel index=%d model=%s bound=%d\n",
-					vmi, held ? held->name : "(null)",
+				Con_Reportf( "Xash3D GameCube: lean held viewmodel index=%d name=%s model=%s bound=%d\n",
+					vmi, vpath[0] ? vpath : "(none)", held ? held->name : "(null)",
 					held && clgame.viewent.model == held ? 1 : 0 );
 			}
 		}
