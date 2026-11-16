@@ -7031,6 +7031,12 @@ static void R_GXDrawPackedWater( void )
 		int order[320];
 		float dists[320];
 		int nvis = 0, a, b, tmpi, refl_pass;
+		/* Body tint and reflection weight of every node, shaded in the first
+		 * pass and reused by the reflection and sun passes (the same nodes in
+		 * the same order): the shading was two thirds of the water's 3.4 ms. */
+		u32 tint_c[1536];
+		u8 tint_r[1536];
+		int tint_n = 0, tint_i = 0;
 		float tmpf;
 
 		AngleVectors( RI.rvp.viewangles, forward, right, up );
@@ -7108,6 +7114,7 @@ static void R_GXDrawPackedWater( void )
 		}
 		for( refl_pass = 0; refl_pass < ( gc_mirror_valid ? ( R_GXWaterSunReady() ? 3 : 2 ) : 1 ); refl_pass++ )
 		{
+		tint_i = 0;
 		if( refl_pass )
 		{
 			/* Second pass: the mirrored scene over the body. Each water
@@ -7288,8 +7295,21 @@ static void R_GXDrawPackedWater( void )
 							q[0] = A[0] + ( B[0] - A[0] ) * fv + ( C[0] - A[0] ) * fu;
 							q[1] = A[1] + ( B[1] - A[1] ) * fv + ( C[1] - A[1] ) * fu;
 							q[2] = A[2] + ( B[2] - A[2] ) * fv + ( C[2] - A[2] ) * fu;
-							nc[u][v] = R_GXWaterBodyTint( wi, q, eye_dot, nd );
-							nr[u][v] = (u8)gc_water_refl_a;
+							if( refl_pass && tint_i < tint_n )
+							{
+								nc[u][v] = tint_c[tint_i];
+								nr[u][v] = tint_r[tint_i++];
+							}
+							else
+							{
+								nc[u][v] = R_GXWaterBodyTint( wi, q, eye_dot, nd );
+								nr[u][v] = (u8)gc_water_refl_a;
+								if( !refl_pass && tint_n < 1536 )
+								{
+									tint_c[tint_n] = nc[u][v];
+									tint_r[tint_n++] = nr[u][v];
+								}
+							}
 							if( wst_on )
 							{
 								ns[u][v][0] = sA[0] + ( sB[0] - sA[0] ) * fv + ( sC[0] - sA[0] ) * fu;
@@ -7345,7 +7365,22 @@ static void R_GXDrawPackedWater( void )
 				GX_Begin( GX_TRIANGLEFAN, GX_VTXFMT0, (u16)nv );
 				for( si = 0; si < nv; si++ )
 				{
-					const u32 col = R_GXWaterBodyTint( wi, pts[si], eye_dot, nd );
+					u32 col;
+
+					if( refl_pass && tint_i < tint_n )
+					{
+						col = tint_c[tint_i];
+						gc_water_refl_a = tint_r[tint_i++];
+					}
+					else
+					{
+						col = R_GXWaterBodyTint( wi, pts[si], eye_dot, nd );
+						if( !refl_pass && tint_n < 1536 )
+						{
+							tint_c[tint_n] = col;
+							tint_r[tint_n++] = (u8)gc_water_refl_a;
+						}
+					}
 
 					GX_Position3f32( pts[si][0], pts[si][1], pts[si][2] );
 					if( refl_pass )
