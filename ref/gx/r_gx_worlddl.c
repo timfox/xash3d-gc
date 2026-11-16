@@ -224,22 +224,30 @@ static int R_GXTevMatEnvMask( int id )
  */
 static byte *R_GXWorldDLLmPage( u32 page )
 {
-	static u8 hint[1024];	/* page & 1023 -> slot it was last found in */
+	static u8 hint[2048];	/* page & 2047 -> slot it was last found in */
+	static int full_frame = -1;	/* frame in which every slot was already in use */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
 
-	i = hint[page & 1023u];
+	i = hint[page & 2047u];
 	if( i < GC_WD_LM_SLOTS && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
 		return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 	}
+	/* A wide view asks for more pages than there are slots (500 chunks in
+	 * the Lost Coast harbor, 192 slots). Once the cache is full for this
+	 * frame every further request walked all the slots to learn that again:
+	 * up to 2.5 ms a world pass. With at most 2048 pages the hint is exact,
+	 * so a hint miss on a full frame means the page is not resident. */
+	if( full_frame == gc_wd_frame && gc_wd_hdr.n_chunks <= 2048u )
+		return NULL;
 	for( i = 0; i < GC_WD_LM_SLOTS; i++ )
 	{
 		if( gc_wd_lm_slot_page[i] == (s32)page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
-			hint[page & 1023u] = (u8)i;
+			hint[page & 2047u] = (u8)i;
 			return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
 		}
 		if( gc_wd_lm_slot_frame[i] < gc_wd_frame && gc_wd_lm_slot_frame[i] < oldest )
@@ -249,7 +257,10 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		}
 	}
 	if( victim < 0 )
+	{
+		full_frame = gc_wd_frame;
 		return NULL;
+	}
 	if( !R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES,
 		gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES, GC_WD_LM_PAGE_BYTES ))
 		return NULL;
@@ -258,7 +269,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_slot_page[victim] = (s32)page;
 	gc_wd_lm_slot_frame[victim] = gc_wd_frame;
 	gc_wd_lm_miss++;
-	hint[page & 1023u] = (u8)victim;
+	hint[page & 2047u] = (u8)victim;
 	return gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES;
 }
 
