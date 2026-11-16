@@ -1464,8 +1464,51 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 	return NULL;
 }
 
+extern void GC_ProfMark( const char *name );
+
 /* First sequence of a studio header whose label contains `want`, or -1. */
+static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want );
+
+/* Every drawn player looks up up to six labels a frame, and a miss walks all
+ * of a DoD body's sequences four times with case-blind compares. Remember the
+ * answers per header; the header's size fields guard against a reused address. */
+#define CL_GC_SEQ_CACHE 64
+typedef struct
+{
+	const studiohdr_t *hdr;
+	int numseq;
+	int seqindex;
+	int seq;
+	char want[40];
+} cl_gc_seq_cache_t;
+
 static int CL_GCLeanFindSeq( const studiohdr_t *hdr, const char *want )
+{
+	static cl_gc_seq_cache_t cache[CL_GC_SEQ_CACHE];
+	static int next;
+	cl_gc_seq_cache_t *c;
+	int i;
+
+	if( !hdr || !want || Q_strlen( want ) >= (int)sizeof( cache[0].want ))
+		return CL_GCLeanFindSeqScan( hdr, want );
+	for( i = 0; i < CL_GC_SEQ_CACHE; i++ )
+	{
+		c = &cache[i];
+		if( c->hdr == hdr && c->numseq == hdr->numseq && c->seqindex == hdr->seqindex
+			&& !Q_strcmp( c->want, want ))
+			return c->seq;
+	}
+	c = &cache[next];
+	next = ( next + 1 ) % CL_GC_SEQ_CACHE;
+	c->hdr = hdr;
+	c->numseq = hdr->numseq;
+	c->seqindex = hdr->seqindex;
+	Q_strncpy( c->want, want, sizeof( c->want ));
+	c->seq = CL_GCLeanFindSeqScan( hdr, want );
+	return c->seq;
+}
+
+static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want )
 {
 	const mstudioseqdesc_t *sd;
 	int i;
@@ -1620,6 +1663,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			added++;
 	}
+
+	GC_ProfMark( "render: lean emit brush scan" );
 
 	/* Already-resident world studios (w_* weapons + allowlisted NPCs +
 	 * CapFaces mapmodels). No Mod_ForName — G371 promotes after present≥24.
@@ -1865,6 +1910,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				studio_slots++;
 			}
 		}
+		GC_ProfMark( "render: lean emit studio scan" );
 		/* Other players and bots. The scan above starts after the client slots
 		 * and skips player.mdl, so on this route nobody else was ever drawn.
 		 * Emit them as players (ent->player) so the renderer swaps in the team
@@ -2201,6 +2247,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 		}
+		GC_ProfMark( "render: lean emit players" );
 		/* Once a player body has been drawn the stub is not needed, and it
 		 * showed as a white plank on the floor near the bot (ceres fld). */
 		if( studios == 0 && !lean_player_seen )
