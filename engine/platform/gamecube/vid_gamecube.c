@@ -11025,6 +11025,20 @@ static const char *GC_StatusFitText( const char *text, int max_chars )
 	return text + ( len - max_chars );
 }
 
+/* Fatal-panel status text: message line plus fitted detail line. */
+static void GC_DrawStatusPanelLines( unsigned short *dst, int width, int height, int stride,
+	int text_x, int msg_y, int det_y, const char *message, const char *details,
+	unsigned short text, int text_scale, int line_scale, int max_chars )
+{
+	const char *detail_line;
+
+	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
+		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
+	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
+	GC_StatusDrawLine( dst, stride, width, height, text_x, det_y,
+		detail_line, text, line_scale, max_chars );
+}
+
 static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int height, int stride,
 	const char *message, const char *details, qboolean top_aligned )
 {
@@ -11043,10 +11057,10 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	int max_chars;
 	int bar_x, bar_y, bar_w, bar_h;
 	unsigned short text = GC_RGB8To565( GC_VGUI_TEXT_R, GC_VGUI_TEXT_G, GC_VGUI_TEXT_B );
-	const char *detail_line;
-	/* Lost Coast loading plaque: title bar plus a centred progress bar, no
-	 * status lines (Tim's mockup). Fatal panels keep the full layout. */
-	const qboolean compact = !top_aligned && GI && !Q_stricmp( GI->gamefolder, "lostcoast" );
+	/* Loading plaque (every game, DoD included): title bar plus a centred
+	 * progress bar, no status lines. The callers log the status text.
+	 * Fatal panels (top_aligned) keep the full layout. */
+	const qboolean compact = !top_aligned;
 
 	panel_x = width * GC_VIDEO_SAFE_AREA_PERCENT / 100;
 	panel_w = width - panel_x * 2;
@@ -11094,7 +11108,7 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 		char title[25];
 		int ti;
 
-		Q_strncpy( title, ( GI && GI->title[0] ) ? GI->title : "HALF-LIFE", sizeof( title ));
+		Q_strncpy( title, ( GI && GI->title[0] ) ? GI->title : GC_LOADING_PLAQUE_TITLE, sizeof( title ));
 		for( ti = 0; title[ti]; ti++ )
 			title[ti] = Q_toupper( title[ti] );
 		GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
@@ -11110,11 +11124,8 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 		return;
 	}
 #endif
-	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
-		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
-	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
-	GC_StatusDrawLine( dst, stride, width, height, text_x, det_y,
-		detail_line, text, line_scale, max_chars );
+	GC_DrawStatusPanelLines( dst, width, height, stride, text_x, msg_y, det_y,
+		message, details, text, text_scale, line_scale, max_chars );
 
 #if XASH_GAMECUBE
 	bar_x = panel_x + pad + 2;
