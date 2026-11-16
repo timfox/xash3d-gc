@@ -107,8 +107,8 @@ if [[ -n "$GC_PHASE_TEST" ]]; then
 	G82_FAULT_MARKER="G82: Intentional phase fault at ${GC_PHASE_TEST}"
 fi
 DOLPHIN_MMU="${DOLPHIN_MMU:-True}"
-# Automated runs are muted by default (host output volume only: the guest's
-# DSP/ARAM audio path and DumpAudio are unchanged).  DOLPHIN_MUTE_AUDIO=0 to listen.
+# Muted by default (host volume only; guest DSP/ARAM and DumpAudio unchanged).
+# DOLPHIN_MUTE_AUDIO=0 to listen.
 DOLPHIN_AUDIO_VOLUME=0; [[ "${DOLPHIN_MUTE_AUDIO:-1}" =~ ^(0|false|FALSE|False|no|NO|No|off|OFF|Off)$ ]] && DOLPHIN_AUDIO_VOLUME=100
 mkdir -p "$USER_DIR/Config"; DUMP_FRAMES=0
 # Retail screenshot capture is useful for visual evidence but changes Dolphin
