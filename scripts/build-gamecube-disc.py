@@ -2130,14 +2130,17 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	st = bsp.stat()
 	out = cache / f"wd_{bsp.stem.lower()}.gcd"
 	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
-	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1"
-	if out.is_file() and stamp.is_file() and stamp.read_text() == key:
+	lf = cache / f"wd_{bsp.stem.lower()}_lf.gcd"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1"
+	if out.is_file() and lf.is_file() and stamp.is_file() and stamp.read_text() == key:
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
 	try:
 		import bake_worlddl_goldsrc  # type: ignore
 
 		bake_worlddl_goldsrc.bake(bsp, out)
+		# Light points for studio models (ref_light.c): face table + lighting.
+		bake_worlddl_goldsrc.bake_lightfaces(bsp, lf)
 	except (Exception, SystemExit) as error:  # a map the baker cannot read keeps CapFaces
 		print(f"  world DL: bake failed for {bsp.name}: {error}")
 		return None
@@ -2152,6 +2155,9 @@ def build_world_dl_overlays(source: Path, output: Path, cache: Path) -> list[tup
 		wd = bake_world_dl(bsp, cache)
 		if wd:
 			overlays.append((f"media/{wd.name}", wd))
+			lf = wd.with_name(wd.stem + "_lf.gcd")
+			if lf.is_file():
+				overlays.append((f"media/{lf.name}", lf))
 	print(f"  world DL: {len(overlays)} map(s) baked/cached")
 	return overlays
 
@@ -4012,6 +4018,22 @@ def stage_smoke_data(
 			continue
 		shutil.copy2(src, dest)
 		print(f"  world DL: staged {name} ({dest.stat().st_size} bytes)")
+		# Light points (wd_<map>_lf.gcd) next to it, baked from the BSP if the
+		# world DL came prebaked without one.
+		lf = src.with_name(f"wd_{stem}_lf.gcd")
+		bsp = source / "maps" / f"{stem}.bsp"
+		if not lf.is_file() and bsp.is_file():
+			sys.path.insert(0, str(Path(__file__).resolve().parent))
+			try:
+				import bake_worlddl_goldsrc  # type: ignore
+
+				lf = Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache" / f"wd_{stem}_lf.gcd"
+				bake_worlddl_goldsrc.bake_lightfaces(bsp, lf)
+			except (Exception, SystemExit) as error:
+				print(f"  light faces: bake failed for {bsp.name}: {error}")
+		if lf.is_file():
+			shutil.copy2(lf, media_out / lf.name)
+			print(f"  light faces: staged {lf.name} ({lf.stat().st_size} bytes)")
 
 	# Changelevel / New Game loading plaque (retail gfx.wad art, ~3 KiB).
 	build_loading_spans(source, output)

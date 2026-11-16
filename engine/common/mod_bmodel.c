@@ -9002,6 +9002,140 @@ static void Mod_GCCloseBspReloadFile( void )
 	gc_bsp_reload_header_ok = false;
 }
 
+/* Light points on routes that never load LUMP_LIGHTING (the world drawn from
+ * a prebaked world DL). GoldSrc lights a studio model from the lightmap
+ * under it (R_LightPoint); without the lump every player fell back to flat
+ * white 255. Keep the lump and a per-face lightofs table in ARAM, and DMA
+ * one face's samples at a time when a light point lands on it. */
+static unsigned int gc_lp_aram, gc_lp_aram_cap, gc_lp_bytes;
+static unsigned int gc_lp_ofs_aram, gc_lp_ofs_cap;
+static int gc_lp_numfaces;
+static model_t *gc_lp_model;
+
+static unsigned int Mod_GCLightPointBlock( unsigned int *base, unsigned int *cap, unsigned int need, const char *tag )
+{
+	need = ( need + 31u ) & ~31u;
+	if( *base && *cap >= need )
+		return *base;
+	if( *base )
+		GC_AramFree( *base );
+	*base = GC_AramAllocTagged( need, true, tag );
+	*cap = *base ? need : 0;
+	return *base;
+}
+
+static void Mod_GCBindLightPoints( model_t *mod, dbspmodel_t *bmod )
+{
+	dlump_t faces, lighting;
+	size_t done;
+	int i;
+
+	gc_lp_model = NULL;
+	gc_lp_numfaces = 0;
+	gc_lp_bytes = 0;
+	if( !mod || !bmod || !bmod->isworld || mod->lightdata || gc_lm_aram_base
+		|| !mod->surfaces || mod->numsurfaces <= 0 || bmod->version != HLBSP_VERSION
+		|| bmod->lightmap_samples != 3 || Sys_CheckParm( "-gcnolightpoints" ))
+		return;
+	if( !Mod_GCOpenBspReloadFile( mod, "light points" ) || !gc_bsp_reload_header_ok )
+		return;
+	faces = gc_bsp_reload_header.lumps[LUMP_FACES];
+	lighting = gc_bsp_reload_header.lumps[LUMP_LIGHTING];
+	if( faces.filelen / (int)sizeof( dface_t ) != mod->numsurfaces || lighting.filelen <= 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: light points skipped faces=%d/%d lighting=%d\n",
+			faces.filelen / (int)sizeof( dface_t ), mod->numsurfaces, lighting.filelen );
+		return;
+	}
+	if( !Mod_GCLightPointBlock( &gc_lp_aram, &gc_lp_aram_cap, (unsigned int)lighting.filelen, "lightpoint" )
+		|| !Mod_GCLightPointBlock( &gc_lp_ofs_aram, &gc_lp_ofs_cap, (unsigned int)mod->numsurfaces * 4u, "lightpoint ofs" ))
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: light points: no ARAM for %s\n", Q_memprint( lighting.filelen ));
+		return;
+	}
+
+	FS_Seek( gc_bsp_reload_file, lighting.fileofs, SEEK_SET );
+	for( done = 0; done < (size_t)lighting.filelen; )
+	{
+		const size_t chunk = Q_min((size_t)lighting.filelen - done, (size_t)GC_LM_HYDRATE_MAX );
+
+		if( FS_Read( gc_bsp_reload_file, gc_lm_hydrate_buf, chunk ) != (fs_offset_t)chunk )
+			return;
+		GC_AramCopy( gc_lp_aram + (unsigned int)done, gc_lm_hydrate_buf, (unsigned int)chunk, true );
+		done += chunk;
+	}
+
+	/* Faces in batches; each face's lightofs packs down to the front of the
+	 * same buffer (int i lands at 4i, below face i's own bytes at 20i). */
+	FS_Seek( gc_bsp_reload_file, faces.fileofs, SEEK_SET );
+	for( i = 0; i < mod->numsurfaces; )
+	{
+		const int batch = Q_min( mod->numsurfaces - i, (int)( GC_LM_HYDRATE_MAX / sizeof( dface_t )) & ~7 );
+		int *ofs = (int *)gc_lm_hydrate_buf;
+		int k;
+
+		if( FS_Read( gc_bsp_reload_file, gc_lm_hydrate_buf, batch * sizeof( dface_t )) != (fs_offset_t)( batch * sizeof( dface_t )))
+			return;
+		for( k = 0; k < batch; k++ )
+		{
+			int v;
+
+			memcpy( &v, gc_lm_hydrate_buf + k * sizeof( dface_t ) + offsetof( dface_t, lightofs ), sizeof( v ));
+			ofs[k] = LittleLong( v );
+		}
+		GC_AramCopy( gc_lp_ofs_aram + (unsigned int)i * 4u, ofs, (unsigned int)batch * 4u, true );
+		i += batch;
+	}
+
+	gc_lp_bytes = (unsigned int)lighting.filelen;
+	gc_lp_numfaces = mod->numsurfaces;
+	gc_lp_model = mod;
+	Con_Reportf( "Xash3D GameCube: light points bound lighting=%s faces=%d (ARAM)\n",
+		Q_memprint( lighting.filelen ), gc_lp_numfaces );
+}
+
+qboolean Mod_GCLightPointsActive( const model_t *world )
+{
+	return ( world && gc_lp_model == world && gc_lp_bytes && world->surfaces ) ? true : false;
+}
+
+/* One face's lightmap samples for a light point, or NULL. */
+color24 *Mod_GCLightPointSamples( const msurface_t *surf )
+{
+	int idx, lightofs, sample_size, smax, tmax, styles = 0, map;
+	unsigned int bytes;
+
+	if( !surf )
+		return NULL;
+	if( surf->samples )
+		return surf->samples;
+	if( gc_lm_aram_base )
+		return Mod_GCHydrateSurfaceLightmap( surf );
+	if( !gc_lp_model || !gc_lp_model->surfaces || !surf->info )
+		return NULL;
+	idx = (int)( surf - gc_lp_model->surfaces );
+	if( idx < 0 || idx >= gc_lp_numfaces )
+		return NULL;
+	GC_AramCopy( gc_lp_ofs_aram + (unsigned int)idx * 4u, &lightofs, sizeof( lightofs ), false );
+	if( lightofs < 0 )
+		return NULL;
+
+	sample_size = Mod_SampleSizeForFace( surf );
+	if( sample_size < 1 )
+		sample_size = 16;
+	smax = ( surf->info->lightextents[0] / sample_size ) + 1;
+	tmax = ( surf->info->lightextents[1] / sample_size ) + 1;
+	for( map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++ )
+		styles++;
+	if( styles < 1 )
+		styles = 1;
+	bytes = (unsigned int)( smax * tmax * styles ) * sizeof( color24 );
+	if( smax < 1 || tmax < 1 || bytes > GC_LM_HYDRATE_MAX || (unsigned int)lightofs + bytes > gc_lp_bytes )
+		return NULL;
+	GC_AramCopy( gc_lp_aram + (unsigned int)lightofs, gc_lm_hydrate_buf, bytes, false );
+	return (color24 *)gc_lm_hydrate_buf;
+}
+
 static void Mod_GCEnsureBspLump( model_t *mod, dbspmodel_t *bmod, int lumpnum )
 {
 	const mlumpinfo_t *info = Mod_GCFindStdLumpInfo( lumpnum );
@@ -12172,6 +12306,8 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 #endif
 	Mod_LoadLighting( mod, bmod );
 #if XASH_GAMECUBE
+	if( isworld )
+		Mod_GCBindLightPoints( mod, bmod );
 	Mod_GCCloseBspReloadFile();
 	Con_Reportf( "Xash3D GameCube: bmodel lighting ready\n" );
 	/* G277: capture after Mod_LoadLighting binds samples to every world and

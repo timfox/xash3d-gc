@@ -1052,6 +1052,102 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		gc_wd_aram ? ( gc_wd_file ? "ARAM+disc" : "ARAM" ) : "disc" );
 }
 
+/* Light points without a live msurface table: media/wd_<map>_lf.gcd holds
+ * each face's light mapping (texinfo vecs, texturemins, extents, flags,
+ * lightofs, styles) and the BSP lighting lump. It lives in ARAM; the light
+ * point walk in ref_light.c reads one node's faces and a few samples. */
+#define GC_LF_REC 56u
+static u32 gc_lf_aram, gc_lf_cap, gc_lf_faces, gc_lf_rec_ofs, gc_lf_lit_ofs, gc_lf_lit_bytes;
+
+static void R_GXLightFacesLoad( const char *mapbase )
+{
+	char path[96];
+	file_t *f;
+	u32 hdr[8] __attribute__(( aligned( 32 )));
+	u32 size, done;
+
+	gc_lf_faces = 0;
+	if( !gc_wd_cache || gc_wd_cache_size < 32u || gEngfuncs.Sys_CheckParm( "-gcnolightpoints" ))
+		return;
+	Q_snprintf( path, sizeof( path ), "media/wd_%s_lf.gcd", mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces missing %s\n", path );
+		return;
+	}
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32 || memcmp( hdr, "GClf", 4 ) || hdr[1] != 1u
+		|| hdr[3] != 32u || hdr[4] < 32u + hdr[2] * GC_LF_REC )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces bad header %s\n", path );
+		gEngfuncs.fsapi->Close( f );
+		return;
+	}
+	size = ( hdr[4] + hdr[5] + 31u ) & ~31u;
+	if( !gc_lf_aram || gc_lf_cap < size )
+	{
+		if( gc_lf_aram )
+			GC_AramFree( gc_lf_aram );
+		gc_lf_aram = GC_AramAllocTagged( size, true, "lightfaces" );
+		gc_lf_cap = gc_lf_aram ? size : 0;
+	}
+	if( !gc_lf_aram )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light faces: no ARAM for %u bytes\n", size );
+		gEngfuncs.fsapi->Close( f );
+		return;
+	}
+	gEngfuncs.fsapi->Seek( f, 0, SEEK_SET );
+	for( done = 0; done < size; )
+	{
+		u32 n = Q_min( size - done, 64u * 1024u );
+		fs_offset_t got;
+
+		if( n > gc_wd_cache_size )
+			n = gc_wd_cache_size & ~31u;
+		got = gEngfuncs.fsapi->Read( f, gc_wd_cache, n );
+		if( got <= 0 )
+			break;
+		GC_AramCopy( gc_lf_aram + done, gc_wd_cache, (u32)got, true );
+		done += (u32)got;
+		if( (u32)got < n )
+			break;
+	}
+	gEngfuncs.fsapi->Close( f );
+	if( done < hdr[4] + hdr[5] )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light faces short read %u/%u\n", done, hdr[4] + hdr[5] );
+		return;
+	}
+	gc_lf_rec_ofs = hdr[3];
+	gc_lf_lit_ofs = hdr[4];
+	gc_lf_lit_bytes = hdr[5];
+	gc_lf_faces = hdr[2];
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces %s faces=%u lighting=%u bytes (ARAM %u)\n",
+		path, gc_lf_faces, gc_lf_lit_bytes, size );
+}
+
+int R_GXLightFacesCount( void )
+{
+	return gc_lf_aram ? (int)gc_lf_faces : 0;
+}
+
+qboolean R_GXLightFacesRead( int first, int num, void *out )
+{
+	if( !gc_lf_faces || first < 0 || num <= 0 || (u32)( first + num ) > gc_lf_faces )
+		return false;
+	GC_AramCopy( gc_lf_aram + gc_lf_rec_ofs + (u32)first * GC_LF_REC, out, (u32)num * GC_LF_REC, false );
+	return true;
+}
+
+qboolean R_GXLightSamplesRead( u32 ofs, void *out, u32 len )
+{
+	if( !gc_lf_faces || ofs >= gc_lf_lit_bytes || len > gc_lf_lit_bytes - ofs )
+		return false;
+	GC_AramCopy( gc_lf_aram + gc_lf_lit_ofs + ofs, out, len, false );
+	return true;
+}
+
 qboolean R_GXWorldDLActive( void )
 {
 	model_t *world = WORLDMODEL;
@@ -1069,6 +1165,7 @@ qboolean R_GXWorldDLActive( void )
 		GC_HeapCheck( "world DL load begin" );
 		Q_strncpy( gc_wd_map, base, sizeof( gc_wd_map ));
 		R_GXWorldDLLoad( base );
+		R_GXLightFacesLoad( base );
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL Active done state=%d\n", gc_wd_state );
 		GC_HeapCheck( "world DL load done" );
 	}
