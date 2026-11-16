@@ -5828,7 +5828,31 @@ static int R_GXPropBind( u8 mat )
 		{
 			const int lv = levels_all - shift;
 
-			data = R_GXCmprSlotFor( gc_prop_tex_aram + gc_prop_mat_ofs[mat], skip_b, remain, &slot );
+			/* The slot this material was in last time, before the search:
+			 * R_GXCmprSlotFor walks up to 128 slots, and the props bind about
+			 * 500 times a frame over their three passes. */
+			{
+				static u8 hint[2][128];
+				const unsigned key = gc_prop_tex_aram + gc_prop_mat_ofs[mat];
+				const int hs = (int)hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] - 1;
+
+				if( hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+					&& r_gx_cmpr_slot[hs].aram == key && r_gx_cmpr_slot[hs].skip == skip_b
+					&& r_gx_cmpr_slot[hs].bytes == remain
+					&& ( hs >= r_gx_cmpr_nslots - r_gx_cmpr_far_n ) == ( r_gx_cmpr_want_far ? 1 : 0 ))
+				{
+					r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
+					r_gx_cmpr_hits++;
+					slot = hs;
+					data = R_GXCmprSlotPtr( hs );
+				}
+				else
+				{
+					data = R_GXCmprSlotFor( key, skip_b, remain, &slot );
+					if( slot >= 0 && slot < 255 )
+						hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] = (u8)( slot + 1 );
+				}
+			}
 			GX_InitTexObj( &obj, data, (u16)Q_max( 8, gc_prop_mat_w[mat] >> shift ),
 				(u16)Q_max( 8, gc_prop_mat_h[mat] >> shift ), GX_TF_CMPR,
 				GX_REPEAT, GX_REPEAT, lv > 1 ? GX_TRUE : GX_FALSE );

@@ -2262,6 +2262,14 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 			continue;
 		GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
 		( *drawn )++;
+		/* $envmap batches (most of Lost Coast) are grouped too: the reflection
+		 * pass is queued exactly as the in-place path queues it. */
+		if(( b->pad & 0x8000u ) && ( gc_wd_mats[mat].flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
+			&& gc_wd_hdr.version == 2 && gc_wd_envq_n < GC_WD_ENVQ_MAX && R_GXWorldDLEnvReady())
+		{
+			gc_wd_envq[gc_wd_envq_n].chunk = chunk;
+			gc_wd_envq[gc_wd_envq_n++].b = b;
+		}
 	}
 	gc_wd_defer_n = 0;
 	R_GXCmprSetFar( false );
@@ -2574,9 +2582,7 @@ int R_GXWorldDLDraw( void )
 				/* Plain batch of a resident chunk: draw it with its material
 				 * group after the chunk loop (R_GXWorldDLDeferFlush). */
 				if( gc_wd_defer_on > 0 && !forced && gc_wd_defer_n < GC_WD_MAX_CHUNKS
-					&& !( gc_wd_hdr.version == 2 && m->hash2 && b->mat < GC_WD_BLEND_MATS )
-					&& !(( b->pad & 0x8000u ) && ( m->flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
-						&& gc_wd_hdr.version == 2 ))
+					&& !( gc_wd_hdr.version == 2 && m->hash2 && b->mat < GC_WD_BLEND_MATS ))
 				{
 					gc_wd_keys[gc_wd_defer_n++] = ( (u64)i << 48 ) | ( (u64)k << 32 )
 						| ( (u64)( b->mat * 2u + ( chunk_far ? 1u : 0u )) << 16 )
