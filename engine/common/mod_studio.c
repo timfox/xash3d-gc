@@ -2301,8 +2301,13 @@ gc_mesh_only_done: ;
 					Mod_GCStudioBssTrimLast( mod->cache.data, (size_t)kept_hdr->length );
 				/* Mesh-only / quality-0: reserve header room for post-MAP_READY
 				 * T.mdl merge so GrowLast still works after later BSS companions. */
-				if( skip_studio_textures && kept_hdr->length > 0
-					&& kept_hdr->numtextures == 0 )
+				/* Mesh-only gc_studio viewmodels (v_amerk, v_grenade) need
+				 * the same pad: they load with textures already split off,
+				 * so skip_studio_textures is false, and without room here
+				 * the merge fell back to a ~30 KiB calloc that failed: knife
+				 * and grenade drew untextured (ceres au1: 66 merge OOMs). */
+				if(( skip_studio_textures || Q_stristr( mod->name, "/v_" ))
+					&& kept_hdr->length > 0 && kept_hdr->numtextures == 0 )
 				{
 					const size_t pad = 4 * 1024;
 					const size_t kept = (size_t)kept_hdr->length;
