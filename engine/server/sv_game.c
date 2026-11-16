@@ -6062,7 +6062,17 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 	if( COM_StringEmpty( classname ))
 		return false;
 	if( SV_GCParityEntity( classname ))
-		return SV_GCEntityPressure();
+	{
+		static int kept, skipped;
+		const qboolean skip = SV_GCEntityPressure();
+
+		if( skip ) skipped++; else kept++;
+		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
+			Con_Reportf( "Xash3D GameCube: DoD parity entity %s %s (kept=%d skipped=%d slab=%zu heap=%s edicts=%d)\n",
+				classname, skip ? "skipped" : "kept", kept, skipped, gc_ent_priv_slab_used,
+				Q_memprint( GC_MemHeapFreeBytes( )), svgame.numEntities );
+		return skip;
+	}
 	/* GoldSrc's CLight removes itself unless it has a targetname; a named
 	 * light is a switchable light style and is kept. */
 	if(( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" ))
