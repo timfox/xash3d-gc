@@ -9352,7 +9352,9 @@ static void R_GXPrepareStudioState( qboolean viewmodel )
 	GX_SetNumChans( 1 );
 	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
-	GX_SetCullMode( viewmodel ? GX_CULL_NONE : GX_CULL_BACK );
+	/* Retail GoldSrc culls the viewmodel like any studio model; a
+	 * cl_righthand mirror flips the winding, so cull the other side. */
+	GX_SetCullMode(( viewmodel && tr.fFlipViewModel ) ? GX_CULL_FRONT : GX_CULL_BACK );
 	/*
 	 * G167: match GL studio viewmodel depth — glDepthRange(min, min+0.3*(max-min)).
 	 * Z-always (G155) never buried the gun in walls but also never clipped it

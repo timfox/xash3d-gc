@@ -1686,17 +1686,6 @@ static void R_StudioSetupLighting( alight_t *plight )
 
 	g_studio.ambientlight = plight->ambientlight;
 	g_studio.shadelight = plight->shadelight;
-#if XASH_GAMECUBE
-	/* Viewmodel MODULATE: soft gouraud only. Wide ambient/shade ranges
-	 * (72/96, 128/80) silhouetted the Garand under MODULATE (ava-play99-87/88).
-	 * 176/32 read almost flat (ava-play99-91/92) — open the band a little
-	 * so hands get definition without crushing wood. */
-	if( RI.currententity == tr.viewent )
-	{
-		g_studio.ambientlight = 152.0f;
-		g_studio.shadelight = 56.0f;
-	}
-#endif
 	VectorCopy( plight->plightvec, g_studio.lightvec );
 
 	for( int i = 0; i < m_pStudioHeader->numbones; i++ )
@@ -2515,18 +2504,6 @@ static void R_StudioDrawPoints( void )
 					R_StudioLighting( &lv_tmp, -1, g_nFaceFlags, g_studio.norms[k] );
 				else
 					R_StudioLighting( &lv_tmp, *pnormbone, g_nFaceFlags, (float *)pstudionorms );
-#if XASH_GAMECUBE
-				/* Soft-clamp viewmodel luminance so MODULATE cannot crush
-				 * backfaces into black silhouettes (ava-play99-88). Floor
-				 * eased with ambient 152/56 so hands keep some shape. */
-				if( RI.currententity == tr.viewent )
-				{
-					if( lv_tmp < 0.55f )
-						lv_tmp = 0.55f;
-					else if( lv_tmp > 0.98f )
-						lv_tmp = 0.98f;
-				}
-#endif
 
 				if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
 					R_StudioSetupChrome( g_studio.chrome[k], *pnormbone, (float *)pstudionorms );
@@ -3026,14 +3003,6 @@ static void R_StudioRenderFinal( void )
 	{
 		for( i = 0; i < m_pStudioHeader->numbodyparts; i++ )
 		{
-#if XASH_GAMECUBE
-			/* Sleeve bodypart is a separate 82-vert paddle that reads as
-			 * prism arms under Flipper (ava-play99-80). Gun mesh0 already
-			 * carries hands.bmp arms — skip the cloth overlay for viewent. */
-			if(( GC_UseGxWorldDraw() || gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
-				&& RI.currententity == tr.viewent && i > 0 )
-				continue;
-#endif
 			R_StudioSetupModel( i, (void **)&m_pBodyPart, (void **)&m_pSubModel );
 
 			GL_StudioSetRenderMode( rendermode );
