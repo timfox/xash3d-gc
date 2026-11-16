@@ -3104,8 +3104,62 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 					t->tiled = r_gx_font_tile;
 					t->alloc_bytes = GC_GX_FONT_TILE_BYTES;
 				}
+				/* The LRU victim itself can be a slot backed for a small
+				 * icon: with the heap spent mid-match (DoD clip sheets
+				 * loaded on use), every bind of a larger texture failed
+				 * there each frame. Take the least recently used HUD slot
+				 * whose buffer is big enough instead, fonts last. */
+				if( hud_bind && ( !t->tiled || t->alloc_bytes < bytes ))
+				{
+					int j, fit = -1, font_fit = -1;
+
+					for( j = GC_GX_TEX_HUD_ONDEMAND0; j < GC_GX_TEX_SLOTS; j++ )
+					{
+						if( j == slot || !r_gx_tex[j].tiled || r_gx_tex[j].alloc_bytes < bytes )
+							continue;
+						if( j < GC_GX_TEX_HUD_SLOT0 && !r_gx_tex[j].hud_pin )
+							continue;
+						if( r_gx_tex[j].tiled == r_gx_font_tile )
+							continue;
+						if( r_gx_tex[j].is_font )
+						{
+							if( font_fit < 0 || r_gx_tex_lru[j] < r_gx_tex_lru[font_fit] )
+								font_fit = j;
+							continue;
+						}
+						if( fit < 0 || r_gx_tex_lru[j] < r_gx_tex_lru[fit] )
+							fit = j;
+					}
+					if( fit < 0 )
+						fit = font_fit;
+					if( fit >= 0 )
+					{
+						static int refit_logs;
+
+						if( refit_logs < 4 )
+						{
+							refit_logs++;
+							gEngfuncs.Con_Reportf(
+								"Xash3D GameCube: HUD bind %s slot=%d too small (%u < %u), reusing slot=%d\n",
+								img->name, slot, (unsigned)t->alloc_bytes, (unsigned)bytes, fit );
+						}
+						slot = fit;
+						t = &r_gx_tex[slot];
+						if( t->valid && GC_GXFenceWait( r_gx_tex_fence[slot] ))
+							r_gx_tex_fence_stalls++;
+					}
+				}
 				if( !t->tiled || t->alloc_bytes < bytes )
 				{
+					static int fail_logs;
+
+					if( fail_logs < 8 )
+					{
+						fail_logs++;
+						gEngfuncs.Con_Reportf(
+							"Xash3D GameCube: HUD bind no buffer %s %dx%d slot=%d alloc=%u evict=%d\n",
+							img->name, dst_w, dst_h, slot, (unsigned)t->alloc_bytes, hud_evict );
+					}
 					r_gx_hud_bind_fails++;
 					return NULL;
 				}
