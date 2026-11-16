@@ -15,28 +15,28 @@
 	update = none
 [submodule "opus"]
 	path = 3rdparty/opus/opus
-	url = https://github.com/xiph/opus
+	url = https://github.com/timfox/opus
 [submodule "3rdparty/xash-extras"]
 	path = 3rdparty/extras/xash-extras
-	url = https://github.com/FWGS/xash-extras
+	url = https://github.com/timfox/xash-extras
 [submodule "3rdparty/bzip2/bzip2"]
 	path = 3rdparty/bzip2/bzip2
-	url = https://gitlab.com/bzip2/bzip2
+	url = https://github.com/timfox/bzip2
 [submodule "3rdparty/MultiEmulator"]
 	path = 3rdparty/MultiEmulator
-	url = https://github.com/FWGS/MultiEmulator
+	url = https://github.com/timfox/MultiEmulator
 [submodule "3rdparty/libogg/libogg"]
 	path = 3rdparty/libogg/libogg
-	url = https://github.com/xiph/ogg.git
+	url = https://github.com/timfox/ogg
 [submodule "3rdparty/vorbis/vorbis-src"]
 	path = 3rdparty/vorbis/vorbis-src
-	url = https://github.com/xiph/vorbis.git
+	url = https://github.com/timfox/vorbis
 [submodule "3rdparty/opusfile/opusfile"]
 	path = 3rdparty/opusfile/opusfile
-	url = https://github.com/xiph/opusfile.git
+	url = https://github.com/timfox/opusfile
 [submodule "3rdparty/libbacktrace/libbacktrace"]
 	path = 3rdparty/libbacktrace/libbacktrace
-	url = https://github.com/ianlancetaylor/libbacktrace
+	url = https://github.com/timfox/libbacktrace
 [submodule "3rdparty/maintui"]
 	path = 3rdparty/maintui
 	url = https://github.com/FWGS/xash3d-maintui.git
@@ -46,7 +46,7 @@
 	url = https://github.com/timfox/library-suffix.git
 [submodule "3rdparty/mbedtls/mbedtls"]
 	path = 3rdparty/mbedtls/mbedtls
-	url = https://github.com/FWGS/mbedtls-releases.git
+	url = https://github.com/timfox/mbedtls-releases
 [submodule "3rdparty/dolphin"]
 	path = 3rdparty/dolphin
 	url = https://github.com/timfox/dolphin
