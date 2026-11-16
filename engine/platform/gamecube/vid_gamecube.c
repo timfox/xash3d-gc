@@ -1251,6 +1251,7 @@ static const byte *GC_WaterRec( int index )
 			GC_AramTransfer( gc_water_aram, p, bytes, false );
 			gc_water_mem = p;
 		}
+		Con_Reportf( "Xash3D GameCube: water mirror %s (%u bytes)\n", p ? "resident" : "FAIL, ARAM per face", bytes );
 	}
 	if( gc_water_mem )
 		return gc_water_mem + (u32)index * 128u;
@@ -1262,12 +1263,9 @@ static const byte *GC_WaterRec( int index )
 	return gc_water_stage;
 }
 static qboolean gc_g286_water_logged;
-/* GX scroll water CMPR (media/water_gx.cmp) — 64×64. */
-#define GC_WATER_TEX_SIZE	64
-#define GC_WATER_TEX_BYTES	( GC_WATER_TEX_SIZE * GC_WATER_TEX_SIZE / 2 )
-static u8 gc_water_tex_data[GC_WATER_TEX_BYTES] __attribute__(( aligned( 32 )));
-static GXTexObj gc_water_tex_obj;
-static qboolean gc_water_tex_ready;
+/* The water normal map lives with the renderer now (r_gx_world.c loads
+ * media/water_gx.ia8 into the map arena); the old scroll-texture path is off. */
+static const qboolean gc_water_tex_ready = false;
 /* G225: ARAM page + aligned MEM1 DMA stage. */
 static u32 gc_aram_fill_base;
 static int gc_aram_fill_count;
@@ -2654,7 +2652,7 @@ qboolean GC_WaterTexReady( void )
 
 void *GC_GetWaterTexObj( void )
 {
-	return gc_water_tex_ready ? (void *)&gc_water_tex_obj : NULL;
+	return NULL;
 }
 
 qboolean GC_WaterFacePlane( int index, mplane_t *out, int *out_flags )
@@ -2717,7 +2715,6 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 		GC_AramFree( gc_water_aram );
 		gc_water_aram = 0;
 	}
-	gc_water_tex_ready = false;
 	gc_g286_water_logged = false;
 	memset( gc_water_faces, 0, sizeof( gc_water_faces ));
 	if( !mod || !mod->name || !mod->name[0] )
@@ -2893,25 +2890,6 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 	}
 	FS_Close( f );
 
-	/* Scroll CMPR */
-	{
-		file_t *tf = FS_Open( "media/water_gx.cmp", "rb", false );
-		if( !tf )
-			tf = FS_Open( "media/water_gx.cmp", "rb", true );
-		if( tf && FS_FileLength( tf ) == GC_WATER_TEX_BYTES
-			&& FS_Read( tf, gc_water_tex_data, GC_WATER_TEX_BYTES ) == GC_WATER_TEX_BYTES )
-		{
-			DCFlushRange( gc_water_tex_data, sizeof( gc_water_tex_data ));
-			GX_InitTexObj( &gc_water_tex_obj, gc_water_tex_data,
-				GC_WATER_TEX_SIZE, GC_WATER_TEX_SIZE, GX_TF_CMPR,
-				GX_REPEAT, GX_REPEAT, GX_FALSE );
-			GX_InitTexObjLOD( &gc_water_tex_obj, GX_LINEAR, GX_LINEAR,
-				0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1 );
-			gc_water_tex_ready = true;
-		}
-		if( tf )
-			FS_Close( tf );
-	}
 	Con_Reportf( "Xash3D GameCube: water pack loaded %s faces=%d tex=%d aram=%d scroll2=%.3f,%.3f\n",
 		path, GC_GetWaterFaceCount(), gc_water_tex_ready ? 1 : 0,
 		gc_water_aram ? 1 : 0, gc_water_scroll2_u, gc_water_scroll2_v );
@@ -8343,8 +8321,20 @@ static u16 gc_tiled_rgb565[GC_GX_TILE_MAX_W * GC_GX_TILE_MAX_H] __attribute__((a
 static unsigned short gc_probe_rgb565[GC_VIDEO_NEWGAME_PROBE_WIDTH * GC_VIDEO_NEWGAME_PROBE_HEIGHT] __attribute__((aligned( 32 )));
 static qboolean gc_buffer_owns_heap;
 
+static int gc_tiled_tex_w;
+static int gc_tiled_tex_h;
+static void *gc_tiled_tex_ptr;
+
 static void GC_InitPresentTexture( void )
 {
+	/* gc_present_tex now points at the linear buffer: forget the tiled
+	 * staging cache so the next GC_InitPresentTextureTiled re-inits the
+	 * TexObj instead of sampling linear RGB565 as 4x4 tiles (the loading
+	 * plaque showed as four squeezed strips after the map-load restore). */
+	gc_tiled_tex_ptr = NULL;
+	gc_tiled_tex_w = 0;
+	gc_tiled_tex_h = 0;
+
 	if( !gc.buffer || gc.width <= 0 || gc.height <= 0 )
 	{
 		gc_present_tex_ready = false;
@@ -8357,9 +8347,6 @@ static void GC_InitPresentTexture( void )
 	gc_present_tex_ready = true;
 }
 
-static int gc_tiled_tex_w;
-static int gc_tiled_tex_h;
-static void *gc_tiled_tex_ptr;
 static qboolean gc_gx_present_pipe_ready;
 /* G151: live New Game draws world tris into EFB; DumpFrames stay on soft. */
 static qboolean gc_gx_world_live;
@@ -11057,6 +11044,9 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	int bar_x, bar_y, bar_w, bar_h;
 	unsigned short text = GC_RGB8To565( GC_VGUI_TEXT_R, GC_VGUI_TEXT_G, GC_VGUI_TEXT_B );
 	const char *detail_line;
+	/* Lost Coast loading plaque: title bar plus a centred progress bar, no
+	 * status lines (Tim's mockup). Fatal panels keep the full layout. */
+	const qboolean compact = !top_aligned && GI && !Q_stricmp( GI->gamefolder, "lostcoast" );
 
 	panel_x = width * GC_VIDEO_SAFE_AREA_PERCENT / 100;
 	panel_w = width - panel_x * 2;
@@ -11079,6 +11069,13 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( header_h > panel_h / 3 )
 		header_h = panel_h / 3;
 
+	if( compact )
+	{
+		bar_h = height >= 240 ? 10 : 6;
+		panel_h = header_h + bar_h + pad * 3;
+		panel_y = height - panel_h - height * GC_VIDEO_SAFE_AREA_PERCENT / 100;
+	}
+
 	GC_DrawVguiBevelPanel( dst, width, height, stride, panel_x, panel_y, panel_w, panel_h, header_h );
 
 	text_x = panel_x + pad + 2;
@@ -11091,16 +11088,33 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( max_chars < 8 )
 		max_chars = 8;
 
-	/* Retail-style plaque: title in the header, progress bar centred in the
-	 * body. The status message/detail lines (CLIENT INIT, map names...) are
-	 * logged by the callers and no longer drawn: they crowded the panel. */
-	(void)message;
-	(void)details;
-	(void)msg_y;
-	(void)det_y;
-	(void)max_chars;
-	GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
-		GC_LOADING_PLAQUE_TITLE, text, text_scale, 24 );
+	{
+		/* Header = the game's own title (gameinfo.txt "title" / liblist
+		 * "game"), upper-cased for the panel font. */
+		char title[25];
+		int ti;
+
+		Q_strncpy( title, ( GI && GI->title[0] ) ? GI->title : "HALF-LIFE", sizeof( title ));
+		for( ti = 0; title[ti]; ti++ )
+			title[ti] = Q_toupper( title[ti] );
+		GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
+			title, text, text_scale, 24 );
+	}
+#if XASH_GAMECUBE
+	if( compact )
+	{
+		bar_x = panel_x + pad * 2;
+		bar_w = panel_w - pad * 4;
+		bar_y = panel_y + header_h + ( panel_h - header_h - bar_h ) / 2;
+		GC_DrawProgressBar( dst, width, height, stride, bar_x, bar_y, bar_w, bar_h, gc_loading_progress );
+		return;
+	}
+#endif
+	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
+		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
+	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
+	GC_StatusDrawLine( dst, stride, width, height, text_x, det_y,
+		detail_line, text, line_scale, max_chars );
 
 #if XASH_GAMECUBE
 	bar_x = panel_x + pad + 2;
