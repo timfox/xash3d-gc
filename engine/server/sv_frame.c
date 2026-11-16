@@ -422,6 +422,9 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 	qboolean		player;
 	int		oldmax;
 	client_frame_t	*from;
+#if XASH_GAMECUBE
+	const qboolean	local_client = NET_IsLocalAddress( cl->netchan.remote_address );
+#endif
 
 	// this is the frame that we are going to delta update from
 	if( cl->delta_sequence != -1 )
@@ -432,7 +435,16 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 		// the snapshot's entities may still have rolled off the buffer, though
 		if( from->first_entity <= ( svs.next_client_entities - svs.num_client_entities ))
 		{
+#if XASH_GAMECUBE
+			/* Every packet with bots on the 128-entry listen ring: log rarely. */
+			if( host.realtime > cl->overflow_warn_time )
+			{
+				Con_DPrintf( S_WARN "%s: delta request from out of date entities.\n", cl->name );
+				cl->overflow_warn_time = host.realtime + 10.0;
+			}
+#else
 			Con_DPrintf( S_WARN "%s: delta request from out of date entities.\n", cl->name );
+#endif
 			MSG_BeginServerCmd( msg, svc_packetentities );
 			MSG_WriteUBitLong( msg, to->num_entities - 1, MAX_VISIBLE_PACKET_BITS );
 
@@ -508,6 +520,16 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 			int		offset = 0;
 
 			// trying to reduce message by select optimal baseline
+#if XASH_GAMECUBE
+			/* A loopback client gets the bytes for free, but the search costs up
+			 * to MAX_CUSTOM_BASELINES delta tests per new entity. With bots the
+			 * listen ring (128 entries) cannot hold the previous frame, so every
+			 * entity of every packet is new: 5.5 ms a frame on dod_charlie.
+			 * Send loopback entities from their own baseline. */
+			if( local_client )
+				offset = 0;
+			else
+#endif
 			if( !sv_instancedbaseline.value || !sv.num_instanced || sv.last_valid_baseline > newnum )
 			{
 				offset = SV_FindBestBaseline( newindex, &baseline, newent, to, player );
