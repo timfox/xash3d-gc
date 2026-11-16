@@ -2296,11 +2296,19 @@ static int r_gx_cmpr_nslots;
 static int r_gx_cmpr_far_n;
 static unsigned r_gx_cmpr_far_cap;
 static qboolean r_gx_cmpr_want_far;
+/* Whole-chain pool: the last big_n slots, big_cap each, for chains (256x256
+ * with L0, about 43 KB) that a near slot would have to cut a mip from. */
+static int r_gx_cmpr_big_n;
+static unsigned r_gx_cmpr_big_cap;
+static byte *r_gx_cmpr_big_base;
+static qboolean r_gx_cmpr_use_big;
 
 static byte *R_GXCmprSlotPtr( int i )
 {
-	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
 
+	if( r_gx_cmpr_big_n && i >= r_gx_cmpr_nslots - r_gx_cmpr_big_n )
+		return r_gx_cmpr_big_base + (size_t)( i - ( r_gx_cmpr_nslots - r_gx_cmpr_big_n )) * r_gx_cmpr_big_cap;
 	if( i < near_n )
 		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
 	return r_gx_cmpr_bounce + (size_t)near_n * r_gx_cmpr_bounce_cap
@@ -2415,6 +2423,9 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	GX_DrawDone();
 	r_gx_cmpr_bounce = base;
 	r_gx_cmpr_nslots = nslots + far_n;
+	r_gx_cmpr_big_n = 0;
+	r_gx_cmpr_big_cap = 0;
+	r_gx_cmpr_big_base = NULL;
 	r_gx_cmpr_bounce_cap = slot_bytes;
 	r_gx_cmpr_far_n = far_n;
 	r_gx_cmpr_far_cap = far_bytes;
@@ -2426,6 +2437,23 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u + %d x %u bytes = %u Kb (map arena)\n",
 		nslots, slot_bytes, far_n, far_bytes,
 		( nslots * slot_bytes + far_n * far_bytes ) / 1024u );
+}
+
+/* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
+void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap )
+{
+	if( !base || big_n < 1 || big_cap < r_gx_cmpr_bounce_cap || ( big_cap & 31u )
+		|| r_gx_cmpr_big_n || r_gx_cmpr_nslots + big_n > GC_CMPR_SLOTS_MAX )
+		return;
+	GX_DrawDone();
+	r_gx_cmpr_big_base = base;
+	r_gx_cmpr_big_n = big_n;
+	r_gx_cmpr_big_cap = big_cap;
+	r_gx_cmpr_nslots += big_n;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
 }
 
 /* Call once after GX init / before map load while MEM1 tip is free. */
@@ -2443,9 +2471,10 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 	int i, pick = -1;
-	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
-	const int lo = r_gx_cmpr_want_far ? near_n : 0;
-	const int hi = r_gx_cmpr_want_far ? r_gx_cmpr_nslots : near_n;
+	const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
+	const int near_n = big_lo - r_gx_cmpr_far_n;
+	const int lo = r_gx_cmpr_use_big ? big_lo : r_gx_cmpr_want_far ? near_n : 0;
+	const int hi = r_gx_cmpr_use_big ? r_gx_cmpr_nslots : r_gx_cmpr_want_far ? big_lo : near_n;
 
 	for( i = lo; i < hi; i++ )
 	{
@@ -2500,6 +2529,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	if( r_gx_cmpr_nslots > 8 && img->gc_packed_aram
 		&& img->gc_packed_bytes > r_gx_cmpr_bounce_cap
 		&& img->gc_packed_bytes <= r_gx_hot.size && !img->gc_packed_hot
+		&& !( r_gx_cmpr_big_n && img->gc_packed_bytes <= r_gx_cmpr_big_cap )
 		&& !img->gc_packed_queued && r_gx_hot.queued < GC_HOT_QUEUE_MAX )
 	{
 		img->gc_packed_queued = true;
@@ -2567,7 +2597,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				&& ( bounce = R_GXCmprBounce()) != NULL
 				&& r_gx_cmpr_bounce_cap > 0 )
 			{
-				const unsigned slot_cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
+				unsigned slot_cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 				unsigned skip = 0;
 				unsigned remain = img->gc_packed_bytes;
 				unsigned use_shift = 0;
@@ -2575,6 +2605,13 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				int bw = img->width, bh = img->height;
 				int mi;
 
+				r_gx_cmpr_use_big = false;
+				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n
+					&& remain > slot_cap && remain <= r_gx_cmpr_big_cap )
+				{
+					slot_cap = r_gx_cmpr_big_cap;
+					r_gx_cmpr_use_big = true;
+				}
 				for( mi = 0; mi < img->gc_packed_levels
 					&& remain > slot_cap; ++mi )
 				{
@@ -2604,6 +2641,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 					w = bw;
 					h = bh;
 				}
+				r_gx_cmpr_use_big = false;
 			}
 			/* Stub+ARAM without a successful bounce: keep grey 8×8, not rainbow. */
 			if( is_stub && data != bounce && !img->gc_packed_hot )

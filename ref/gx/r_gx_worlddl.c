@@ -113,6 +113,8 @@ extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
+extern void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap );
+extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
@@ -784,28 +786,45 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			 * and a resident bind never waits for the GP. */
 			if( !gEngfuncs.Sys_CheckParm( "-gcnoarenagap" ))
 			{
-				/* -gcarenagapbig: 48 KB slots hold a whole 256x256 chain (L0 kept). */
-				const size_t big = gEngfuncs.Sys_CheckParm( "-gcarenagapbig" ) ? 48u * 1024u : 24u * 1024u;
+				/* Plus a few whole-chain slots for 256x256 textures (about
+				 * 43 KB with L0): in a 24 KB slot they lose L0 and the beach
+				 * and trench ground goes soft. -gccmprbig N sets how many. */
+				const size_t small = 24u * 1024u;
+				const size_t big = 44u * 1024u;
 				const size_t keep_gap = 160u * 1024u;	/* later claims (overflow, entity tables) */
 				const size_t gap = GC_MapArenaLargestGap();
-				int gn = gap > keep_gap ? (int)(( gap - keep_gap ) / big ) : 0;
+				const size_t avail = gap > keep_gap ? gap - keep_gap : 0;
+				int bn = 8, gn;
 				byte *gt = NULL;
+				char nb[8];
 
+				if( _Sys_GetParmFromCmdLine( "-gccmprbig", nb, sizeof( nb )))
+					bn = Q_atoi( nb );
+				bn = bound( 0, bn, 16 );
+				while( bn > 0 && avail < (size_t)bn * big + 8u * small )
+					bn--;
+				gn = (int)(( avail - (size_t)bn * big ) / small );
 				if( gn > 32 )
 					gn = 32;
 				for( ; gn >= 8 && !gt; gn-- )
 				{
-					const size_t at = GC_MapArenaFind( (size_t)gn * big );
+					const size_t bytes = (size_t)gn * small + (size_t)bn * big;
+					const size_t at = GC_MapArenaFind( bytes );
 
 					if( at == (size_t)-1 )
 						continue;
 					GC_RetainMapLoadBufferBorrow();
-					gt = (byte *)GC_MapLoadBufferTailAlloc( at, (size_t)gn * big );
+					gt = (byte *)GC_MapLoadBufferTailAlloc( at, bytes );
 					if( gt )
-						R_GXCmprBounceAdopt( gt, gn, (unsigned)big, 0, 0 );
+					{
+						R_GXCmprBounceAdopt( gt, gn, (unsigned)small, 0, 0 );
+						if( bn )
+							R_GXCmprBigAdopt( gt + (size_t)gn * small, bn, (unsigned)big );
+						break;
+					}
 				}
-				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s from arena gap: %d x %u (largest gap %u)\n",
-					gt ? "adopted" : "skipped", gt ? gn + 1 : 0, (unsigned)big, (unsigned)gap );
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots %s from arena gap: %d x %u + %d x %u whole-chain (largest gap %u)\n",
+					gt ? "adopted" : "skipped", gt ? gn : 0, (unsigned)small, gt ? bn : 0, (unsigned)big, (unsigned)gap );
 			}
 			/* Experimental (-gcslotsspill): the arena is full, so take the slots
 			 * from the world-array spill, leaving 48 KiB for props. */
