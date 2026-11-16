@@ -15,8 +15,12 @@ GNU General Public License for more details.
 
 #include "ref_common.h"
 #if XASH_GAMECUBE
-color24 *Mod_GCHydrateSurfaceLightmap( const msurface_t *surf );
+color24 *Mod_GCLightPointSamples( const msurface_t *surf );
 qboolean Mod_GCAramLightmapActive( void );
+qboolean Mod_GCLightPointsActive( const model_t *world );
+/* Last sky trace of R_EntityDynamicLight: 0 no surface, 1 not sky, 2 sky. */
+int r_gc_light_path = -1;
+float r_gc_light_frac;
 #endif
 #include "xash3d_mathlib.h"
 #include "enginefeatures.h"
@@ -302,7 +306,7 @@ start:
 #if XASH_GAMECUBE
 		/* The world lightmap lives in ARAM: fetch this face's samples. */
 		if( !samples )
-			samples = Mod_GCHydrateSurfaceLightmap( surf );
+			samples = Mod_GCLightPointSamples( surf );
 #endif
 		if( !samples )
 			return true;
@@ -400,7 +404,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 
 	if( !gp_cl->models[1] || ( !gp_cl->models[1]->lightdata
 #if XASH_GAMECUBE
-		&& !Mod_GCAramLightmapActive()
+		&& !Mod_GCAramLightmapActive() && !Mod_GCLightPointsActive( gp_cl->models[1] )
 #endif
 		))
 		return (colorVec){ 255, 255, 255, 0 };
@@ -568,6 +572,10 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 		else
 			psurf = gEngfuncs.EV_TraceSurface( 0, vecSrc, vecEnd );
 
+#if XASH_GAMECUBE
+		r_gc_light_path = psurf ? ( FBitSet( psurf->flags, SURF_DRAWSKY ) ? 2 : 1 ) : 0;
+		r_gc_light_frac = trace.fraction;
+#endif
 		if(( ent->model->type == mod_studio && FBitSet( ent->model->flags, STUDIO_FORCE_SKYLIGHT ))
 			|| ( psurf && FBitSet( psurf->flags, SURF_DRAWSKY )))
 		{
