@@ -412,6 +412,22 @@ static void Mod_GCVMSlotClaim( model_t *mod, const void *buf, size_t bytes )
 	}
 }
 
+/* A viewmodel's *t skin merge appends texture headers after the mesh. When
+ * the mesh sits in a viewmodel slot the slot has room for it, so the merge
+ * stays in place instead of moving the model to a calloc copy on the heap
+ * (which also orphaned the slot). NULL when buf is no slot or it won't fit. */
+byte *Mod_GCVMSlotGrow( void *buf, size_t new_size )
+{
+	int i;
+
+	for( i = 0; buf && i < GC_VM_SLOTS; i++ )
+	{
+		if( gc_vm_slot[i].buf == buf )
+			return new_size <= GC_VM_SLOT_SIZE ? (byte *)buf : NULL;
+	}
+	return NULL;
+}
+
 static void Mod_GCVMSlotTouch( const model_t *mod )
 {
 	int i;
@@ -1178,8 +1194,16 @@ qboolean Mod_GCPromoteStudioPath( const char *path )
 		Mod_GCStudioNameAllowed( path, &is_view );
 		if( is_view )
 		{
+			extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+
 			Mod_GCVMSlotClaim( mod, buf, kept );
 			Mod_GCPinViewModel( mod );
+			/* Every viewmodel load path ends here (held bind, CapFaces team
+			 * pick, deferred precache), and the map-load skin pass skips
+			 * weapons nobody holds yet. Without this the split v_30cal and
+			 * v_mg42 cores drew flat grey on ceres (no skin try for them). */
+			if( !Mod_GCAttachStudioSkins( mod ))
+				Con_Reportf( "Xash3D GameCube: viewmodel skins not attached '%s'\n", path );
 		}
 		R_GXStudioInvalidateBindings();
 		return true;
