@@ -905,6 +905,22 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	return gc_animpool + start;
 }
 
+/* Release a block fetched this frame early (a load-time scan), so the
+ * ring can reuse it for the next one instead of stepping over it. */
+static void Mod_GCAnimPackUnpin( const void *ptr )
+{
+	int i;
+
+	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+	{
+		if( gc_animent[i].pack && gc_animpool + gc_animent[i].off == (const byte *)ptr )
+		{
+			gc_animent[i].frame = host.framecount - 1;
+			return;
+		}
+	}
+}
+
 /* Animation for a sequence of a split model, or NULL when the model's group
  * table does not name a pack. A sequence that cannot be fetched plays as the
  * bind pose (an all-zero offset table) instead of ending the game. */
@@ -2360,14 +2376,22 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 		for( j = 0; j < pbodypart[i].nummodels; j++, pmodel++ )
 		{
 			mstudiomesh_t *pmesh;
+			byte *base = (byte *)phdr;
 
+			/* Streamed: scan the blob from the ARAM mesh pack. Skipping these
+			 * left the lean 128 px skin widths in place, so the retail UVs
+			 * tiled the atlas several times over (ceres: speckled bodies). */
 			if( Mod_GCStudioModelStreamed( pmodel ))
-				continue; /* triangle commands are in the ARAM mesh pack */
-			pmesh = (mstudiomesh_t *)((byte *)phdr + pmodel->meshindex );
+			{
+				base = Mod_GCStudioMeshBase( phdr, pmodel );
+				if( !base )
+					continue;
+			}
+			pmesh = (mstudiomesh_t *)( base + pmodel->meshindex );
 
 			for( k = 0; k < pmodel->nummesh; k++, pmesh++ )
 			{
-				short *cmd = (short *)((byte *)phdr + pmesh->triindex );
+				short *cmd = (short *)( base + pmesh->triindex );
 				int tex, max_s = 0, max_t = 0;
 				int n;
 
@@ -2398,6 +2422,8 @@ static void Mod_GCFixStudioUvDomains( studiohdr_t *phdr )
 					ptexture[tex].height = max_t + 1;
 				}
 			}
+			if( base != (byte *)phdr )
+				Mod_GCAnimPackUnpin( base ); /* scanned; let the ring reuse it */
 		}
 	}
 
