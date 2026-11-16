@@ -2672,6 +2672,32 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 					b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] );
 			}
 
+			/* -gctexdump: what each world texture is drawn from, once per
+			 * (texture, shift, source), to chase soft ground. */
+			{
+				static int dump_on = -1, dump_n, dump_ring_i;
+				static u32 dump_ring[96];
+
+				if( dump_on < 0 )
+					dump_on = gEngfuncs.Sys_CheckParm( "-gctexdump" ) ? 1 : 0;
+				if( dump_on && dump_n < 600 )
+				{
+					const int src = img->gc_packed_hot ? 1 : used_bounce ? ( r_gx_cmpr_cur_slot >= r_gx_cmpr_nslots - r_gx_cmpr_big_n && r_gx_cmpr_big_n ? 3 : 2 ) : is_stub ? 4 : 0;
+					const u32 key = ( texnum << 8 ) | ( shift << 3 ) | (u32)src;
+					int k;
+
+					for( k = 0; k < 96 && dump_ring[k] != key; k++ );
+					if( k == 96 )
+					{
+						dump_ring[dump_ring_i++ % 96] = key;
+						dump_n++;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: texdump t=%.1f tex=%u %s %dx%d draw=%dx%d shift=%u levels=%d src=%s bytes=%u lowshift=%u\n",
+							gp_cl ? gp_cl->time : 0.0, texnum, img->name, img->width, img->height, w, h, shift, levels,
+							src == 1 ? "hot" : src == 2 ? "slot" : src == 3 ? "big" : src == 4 ? "stub" : "mem1",
+							(unsigned)img->gc_packed_bytes, (unsigned)( img->gc_packed_low_shift & 0x3fu ));
+					}
+				}
+			}
 			GX_InitTexObj( &t->obj, data, (u16)w, (u16)h, GX_TF_CMPR, GX_REPEAT, GX_REPEAT, levels > 1 ? GX_TRUE : GX_FALSE );
 			if( levels > 1 )
 				GX_InitTexObjLOD( &t->obj, GX_LIN_MIP_LIN, GX_LINEAR, 0.0f, (f32)( levels - 1 ), 0.0f, GX_FALSE, GX_TRUE, GX_ANISO_2 );
