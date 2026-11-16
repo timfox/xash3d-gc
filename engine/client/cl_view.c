@@ -201,6 +201,30 @@ static void V_GCRetailViewModelPose( const ref_params_t *pp )
 }
 
 /*
+Routes that draw the world without V_RenderView (the DoD CapFaces /
+-gcworldrender listen) used to copy the raw camera into the viewmodel.
+The studio transform negates pitch, so the gun tilted against the view,
+with no bob and no retail 1-unit drop. Pose it the retail way at the
+camera the route uses.
+*/
+void V_GCPoseViewModelAt( const vec3_t vieworg, const vec3_t viewangles )
+{
+	ref_params_t pp;
+
+	memset( &pp, 0, sizeof( pp ));
+	VectorCopy( vieworg, pp.simorg );
+	VectorCopy( viewangles, pp.viewangles );
+	VectorCopy( viewangles, pp.cl_viewangles );
+	pp.cl_viewangles[ROLL] = 0.0f;
+	VectorCopy( cl.simvel, pp.simvel );
+	pp.time = cl.time;
+	pp.frametime = host.frametime;
+	pp.onground = ( cl.local.onground != -1 );
+	pp.viewsize = scr_viewsize.value;
+	V_GCRetailViewModelPose( &pp );
+}
+
+/*
 True when the HL1 animation is one step of a longer one (a shotgun shell or
 the closing pump) that the DoD model plays as a single reload: the caller
 leaves the playing sequence and its start time alone.

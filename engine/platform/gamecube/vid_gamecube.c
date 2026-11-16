@@ -17628,10 +17628,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				if( model_changed || clgame.viewent.curstate.animtime <= 0.0f )
 					clgame.viewent.curstate.animtime = (float)cl.time - 2.0f;
 				clgame.viewent.curstate.rendermode = kRenderNormal;
-				VectorCopy( rvp.vieworigin, clgame.viewent.origin );
-				VectorCopy( rvp.viewangles, clgame.viewent.angles );
-				VectorCopy( clgame.viewent.origin, clgame.viewent.curstate.origin );
-				VectorCopy( clgame.viewent.angles, clgame.viewent.curstate.angles );
+				V_GCPoseViewModelAt( rvp.vieworigin, rvp.viewangles );
 				gc_force_draw_viewmodel = true;
 				if( !gc_capfaces_vm_bound_logged
 					|| gc_capfaces_vm_team_logged != gc_capfaces_team_sel )
@@ -17677,10 +17674,10 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		 * (ava-play99-52..54 prism arms). */
 		if( clgame.viewent.model && clgame.viewent.model->type == mod_studio )
 		{
-			VectorCopy( rvp.vieworigin, clgame.viewent.origin );
-			VectorCopy( rvp.viewangles, clgame.viewent.angles );
-			VectorCopy( clgame.viewent.origin, clgame.viewent.curstate.origin );
-			VectorCopy( clgame.viewent.angles, clgame.viewent.curstate.angles );
+			/* Retail pose (negated pitch, bob, -1 z): the raw camera copy
+			 * tilted the gun against the view once the studio transform
+			 * negated its pitch (Tim: "gun rendering is a bit off"). */
+			V_GCPoseViewModelAt( rvp.vieworigin, rvp.viewangles );
 			if( clgame.viewent.curstate.animtime <= 0.0f )
 			{
 				clgame.viewent.curstate.sequence = 0; /* idle */

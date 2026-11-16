@@ -1022,6 +1022,9 @@ void V_PostRender( void );
 void V_RenderView( void );
 #if XASH_GAMECUBE
 qboolean V_RenderViewBoundedGC( void );
+#if XASH_GAMECUBE
+void V_GCPoseViewModelAt( const vec3_t vieworg, const vec3_t viewangles );
+#endif
 #endif
 
 //
