@@ -2429,7 +2429,12 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 		byte *slot = NULL;
 		mstudiotexture_t *src_tex, *dst_tex;
 
-		if( Mod_GCIsStudioBssCache( mod->cache.data ))
+		{
+			extern byte *Mod_GCVMSlotGrow( void *buf, size_t new_size );
+
+			slot = Mod_GCVMSlotGrow( mod->cache.data, merged );
+		}
+		if( !slot && Mod_GCIsStudioBssCache( mod->cache.data ))
 			slot = Mod_GCStudioBssGrowLast( mod->cache.data, mesh, merged );
 		Image_GCPurgeDecodeScratch();
 		Mod_GCForceVmChromakeyMasks( src_hdr );
