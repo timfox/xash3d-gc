@@ -1540,6 +1540,7 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 }
 
 static void R_GXCmprSlotsReset( void );
+void R_GXCmprBounceDropLate( void );
 
 static void R_GXTexCacheReset( void )
 {
@@ -1586,6 +1587,8 @@ static void R_GXTexCacheReset( void )
 	r_gx_cinematic_ready = false;
 	r_gx_tex_world = NULL;
 	r_gx_hud_pool_ready = false;
+	/* Late slots live in the world-array spill, which the next map rewinds. */
+	R_GXCmprBounceDropLate();
 	R_GXCmprSlotsReset();
 	if( !gc_mem003_world_pool_logged )
 	{
@@ -2314,6 +2317,13 @@ static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
 static unsigned r_gx_cmpr_bounce_stalls;
 static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
+/* Late slots (R_GXCmprBounceAdoptLate): the bounce they replaced, and the
+ * slot clock at the start of this frame, for the victim choice. */
+static qboolean r_gx_cmpr_late;
+static byte *r_gx_cmpr_home;
+static int r_gx_cmpr_home_n;
+static unsigned r_gx_cmpr_home_cap;
+static unsigned r_gx_cmpr_frame_id, r_gx_cmpr_frame_clock;
 
 /* A new map reuses texnums and ARAM windows: forget what the slots hold. */
 static void R_GXCmprSlotsReset( void )
@@ -2417,6 +2427,58 @@ void R_GXPreallocCmprBounce( void )
 	(void)R_GXCmprBounce();
 }
 
+/* A world that got no slots at load (dod_charlie: the map arena is full) is
+ * handed spare world-array spill once the team bodies are in. The bounce it
+ * had stays where it is and comes back with R_GXCmprBounceDropLate. */
+void R_GXCmprBounceAdoptLate( byte *base, int nslots, unsigned slot_bytes )
+{
+	byte *home = r_gx_cmpr_bounce;
+	const int home_n = r_gx_cmpr_nslots;
+	const unsigned home_cap = r_gx_cmpr_bounce_cap;
+
+	if( r_gx_cmpr_late || !base || nslots < 4 || r_gx_cmpr_far_n )
+		return;
+	R_GXCmprBounceAdopt( base, nslots, slot_bytes, 0, 0 );
+	if( r_gx_cmpr_bounce != base )
+		return;
+	r_gx_cmpr_home = home;
+	r_gx_cmpr_home_n = home_n;
+	r_gx_cmpr_home_cap = home_cap;
+	r_gx_cmpr_late = true;
+}
+
+qboolean R_GXCmprBounceIsLate( void )
+{
+	return r_gx_cmpr_late;
+}
+
+/* Number of near slots now, so the world DL knows whether it got any. */
+int R_GXCmprNearSlots( void )
+{
+	return r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+}
+
+void R_GXCmprBounceDropLate( void )
+{
+	if( !r_gx_cmpr_late )
+		return;
+	GX_DrawDone();
+	r_gx_cmpr_late = false;
+	r_gx_cmpr_bounce = r_gx_cmpr_home;
+	r_gx_cmpr_nslots = r_gx_cmpr_home ? r_gx_cmpr_home_n : 0;
+	r_gx_cmpr_bounce_cap = r_gx_cmpr_home ? r_gx_cmpr_home_cap : 0;
+	r_gx_cmpr_far_n = 0;
+	r_gx_cmpr_far_cap = 0;
+	r_gx_cmpr_want_far = false;
+	r_gx_cmpr_home = NULL;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR late slots dropped, back to %d x %u bytes\n",
+		r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap );
+}
+
 /*
  * The slot holding `bytes` of ARAM at aram+skip, DMAing it in on a miss. Only
  * the LRU slot being replaced is waited for (its own last draw), never the one
@@ -2441,6 +2503,33 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 			return R_GXCmprSlotPtr( i );
 		}
 	}
+	if( r_gx_cmpr_late && hi - lo >= 4 )
+	{
+		/* A frame binds each texture once, in material order. With fewer
+		 * slots than textures plain LRU evicts exactly the one needed next
+		 * and nothing ever hits. Replace a slot this frame has not used
+		 * (its last draw is a frame old, so no wait), and once every slot
+		 * is in use send the rest through the last two slots in turn. */
+		if( r_gx_hot.frame != r_gx_cmpr_frame_id )
+		{
+			r_gx_cmpr_frame_id = r_gx_hot.frame;
+			r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
+		}
+		for( i = lo; i < hi; i++ )
+		{
+			if( !r_gx_cmpr_slot[i].valid )
+			{
+				pick = i;
+				break;
+			}
+			if( r_gx_cmpr_slot[i].used <= r_gx_cmpr_frame_clock
+				&& ( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used ))
+				pick = i;
+		}
+		if( pick < 0 )
+			pick = ( r_gx_cmpr_slot[hi - 1].used < r_gx_cmpr_slot[hi - 2].used ) ? hi - 1 : hi - 2;
+	}
+	else
 	for( i = lo; i < hi; i++ )
 	{
 		if( !r_gx_cmpr_slot[i].valid )

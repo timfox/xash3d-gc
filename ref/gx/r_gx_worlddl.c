@@ -112,6 +112,18 @@ extern size_t Mod_GCWorldArraySpillFreeLasting( void );
 extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
+extern void R_GXCmprBounceAdoptLate( byte *base, int nslots, unsigned slot_bytes );
+extern void R_GXCmprBounceDropLate( void );
+extern qboolean R_GXCmprBounceIsLate( void );
+extern int R_GXCmprNearSlots( void );
+extern qboolean Mod_GCAnimPoolSettled( void );
+/* Late texture slots: a world that got no slots at load waits until both
+ * team bodies (and the animation ring) are in, then takes the spill they
+ * left. gc_wd_late_target is the spill-free level that means both cores
+ * landed; 0 = nothing to wait for. */
+static int gc_wd_late_state;	/* 0 off, 1 waiting, 2 done */
+static size_t gc_wd_late_target;
+static int gc_wd_late_settle;
 extern void R_GXCmprSetFar( qboolean far_pool );
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
@@ -514,6 +526,8 @@ static void R_GXWorldDLLoad( const char *mapbase )
 
 	gc_wd_state = -1;
 	R_GXWorldDLUnload();
+	R_GXCmprBounceDropLate();
+	gc_wd_late_state = 0;
 	if( gEngfuncs.Sys_CheckParm( "-gcnobspdl" ))
 		return;
 	Q_strncpy( gc_wd_mapbase, mapbase, sizeof( gc_wd_mapbase ));
@@ -964,6 +978,25 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	GC_HeapCheck( "world DL before mat pack" );
 	R_GXMatPackLoad();
 	gc_wd_state = 1;
+	if( R_GXCmprNearSlots() <= 2 && !gEngfuncs.Sys_CheckParm( "-gcnolateslots" ))
+	{
+		static const char *const team_cores[] = { "gc_studio/us-inf.mdl", "gc_studio/axis-inf.mdl" };
+		/* The CMPR bounce borrow comes after this and takes only the top
+		 * 32 KiB, which FreeLasting already leaves out. */
+		const size_t sfree = Mod_GCWorldArraySpillFreeLasting();
+		size_t cores = 0;
+
+		for( i = 0; i < 2; i++ )
+		{
+			fs_offset_t sz = gEngfuncs.fsapi->FileSize( team_cores[i], false );
+
+			if( sz > 0 )
+				cores += ALIGN( (size_t)sz, 32 );
+		}
+		gc_wd_late_target = sfree > cores ? sfree - cores : 0;
+		gc_wd_late_settle = 0;
+		gc_wd_late_state = 1;
+	}
 	gEngfuncs.Con_Reportf(
 		"Xash3D GameCube: world DL %s v%u clusters=%u chunks=%u mats=%u cache=%u Kb file=%u Kb (%s)\n",
 		path, gc_wd_hdr.version, gc_wd_hdr.n_clusters, gc_wd_hdr.n_chunks, gc_wd_hdr.n_mats,
@@ -2191,6 +2224,41 @@ int R_GXWorldDLDraw( void )
 	if( gc_wd_frame > 0 )
 		GX_DrawDone();
 	gc_wd_frame++;
+	/* The GP is idle here: safe to repoint the texture slots. */
+	if( gc_wd_late_state == 1 && ( gc_wd_frame & 15 ) == 0 )
+	{
+		const size_t sfree = Mod_GCWorldArraySpillFreeLasting();
+
+		/* Bodies in: spill down to the target, give or take the merged
+		 * *t growth. */
+		if( sfree <= gc_wd_late_target + 4096u )
+			gc_wd_late_settle++;
+		else
+			gc_wd_late_settle = 0;
+		/* Waits for the ring for about 10 s; a body without animation
+		 * packs never opens it. */
+		if( gc_wd_late_settle >= 40 || ( gc_wd_late_settle >= 4 && Mod_GCAnimPoolSettled()))
+		{
+			const unsigned slot_bytes = 10944u;
+			const size_t keep = 16u * 1024u;	/* small props, string growth */
+			const int n = sfree > keep ? (int)Q_min(( sfree - keep ) / slot_bytes, 64u ) : 0;
+			byte *st = NULL;
+
+			gc_wd_late_state = 2;
+			if( n >= 6 )
+			{
+				st = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)n * slot_bytes, "cmpr-late-slots" );
+				if( st )
+				{
+					Mod_GCWorldArraySpillPinBase( st, (size_t)n * slot_bytes );
+					R_GXCmprBounceAdoptLate( st, n, slot_bytes );
+				}
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR late slots %s: %d x %u (spill free %u) frame=%d\n",
+				R_GXCmprBounceIsLate() ? "adopted" : "skipped", n, slot_bytes,
+				(unsigned)sfree, gc_wd_frame );
+		}
+	}
 	if( gc_wd_file && ( gc_wd_frame & 127 ) == 0 )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL disc totals reads=%u bytes=%u frame=%d\n",
 			gc_wd_disc_reads, gc_wd_disc_bytes, gc_wd_frame );

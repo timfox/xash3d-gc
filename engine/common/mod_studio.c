@@ -780,6 +780,13 @@ static qboolean Mod_GCAnimPoolReady( void )
 	return true;
 }
 
+/* True once the animation ring has a home (or gave up): it will not ask the
+ * world-array spill for room again this map. */
+qboolean Mod_GCAnimPoolSettled( void )
+{
+	return gc_animpool || gc_animpool_failed;
+}
+
 static gc_animpack_t *Mod_GCAnimPackOpen( const char *name )
 {
 	gc_animpack_t *pk = NULL;
