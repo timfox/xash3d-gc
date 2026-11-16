@@ -1944,17 +1944,19 @@ void Mod_FreeModel( model_t *mod )
 		}
 #endif
 #if XASH_GAMECUBE
-			/* Retail tram hop tip≈18 KiB (probe 235602): Mem_FreePool walks the
-			 * world zone and never returns after lean tex unload. Drop the pool
-			 * handle without walking — malloc surfaces already freed above. */
+			/* The old world's pool is always freed.  A low-heap skip here
+			 * (added for a tram-hop hang) leaked the pool on every changelevel
+			 * once the heap sat under 48 KiB, which then kept it there: c2a1's
+			 * c1a4i/c1a4b round trips ran out of memory after ~75 loads.  At
+			 * low heap, list what the pool still holds so a bad block that
+			 * would hang the walk is named in the log. */
 			if( mod->type == mod_brush && FBitSet( mod->flags, MODEL_WORLD )
 				&& GC_MemHeapFreeBytes() < 48u * 1024u )
 			{
-				Con_Reportf( "Xash3D GameCube: FreeModel skip world Mem_FreePool tip=%s\n",
-					Q_memprint( GC_MemHeapFreeBytes() ));
-				mod->mempool = 0;
+				extern void Mem_GCDescribePool( poolhandle_t poolptr, const char *why );
+				Mem_GCDescribePool( mod->mempool, "world free at low tip" );
 			}
-			else if( !( mod->type == mod_sprite && mod->mempool == host.mempool ))
+			if( !( mod->type == mod_sprite && mod->mempool == host.mempool ))
 				Mem_FreePool( &mod->mempool );
 #else
 		Mem_FreePool( &mod->mempool );

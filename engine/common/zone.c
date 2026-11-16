@@ -171,6 +171,56 @@ static void GC_MemWatchCall( const char *what, const char *filename, int filelin
 #endif
 
 #if XASH_GAMECUBE
+/* One line per "map active": every pool of 2 KiB or more, so growth across
+ * repeated changelevels shows which pool keeps what. */
+void GC_MemReportPools( const char *stage )
+{
+	char line[1024];
+	size_t i, len = 0;
+
+	size_t live = 0, small = 0;
+
+	line[0] = 0;
+	for( i = 0; i < poolcount; i++ )
+	{
+		const mempool_t *pool = &poolchain[i];
+
+		if( !pool->filename )
+			continue;
+		live++;
+		if( pool->realsize < 2048 )
+		{
+			small += pool->realsize;
+			continue;
+		}
+		if( len + 48 < sizeof( line ))
+			len += Q_snprintf( line + len, sizeof( line ) - len, " %s=%u",
+				pool->name, (unsigned)pool->realsize );
+	}
+	Con_Reportf( "Xash3D GameCube: mem pools at=%s live=%u slots=%u small=%u%s\n", stage,
+		(unsigned)live, (unsigned)poolcount, (unsigned)small, line );
+	/* Names that appear more than once: a pool created per map and never freed. */
+	for( i = 0; i < poolcount; i++ )
+	{
+		size_t j, dup = 0;
+
+		if( !poolchain[i].filename )
+			continue;
+		for( j = 0; j < i; j++ )
+			if( poolchain[j].filename && !Q_strcmp( poolchain[j].name, poolchain[i].name ))
+				break;
+		if( j < i )
+			continue; // reported with its first instance
+		for( j = i + 1; j < poolcount; j++ )
+			if( poolchain[j].filename && !Q_strcmp( poolchain[j].name, poolchain[i].name ))
+				dup++;
+		if( dup )
+			Con_Reportf( "Xash3D GameCube: mem pool repeated name=%s count=%u size=%u at %s:%i\n",
+				poolchain[i].name, (unsigned)( dup + 1 ), (unsigned)poolchain[i].realsize,
+				poolchain[i].filename, poolchain[i].fileline );
+	}
+}
+
 void GC_MemReportPoolPressure( const char *subsystem, size_t requested )
 {
 	static char last_subsystem[64];
@@ -1105,6 +1155,29 @@ void _Mem_EmptyPool( poolhandle_t poolptr, const char *filename, int fileline )
 	}
 #endif
 }
+
+#if XASH_GAMECUBE
+/* List what a pool still holds (first 12 big blocks, small count), with a
+ * header check, before it is freed. */
+void Mem_GCDescribePool( poolhandle_t poolptr, const char *why )
+{
+	mempool_t *pool = poolptr ? Mem_FindPool( poolptr ) : NULL;
+	const memheader_t *h;
+	const memheader_small_t *hs;
+	int n = 0, small = 0;
+
+	if( !pool )
+		return;
+	for( hs = pool->chain_small; hs && small < 100000; hs = hs->next )
+		small++;
+	Con_Reportf( "Xash3D GameCube: pool %s why=%s size=%u small=%d\n",
+		pool->name, why, (unsigned)pool->realsize, small );
+	for( h = pool->chain; h && n < 12; h = h->next, n++ )
+		Con_Reportf( "Xash3D GameCube:   block %p size=%u at %s:%u sentinel=%s\n",
+			(const void *)h, (unsigned)h->size, h->filename ? h->filename : "?",
+			(unsigned)h->fileline, h->sentinel1 == MEMHEADER_SENTINEL_BIG ? "ok" : "BAD" );
+}
+#endif
 
 void _Mem_FreePool( poolhandle_t *poolptr, const char *filename, int fileline )
 {

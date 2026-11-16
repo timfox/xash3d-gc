@@ -299,6 +299,11 @@ void GC_MemSample( const char *stage )
 			stage, Q_memprint( total ), Q_memprint( delta ), Q_memprint( gc_mem_hwm ), gc_mem_map,
 			Q_memprint( heap_used ), Q_memprint( heap_free ), Q_memprint( heap_unclaimed ));
 	}
+	if( !Q_strcmp( stage, "map active" ))
+	{
+		extern void GC_MemReportPools( const char *stage );
+		GC_MemReportPools( stage );
+	}
 }
 
 /*
