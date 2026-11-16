@@ -16571,6 +16571,59 @@ void GC_CaptureNewGamePVS( void )
 }
 
 /*
+GC_SpectatorEye
+
+These routes build the camera from server edict 1 and never run the client's
+V_CalcRefdef, so an observer's chase/in-eye target (iuser1/iuser2) was ignored
+and a DoD spectator sat still where it joined. Do what the stock HLSDK
+spectator view does: in-eye takes the target's eye and aim; chase sits 96
+units behind the target's eye along the view direction (the target's aim
+when locked, the observer's own look when free), pulled in at walls.
+*/
+static void GC_SpectatorEye( edict_t *player, vec3_t eye, vec3_t angles )
+{
+	enum { GC_OBS_CHASE_LOCKED = 1, GC_OBS_CHASE_FREE = 2, GC_OBS_IN_EYE = 4, GC_OBS_MAP_CHASE = 6 };
+	const int mode = player->v.iuser1;
+	edict_t *target;
+	vec3_t target_eye, forward, back;
+	trace_t tr;
+
+	if( mode != GC_OBS_CHASE_LOCKED && mode != GC_OBS_CHASE_FREE
+		&& mode != GC_OBS_IN_EYE && mode != GC_OBS_MAP_CHASE )
+		return;
+	if( player->v.iuser2 < 1 || player->v.iuser2 > svs.maxclients )
+		return;
+	target = SV_EdictNum( player->v.iuser2 );
+	if( !SV_IsValidEdict( target ) || target == player )
+		return;
+
+	VectorAdd( target->v.origin, target->v.view_ofs, target_eye );
+	if( mode == GC_OBS_IN_EYE )
+	{
+		VectorCopy( target_eye, eye );
+		VectorCopy( target->v.v_angle, angles );
+		return;
+	}
+	if( mode == GC_OBS_CHASE_LOCKED )
+	{
+		VectorCopy( target->v.v_angle, angles );
+		angles[PITCH] = 0.0f;
+	}
+	/* The observer's look can be pitched far down after the join (ceres:
+	 * the chase camera hung straight over the bot's helmet). Keep the
+	 * orbit to a shoulder-height arc like the client chase camera. */
+	if( angles[PITCH] > 30.0f )
+		angles[PITCH] = 30.0f;
+	else if( angles[PITCH] < -30.0f )
+		angles[PITCH] = -30.0f;
+	AngleVectors( angles, forward, NULL, NULL );
+	VectorMA( target_eye, -96.0f, forward, back );
+	tr = SV_Move( target_eye, vec3_origin, vec3_origin, back, MOVE_NOMONSTERS, target, false );
+	/* Stay a few units off the wall the trace hit. */
+	VectorMA( tr.endpos, tr.fraction < 1.0f ? 4.0f : 0.0f, forward, eye );
+}
+
+/*
  * G90: single New Game world pass for V_RenderViewBoundedGC.
  * Caller owns R_BeginFrame / R_EndFrame (V_PreRender / V_PostRender).
  */
@@ -16617,6 +16670,7 @@ qboolean GC_RenderNewGameWorldPassNoFrame( qboolean draw_viewmodel )
 			if( !Sys_CheckParm( "-gcnewgame" ))
 				center[2] += 48.0f;
 			VectorCopy( player->v.v_angle, rvp.viewangles );
+			GC_SpectatorEye( player, center, rvp.viewangles );
 		}
 		else
 		{
@@ -17048,6 +17102,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 			else if( !Sys_CheckParm( "-gcnewgame" ))
 				center[2] += 48.0f;
 			VectorCopy( player->v.v_angle, rvp.viewangles );
+			GC_SpectatorEye( player, center, rvp.viewangles );
 		}
 		else
 		{
