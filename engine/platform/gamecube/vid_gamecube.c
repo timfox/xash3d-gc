@@ -406,6 +406,13 @@ u16 GC_GXFenceNext( void )
 	return (u16)( gc_gx_fence_issued + 1 );
 }
 
+/* Put a token behind the draws queued so far, so buffers handed out before
+ * now can be waited for without also waiting for later draws. */
+void GC_GXFenceSplit( void )
+{
+	GC_GXFenceIssue();
+}
+
 /* Wait until the GP has executed everything queued before GC_GXFenceNext()
  * returned 'token'. Returns true when it had to wait. */
 qboolean GC_GXFenceWait( u16 token )

@@ -2280,9 +2280,29 @@ static int r_gx_cmpr_far_n;
 static unsigned r_gx_cmpr_far_cap;
 static qboolean r_gx_cmpr_want_far;
 
+/* Heap/spill bounce (no map-arena adoption, e.g. dod_charlie's single
+ * 24 KB slot): run it as a byte ring of variable-size entries instead of
+ * fixed slots. A fixed single slot made every texture change wait for the
+ * GP to finish the draws of the texture before it (24 binds, 4.3 ms a frame
+ * at the charlie spawn); in the ring the bytes about to be reused belong to
+ * a texture several binds back, which the GP has normally finished. */
+#define GC_CMPR_RING_ENTRIES 64
+static qboolean r_gx_cmpr_ring;
+static unsigned r_gx_cmpr_ring_head;
+static unsigned r_gx_cmpr_ring_ofs[GC_CMPR_RING_ENTRIES];
+
+/* Slot indices valid for r_gx_cmpr_slot[] / r_gx_cmpr_hint. */
+static int R_GXCmprSlotCount( void )
+{
+	return r_gx_cmpr_ring ? GC_CMPR_RING_ENTRIES : r_gx_cmpr_nslots;
+}
+
 static byte *R_GXCmprSlotPtr( int i )
 {
 	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
+
+	if( r_gx_cmpr_ring )
+		return r_gx_cmpr_bounce + r_gx_cmpr_ring_ofs[i];
 
 	if( i < near_n )
 		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
@@ -2320,6 +2340,8 @@ static void R_GXCmprSlotsReset( void )
 {
 	memset( r_gx_cmpr_slot, 0, sizeof( r_gx_cmpr_slot ));
 	memset( r_gx_cmpr_hint, 0, sizeof( r_gx_cmpr_hint ));
+	memset( r_gx_cmpr_ring_ofs, 0, sizeof( r_gx_cmpr_ring_ofs ));
+	r_gx_cmpr_ring_head = 0;
 	r_gx_cmpr_cur_slot = -1;
 	r_gx_cmpr_bounce_texnum = 0;
 }
@@ -2358,6 +2380,7 @@ static byte *R_GXCmprBounce( void )
 			{
 				r_gx_cmpr_nslots = n;
 				r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
+				r_gx_cmpr_ring = !gEngfuncs.Sys_CheckParm( "-gcnocmprring" );
 			}
 		}
 		R_GXCmprSlotsReset();
@@ -2396,6 +2419,7 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	if( nslots + far_n > GC_CMPR_SLOTS_MAX )
 		return;
 	GX_DrawDone();
+	r_gx_cmpr_ring = false;
 	r_gx_cmpr_bounce = base;
 	r_gx_cmpr_nslots = nslots + far_n;
 	r_gx_cmpr_bounce_cap = slot_bytes;
@@ -2429,6 +2453,75 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n;
 	const int lo = r_gx_cmpr_want_far ? near_n : 0;
 	const int hi = r_gx_cmpr_want_far ? r_gx_cmpr_nslots : near_n;
+
+	if( r_gx_cmpr_ring )
+	{
+		extern void GC_GXFenceSplit( void );
+		const unsigned ring_size = (unsigned)r_gx_cmpr_nslots * r_gx_cmpr_bounce_cap;
+		const unsigned need = ( bytes + 31u ) & ~31u;
+		unsigned start;
+
+		for( i = 0; i < GC_CMPR_RING_ENTRIES; i++ )
+		{
+			if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
+				&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
+			{
+				r_gx_cmpr_slot[i].used = ++r_gx_cmpr_clock;
+				r_gx_cmpr_hits++;
+				*slot_out = i;
+				return R_GXCmprSlotPtr( i );
+			}
+		}
+		if( need > ring_size )
+		{
+			*slot_out = -1;
+			return NULL;
+		}
+		/* Close the fence of the draws made so far, so the entries about to
+		 * be overwritten have their own token behind their last draw. */
+		GC_GXFenceSplit();
+		if( r_gx_cmpr_ring_head + need > ring_size )
+			r_gx_cmpr_ring_head = 0;
+		start = r_gx_cmpr_ring_head;
+		for( i = 0; i < GC_CMPR_RING_ENTRIES; i++ )
+		{
+			const unsigned o = r_gx_cmpr_ring_ofs[i];
+
+			if( !r_gx_cmpr_slot[i].valid
+				|| o >= start + need || o + r_gx_cmpr_slot[i].bytes <= start )
+				continue;
+			if( GC_GXFenceWait( r_gx_cmpr_slot[i].fence ))
+				r_gx_cmpr_bounce_stalls++;
+			r_gx_cmpr_slot[i].valid = false;
+			r_gx_cmpr_slot[i].texnum = 0;
+		}
+		for( i = 0; i < GC_CMPR_RING_ENTRIES; i++ )
+		{
+			if( !r_gx_cmpr_slot[i].valid )
+			{
+				pick = i;
+				break;
+			}
+			if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
+				pick = i;
+		}
+		/* All entries hold live textures elsewhere in the ring: drop the
+		 * oldest record. Its bytes are not touched, so no wait. */
+		r_gx_cmpr_ring_ofs[pick] = start;
+		r_gx_cmpr_ring_head = start + need;
+		GC_AramTransfer( aram + skip, R_GXCmprSlotPtr( pick ), bytes, false );
+		r_gx_cmpr_slot[pick].texnum = 0;
+		r_gx_cmpr_slot[pick].aram = aram;
+		r_gx_cmpr_slot[pick].skip = skip;
+		r_gx_cmpr_slot[pick].bytes = bytes;
+		r_gx_cmpr_slot[pick].valid = true;
+		r_gx_cmpr_slot[pick].used = ++r_gx_cmpr_clock;
+		r_gx_cmpr_slot[pick].fence = GC_GXFenceNext();
+		r_gx_cmpr_misses++;
+		r_gx_cmpr_dma_bytes += bytes;
+		*slot_out = pick;
+		return R_GXCmprSlotPtr( pick );
+	}
 
 	for( i = lo; i < hi; i++ )
 	{
@@ -2492,7 +2585,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	{
 		const int hs = r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] - 1;
 
-		if( hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+		if( hs < R_GXCmprSlotCount() && r_gx_cmpr_slot[hs].valid
 			&& r_gx_cmpr_slot[hs].texnum == texnum )
 		{
 			if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR )
