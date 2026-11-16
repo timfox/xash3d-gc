@@ -13,6 +13,7 @@
 #   SWEEP_STALL_SEC=120   a run whose log stops growing this long is a freeze
 #   SWEEP_AUTOCAMPAIGN=25 seconds per map before the autopilot walks on
 #   SWEEP_RECORD=1        record video (last frame saved for crash screens)
+#   SWEEP_GDB=0           1: attach gdb and dump PC/backtrace when a run stalls
 #   SWEEP_OUT=.ai/sweeps/<stamp>
 #   GC_PROBE_TAG=sweep    probe/ride dir suffix; also honours XASH_GC_OUT,
 #                         XASH_GC_WAF_OUT, HLSDK_GAMECUBE_DESTDIR and
@@ -36,6 +37,14 @@ OUT="${SWEEP_OUT:-.ai/sweeps/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT"
 CSV="$OUT/sweep.csv"
 MD="$OUT/summary.md"
+
+# The engine build links a prebuilt hlsdk archive and never recompiles the
+# game code, so rebuild it first or game-side fixes are silently missing.
+export DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}" DEVKITPPC="${DEVKITPPC:-/opt/devkitpro/devkitPPC}"
+if [[ "${SWEEP_HLSDK_BUILD:-1}" == "1" ]]; then
+	scripts/hlsdk-gamecube-build.sh > "$OUT/hlsdk-build.log" 2>&1 \
+		|| { echo "hlsdk build failed; see $OUT/hlsdk-build.log"; exit 1; }
+fi
 
 echo "start_map,run,commit,maps_reached,fatal,host_error,dropped_entities_max,dropped_lines,count_mismatches,canary_changes,alloc_failures,stalled_sec,freeze,reduced,ride_dir,last_frame" > "$CSV"
 
@@ -61,7 +70,7 @@ for map in "${MAPS[@]}"; do
 			continue
 		fi
 		rm -rf "$probe_dir/dolphin-user/Dump"
-		RIDE_RECORD="$RECORD" RIDE_VIDEO=OGL RIDE_STALL_SEC="$STALL" \
+		RIDE_RECORD="$RECORD" RIDE_VIDEO=OGL RIDE_STALL_SEC="$STALL" RIDE_GDB="${SWEEP_GDB:-0}" \
 			scripts/gamecube-ride.sh "$iso" "$probe_dir" "" "$MINUTES" > "$OUT/ride-$map-$run.log" 2>&1
 		rm -f "$iso"
 		ride=$(find .ai/logs -maxdepth 1 -name "ride-*-$GC_PROBE_TAG" -newer "$OUT/.run-start" 2>/dev/null | sort | tail -1)
@@ -93,6 +102,19 @@ for map in "${MAPS[@]}"; do
 				ffmpeg -v error -y -sseof -3 -i "$mp4" -frames:v 1 "$frame" 2>/dev/null || frame=""
 				rm -f "$mp4"	# the last frame is what a crash screen needs
 			fi
+		fi
+		# libogc's exception screen (DSI/ISI/...) is a dark-red frame; a silent
+		# log after a crash otherwise reads as a freeze.
+		if [[ -z "$fatal" && -n "$frame" && -f "$frame" ]] && python3 -I - "$frame" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert('RGB'); w, h = im.size
+px = [im.getpixel((x, y)) for x in (w * 30 // 640, w * 600 // 640) for y in range(h // 8, h * 7 // 8, 8)]
+sys.exit(0 if sum(r > 100 and g < 30 and b < 30 for r, g, b in px) > 0.8 * len(px) else 1)
+PY
+		then
+			fatal="exception screen (see last frame)"
+			freeze=no
 		fi
 		{
 			printf '%s,%s,%s,' "$map" "$run" "$(git rev-parse --short HEAD)"
