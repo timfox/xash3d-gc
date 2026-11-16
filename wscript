@@ -629,13 +629,16 @@ def configure(conf):
 			conf.define('GC_SP_EDICT_CAP', 460)
 		# Slim server client slots: more than two listen-server slots (bots), real
 		# clients still limited to two; see server.h. DoD builds default to on
-		# with 3 slots (player + an Axis and an Allies bot, ceres 2026-11-15:
-		# 371 KiB free at client start); XASH_GC_SLIM_CLIENTS=0 turns it off.
+		# with 5 slots (the player and four bots). Measured on dod_charlie in Dolphin
+		# (3/4/5/6/8 slots): a slot costs ~9 KiB of client table and the free heap at
+		# client start is unchanged (442-450 KiB); entities are the ceiling (the map uses
+		# ~422 of the 460 edicts, 7 bots reached 453 and crashed once), so the table is
+		# 5 as well. XASH_GC_SLIM_CLIENTS=0 turns it off.
 		is_dod = conf.options.GAMEDIR == 'dod'
 		slim_env = os.environ.get('XASH_GC_SLIM_CLIENTS', '1' if is_dod else '').lower()
 		if slim_env in ('1', 'yes', 'true', 'on'):
-			max_slots = os.environ.get('XASH_GC_MAX_SLOTS', '4')
-			default_slots = os.environ.get('XASH_GC_DEFAULT_SLOTS', '3' if is_dod else '2')
+			max_slots = os.environ.get('XASH_GC_MAX_SLOTS', '5' if is_dod else '4')
+			default_slots = os.environ.get('XASH_GC_DEFAULT_SLOTS', '5' if is_dod else '2')
 			conf.define('XASH_GC_SLIM_CLIENTS', 1)
 			conf.define('GC_SV_MAX_SLOTS', int(max_slots))
 			# The slot count a listen server starts with (sv_gc_slots default).
