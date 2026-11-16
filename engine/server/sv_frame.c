@@ -437,10 +437,12 @@ static void SV_EmitPacketEntities( sv_client_t *cl, client_frame_t *to, sizebuf_
 		{
 #if XASH_GAMECUBE
 			/* Every packet with bots on the 128-entry listen ring: log rarely. */
-			if( host.realtime > cl->overflow_warn_time )
+			static double next_warn;
+
+			if( host.realtime > next_warn )
 			{
 				Con_DPrintf( S_WARN "%s: delta request from out of date entities.\n", cl->name );
-				cl->overflow_warn_time = host.realtime + 10.0;
+				next_warn = host.realtime + 10.0;
 			}
 #else
 			Con_DPrintf( S_WARN "%s: delta request from out of date entities.\n", cl->name );
