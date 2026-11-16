@@ -1194,16 +1194,8 @@ qboolean Mod_GCPromoteStudioPath( const char *path )
 		Mod_GCStudioNameAllowed( path, &is_view );
 		if( is_view )
 		{
-			extern qboolean Mod_GCAttachStudioSkins( model_t *m );
-
 			Mod_GCVMSlotClaim( mod, buf, kept );
 			Mod_GCPinViewModel( mod );
-			/* Every viewmodel load path ends here (held bind, CapFaces team
-			 * pick, deferred precache), and the map-load skin pass skips
-			 * weapons nobody holds yet. Without this the split v_30cal and
-			 * v_mg42 cores drew flat grey on ceres (no skin try for them). */
-			if( !Mod_GCAttachStudioSkins( mod ))
-				Con_Reportf( "Xash3D GameCube: viewmodel skins not attached '%s'\n", path );
 		}
 		R_GXStudioInvalidateBindings();
 		return true;
@@ -1232,6 +1224,42 @@ qboolean Mod_GCEnsureLandmarkViewModel( const char *model_path )
 		Mod_GCVMSlotTouch( mod );
 		Mod_GCPinViewModel( mod );
 		Q_strncpy( gc_landmark_viewmodel, model_path, sizeof( gc_landmark_viewmodel ));
+		/* Promoted earlier (precache, or the spill route for the split
+		 * v_30cal / v_mg42 cores) without skins: the map-load skin pass skips
+		 * weapons nobody holds, so attach them once one is held. Only the
+		 * held weapon gets skins: attaching every promoted viewmodel at load
+		 * ran the skin uploads out of memory on ceres (v_scoped98k, v_grenade,
+		 * v_stick) and left no room for the animation ring. */
+		if( Mod_GCIsViewModelPath( model_path ))
+		{
+			extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+			static model_t *skinned_last, *failed_last;
+			static double failed_time;
+
+			/* Attach returns at once when the skins are already bound; a
+			 * failed attach (OOM) is retried once a second, not per frame. */
+			if( mod != failed_last || host.realtime - failed_time >= 1.0 )
+			{
+				if( Mod_GCAttachStudioSkins( mod ))
+				{
+					if( skinned_last != mod )
+					{
+						skinned_last = mod;
+						Con_Reportf( "Xash3D GameCube: held viewmodel skins '%s' ok=1 (resident)\n", model_path );
+						R_GXStudioInvalidateBindings();
+					}
+					if( failed_last == mod )
+						failed_last = NULL;
+				}
+				else
+				{
+					if( failed_last != mod )
+						Con_Reportf( "Xash3D GameCube: held viewmodel skins '%s' ok=0 (resident)\n", model_path );
+					failed_last = mod;
+					failed_time = host.realtime;
+				}
+			}
+		}
 		return true;
 	}
 
