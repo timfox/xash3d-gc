@@ -55,7 +55,10 @@ static qboolean Mem_GCMenuIdleSoftFail( void )
  * room for both indexes after ZIP_NAME_MAX shrink without starving HUDs. */
 #define GC_FS_ARENA_SIZE (192u * 1024u)
 #else
-#define GC_FS_ARENA_SIZE (512u * 1024u)
+/* Lost Coast keeps its heap for the world and prop caches: a 512 KiB arena
+ * that now fits (the program image got smaller) left 144 bytes free at server
+ * progs and the first frame never presented. */
+#define GC_FS_ARENA_SIZE ( !Q_stricmp( XASH_GAMEDIR, "lostcoast" ) ? ( 192u * 1024u ) : ( 512u * 1024u ))
 #endif
 #define GC_FS_ARENA_MIN (2u * 1024u)
 #endif
