@@ -7952,6 +7952,7 @@ static byte *gc_mirror_tex;
 static qboolean gc_mirror_tried;
 static GXTexObj gc_mirror_obj;
 static qboolean gc_mirror_valid;	/* this frame's water may project it */
+static u64 gc_mirror_ticks[3];	/* flythrough timing: world, props, copy */
 
 /* Height of the harbor sheet: the first up-facing packed water face. */
 static qboolean R_GXWaterPlaneZ( float *z )
@@ -8030,9 +8031,18 @@ static void R_GXWaterMirrorPass( void )
 	r_gx_bound_fmt = 0;
 	/* The sky is in; everything from here is cut at the water plane. */
 	R_GXMirrorClipSet( true );
-	R_GXWorldDLDraw();
-	R_GXPropDrawHorizon( RI.rvp.vieworigin );
-	R_GXPropDraw( RI.rvp.vieworigin );
+	{
+		const u64 m0 = gettime();
+		u64 m1, m2;
+
+		R_GXWorldDLDraw();
+		m1 = gettime();
+		R_GXPropDrawHorizon( RI.rvp.vieworigin );
+		R_GXPropDraw( RI.rvp.vieworigin );
+		m2 = gettime();
+		gc_mirror_ticks[0] += m1 - m0;
+		gc_mirror_ticks[1] += m2 - m1;
+	}
 	R_GXMirrorClipSet( false );
 	GX_SetTexCopySrc( 0, 0, GC_MIRROR_W, GC_MIRROR_H );
 	GX_SetTexCopyDst( GC_MIRROR_W, GC_MIRROR_H, GX_TF_RGB565, GX_FALSE );
@@ -8040,7 +8050,12 @@ static void R_GXWaterMirrorPass( void )
 	GX_PixModeSync();
 	/* The props' resident lists and the chunk ring may be reused by the
 	 * main pass: let the GP finish this one first. */
-	GX_DrawDone();
+	{
+		const u64 c0 = gettime();
+
+		GX_DrawDone();
+		gc_mirror_ticks[2] += gettime() - c0;
+	}
 	GX_InvalidateTexAll();
 
 	r_gx_mirror = false;
@@ -8170,6 +8185,11 @@ static int R_GXDrawWorldDLFrame( void )
 			(float)ticks_to_microsecs( st_acc[4] ) / ( 1000.0f * st_n ),
 			(float)ticks_to_microsecs( st_acc[5] ) / ( 1000.0f * st_n ),
 			st_acc[5] ? 1000000.0f * st_n / (float)ticks_to_microsecs( st_acc[5] ) : 0.0f );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: mirror ms/frame world=%.1f props=%.1f done=%.1f\n",
+			(float)ticks_to_microsecs( gc_mirror_ticks[0] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( gc_mirror_ticks[1] ) / ( 1000.0f * st_n ),
+			(float)ticks_to_microsecs( gc_mirror_ticks[2] ) / ( 1000.0f * st_n ));
+		memset( gc_mirror_ticks, 0, sizeof( gc_mirror_ticks ));
 		memset( st_acc, 0, sizeof( st_acc ));
 		st_n = 0;
 	}
