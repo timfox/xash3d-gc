@@ -2680,6 +2680,7 @@ void SV_Physics( void )
 #endif
 	SV_CheckAllEnts ();
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: pre-physics checks" );
 	if( gc_fullphysics_trace )
 		Con_Reportf( "Xash3D GameCube: full physics check ents ready\n" );
 #endif
@@ -2693,6 +2694,7 @@ void SV_Physics( void )
 #endif
 	svgame.dllFuncs.pfnStartFrame();
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: game StartFrame (bots)" );
 	if( gc_fullphysics_trace )
 		Con_Reportf( "Xash3D GameCube: full physics StartFrame ready\n" );
 #endif
@@ -2716,6 +2718,7 @@ void SV_Physics( void )
 		SV_TryNewGameWorldInteraction( SV_EdictNum( 1 ));
 #endif
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: entity physics+think" );
 	if( gc_fullphysics_trace )
 	{
 		Con_Reportf( "Xash3D GameCube: full physics entities ready\n" );
@@ -2736,6 +2739,7 @@ void SV_Physics( void )
 	sv.framecount++;
 
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: end frame+lightstyles" );
 	/* The full-physics c0a0 route runs the bounded path follower after the
 	 * regular entity physics pass. It advances only the intro tracktrain; the
 	 * player's next PMove consumes that displacement as moving-ground carry. */

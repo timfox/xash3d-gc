@@ -1319,6 +1319,10 @@ static void R_DrawEntitiesOnList( void )
 					&& ( R_GXEfbDumpHoldLeft() > 0 || R_GXDumpSkipViewmodelActive())))
 			{
 				R_DrawViewModel();
+				{
+					extern void GC_ProfMark( const char *name );
+					GC_ProfMark( "render: viewmodel" );
+				}
 				if( !lean_vm_draw_logged )
 				{
 					lean_vm_draw_logged = true;

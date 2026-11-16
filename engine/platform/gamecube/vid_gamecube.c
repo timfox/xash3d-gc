@@ -17727,6 +17727,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 			frame_trace++;
 		GC_ProfMark( "newgame frame setup" );
 		ref.dllFuncs.R_BeginFrame( false );
+		GC_ProfMark( "render: R_BeginFrame" );
 		VectorCopy( rvp.vieworigin, refState.vieworg );
 		VectorCopy( rvp.viewangles, refState.viewangles );
 		/* Keep viewent posed with the camera each CapFaces present.

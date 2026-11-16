@@ -830,6 +830,9 @@ void Host_ServerFrame( void )
 	// read packets from clients
 	SV_ReadPackets ();
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: read packets (usercmds)" );
+#endif
+#if XASH_GAMECUBE
 	if( gc_fullphysics_trace )
 		Con_Reportf( "Xash3D GameCube: full server packets ready\n" );
 #endif
@@ -842,6 +845,9 @@ void Host_ServerFrame( void )
 
 	// check timeouts
 	SV_CheckTimeouts ();
+#if XASH_GAMECUBE
+	GC_ProfMark( "sv: movevars+resources+timeouts" );
+#endif
 
 	// let everything in the world think and move
 	if( !SV_RunGameFrame ()) return;
@@ -852,6 +858,7 @@ void Host_ServerFrame( void )
 
 	SV_SendClientMessages ();
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: send client messages" );
 	if( gc_fullphysics_trace )
 	{
 		Con_Reportf( "Xash3D GameCube: full server messages ready\n" );
