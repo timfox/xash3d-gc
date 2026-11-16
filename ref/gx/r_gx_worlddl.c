@@ -784,7 +784,8 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			 * and a resident bind never waits for the GP. */
 			if( !gEngfuncs.Sys_CheckParm( "-gcnoarenagap" ))
 			{
-				const size_t big = 24u * 1024u;
+				/* -gcarenagapbig: 48 KB slots hold a whole 256x256 chain (L0 kept). */
+			const size_t big = gEngfuncs.Sys_CheckParm( "-gcarenagapbig" ) ? 48u * 1024u : 24u * 1024u;
 				const size_t keep_gap = 160u * 1024u;	/* later claims (overflow, entity tables) */
 				const size_t gap = GC_MapArenaLargestGap();
 				int gn = gap > keep_gap ? (int)(( gap - keep_gap ) / big ) : 0;
