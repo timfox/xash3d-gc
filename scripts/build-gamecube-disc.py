@@ -821,7 +821,7 @@ def _gc_menu_nonblack_ratio(image) -> float:
 
 
 def _gc_menu_preserve_retail_tone(image):
-	"""Lift crushed HD steam tiles so the lambda/lab backdrop reads on TV.
+	"""Lift crushed HD menu background tiles so the lambda/lab backdrop reads on TV.
 
 	HD_BackgroundLayout composites sit near mean≈15 / p95≈30 (near-black on
 	a 320×240 soft HUD). Probe 20261104-235523 showed 4 dark quadrants with
@@ -1055,7 +1055,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 	gc_menu_bg_size = (320, 240)
 	bake_src_size = (640, 480)
 	if best is not None and best_ratio >= 0.02:
-		# Retail tone: the HD steam tiles as drawn by the PC menu (mean ~15,
+		# Retail tone: the HD menu background tiles as drawn by the retail menu (mean ~15,
 		# p95 ~31, the same as the retail screenshot).  The old lift to p95 168
 		# made up for an unreadable 320x240 soft HUD and washed the sheet out
 		# on the full-resolution GX menu.
@@ -1183,7 +1183,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 
 
 def _stage_gc_menu_btn_strips(source: Path, menu_dir: Path) -> None:
-	"""Bake WON/Steam btns_main rows used by the GameCube main menu."""
+	"""Bake retail btns_main rows used by the GameCube main menu."""
 	try:
 		from PIL import Image
 	except ImportError:
@@ -3852,7 +3852,7 @@ def stage_smoke_data(
 	for relative in MENU_RESOURCE_DIRS:
 		copy_tree_if_present(source, output, relative)
 	# The fallback GameCube menu consumes the baked gc_menu atlas/background,
-	# not only the original Steam menu resources. Smoke menu probes must stage
+	# not only the original retail menu resources. Smoke menu probes must stage
 	# the same derived assets as retail discs or New Game stalls on blank UI.
 	if not stage_gc_menu_assets(source, output):
 		print("Warning: GameCube smoke menu background bake failed.", file=sys.stderr)

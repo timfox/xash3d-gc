@@ -310,7 +310,7 @@ def classify_probe_failure(
 	ready_seen = MARKERS["ready"] in text
 	world_render_seen = MARKERS["world_render_present"] in text or MARKERS["world_render_ready"] in text
 	menu_seen = (
-		"retail menu steam background ready" in text.lower()
+		"retail menu background ready" in text.lower()
 		or "retail menu button text ready" in text.lower()
 	)
 

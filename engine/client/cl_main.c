@@ -1407,7 +1407,7 @@ static void CL_GetCDKey( char *protinfo, size_t protinfosize )
 	Info_SetValueForKey( protinfo, "cdkey", key, protinfosize );
 }
 
-static void CL_WriteSteamTicket( sizebuf_t *send )
+static void CL_WriteGoldSrcTicket( sizebuf_t *send )
 {
 	string key;
 	netadr_t adr = { .type = NA_LOOPBACK, }; // goldsrc servers don't get unique key as xashid isn't sent raw to them
@@ -1429,8 +1429,8 @@ static void CL_WriteSteamTicket( sizebuf_t *send )
 	MSG_WriteBytes( send, buf, i );
 
 	// RevEmu2013: pTicket[1] = revHash (low), pTicket[5] = 0x01100001 (high)
-	*(uint32_t*)cls.steamid = LittleLong( ((uint32_t*)buf)[1] );
-	*(uint32_t*)(cls.steamid + 4) = LittleLong( ((uint32_t*)buf)[5] );
+	*(uint32_t*)cls.authid = LittleLong( ((uint32_t*)buf)[1] );
+	*(uint32_t*)(cls.authid + 4) = LittleLong( ((uint32_t*)buf)[5] );
 }
 
 void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticket, size_t ticketlen )
@@ -1441,8 +1441,9 @@ void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticke
 
 	protinfo[0] = 0;
 
-	Info_SetValueForKey( protinfo, "prot", "3", sizeof( protinfo )); // steam auth type
+	Info_SetValueForKey( protinfo, "prot", "3", sizeof( protinfo )); // GoldSrc auth type 3
 	Info_SetValueForKeyf( protinfo, "unique", sizeof( protinfo ), "%i", 0xffffffff );
+	// wire protocol: GoldSrc servers expect raw="steam" (not a Steam service dependency)
 	Info_SetValueForKey( protinfo, "raw", "steam", sizeof( protinfo ));
 	CL_GetCDKey( protinfo, sizeof( protinfo ));
 	const char *name = Info_ValueForKey( cls.userinfo, "name" );
@@ -1455,7 +1456,7 @@ void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticke
 		PROTOCOL_GOLDSRC_VERSION, challenge, protinfo, cls.userinfo );
 	MSG_SeekToBit( &send, -8, SEEK_CUR ); // rewrite null terminator
 	if( ticket == NULL )
-		CL_WriteSteamTicket( &send );
+		CL_WriteGoldSrcTicket( &send );
 	else
 		MSG_WriteBytes( &send, ticket, ticketlen );
 
@@ -1509,24 +1510,10 @@ static void CL_SendConnectPacket( connprotocol_t proto, int challenge )
 		Info_SetValueForKey( protinfo, "a", Q_buildarch(), sizeof( protinfo ) );
 	}
 
-	cls.broker_wait = false;
 	cls.netchan_pending_cookie = 0;
 
 	if( proto == PROTO_GOLDSRC )
 	{
-		// if the cl_ticket_generator is set to "steam" we need to get ticket
-		// from steam broker, which is asynchronous process by nature
-		if( !Q_stricmp( cl_ticket_generator.string, "steam" ))
-		{
-			if( SteamBroker_InitiateGameConnection( adr, challenge ))
-			{
-				// we are waiting for the broker response...
-				cls.broker_wait = true;
-				cls.timestart = Platform_DoubleTime();
-				return;
-			}
-		}
-
 		CL_SendGoldSrcConnectPacket( adr, challenge, NULL, 0 );
 	}
 	else
@@ -1604,6 +1591,8 @@ static void CL_SendBandwidthTest( netadr_t to, qboolean start )
 
 static void CL_SendGetChallenge( netadr_t to )
 {
+	// wire protocol: GoldSrc servers expect the literal token "steam" here;
+	// it is not a Steam service dependency
 	// always send GoldSrc-styled getchallenge message
 	// Xash servers will ignore it but for GoldSrc it will help
 	// in auto-detection
@@ -1731,7 +1720,7 @@ static void CL_CheckForResend( void )
 		else
 			CL_SendBandwidthTest( adr, false );
 	}
-	else if( !cls.broker_wait )
+	else
 	{
 		Con_Printf( "Connecting to %s... (retry #%i)\n", cls.servername, cls.connect_retry );
 		CL_SendGetChallenge( adr );
@@ -2067,7 +2056,6 @@ void CL_Disconnect( void )
 
 	// send a disconnect message to the server
 	CL_SendDisconnectMessage( cls.net_protocol );
-	SteamBroker_TerminateGameConnection();
 	CL_ClearState ();
 
 	S_StopBackgroundTrack ();
@@ -3015,14 +3003,14 @@ static void CL_Challenge( const char *c, netadr_t from, sizebuf_t *msg )
 	{
 		cls.net_protocol = PROTO_GOLDSRC;
 
-		cls.steam_auth = Q_atoi( Cmd_Argv( 2 )) == 3;
+		cls.gs_auth = Q_atoi( Cmd_Argv( 2 )) == 3;
 
-		if( Cmd_Argc( ) == 5 && cls.steam_auth )
+		if( Cmd_Argc( ) == 5 && cls.gs_auth )
 		{
-			// arg 2 auth protocol, we only support steam
-			// arg 3 if steam is server's steam id
-			// arg 4 if steam is server's VAC status
-			cls.server_steamid = strtoull( Cmd_Argv( 3 ), NULL, 10 );
+			// arg 2 auth protocol, we only support type 3
+			// arg 3 is the server's auth id
+			// arg 4 is the server's VAC status
+			cls.server_authid = strtoull( Cmd_Argv( 3 ), NULL, 10 );
 			cls.vac2_secure = Q_atoi( Cmd_Argv( 4 ));
 		}
 	}
@@ -4294,7 +4282,6 @@ void Host_ClientBegin( void )
 	// if running the server locally, make intentions now
 	if( SV_Active( )) CL_SendCommand ();
 
-	SteamBroker_Frame();
 }
 
 /*
@@ -4688,7 +4675,6 @@ void CL_Init( void )
 		Con_Reportf( "Xash3D GameCube: client sound init ready\n" );
 	}
 	Con_Reportf( "Xash3D GameCube: client identity skipped\n" );
-	Con_Reportf( "Xash3D GameCube: steam broker skipped\n" );
 	memset( &clgame.drawFuncs, 0, sizeof( clgame.drawFuncs ));
 	cls.build_num = 0;
 	cls.initialized = true;
@@ -4710,7 +4696,6 @@ void CL_Init( void )
 
 	{
 		ID_Init();
-		SteamBroker_Init();
 	}
 
 	/* client must be always initialized last so it can fetch all cvars */
@@ -4875,7 +4860,6 @@ void CL_Shutdown( void )
 	Mobile_Shutdown ();
 	SCR_Shutdown ();
 	CL_UnloadProgs ();
-	SteamBroker_Shutdown();
 	cls.initialized = false;
 
 	VGui_Shutdown();
