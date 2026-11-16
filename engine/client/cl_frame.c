@@ -2216,6 +2216,45 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			}
 		}
 
+		/* This route never runs V_RenderView/V_SetupViewModel, so the held
+		 * weapon was never bound (ceres lt3: vm=0, no "viewmodel index"
+		 * line). Bind the server's viewmodel here, loading it on demand. */
+		{
+			int vmi = cl.local.viewmodel ? cl.local.viewmodel
+				: cl.frames[cl.parsecountmod].clientdata.viewmodel;
+			model_t *held = vmi > 0 ? CL_ModelHandle( vmi ) : NULL;
+			static int held_logged = -1, held_logs;
+
+			if( held && held->name[0] && Q_stristr( held->name, ".mdl" )
+				&& ( held->type != mod_studio || !held->cache.data ))
+			{
+				char vpath[MAX_QPATH];
+
+				Q_strncpy( vpath, held->name, sizeof( vpath ));
+				if( Mod_GCEnsureLandmarkViewModel( vpath ))
+					held = Mod_FindName( vpath, false );
+			}
+			if( held && held->type == mod_studio && held->cache.data
+				&& clgame.viewent.model != held )
+			{
+				clgame.viewent.model = held;
+				clgame.viewent.curstate.modelindex = vmi;
+				clgame.viewent.curstate.animtime = (float)cl.time;
+				clgame.viewent.curstate.framerate = 1.0f;
+				clgame.viewent.curstate.rendermode = kRenderNormal;
+				VectorCopy( view_org, clgame.viewent.origin );
+				VectorCopy( clgame.viewent.origin, clgame.viewent.curstate.origin );
+			}
+			if( vmi != held_logged && held_logs < 8 )
+			{
+				held_logs++;
+				held_logged = vmi;
+				Con_Reportf( "Xash3D GameCube: lean held viewmodel index=%d model=%s bound=%d\n",
+					vmi, held ? held->name : "(null)",
+					held && clgame.viewent.model == held ? 1 : 0 );
+			}
+		}
+
 		/* Landmark viewmodel for Flipper G155 gun pass (G105 crowbar).
 		 * Bind even when no world NPC studios made the lean list — tip-safe
 		 * c0a0 often has studios=0 while crowbar is already G105-ready. */
