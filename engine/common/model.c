@@ -2261,8 +2261,12 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 
 			/* World precache registers every weapon; a viewmodel the map does
 			 * not place stays deferred and loads when held (V_SetupViewModel). */
+			/* Third-person weapons likewise load when a player first holds
+			 * one (CL lean player emit): precaching the whole DoD table put
+			 * all 17 in memory at spawn, twice across the map reload. */
 			if( !Q_stricmp( ext, "mdl" )
 				&& Mod_GCStudioNameAllowed( tempname, &is_view )
+				&& !Mod_GCIsWeaponModelPath( tempname )
 				&& !( is_view && !Mod_GCMapNeedsStudio( tempname ))
 				&& Mod_GCPromoteStudioPath( tempname ))
 				return mod;
