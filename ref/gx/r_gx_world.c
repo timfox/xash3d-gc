@@ -2360,6 +2360,17 @@ static byte *R_GXCmprBounce( void )
 				r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES;
 			}
 		}
+		/* A single 24 KB slot re-DMAs and drains the GP on every change of
+		 * texture (dod_charlie: ~20 a frame, ~4 ms at the beach spawn). Two
+		 * 12 KB halves let a miss wait only for the draw before last. A
+		 * 256x256 chain without its base mip (10.9 KB) still fits; larger
+		 * chains drop one more mip. -gccmprnosplit keeps one slot. */
+		if( r_gx_cmpr_bounce && r_gx_cmpr_nslots == 1
+			&& !gEngfuncs.Sys_CheckParm( "-gccmprnosplit" ))
+		{
+			r_gx_cmpr_nslots = 2;
+			r_gx_cmpr_bounce_cap = GC_CMPR_BOUNCE_BYTES / 2u;
+		}
 		R_GXCmprSlotsReset();
 		if( r_gx_cmpr_bounce )
 		{
