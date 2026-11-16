@@ -2092,6 +2092,8 @@ generic path
 #define R_GX_STUDIO_COLOR_CACHE 2048
 static unsigned r_gx_studio_colors[R_GX_STUDIO_COLOR_CACHE]; /* packed RGBA per normal, 0 = not yet */
 static qboolean r_gc_studio_emit_logged; /* G376 one-time emit log done */
+static qboolean r_gx_studio_colors_ready; /* every normal of this submodel packed */
+static int r_gc_points_serial;	/* one per R_StudioDrawPoints */
 #endif
 
 static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float s, float t )
@@ -2116,12 +2118,24 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		 * once, then emit the tricmds straight into the FIFO. */
 		if( r_gc_studio_emit_logged && !g_studio.numlocallights && m_pSubModel
 			&& m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
-			&& RI.currententity != tr.viewent )
+			&& ( RI.currententity != tr.viewent || R_GXStudioVmDirectReady() ))
 		{
 			const short *pc = ptricmds;
 			int n;
 
-			while(( n = *( pc++ )))
+			/* The viewmodel's behind-near verts go onto the near plane once
+			 * per submodel (the strip path did it per strip). */
+			if( RI.currententity == tr.viewent )
+			{
+				static int vm_pushed_serial = -1;
+
+				if( vm_pushed_serial != r_gc_points_serial )
+				{
+					vm_pushed_serial = r_gc_points_serial;
+					R_GXStudioVmPushVerts( g_studio.verts, m_pSubModel->numverts );
+				}
+			}
+			while( !r_gx_studio_colors_ready && ( n = *( pc++ )))
 			{
 				if( n < 0 )
 					n = -n;
@@ -2605,8 +2619,25 @@ static void R_StudioDrawPoints( void )
 	pstudionorms = (vec3_t *)(m_pSubModelBase + m_pSubModel->normindex );
 
 #if XASH_GAMECUBE
-	memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
-		* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	/* Without dynamic lights a vertex colour is its normal's light value
+	 * (R_LightLambert scales it by 255): pack every normal's once here
+	 * instead of walking each mesh's tricmds for it. */
+	r_gx_studio_colors_ready = false;
+	if( !g_studio.numlocallights && m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE )
+	{
+		for( i = 0; i < m_pSubModel->numnorms; i++ )
+		{
+			const float *lv = g_studio.lightvalues[i];
+			const unsigned cr = (byte)( lv[0] * 255.0f ), cg = (byte)( lv[1] * 255.0f ), cb = (byte)( lv[2] * 255.0f );
+
+			r_gx_studio_colors[i] = ( cr << 24 ) | ( cg << 16 ) | ( cb << 8 ) | 0xFFu;
+		}
+		r_gx_studio_colors_ready = true;
+	}
+	else
+		memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
+			* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	r_gc_points_serial++;
 	R_STUDIO_PROF( "studio: sort+color clear" );
 #endif
 	for( j = 0; j < m_pSubModel->nummesh; j++ )

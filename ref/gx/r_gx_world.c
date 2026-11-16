@@ -9715,6 +9715,21 @@ static void R_GXStudioPushVmVert( float *x, float *y, float *z )
 	}
 }
 
+/* The viewmodel can take the direct tricmd emit once its one-time probes
+ * (G157/G164, fed by the strip path) have logged. */
+qboolean R_GXStudioVmDirectReady( void )
+{
+	return r_gx_studio_vm_logged && r_gx_studio_active && r_gx_studio_viewmodel;
+}
+
+void R_GXStudioVmPushVerts( vec3_t *verts, int n )
+{
+	int i;
+
+	for( i = 0; i < n; i++ )
+		R_GXStudioPushVmVert( &verts[i][0], &verts[i][1], &verts[i][2] );
+}
+
 static qboolean R_GXStudioVmTriInFront(
 	float x0, float y0, float z0,
 	float x1, float y1, float z1,
@@ -10287,7 +10302,7 @@ qboolean R_GXStudioEmitTricmds( const short *cmds, const float (*verts)[3], int 
 {
 	int i;
 
-	if( !cmds || !verts || !colors || nverts <= 0 || !r_gx_studio_active || r_gx_studio_viewmodel )
+	if( !cmds || !verts || !colors || nverts <= 0 || !r_gx_studio_active )
 		return false;
 	R_GXEnsureTriApiLayout();
 	if( r_gx_studio_bound_tex == 0 )
@@ -11061,6 +11076,8 @@ qboolean R_GXDrawStretchPic( float x, float y, float w, float h,
 int R_GXDrawNewGameCapFaces( void ) { return 0; }
 void R_GXPrefetchMapSkybox( void ) {}
 qboolean R_GXStudioIsActive( void ) { return false; }
+qboolean R_GXStudioVmDirectReady( void ) { return false; }
+void R_GXStudioVmPushVerts( vec3_t *verts, int n ) { (void)verts; (void)n; }
 qboolean R_GXTriApiIsActive( void ) { return false; }
 void R_GXEffectsTriBegin( void ) {}
 void R_GXEffectsTriEnd( void ) {}
