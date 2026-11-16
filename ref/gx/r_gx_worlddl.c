@@ -636,8 +636,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		const size_t hw = ( Q_max( live, R_GXWorldDLBspFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
-		 * 96 KB, prop far LODs about 360 KB, and entity overflow. */
-		const size_t keep = 432u * 1024u;
+		 * 96 KB, prop far LODs about 360 KB, the fire atlas 33 KB, and entity
+		 * overflow. The ring peaks near 915 KB in the Lost Coast harbor. */
+		const size_t keep = 462u * 1024u;
 
 		if( cap > hw + keep + 512u * 1024u )
 		{
