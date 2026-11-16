@@ -2278,6 +2278,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						held = Mod_FindName( vpath, false );
 				}
 			}
+			/* No held weapon (spectator, dead, holstered): drop the last
+			 * one, or the old gun stayed bound and drawn for good. */
+			if( vmi <= 0 && clgame.viewent.model )
+			{
+				clgame.viewent.model = NULL;
+				clgame.viewent.curstate.modelindex = 0;
+			}
 			if( held && held->type == mod_studio && held->cache.data
 				&& clgame.viewent.model != held )
 			{
