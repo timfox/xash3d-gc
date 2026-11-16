@@ -10043,6 +10043,44 @@ void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip
 		r_gx_effects_tris += count - 2;
 }
 
+/* Studio mesh straight from its tricmds: one GX strip/fan per command with
+ * no per-vertex staging copy. World studios only (the viewmodel pushes
+ * verts onto its near plane through R_GXStudioEmitFanC). Colours are
+ * per normal, already packed. Returns false when the caller must take the
+ * staged path. */
+qboolean R_GXStudioEmitTricmds( const short *cmds, const float (*verts)[3], int nverts,
+	const unsigned *colors, float s, float t )
+{
+	int i;
+
+	if( !cmds || !verts || !colors || nverts <= 0 || !r_gx_studio_active || r_gx_studio_viewmodel )
+		return false;
+	R_GXEnsureTriApiLayout();
+	if( r_gx_studio_bound_tex == 0 )
+		R_GXStudioBindTexnum( (unsigned)tr.whiteTexture );
+	while(( i = *( cmds++ )))
+	{
+		const qboolean strip = i > 0;
+		const int n = strip ? i : -i;
+
+		GX_Begin( strip ? GX_TRIANGLESTRIP : GX_TRIANGLEFAN, GX_VTXFMT0, (u16)n );
+		for( i = n; i > 0; i--, cmds += 4 )
+		{
+			const int idx = ( cmds[0] >= 0 && cmds[0] < nverts ) ? cmds[0] : 0;
+			const float *p = verts[idx];
+
+			GX_Position3f32( p[0], p[1], p[2] );
+			GX_Color1u32( colors[cmds[1]] );
+			GX_TexCoord2f32( cmds[2] * s, cmds[3] * t );
+			GX_TexCoord2f32( 0.0f, 0.0f );
+		}
+		GX_End();
+		if( n >= 3 )
+			r_gx_studio_tris += n - 2;
+	}
+	return true;
+}
+
 void R_GXStudioEmitTrianglesC( const gx_tri_vertex_t *verts, int count )
 {
 	int i, emitted = 0;
@@ -10841,6 +10879,12 @@ void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip
 void R_GXStudioEmitTrianglesC( const gx_tri_vertex_t *verts, int count )
 {
 	(void)verts; (void)count;
+}
+qboolean R_GXStudioEmitTricmds( const short *cmds, const float (*verts)[3], int nverts,
+	const unsigned *colors, float s, float t )
+{
+	(void)cmds; (void)verts; (void)nverts; (void)colors; (void)s; (void)t;
+	return false;
 }
 
 #endif
