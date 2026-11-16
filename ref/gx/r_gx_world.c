@@ -6870,6 +6870,48 @@ static qboolean R_GXWaterDepthReady( void )
 static GXTexObj gc_wnrm_obj;
 static int gc_wnrm_state;
 
+/* The sun on the water (media/ws_d2_lostcoast.gcx, lostcoast-gc
+ * tools/bake_water_sun.py). Retail reflects an HDR scene; the 565 mirror
+ * clips at white. The file is max( 0, cubemap - 1 ) of the water's own HDR
+ * env_cubemap looking up: the clipped light, added back over the mirror
+ * reflection with its Fresnel weight and ripple offsets. */
+static GXTexObj gc_wsun_obj;
+static float gc_wsun_ik;
+static s8 gc_wsun_state;	/* 0 untried, 1 ready, -1 none */
+static u16 gc_wsun_side;
+
+static qboolean R_GXWaterSunReady( void )
+{
+	file_t *f;
+	u16 hdr[16];
+	byte *tex;
+
+	if( gc_wsun_state )
+		return gc_wsun_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;
+	gc_wsun_state = -1;
+	f = gEngfuncs.fsapi->Open( "media/ws_d2_lostcoast.gcx", "rb", false );
+	if( !f )
+		return false;
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x4743 && hdr[1] == 0x7773 && hdr[2] == 1
+		&& hdr[3] >= 16 && hdr[3] <= 64 && hdr[4]
+		&& ( tex = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), (size_t)hdr[3] * hdr[3] / 2u )) != NULL
+		&& gEngfuncs.fsapi->Read( f, tex, hdr[3] * hdr[3] / 2 ) == (fs_offset_t)( hdr[3] * hdr[3] / 2 ))
+	{
+		DCFlushRange( tex, (u32)hdr[3] * hdr[3] / 2u );
+		GX_InitTexObj( &gc_wsun_obj, tex, hdr[3], hdr[3], GX_TF_CMPR, GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wsun_obj, GX_LINEAR, GX_LINEAR );
+		gc_wsun_side = hdr[3];
+		gc_wsun_ik = 0.5f * 256.0f / (float)hdr[4];
+		gc_wsun_state = 1;
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: water sun %s\n", gc_wsun_state > 0 ? "ready" : "FAIL" );
+	return gc_wsun_state > 0;
+}
+
 static qboolean R_GXWaterNormalReady( void )
 {
 	file_t *f;
@@ -7064,7 +7106,7 @@ static void R_GXDrawPackedWater( void )
 			order[b + 1] = tmpi;
 			dists[b + 1] = tmpf;
 		}
-		for( refl_pass = 0; refl_pass < ( gc_mirror_valid ? 2 : 1 ); refl_pass++ )
+		for( refl_pass = 0; refl_pass < ( gc_mirror_valid ? ( R_GXWaterSunReady() ? 3 : 2 ) : 1 ); refl_pass++ )
 		{
 		if( refl_pass )
 		{
@@ -7164,6 +7206,34 @@ static void R_GXDrawPackedWater( void )
 				GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 				GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
 				GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			}
+			if( refl_pass == 2 )
+			{
+				/* Third pass: the clipped HDR light. Same stages; the
+				 * lookup is the mirrored ray on the plane above the
+				 * water, uv = 0.5 + R.xy / ( 2 k R.z ), R = ( x, y, -z ). */
+				const float *eye = RI.rvp.vieworigin;
+				Mtx sm;
+
+				memset( sm, 0, sizeof( sm ));
+				sm[0][0] = gc_wsun_ik; sm[0][2] = -0.5f;
+				sm[1][1] = gc_wsun_ik; sm[1][2] = -0.5f;
+				sm[2][2] = -1.0f;
+				sm[0][3] = -( sm[0][0] * eye[0] + sm[0][2] * eye[2] );
+				sm[1][3] = -( sm[1][1] * eye[1] + sm[1][2] * eye[2] );
+				sm[2][3] = eye[2];
+				GX_LoadTexMtxImm( sm, GX_TEXMTX3, GX_MTX3x4 );
+				GX_LoadTexObj( &gc_wsun_obj, GX_TEXMAP5 );
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
+				if( water_tex )
+				{
+					/* Ripple offsets in this texture's texels. */
+					f32 im[2][3];
+
+					memset( im, 0, sizeof( im ));
+					im[0][0] = im[1][1] = 0.75f * (float)gc_wsun_side / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
+					GX_SetIndTexMatrix( GX_ITM_0, im, -3 );
+				}
 			}
 		}
 		for( a = 0; a < nvis; a++ )
