@@ -4105,6 +4105,27 @@ static void R_GXDrawSkyBox( void )
 	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
 	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
 	GX_SetTevOp( GX_TEVSTAGE0, GX_REPLACE );
+	/* In the water mirror the sky is part of the world's picture and takes
+	 * the world's exposure gain with it: lift a light-baked sky into the
+	 * world's baked units (texture x gain, up to 2). */
+	if( r_gx_mirror )
+	{
+		extern float R_GXExposureMirrorSkyGain( void );
+		float g = R_GXExposureMirrorSkyGain();
+
+		if( g > 0.0f )
+		{
+			GXColor k;
+
+			if( g > 2.0f ) g = 2.0f;
+			k.r = k.g = k.b = (u8)( g * 127.5f + 0.5f );
+			k.a = 255;
+			GX_SetTevKColor( GX_KCOLOR0, k );
+			GX_SetTevKColorSel( GX_TEVSTAGE0, GX_TEV_KCSEL_K0 );
+			GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO );
+			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		}
+	}
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
