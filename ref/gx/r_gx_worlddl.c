@@ -709,8 +709,11 @@ static void R_GXWorldDLLoad( const char *mapbase )
 					R_GXCmprBigForProps( true );
 					cmpr_adopted = true;
 					/* Not the far-pool mode for distant world chunks: that pool is
-					 * the props'. The near slots turn over by least recent use. */
-					gc_wd_tex_overflow = GC_WorldTexCount() > nslots + 8;
+					 * the props'. The near slots turn over by least recent use,
+					 * which holds while a view binds fewer textures than there
+					 * are slots (the map has 96, six of them decal atlases that
+					 * are each seen in one place). */
+					gc_wd_tex_overflow = GC_WorldTexCount() > nslots + nslots / 4;
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
 			}
