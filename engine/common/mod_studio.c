@@ -2306,12 +2306,26 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				 * heap is too full for a fresh copy: keep room for them
 				 * after the mesh now (see Mod_GCVMHeapPadFits). */
 				const size_t pad = Q_stristr( mod->name, "/v_" ) ? GC_VM_HEAP_SKIN_PAD : 0;
+				extern qboolean Mod_GCIsWorldArraySpillCache( const void *ptr );
 
-				mod->cache.data = calloc( 1, mesh + pad );
-				if( !mod->cache.data && pad )
-					mod->cache.data = calloc( 1, mesh );
-				Mod_GCVMHeapPadNote( mod, mod->cache.data, mesh,
-					mod->cache.data && pad ? mesh + pad : 0 );
+				/* A map prop read into the world-array spill stays there: the
+				 * slice is pinned either way, so a heap copy only cost MEM1
+				 * (charlie: the flags copy left too little heap for its skin
+				 * merge; caen: the Enfield skins then ran out). Leaving it
+				 * resident lets the skin merge grow it in the spill. */
+				if( Q_stristr( mod->name, "mapmodels/" )
+					&& Mod_GCIsWorldArraySpillCache( buffer ) && mesh <= buffersize )
+				{
+					mod->cache.data = NULL; /* taken below, as spill-resident */
+				}
+				else
+				{
+					mod->cache.data = calloc( 1, mesh + pad );
+					if( !mod->cache.data && pad )
+						mod->cache.data = calloc( 1, mesh );
+					Mod_GCVMHeapPadNote( mod, mod->cache.data, mesh,
+						mod->cache.data && pad ? mesh + pad : 0 );
+				}
 			}
 			if( !mod->cache.data )
 			{

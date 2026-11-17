@@ -1471,6 +1471,7 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 }
 
 extern void GC_ProfMark( const char *name );
+void R_GXStudioInvalidateBindings( void );
 
 /* First sequence of a studio header whose label contains `want`, or -1. */
 static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want );
@@ -1789,6 +1790,83 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				continue;
 			}
 			mod = SV_ModelHandle( ed->v.modelindex );
+			/* Before the type test: an unloaded handle is not mod_studio yet. */
+			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A map model precached by the game at spawn (DoD control
+				 * point flags) stays a registered, never-loaded handle on this
+				 * route: nothing promotes it the way the static props are.
+				 * Point the handle at a resident copy, or load it (lean mesh,
+				 * ARAM cache later), retrying a failed load every few seconds. */
+				extern qboolean Mod_GCPromoteStudioPath( const char *path );
+				static double next_try[32];
+				static byte fails[32];
+				static int fails_spawn = -1;
+				const int mk = ed->v.modelindex & 31;
+				model_t *found;
+
+				if( fails_spawn != svs.spawncount )
+				{
+					memset( next_try, 0, sizeof( next_try ));
+					memset( fails, 0, sizeof( fails ));
+					fails_spawn = svs.spawncount;
+				}
+				found = Mod_FindName( mod->name, false );
+				if(( !found || found->needload != NL_PRESENT || !found->cache.data )
+					&& fails[mk] < 3 && host.realtime >= next_try[mk] )
+				{
+					if( Mod_GCPromoteStudioPath( mod->name ))
+						found = Mod_FindName( mod->name, false );
+					else
+					{
+						fails[mk]++;
+						next_try[mk] = host.realtime + 5.0;
+					}
+					Con_Reportf( "Xash3D GameCube: lean promote map model %s (index %d) %s\n", mod->name,
+						ed->v.modelindex, found && found->needload == NL_PRESENT && found->cache.data ? "resident" : "not loaded" );
+				}
+				if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+				{
+					if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
+						sv.models[ed->v.modelindex] = found;
+					mod = found;
+				}
+			}
+			if( mod && mod->type == mod_studio && mod->needload == NL_PRESENT && mod->cache.data
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A promoted map model has its lean mesh only; attach its *t
+				 * skin atlas too, or it draws flat grey (ceres 3282517bd).
+				 * Bound skins return at once; stop checking after that. */
+				extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+				static byte skin_state[32];	/* 0..2 fails, 0xff bound */
+				static double skin_next[32];
+				static int skin_spawn = -1;
+				const int sk = ed->v.modelindex & 31;
+
+				if( skin_spawn != svs.spawncount )
+				{
+					memset( skin_state, 0, sizeof( skin_state ));
+					memset( skin_next, 0, sizeof( skin_next ));
+					skin_spawn = svs.spawncount;
+				}
+				if( skin_state[sk] < 3 && host.realtime >= skin_next[sk] )
+				{
+					if( Mod_GCAttachStudioSkins( mod ))
+					{
+						skin_state[sk] = 0xff;
+						R_GXStudioInvalidateBindings();
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' bound\n", mod->name );
+					}
+					else
+					{
+						skin_state[sk]++;
+						skin_next[sk] = host.realtime + 5.0;
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' failed (%d)\n", mod->name, skin_state[sk] );
+					}
+				}
+			}
 			if( !mod || mod->type != mod_studio )
 				continue;
 			/* A weapon a player carries keeps its w_ model at the player's

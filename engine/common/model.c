@@ -911,6 +911,34 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				return NULL;
 			}
 			previous_bump = gc_studio_bss_bump;
+			/* Map props reloaded from ARAM go back to the world-array spill,
+			 * like the disc read below. In the studio BSS, the flags merge
+			 * grew into the room the team viewmodel's skins need, and the
+			 * rifle drew with a rainbow skin (ceres rfL, DoD charlie). */
+			if(( Mod_GCStudioPrefersSpill( model_path )
+				|| Mod_GCViewModelNeedsSpill( model_path, (size_t)cached ))
+				&& Mod_GCMapModelSpillAfterWorldDL())
+			{
+				extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+				extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+
+				slot = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)cached, "mapmodel-studio" );
+				if( slot && GC_AssetCacheRead( mirror, slot, cached ))
+				{
+					Mod_GCWorldArraySpillPinBase( slot, (size_t)cached );
+					*length = (fs_offset_t)cached;
+					if( from_bss )
+						*from_bss = true;
+					Con_Reportf( "Xash3D GameCube: mapmodel spill from ARAM '%s' (%s)\n",
+						model_path, Q_memprint( (size_t)cached ));
+					return slot;
+				}
+				if( slot )
+					Mod_GCWorldArraySpillRewind( slot, (size_t)cached );
+				Con_Reportf( "Xash3D GameCube: mapmodel spill from ARAM miss '%s' (%s), studio arena\n",
+					model_path, Q_memprint( (size_t)cached ));
+				slot = NULL;
+			}
 			slot = Mod_GCIsViewModelPath( model_path ) ? Mod_GCVMSlotAlloc( (size_t)cached ) : NULL;
 			/* Oversized viewmodels belong in the spill (disc path below),
 			 * not in the studio arena the skins share. */
