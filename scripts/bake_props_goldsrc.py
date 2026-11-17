@@ -372,9 +372,46 @@ class FloorLight:
 		self.wd = wd
 		self.bsp = wd.Bsp(bsp_path)
 		self.floors = []
+		# Hull-0 roots a point trace tests: the world, then solid brush
+		# entities as (head node, origin offset, mins, maxs).
+		self.heads = [(0, (0.0, 0.0, 0.0), None, None)] if self.bsp.nodes else []
 		first, count = 0, len(self.bsp.faces)
 		if self.bsp.models:
 			first, count = self.bsp.models[0][-2], self.bsp.models[0][-1]
+		self._add_floors(first, count)
+
+	# Brush entities a dropped prop passes through in the game.
+	NOT_SOLID = frozenset((
+		"func_illusionary", "func_water", "func_ladder", "func_friction",
+		"func_monsterclip", "func_mortar_field", "func_bomb_target",
+		"func_buyzone", "func_points_brush", "func_detail_illusionary",
+	))
+
+	def add_brush_entities(self, ents: list[dict]) -> int:
+		"""Solid brush entities (func_wall and the like) are ground too:
+		dod_charlie's beach sand is one, 60-84 units above the world brush
+		under it."""
+		added = 0
+		for e in ents:
+			model = e.get("model", "")
+			cls = e.get("classname", "")
+			if not model.startswith("*") or not cls.startswith("func_") or cls in self.NOT_SOLID:
+				continue
+			try:
+				mi = int(model[1:])
+			except ValueError:
+				continue
+			if mi <= 0 or mi >= len(self.bsp.models):
+				continue
+			vals = self.bsp.models[mi]
+			org = tuple(_floats(e.get("origin", "0 0 0"), 3))
+			self.heads.append((vals[9], org, vals[0:3], vals[3:6]))
+			if org == (0.0, 0.0, 0.0):
+				self._add_floors(vals[-2], vals[-1])
+			added += 1
+		return added
+
+	def _add_floors(self, first: int, count: int) -> None:
 		for fi in range(first, min(len(self.bsp.faces), first + count)):
 			f = self.bsp.faces[fi]
 			nx, ny, nz, dist = self.bsp.planes[f[0]]
@@ -383,7 +420,7 @@ class FloorLight:
 			if nz < 0.2 or f[6] < 0:
 				continue
 			ti0, ti1, _mip, flags = self.bsp.texinfos[f[4]]
-			if flags & getattr(wd, "TEX_SPECIAL", 1):
+			if flags & getattr(self.wd, "TEX_SPECIAL", 1):
 				continue
 			pts = self.bsp.face_pts(f)
 			if len(pts) < 3:
@@ -394,15 +431,21 @@ class FloorLight:
 	def solid(self, p) -> bool:
 		"""Point contents of the world hull: true inside solid."""
 		bsp = self.bsp
-		if not bsp.nodes:
-			return False
-		idx = 0
-		while idx >= 0:
-			node = bsp.nodes[idx]
-			nx, ny, nz, dist = bsp.planes[node[0]]
-			idx = node[1] if nx * p[0] + ny * p[1] + nz * p[2] - dist >= 0.0 else node[2]
-		leaf = -1 - idx
-		return 0 <= leaf < len(bsp.leaves) and bsp.leaves[leaf][0] == -2
+		for head, org, mins, maxs in getattr(self, "heads", [(0, (0.0, 0.0, 0.0), None, None)]):
+			q = (p[0] - org[0], p[1] - org[1], p[2] - org[2])
+			if mins is not None and any(q[a] < mins[a] - 1.0 or q[a] > maxs[a] + 1.0 for a in range(3)):
+				continue
+			idx = head
+			if idx >= len(bsp.nodes):
+				continue
+			while idx >= 0:
+				node = bsp.nodes[idx]
+				nx, ny, nz, dist = bsp.planes[node[0]]
+				idx = node[1] if nx * q[0] + ny * q[1] + nz * q[2] - dist >= 0.0 else node[2]
+			leaf = -1 - idx
+			if 0 <= leaf < len(bsp.leaves) and bsp.leaves[leaf][0] == -2:
+				return True
+		return False
 
 	def drop(self, p, reach: float = 256.0):
 		"""DROP_TO_FLOOR for a point entity: the z where a trace straight
@@ -579,6 +622,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		floor = None
 	dropped = 0
 	if floor is not None:
+		floor.add_brush_entities(ents)
 		for prop in props:
 			if not prop["drop"]:
 				continue

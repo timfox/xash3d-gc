@@ -225,6 +225,37 @@ class DropToFloorTests(unittest.TestCase):
 		)
 		return light
 
+	def test_a_solid_brush_entity_is_ground_too(self):
+		import types
+
+		# World floor at z = -160; a func_wall slab (model 1) with its top at
+		# z = -88, like the sand on dod_charlie's beach. Model 2 is a trigger.
+		light = self.props.FloorLight.__new__(self.props.FloorLight)
+		model = lambda head, lo, hi: (*lo, *hi, 0.0, 0.0, 0.0, head, 0, 0, 0, 0, 0, 0)
+		light.bsp = types.SimpleNamespace(
+			planes=[(0.0, 0.0, 1.0, -160.0), (0.0, 0.0, 1.0, -88.0), (0.0, 0.0, 1.0, -20.0)],
+			nodes=[(0, -2, -1), (1, -2, -1), (2, -2, -1)],
+			leaves=[(-2,), (-1,)],
+			faces=[],
+			models=[
+				model(0, (-4096.0,) * 3, (4096.0,) * 3),
+				model(1, (-500.0, -500.0, -120.0), (500.0, 500.0, -88.0)),
+				model(2, (-500.0, -500.0, -60.0), (500.0, 500.0, -20.0)),
+			],
+		)
+		light.floors = []
+		light.heads = [(0, (0.0, 0.0, 0.0), None, None)]
+		self.assertAlmostEqual(light.drop((0.0, 0.0, -10.0)), -160.0, delta=0.01)
+		added = light.add_brush_entities([
+			{"classname": "func_wall", "model": "*1"},
+			{"classname": "trigger_multiple", "model": "*2"},
+			{"classname": "func_illusionary", "model": "*2"},
+		])
+		self.assertEqual(added, 1)
+		self.assertAlmostEqual(light.drop((0.0, 0.0, -10.0)), -88.0, delta=0.01)
+		# Outside the slab the world floor still counts.
+		self.assertAlmostEqual(light.drop((900.0, 0.0, -10.0)), -160.0, delta=0.01)
+
 	def test_spawnflag_2_marks_a_prop_for_the_drop(self):
 		ents = [
 			{"classname": "env_model", "model": "models/a.mdl", "origin": "0 0 4", "spawnflags": "2"},
