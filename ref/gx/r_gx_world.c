@@ -2425,6 +2425,52 @@ static byte *R_GXHotAlloc( unsigned bytes )
 	return NULL;
 }
 
+/* Which large chains earn the hot window. It holds two 256x256 chains and a
+ * beach view binds five or six; first come first served kept whichever the
+ * camera met first, often a strip of grass at the edge of the frame. The
+ * world pass says how many near batches each bind stands for
+ * (r_gx_hot_weight); the chain that covers more of the view takes the place
+ * of one that covers less than half as much. */
+unsigned r_gx_hot_weight;
+#define GC_HOT_CAND 12
+static struct { image_t *img; u32 cur, last; } gc_hot_cand[GC_HOT_CAND];
+
+static void R_GXHotNote( image_t *img )
+{
+	int i, spare = -1;
+
+	if( !r_gx_hot_weight )
+		return;
+	for( i = 0; i < GC_HOT_CAND; i++ )
+	{
+		if( gc_hot_cand[i].img == img )
+		{
+			gc_hot_cand[i].cur += r_gx_hot_weight;
+			r_gx_hot_weight = 0;
+			return;
+		}
+		if( spare < 0 && ( !gc_hot_cand[i].img || ( !gc_hot_cand[i].cur && !gc_hot_cand[i].last )))
+			spare = i;
+	}
+	if( spare >= 0 )
+	{
+		gc_hot_cand[spare].img = img;
+		gc_hot_cand[spare].cur = r_gx_hot_weight;
+		gc_hot_cand[spare].last = 0;
+	}
+	r_gx_hot_weight = 0;
+}
+
+static u32 R_GXHotWeightOf( const image_t *img )
+{
+	int i;
+
+	for( i = 0; i < GC_HOT_CAND; i++ )
+		if( gc_hot_cand[i].img == img )
+			return gc_hot_cand[i].last;
+	return 0;
+}
+
 /* Between frames, with the GPU done with last frame's textures. */
 static void R_GXHotService( void )
 {
@@ -2434,6 +2480,49 @@ static void R_GXHotService( void )
 	qboolean retired = false;
 
 	r_gx_hot.frame++;
+	for( i = 0; i < GC_HOT_CAND; i++ )
+	{
+		gc_hot_cand[i].last = gc_hot_cand[i].cur;
+		gc_hot_cand[i].cur = 0;
+	}
+	/* The heaviest waiting chain against the lightest resident one. */
+	{
+		int best = -1, worst = -1;
+		u32 bw = 0, ww = 0;
+
+		for( i = 0; i < r_gx_hot.queued; i++ )
+		{
+			const u32 w = R_GXHotWeightOf( r_gx_hot.queue[i] );
+
+			if( w > bw )
+			{
+				bw = w;
+				best = i;
+			}
+		}
+		for( i = 0; i < r_gx_hot.count; i++ )
+		{
+			const image_t *img = r_gx_hot.list[i];
+			const u32 w = R_GXHotWeightOf( img );
+
+			if( img->width < 256 && img->height < 256 )
+				continue;	/* not a chain that competes for the window */
+			if( worst < 0 || w < ww )
+			{
+				ww = w;
+				worst = i;
+			}
+		}
+		if( best >= 0 && worst >= 0 && bw > 2u * ww + 4u )
+		{
+			image_t *t = r_gx_hot.queue[0];
+
+			/* Old enough for R_GXHotAlloc to take its place. */
+			r_gx_hot.list[worst]->gc_packed_used = r_gx_hot.frame - GC_HOT_KEEP_FRAMES - 1;
+			r_gx_hot.queue[0] = r_gx_hot.queue[best];
+			r_gx_hot.queue[best] = t;
+		}
+	}
 	for( i = 0; i < r_gx_hot.queued; i++ )
 	{
 		image_t *img = r_gx_hot.queue[i];
@@ -2749,12 +2838,19 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 
 	img->gc_packed_used = r_gx_hot.frame;
+	if( img->gc_packed_bytes > r_gx_cmpr_bounce_cap )
+		R_GXHotNote( img );
+	else
+		r_gx_hot_weight = 0;
 	/* With large adopted bounce pools, promote chains too large for a near
 	 * slot into the bounded hot window. Queue before the resident-slot hit. */
 	if( r_gx_cmpr_nslots > 8 && img->gc_packed_aram
 		&& img->gc_packed_bytes > r_gx_cmpr_bounce_cap
 		&& img->gc_packed_bytes <= r_gx_hot.size && !img->gc_packed_hot
-		&& !( r_gx_cmpr_big_n && img->gc_packed_bytes <= r_gx_cmpr_big_cap )
+		/* ...unless a big slot will take it. The big slots of Lost Coast are
+		 * the props' (R_GXCmprBigForProps), so there the 256x256 sand layers
+		 * still go to the hot window; without this they stayed at 128. */
+		&& !( r_gx_cmpr_big_n && !r_gx_cmpr_big_for_props && img->gc_packed_bytes <= r_gx_cmpr_big_cap )
 		&& !img->gc_packed_queued && r_gx_hot.queued < GC_HOT_QUEUE_MAX )
 	{
 		img->gc_packed_queued = true;
@@ -5778,6 +5874,15 @@ static int R_GXDrawNewGameCapFacesImpl( void );
 extern qboolean R_GXWorldDLActive( void );
 extern int R_GXWorldDLDraw( void );
 extern qboolean R_GXWorldDLSampleLight( const float *org, byte rgb[3] );
+
+/* A world texture whose chain is too large for a near slot (256x256): one
+ * that competes for the hot window. */
+qboolean R_GXTexnumIsLargeChain( unsigned texnum )
+{
+	const image_t *img = R_GetTexture( texnum );
+
+	return img && img->gc_packed && ( img->width >= 256 || img->height >= 256 );
+}
 
 qboolean R_GXWorldDLBindTex( unsigned texnum )
 {

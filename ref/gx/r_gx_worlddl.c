@@ -119,6 +119,8 @@ extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t siz
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
+extern unsigned r_gx_hot_weight;
+extern qboolean R_GXTexnumIsLargeChain( unsigned texnum );
 /* Mirror-pass clip stage: see r_gx_world.c. */
 extern qboolean r_gx_mirror_clip;
 extern void R_GXWrapNumTevStages( u8 n );
@@ -2422,6 +2424,30 @@ static int R_GXWorldDLMatTexnum( u32 mat )
 	return gc_wd_texnum[mat];
 }
 
+/* Batches of one material group that lie within 768 units of the eye: how
+ * much of the near view a texture bind stands for. A count of all batches
+ * ranked the grass of the far hills above the sand underfoot. */
+static unsigned R_GXWorldDLNearBatches( const u16 *idx, int k, int key )
+{
+	unsigned n = 0;
+	int last = -1;
+	qboolean near_chunk = false;
+
+	for( ; k < gc_wd_defer_n && (int)(( gc_wd_keys[idx[k]] >> 16 ) & 0xffffu ) == key; k++ )
+	{
+		const int ci = (int)( gc_wd_keys[idx[k]] >> 48 );
+
+		if( ci != last )
+		{
+			near_chunk = R_GXWorldDLChunkD2( ci ) < 768.0f * 768.0f;
+			last = ci;
+		}
+		if( near_chunk )
+			n++;
+	}
+	return n;
+}
+
 /* Second layer of a WorldVertexTransition material (Lost Coast sand) for one
  * material group of the deferred queue: $basetexture2 over the layer just
  * drawn, weighted by the vertex alpha. In place this was three texture binds
@@ -2442,6 +2468,8 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 	if( gc_wd_texnum2[mat] <= 0 )
 		return;
 	R_GXCmprSetFar( far_pool ? true : false );
+	r_gx_hot_weight = ( far_pool || r_gx_mirror || !R_GXTexnumIsLargeChain( (unsigned)gc_wd_texnum2[mat] )) ? 0u
+		: R_GXWorldDLNearBatches( idx, k0, (int)(( gc_wd_keys[idx[k0]] >> 16 ) & 0xffffu ));
 	if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum2[mat] ))
 		return;
 	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
@@ -2587,6 +2615,10 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 			{
 				qboolean ok;
 
+				/* How much of the near view this bind stands for: the
+				 * batches of its group (the hot window's priority). */
+				if( !far_pool && !r_gx_mirror && R_GXTexnumIsLargeChain( (unsigned)texnum ))
+					r_gx_hot_weight = R_GXWorldDLNearBatches( idx, k, key );
 				WD_PF( 4, ok = R_GXWorldDLBindTex( (unsigned)texnum ));
 				if( ok )
 				{
