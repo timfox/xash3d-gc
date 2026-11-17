@@ -375,7 +375,10 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	}
 	/* Alpha-test on LM-lit cliff/brush mats cut white sky holes through
 	 * solid plates. Keep punch-through only for unlit foliage-style mats. */
-	if( ( flags & 0x02 ) && !gc_wd_chunk_lm )
+	/* Decals (flag 0x08, Source $decal): the alpha is the decal's shape, so
+	 * they cut out on lightmapped walls too. Without it the infodecals and
+	 * overlays on lit walls drew as opaque rectangles. */
+	if(( flags & 0x02 ) && ( !gc_wd_chunk_lm || ( flags & 0x08 )))
 	{
 		GX_SetAlphaCompare( GX_GEQUAL, aref ? aref : 128, GX_AOP_AND, GX_ALWAYS, 0 );
 		GX_SetZCompLoc( GX_FALSE );
@@ -2325,11 +2328,89 @@ static int R_GXWorldDLMatTexnum( u32 mat )
 	return gc_wd_texnum[mat];
 }
 
+/* Second layer of a WorldVertexTransition material (Lost Coast sand) for one
+ * material group of the deferred queue: $basetexture2 over the layer just
+ * drawn, weighted by the vertex alpha. In place this was three texture binds
+ * and two blend-state changes per batch, and the beach is all such batches;
+ * per group it is one bind and one state change. */
+static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat, int far_pool )
+{
+	const gc_wd_mat_t *m = &gc_wd_mats[mat];
+	int k, cur_chunk = -1, cur_lm = -1;
+	qboolean tev_set = false;
+
+	if( gc_wd_texnum2[mat] == 0 )
+	{
+		const int t2 = GC_WorldTexnumByHash( m->hash2 );
+
+		gc_wd_texnum2[mat] = (s16)( t2 > 0 ? t2 : -1 );
+	}
+	if( gc_wd_texnum2[mat] <= 0 )
+		return;
+	R_GXCmprSetFar( far_pool ? true : false );
+	if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum2[mat] ))
+		return;
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+	for( k = k0; k < k1; k++ )
+	{
+		const u64 r = gc_wd_keys[idx[k]];
+		const int ci = (int)( r >> 48 );
+		const int lm = (int)(( r >> 8 ) & 0xffu );
+		byte *chunk;
+		const gc_wd_batch_t *b;
+
+		if( gc_wd_slots[ci].cache_ofs < 0 )
+			continue;
+		chunk = gc_wd_cache + gc_wd_slots[ci].cache_ofs;
+		b = (const gc_wd_batch_t *)( chunk + 16 ) + (int)(( r >> 32 ) & 0xffffu );
+		if( ci != cur_chunk )
+		{
+			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			cur_chunk = ci;
+		}
+		if( lm != cur_lm )
+		{
+			const int had = gc_wd_chunk_lm;
+
+			gc_wd_chunk_lm = 0;
+			if( lm > 0 )
+			{
+				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * GC_WD_LM_PAGE_BYTES,
+					32, 32, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE );
+				GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
+				GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
+				gc_wd_chunk_lm = 1;
+			}
+			if( had != gc_wd_chunk_lm )
+				tev_set = false;
+			cur_lm = lm;
+		}
+		if( !tev_set )
+		{
+			gc_wd_tev_key = -1;
+			R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
+			/* Coverage = vertex alpha, carried through the later stages. */
+			GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+			gc_wd_tev_key = -1;
+			tev_set = true;
+		}
+		GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+		blend_draws++;
+	}
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	gc_wd_tev_key = -1;
+}
+
 static void R_GXWorldDLDeferFlush( int *drawn )
 {
 	static u16 idx[GC_WD_MAX_CHUNKS];
 	const int nkeys = (int)gc_wd_hdr.n_mats * 2;
 	int k, cur_chunk = -1, cur_lm = -1, cur_key = -1, cur_far = -1;
+	int group_key = -1, group_start = 0;
 	qboolean bound = false;
 
 	if( gc_wd_defer_n <= 0 )
@@ -2343,12 +2424,27 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 	for( k = 0; k < gc_wd_defer_n; k++ )
 		idx[gc_wd_mat_count[( gc_wd_keys[k] >> 16 ) & 0xffffu]++] = (u16)k;
 
-	for( k = 0; k < gc_wd_defer_n; k++ )
+	for( k = 0; k <= gc_wd_defer_n; k++ )
 	{
-		const u64 r = gc_wd_keys[idx[k]];
+		const u64 r = gc_wd_keys[idx[k < gc_wd_defer_n ? k : 0]];
 		const int ci = (int)( r >> 48 );
 		const int bi = (int)(( r >> 32 ) & 0xffffu );
-		const int key = (int)(( r >> 16 ) & 0xffffu );
+		const int key = k < gc_wd_defer_n ? (int)(( r >> 16 ) & 0xffffu ) : -2;
+
+		/* A material group just ended: its second layer, if it has one. */
+		if( key != group_key )
+		{
+			if( group_key >= 0 && gc_wd_hdr.version == 2 && (u32)( group_key >> 1 ) < GC_WD_BLEND_MATS
+				&& gc_wd_mats[group_key >> 1].hash2 )
+			{
+				R_GXWorldDLDeferBlendLayer( idx, group_start, k, (u32)group_key >> 1, group_key & 1 );
+				cur_chunk = -1; cur_lm = -1; cur_key = -1; cur_far = -1;
+			}
+			group_key = key;
+			group_start = k;
+		}
+		if( k == gc_wd_defer_n )
+			break;
 		const int lm = (int)(( r >> 8 ) & 0xffu );
 		const u32 mat = (u32)key >> 1;
 		const int far_pool = key & 1;
@@ -2616,8 +2712,27 @@ int R_GXWorldDLDraw( void )
 					keys[bq] = kv;
 				}
 			}
+			/* The tower test and the far-pool test only need the box and the
+			 * distance just computed. Both go in the spare top bits of the
+			 * order entry (chunk ids stay under 8192), so the draw passes do
+			 * not redo the distance, the span and two tower tests per chunk:
+			 * about fifty int-to-float conversions each, the slow kind on
+			 * the Gekko. */
 			for( a = 0; a < norder; a++ )
-				order[a] = (u16)( keys[a] & 0xffffu );
+			{
+				const u32 ci = (u32)( keys[a] & 0xffffu );
+				union { float f; u32 u; } d;
+				const float dx = gc_wd_chunk_maxs[ci * 3] - gc_wd_chunk_mins[ci * 3];
+				const float dy = gc_wd_chunk_maxs[ci * 3 + 1] - gc_wd_chunk_mins[ci * 3 + 1];
+				const float dz = gc_wd_chunk_maxs[ci * 3 + 2] - gc_wd_chunk_mins[ci * 3 + 2];
+				const float span = Q_max( dx, Q_max( dy, dz ));
+
+				d.u = (u32)( keys[a] >> 16 );
+				order[a] = (u16)( ci
+					| ( R_GXWorldDLIsTower( ci ) ? 0x8000u : 0u )
+					| (( gc_wd_tex_overflow && d.f > 1400.0f * 1400.0f
+						&& span * span < d.f * 0.015625f ) ? 0x4000u : 0u ));
+			}
 			if( gc_wd_pf_on > 0 )
 			{
 				gc_wd_pf[0] += gettime() - pf_t;
@@ -2651,23 +2766,16 @@ int R_GXWorldDLDraw( void )
 			qboolean chunk_far = false;
 			int lm_slot = 0;	/* lightmap store slot + 1, 0 = unlit */
 
-			i = order[oi];
-			if( R_GXWorldDLIsTower( i ) != want_tower )
+			i = order[oi] & 0x1fffu;
+			if((( order[oi] & 0x8000u ) != 0 ) != want_tower )
 				continue;
 			/* Past 1400 units a 128x128 texture is already on its 64x64
 			 * mip; bind it from the small-slot pool. */
 			/* Only when the pack has more textures than full-size slots. */
-			{
-				const float d2 = R_GXWorldDLChunkD2( (u16)i );
-				const float dx = gc_wd_chunk_maxs[i * 3] - gc_wd_chunk_mins[i * 3];
-				const float dy = gc_wd_chunk_maxs[i * 3 + 1] - gc_wd_chunk_mins[i * 3 + 1];
-				const float dz = gc_wd_chunk_maxs[i * 3 + 2] - gc_wd_chunk_mins[i * 3 + 2];
-				const float span = Q_max( dx, Q_max( dy, dz ));
-				/* A large cliff can cover much of the view even at a distance. */
-				chunk_far = gc_wd_tex_overflow && d2 > 1400.0f * 1400.0f
-					&& span * span < d2 * 0.015625f;
-				R_GXCmprSetFar( chunk_far );
-			}
+			/* A large cliff can cover much of the view even at a distance
+			 * (decided with the sort, above). */
+			chunk_far = ( order[oi] & 0x4000u ) != 0;
+			R_GXCmprSetFar( chunk_far );
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{
@@ -2729,8 +2837,7 @@ int R_GXWorldDLDraw( void )
 					continue;
 				/* Plain batch of a resident chunk: draw it with its material
 				 * group after the chunk loop (R_GXWorldDLDeferFlush). */
-				if( gc_wd_defer_on > 0 && !forced && gc_wd_defer_n < GC_WD_MAX_CHUNKS
-					&& !( gc_wd_hdr.version == 2 && m->hash2 && b->mat < GC_WD_BLEND_MATS ))
+				if( gc_wd_defer_on > 0 && !forced && gc_wd_defer_n < GC_WD_MAX_CHUNKS )
 				{
 					gc_wd_keys[gc_wd_defer_n++] = ( (u64)i << 48 ) | ( (u64)k << 32 )
 						| ( (u64)( b->mat * 2u + ( chunk_far ? 1u : 0u )) << 16 )

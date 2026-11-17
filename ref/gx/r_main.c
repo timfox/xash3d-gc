@@ -2706,6 +2706,7 @@ void GAME_EXPORT R_BeginFrame( qboolean clearScene )
 {
 #if XASH_GAMECUBE
 	R_GXSkinBeginFrame();
+	R_GXHudHiBeginFrame();
 #endif
 	R_Set2DMode( true );
 

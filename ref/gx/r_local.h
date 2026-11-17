@@ -547,6 +547,7 @@ int R_GXSkinLowCap( void );
 void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean flag_masked );
 const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean *promoted );
 void R_GXSkinBeginFrame( void );
+void R_GXHudHiBeginFrame( void );
 void R_GXSkinReport( const char *stage );
 void R_GXSkinRelease( image_t *img );
 void R_GXSkinReset( void );
