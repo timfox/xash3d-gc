@@ -8892,6 +8892,8 @@ static qboolean R_GXWaterPlaneZ( float *z )
 	return state > 0;
 }
 
+static u32 gc_mirror_ents;	/* characters drawn into the mirror, for the timing log */
+
 static void R_GXWaterMirrorPass( void )
 {
 	vec3_t org, ang, morg, corg, cf, cr, cu;
@@ -8952,6 +8954,31 @@ static void R_GXWaterMirrorPass( void )
 		m1 = gettime();
 		R_GXPropDrawHorizon( RI.rvp.vieworigin );
 		R_GXPropDraw( RI.rvp.vieworigin );
+		/* The water's VMT says $reflectentities 1: the fisherman on the
+		 * dock and the gulls stand in the reflection too. Only those
+		 * within reach of the water plane and near enough to read in the
+		 * mirror are skinned a second time. */
+		{
+			int ei;
+
+			for( ei = 0; ei < tr.draw_list->num_solid_entities; ei++ )
+			{
+				cl_entity_t *e = tr.draw_list->solid_entities[ei];
+				vec3_t d;
+
+				if( !e || !e->model || e->model->type != mod_studio )
+					continue;
+				VectorSubtract( e->origin, r_gx_mirror_real_org, d );
+				if( DotProduct( d, d ) > 1536.0f * 1536.0f || e->origin[2] < wz - 64.0f )
+					continue;
+				RI.currententity = e;
+				RI.currentmodel = e->model;
+				R_SetUpWorldTransform();
+				R_DrawStudioModel( e );
+				gc_mirror_ents++;
+			}
+			R_SetUpWorldTransform();
+		}
 		m2 = gettime();
 		gc_mirror_ticks[0] += m1 - m0;
 		gc_mirror_ticks[1] += m2 - m1;
@@ -9098,10 +9125,12 @@ static int R_GXDrawWorldDLFrame( void )
 			(float)ticks_to_microsecs( st_acc[4] ) / ( 1000.0f * st_n ),
 			(float)ticks_to_microsecs( st_acc[5] ) / ( 1000.0f * st_n ),
 			st_acc[5] ? 1000000.0f * st_n / (float)ticks_to_microsecs( st_acc[5] ) : 0.0f );
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: mirror ms/frame world=%.1f props=%.1f done=%.1f\n",
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: mirror ms/frame world=%.1f props=%.1f done=%.1f characters=%.2f\n",
 			(float)ticks_to_microsecs( gc_mirror_ticks[0] ) / ( 1000.0f * st_n ),
 			(float)ticks_to_microsecs( gc_mirror_ticks[1] ) / ( 1000.0f * st_n ),
-			(float)ticks_to_microsecs( gc_mirror_ticks[2] ) / ( 1000.0f * st_n ));
+			(float)ticks_to_microsecs( gc_mirror_ticks[2] ) / ( 1000.0f * st_n ),
+			(float)gc_mirror_ents / (float)st_n );
+		gc_mirror_ents = 0;
 		memset( gc_mirror_ticks, 0, sizeof( gc_mirror_ticks ));
 		memset( st_acc, 0, sizeof( st_acc ));
 		st_n = 0;
@@ -10626,6 +10655,13 @@ static void R_GXPrepareStudioState( qboolean viewmodel )
 		R_GXBuildWorldProjection( proj );
 
 	GX_LoadProjectionMtx( proj, GX_PERSPECTIVE );
+	/* A character drawn into the water mirror: the mirror's small target,
+	 * not the whole frame. */
+	if( r_gx_mirror && !viewmodel )
+	{
+		GX_SetViewport( 0.0f, 0.0f, (f32)GC_MIRROR_W, (f32)GC_MIRROR_H, 0.0f, 1.0f );
+		GX_SetScissor( 0, 0, GC_MIRROR_W, GC_MIRROR_H );
+	}
 	R_GXBuildWorldModelview( mv );
 	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
 	GX_SetCurrentMtx( GX_PNMTX0 );
