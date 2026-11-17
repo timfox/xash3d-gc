@@ -24,6 +24,54 @@ GNU General Public License for more details.
 #include "wadfile.h"	// acess decal size
 #include "sound.h"
 #if XASH_GAMECUBE
+#include "server.h"
+
+/*
+ * The lean DoD listen route never loads the server's precached sprites into
+ * cl.models (only the studio props the lean emit draws), so every temp
+ * entity a TE message made had no model and was dropped (fx diag on charlie:
+ * nomodel == alloc). Resolve a missing index from the server precache list
+ * on first use: sprites load as client sprites, studio models come from the
+ * server's resident handle. Each index is tried once per map.
+ */
+static model_t *CL_GCTentModelHandle( int modelindex )
+{
+	static byte tried[MAX_MODELS];
+	static const void *tried_world;
+	static int fail_logs;
+	model_t *mod = ( modelindex >= 0 && modelindex < MAX_MODELS ) ? cl.models[modelindex] : NULL;
+	const char *name;
+
+	if( mod || modelindex <= 0 || modelindex >= MAX_MODELS || !SV_Active( ))
+		return mod;
+	if( tried_world != (const void *)cl.worldmodel )
+	{
+		memset( tried, 0, sizeof( tried ));
+		tried_world = cl.worldmodel;
+	}
+	if( tried[modelindex] )
+		return NULL;
+	tried[modelindex] = 1;
+	name = sv.model_precache[modelindex];
+	if( !name[0] )
+		return NULL;
+	if( Q_stristr( name, ".spr" ))
+		mod = CL_LoadClientSprite( name );
+	else
+	{
+		mod = SV_ModelHandle( modelindex );
+		if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->type != mod_brush )
+			mod = NULL;
+	}
+	if( mod )
+		cl.models[modelindex] = mod;
+	else if( fail_logs++ < 8 )
+		Con_Reportf( "Xash3D GameCube: temp entity model %d %s not loadable\n", modelindex, name );
+	return mod;
+}
+#define CL_ModelHandle CL_GCTentModelHandle
+#endif
+#if XASH_GAMECUBE
 #include "gamecube/mem_gamecube.h"
 #endif
 
@@ -337,6 +385,11 @@ void CL_GCEnsureTempEntPool( void )
 	}
 	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
 		cl_sprite_ricochet = CL_LoadClientSprite( cl_default_sprites[5] );
+	if( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet )
+		Con_Reportf( "Xash3D GameCube: client sprites: %s %s, %s %s (on disc: %d %d)\n",
+			cl_default_sprites[0], cl_sprite_muzzleflash[0] ? "ok" : "failed",
+			cl_default_sprites[5], cl_sprite_ricochet ? "ok" : "failed",
+			FS_FileExists( cl_default_sprites[0], false ), FS_FileExists( cl_default_sprites[5], false ));
 	Con_Reportf( "Xash3D GameCube: client tempents %d in %s (%s), muzzle flash %s, heap %s\n",
 		want, where, Q_memprint( bytes ), cl_sprite_muzzleflash[0] ? "loaded" : "missing",
 		Q_memprint( GC_MemHeapFreeBytes( )));
