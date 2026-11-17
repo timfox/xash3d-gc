@@ -71,10 +71,60 @@ static qboolean R_GCIsStudioSkinOverflow( const void *ptr )
 	return Mod_GCIsStudioSkin( ptr );
 }
 
+/* Effect sprites (explosion, steam, blood, smoke) get their pixels from a
+ * block of their own. In the shared heap they always lost: a DoD match uses
+ * every free byte (view models, resident textures), so the sprites either
+ * failed their free-heap gate or, when let in first, starved the grenade
+ * view model skins. The block is filled while gc_sprite_effect_load is set
+ * (engine/client/cl_sprite.c) and rewinds when its last texture is freed. */
+#define GC_FX_PIXELS_BYTES ( 128u * 1024u )
+extern qboolean gc_sprite_effect_load;
+static byte gc_fx_pixels[GC_FX_PIXELS_BYTES] __attribute__((aligned(32)));
+static size_t gc_fx_pixels_used;
+static int gc_fx_pixels_live;
+
+static qboolean R_GCIsFxPixels( const void *ptr )
+{
+	return (const byte *)ptr >= gc_fx_pixels && (const byte *)ptr < gc_fx_pixels + GC_FX_PIXELS_BYTES;
+}
+
+static byte *R_GCAllocFxPixels( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+	byte *out;
+
+	if( !gc_sprite_effect_load || bytes == 0 || gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+		return NULL;
+	out = gc_fx_pixels + gc_fx_pixels_used;
+	gc_fx_pixels_used += need;
+	gc_fx_pixels_live++;
+	memset( out, 0, need );
+	return out;
+}
+
+static void R_GCFreeFxPixels( void )
+{
+	if( gc_fx_pixels_live > 0 && --gc_fx_pixels_live == 0 )
+		gc_fx_pixels_used = 0;
+}
+
+size_t R_GCFxPixelsFree( void )
+{
+	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used;
+}
+
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
  * use it as a texture in place (R_GXNativeTexture in r_gx_world.c). */
 static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 {
+	byte *fx = R_GCAllocFxPixels( bytes );
+
+	if( fx )
+	{
+		if( level == 0 )
+			tex->gc_pixels_base = fx;
+		return (pixel_t *)fx;
+	}
 	byte *base = (byte *)Mem_TryCalloc( r_temppool, bytes + ( level == 0 ? 31 : 0 ));
 	if( !base && level == 0 && bytes <= sizeof( gc_tiny_pixels[0] ))
 	{
@@ -101,6 +151,13 @@ static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 
 void R_GCFreeMip( image_t *tex, uint level )
 {
+	if( R_GCIsFxPixels( level == 0 && tex->gc_pixels_base ? (void *)tex->gc_pixels_base : (void *)tex->pixels[level] ))
+	{
+		R_GCFreeFxPixels();
+		if( level == 0 )
+			tex->gc_pixels_base = NULL;
+		return;
+	}
 	if( level == 0 && tex->gc_pixels_base )
 	{
 		for( unsigned i = 0; i < ARRAYSIZE( gc_tiny_pixels ); i++ )

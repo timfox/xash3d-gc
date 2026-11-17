@@ -96,17 +96,14 @@ static model_t *CL_GCTentModelHandle( int modelindex )
  * handed the free heap to resident textures and models (dod_charlie: 354 KiB
  * free at spawn, 22 KiB a little later), so explosion, steam and blood
  * sprites failed the 80 KiB gate above for the whole map. Load the server's
- * precached sprites right after the map goes active instead, one per frame,
- * while 96 KiB stays free. Measured on charlie, which has 126 KiB free
- * when the client goes active: a 128 KiB floor loaded nothing; a 64 KiB
- * floor loaded four sprites (68 KiB) but the grenade view model skins then
- * failed to allocate.
+ * precached sprites right after the map goes active instead, one per frame.
  */
 static void CL_GCPrewarmEffectSprites( void )
 {
+	extern size_t R_GCFxPixelsFree( void );
 	static const void *world;
 	static int next, loaded;
-	static size_t start_free;
+	static size_t heap_taken;
 	static qboolean done;
 
 	if( !SV_Active() || cls.state != ca_active || !cl.worldmodel )
@@ -116,7 +113,7 @@ static void CL_GCPrewarmEffectSprites( void )
 		world = cl.worldmodel;
 		next = 1;
 		loaded = 0;
-		start_free = 0;
+		heap_taken = 0;
 		done = false;
 	}
 	if( done )
@@ -124,30 +121,34 @@ static void CL_GCPrewarmEffectSprites( void )
 	for( ; next < MAX_MODELS; next++ )
 	{
 		const char *name = sv.model_precache[next];
+		size_t before, after;
 		model_t *mod;
 
 		if( !name[0] )
 			break;
 		if( cl.models[next] || !Q_stristr( name, ".spr" ))
 			continue;
-		/* A match uses every free byte later, so the floor alone protects
-		 * nothing: with 112 KiB more heap the prewarm took a second sprite
-		 * and the grenade view model skins failed again. Cap what the
-		 * prewarm itself takes (the explosion sprite is 32 KiB). */
-		if( !start_free )
-			start_free = GC_MemHeapFreeBytes();
-		if( GC_MemHeapFreeBytes() < 96 * 1024
-			|| ( start_free > GC_MemHeapFreeBytes()
-				&& start_free - GC_MemHeapFreeBytes() >= 24 * 1024 ))
+		/* The frames go to the renderer's effect block (ref/gx/r_image.c),
+		 * not the heap. The heap still pays for the file read and the
+		 * sprite headers: keep 64 KiB free for the read, and stop once the
+		 * prewarm itself has kept 24 KiB, which the grenade view model
+		 * skins need later (measured on dod_charlie). */
+		if( GC_MemHeapFreeBytes() < 64 * 1024 || heap_taken >= 24 * 1024
+			|| R_GCFxPixelsFree() < 4 * 1024 )
 		{
 			done = true;
-			Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d, stopped at %s (heap %s)\n",
-				loaded, name, Q_memprint( GC_MemHeapFreeBytes( )));
+			Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d, stopped at %s (heap %s, kept %s, effect block free %s)\n",
+				loaded, name, Q_memprint( GC_MemHeapFreeBytes( )),
+				Q_memprint( heap_taken ), Q_memprint( R_GCFxPixelsFree( )));
 			return;
 		}
+		before = GC_MemHeapFreeBytes();
 		gc_sprite_effect_load = true;
 		mod = CL_LoadClientSprite( name );
 		gc_sprite_effect_load = false;
+		after = GC_MemHeapFreeBytes();
+		if( before > after )
+			heap_taken += before - after;
 		if( mod )
 		{
 			cl.models[next] = mod;
@@ -157,8 +158,9 @@ static void CL_GCPrewarmEffectSprites( void )
 		return; /* one sprite a frame: no load hitch */
 	}
 	done = true;
-	Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d (heap %s)\n",
-		loaded, Q_memprint( GC_MemHeapFreeBytes( )));
+	Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d (heap %s, kept %s, effect block free %s)\n",
+		loaded, Q_memprint( GC_MemHeapFreeBytes( )), Q_memprint( heap_taken ),
+		Q_memprint( R_GCFxPixelsFree( )));
 }
 #endif
 #if XASH_GAMECUBE
