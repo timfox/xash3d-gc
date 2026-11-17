@@ -4444,6 +4444,16 @@ static void Mod_LoadEntities( model_t *mod, const dbspmodel_t *bmod )
 		 * leafs memalign(202)/seize(208) deferred → LoadLeafs tip-OOM while
 		 * nodes alone took BSP scratch. Prefer malloc(need) so leaf tip-park
 		 * still sees a contiguous hole. Reuse an already-held static block. */
+		/* A lump larger than the reserve never uses it (dod_charlie: 180 KiB
+		 * lump malloc'd beside an idle 128 KiB reserve, heap low 21 KiB).
+		 * Give the reserve back before the exact-size take below. */
+		if( gc_static_entities && need > GC_STATIC_ENTITIES_BYTES )
+		{
+			free( gc_static_entities );
+			gc_static_entities = NULL;
+			Con_Reportf( "Xash3D GameCube: world entities %s exceed the reserve, released %s\n",
+				Q_memprint( need ), Q_memprint( GC_STATIC_ENTITIES_BYTES ));
+		}
 		if( gc_static_entities && need <= GC_STATIC_ENTITIES_BYTES )
 		{
 			mod->entities = gc_static_entities;
