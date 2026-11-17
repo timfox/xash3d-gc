@@ -17795,7 +17795,9 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				/* this frame loop replaces SCR_UpdateScreen, so the chat keyboard is drawn here */
 				{
 					extern void OSK_Draw( void );
+					extern void OSK_ChatDraw( void );
 
+					OSK_ChatDraw();
 					OSK_Draw();
 				}
 				GC_ProfMark( "render: HUD" );
