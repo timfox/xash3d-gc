@@ -1439,6 +1439,8 @@ GC_STUDIO_PWEAPONS = (
 	"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger", "p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44", "p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
 	# British (Allies on British maps) and para loadouts.
 	"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley", "p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
+	# Bipod down / up variants the game switches weaponmodel to when deployed.
+	"p_barbd", "p_brenbd", "p_brenbu", "p_fg42bd", "p_fg42bu", "p_scopedfg42bu", "p_mg34bd", "p_mg34bu", "p_mg42bd", "p_mg42bu",
 )
 
 # Small allowlist injected into gamecube-bootstrap.pk3 as gc_studio/*.mdl so
@@ -1523,6 +1525,16 @@ GC_STUDIO_MODELS = (
 	"models/p_grease.mdl",
 	"models/p_fg42.mdl",
 	"models/p_paraknife.mdl",
+	"models/p_barbd.mdl",
+	"models/p_brenbd.mdl",
+	"models/p_brenbu.mdl",
+	"models/p_fg42bd.mdl",
+	"models/p_fg42bu.mdl",
+	"models/p_scopedfg42bu.mdl",
+	"models/p_mg34bd.mdl",
+	"models/p_mg34bu.mdl",
+	"models/p_mg42bd.mdl",
+	"models/p_mg42bu.mdl",
 	# DoD CapFaces map props (env_model / dod_object).
 	# Tip: skip forts/kingtiger; caen unique order saturates 6 slots before bulb.
 	"models/mapmodels/hk_satchel.mdl",

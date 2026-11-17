@@ -75,6 +75,8 @@ static qboolean Mod_GCIsWeaponModelPath( const char *path )
 		/* BAR, British and para loadouts. */
 		"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley",
 		"p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
+		/* Bipod down / up third-person models. */
+		"p_barbd", "p_brenbd", "p_brenbu", "p_fg42bd", "p_fg42bu", "p_scopedfg42bu", "p_mg34bd", "p_mg34bu", "p_mg42bd", "p_mg42bu",
 		NULL
 	};
 	char bare[64];

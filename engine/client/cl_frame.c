@@ -1452,6 +1452,8 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 		{ "p_barbu", "mg" }, { "p_enfield", "bolt" }, { "p_enfields", "bolt" }, { "p_sten", "mp40" },
 		{ "p_piat", "bazooka" }, { "p_webley", "pistol" }, { "p_fairbairn", "knife" }, { "p_paraknife", "knife" },
 		{ "p_mills", "gren" }, { "p_m1carb", "rifle" }, { "p_grease", "tommy" }, { "p_fg42", "stg44" },
+		/* Bipod deployed / up variants (p_*bd, p_*bu) not covered by a prefix above. */
+		{ "p_scopedfg42", "stg44" }, { "p_mg34", "mg" },
 	};
 	const char *name;
 	int i;
@@ -2085,9 +2087,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						char label[48];
 						int aim = -1, dgait = -1;
 
-						/* The game sets iuser3 = 1 while prone (dod-gc
+						/* iuser3 bit 0 is prone, bit 1 deployed (dod-gc
 						 * docs/DOD_ENGINE_REQUESTS.md). */
-						const qboolean prone = ed->v.iuser3 == 1;
+						const qboolean prone = ( ed->v.iuser3 & 1 ) != 0;
 
 						if( tok )
 						{
