@@ -1,0 +1,282 @@
+From 24431e0421865504ce95069d18fb88175689863e Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Mon, 16 Nov 2026 14:21:54 -0800
+Subject: [PATCH 1/2] Lost Coast: npc_seagull as monster_lc_seagull (Valve
+ npc_crow flight)
+
+Seagulls the Lost Coast map sends FlyAway along its path_corner loops take
+off on the Takeoff event (cycle 0.373), then fly the loop at CROW_AIRSPEED
+220 with npc_crow's steering lerp, 45 degree banking and Fly/Soar
+alternation. Light 0.1 s think, no schedules or node graph. Only Lost
+Coast's stub BSP spawns the class.
+---
+ dlls/lostcoast_npcs.cpp | 257 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 257 insertions(+)
+ create mode 100644 dlls/lostcoast_npcs.cpp
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+new file mode 100644
+index 00000000..8f09c547
+--- /dev/null
++++ b/dlls/lostcoast_npcs.cpp
+@@ -0,0 +1,257 @@
++/*
++lostcoast_npcs.cpp - Half-Life 2: Lost Coast characters for the GameCube port
++
++The Lost Coast bake (lostcoast-gc tools/bake_lostcoast_studio.py) turns the
++map's npc_seagull / npc_fisherman / npc_combine_s into these entities, with
++their Source models converted to GoldSrc studio files. Behaviour follows
++Valve's own NPC code (Source SDK 2013 npc_crow.cpp for the gulls), cut down
++to what the map asks of each character, and runs on a plain 0.1 s think:
++no schedules, node graph or squad code, so it stays cheap on Gekko.
++
++Only Lost Coast's stub BSP spawns these classnames.
++*/
++
++#include "extdll.h"
++#include "util.h"
++#include "cbase.h"
++#include "animation.h"
++
++// npc_crow.h
++#define CROW_TAKEOFF_SPEED	170.0f
++#define CROW_AIRSPEED		220.0f
++// seagull.mdl Takeoff: AE_CROW_TAKEOFF at cycle 0.373
++#define CROW_TAKEOFF_CYCLE	0.373f
++
++static float LC_Clamp( float v, float lo, float hi )
++{
++	return v < lo ? lo : ( v > hi ? hi : v );
++}
++
++//=========================================================
++// monster_lc_seagull: npc_seagull (CNPC_Crow with the gull
++// model). The map fires FlyAway,<path_corner> at spawn on two
++// of its four gulls; they take off and circle the path loop
++// for the rest of the level, alternating Fly and Soar.
++//=========================================================
++class CLCSeagull : public CBaseAnimating
++{
++public:
++	void Spawn( void );
++	void Precache( void );
++	void EXPORT GullThink( void );
++
++private:
++	enum { GULL_SIT, GULL_TAKEOFF, GULL_FLY };
++
++	void SetSeq( const char *label, BOOL restart );
++	void ChooseFlySeq( void );
++	void MoveFly( float interval );
++	CBaseEntity *Goal( void );
++
++	int	m_state;
++	float	m_flLast;
++	float	m_flSoarTime;
++	BOOL	m_bSoar;
++	BOOL	m_bLaunched;
++	Vector	m_vFwd;
++	Vector	m_vCurrentTarget;
++	Vector	m_vDesiredTarget;
++	string_t m_iGoal;
++};
++
++LINK_ENTITY_TO_CLASS( monster_lc_seagull, CLCSeagull )
++
++void CLCSeagull::Precache( void )
++{
++	PRECACHE_MODEL( STRING( pev->model ));
++}
++
++void CLCSeagull::Spawn( void )
++{
++	Precache();
++	SET_MODEL( ENT( pev ), STRING( pev->model ));
++	UTIL_SetSize( pev, Vector( -8, -8, 0 ), Vector( 8, 8, 16 ));
++	pev->solid = SOLID_NOT;
++	pev->movetype = MOVETYPE_NONE;
++	pev->takedamage = DAMAGE_NO;
++	m_state = GULL_SIT;
++	m_iGoal = pev->target; // FlyAway target fired by the map at spawn
++	UTIL_MakeVectors( pev->angles );
++	m_vFwd = gpGlobals->v_forward;
++	m_vCurrentTarget = m_vFwd;
++	m_vDesiredTarget = g_vecZero;
++	SetSeq( "idle", TRUE );
++	pev->frame = RANDOM_FLOAT( 0, 255 );
++	SetThink( &CLCSeagull::GullThink );
++	pev->nextthink = gpGlobals->time + 0.1f + RANDOM_FLOAT( 0.0f, 0.2f );
++	m_flLast = gpGlobals->time;
++}
++
++void CLCSeagull::SetSeq( const char *label, BOOL restart )
++{
++	int seq = LookupSequence( label );
++
++	if( seq < 0 || ( seq == pev->sequence && !restart ))
++		return;
++	pev->sequence = seq;
++	pev->frame = 0;
++	pev->framerate = 1.0f;
++	ResetSequenceInfo();
++}
++
++CBaseEntity *CLCSeagull::Goal( void )
++{
++	if( FStringNull( m_iGoal ))
++		return NULL;
++	return UTIL_FindEntityByTargetname( NULL, STRING( m_iGoal ));
++}
++
++// NPC_TranslateActivity for ACT_FLY: soar half the time while descending.
++void CLCSeagull::ChooseFlySeq( void )
++{
++	if( m_flSoarTime < gpGlobals->time )
++	{
++		if( RANDOM_LONG( 0, 100 ) <= 50 && !m_bSoar && pev->velocity.z < 0 )
++		{
++			m_bSoar = TRUE;
++			m_flSoarTime = gpGlobals->time + RANDOM_FLOAT( 1, 4 );
++		}
++		else
++		{
++			m_bSoar = FALSE;
++			m_flSoarTime = gpGlobals->time + RANDOM_FLOAT( 3, 5 );
++		}
++	}
++	SetSeq( m_bSoar ? "soar" : "fly", FALSE );
++}
++
++// CNPC_Crow::MoveCrowFly, flying a path_corner chain.
++void CLCSeagull::MoveFly( float interval )
++{
++	CBaseEntity *goal = Goal();
++	Vector vecMoveGoal, vecMoveDir, vecRight;
++	float flDistance, flLerpMod, flRoll;
++
++	if( interval > 1.0f )
++		interval = 1.0f;
++	if( !goal )
++	{
++		pev->velocity = g_vecZero;
++		return;
++	}
++	vecMoveGoal = goal->pev->origin;
++	vecMoveDir = vecMoveGoal - pev->origin;
++	flDistance = vecMoveDir.Length();
++
++	if( vecMoveGoal != m_vDesiredTarget )
++		m_vDesiredTarget = vecMoveGoal;
++	else
++		m_vCurrentTarget = ( m_vDesiredTarget - pev->origin ).Normalize();
++
++	flLerpMod = 0.25f;
++	if( flDistance <= 256.0f )
++		flLerpMod = 1.0f - ( flDistance / 256.0f );
++	m_vFwd = m_vFwd + ( m_vCurrentTarget - m_vFwd ) * flLerpMod;
++
++	// Reached the corner: on to the next one (the gull loops never end).
++	if( flDistance < CROW_AIRSPEED * interval && !FStringNull( goal->pev->target ))
++		m_iGoal = goal->pev->target;
++
++	m_vFwd = m_vFwd.Normalize();
++	pev->velocity = m_vFwd * CROW_AIRSPEED;
++
++	// Bank into the turn (Source: dot(right, unnormalised move dir) * 45).
++	pev->angles = UTIL_VecToAngles( m_vFwd );
++	{
++		Vector a = pev->angles;
++
++		a.z = 0;
++		UTIL_MakeVectors( a );
++	}
++	vecRight = gpGlobals->v_right;
++	flRoll = LC_Clamp( DotProduct( vecRight, vecMoveDir ) * 45.0f, -45.0f, 45.0f );
++	pev->angles.z = flRoll;
++}
++
++void CLCSeagull::GullThink( void )
++{
++	float interval = gpGlobals->time - m_flLast;
++
++	m_flLast = gpGlobals->time;
++	StudioFrameAdvance();
++	pev->nextthink = gpGlobals->time + 0.1f;
++
++	switch( m_state )
++	{
++	case GULL_SIT:
++	{
++		CBaseEntity *goal = Goal();
++		TraceResult tr;
++
++		if( !goal )
++			return; // no FlyAway for this one: it stays put
++		// InputFlyAway: only if the target is in sight.
++		UTIL_TraceLine( pev->origin + Vector( 0, 0, 8 ), goal->pev->origin, ignore_monsters, ENT( pev ), &tr );
++		if( tr.flFraction != 1.0f )
++		{
++			m_iGoal = 0;
++			return;
++		}
++		m_state = GULL_TAKEOFF;
++		m_bLaunched = FALSE;
++		SetSeq( "takeoff", TRUE );
++		pev->angles.y = UTIL_VecToYaw( goal->pev->origin - pev->origin );
++		break;
++	}
++	case GULL_TAKEOFF:
++	{
++		CBaseEntity *goal = Goal();
++
++		// Takeoff(): leave the ground straight at the goal on the event.
++		if( !m_bLaunched && pev->frame >= CROW_TAKEOFF_CYCLE * 255.0f && goal )
++		{
++			Vector dir = ( goal->pev->origin - pev->origin ).Normalize();
++
++			m_bLaunched = TRUE;
++			pev->movetype = MOVETYPE_NOCLIP;
++			pev->origin.z += 1.0f;
++			UTIL_SetOrigin( pev, pev->origin );
++			m_vFwd = dir;
++			m_vCurrentTarget = dir;
++			pev->angles = UTIL_VecToAngles( dir );
++			pev->velocity = dir * CROW_TAKEOFF_SPEED;
++		}
++		if( m_fSequenceFinished )
++		{
++			m_state = GULL_FLY;
++			m_bSoar = FALSE;
++			m_flSoarTime = gpGlobals->time + RANDOM_FLOAT( 2, 5 );
++			pev->movetype = MOVETYPE_NOCLIP;
++			SetSeq( "fly", TRUE );
++			pev->frame = RANDOM_FLOAT( 0.0f, 0.75f ) * 255.0f; // OnChangeActivity
++		}
++		break;
++	}
++	case GULL_FLY:
++		MoveFly( interval );
++		{
++			static int logs;
++			static float next;
++
++			if( logs < 6 && gpGlobals->time >= next )
++			{
++				logs++;
++				next = gpGlobals->time + 10.0f;
++				ALERT( at_console, "Lost Coast: seagull %d flying %s at %.0f %.0f %.0f seq=%d\n",
++					ENTINDEX( ENT( pev )), STRING( m_iGoal ), pev->origin.x, pev->origin.y,
++					pev->origin.z, pev->sequence );
++			}
++		}
++		if( m_fSequenceFinished )
++		{
++			m_fSequenceFinished = FALSE;
++			ChooseFlySeq();
++		}
++		break;
++	}
++}
+-- 
+2.53.0
+
