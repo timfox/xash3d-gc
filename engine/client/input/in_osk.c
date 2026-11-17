@@ -17,188 +17,168 @@ GNU General Public License for more details.
 #include "input.h"
 #include "client.h"
 
-CVAR_DEFINE_AUTO( osk_enable, "0", FCVAR_ARCHIVE | FCVAR_FILTERABLE, "enable built-in on-screen keyboard" );
+#if XASH_GAMECUBE
+#define OSK_DEFAULT_ENABLE "1"
+#else
+#define OSK_DEFAULT_ENABLE "0"
+#endif
 
-/* On-screen keyboard:
+CVAR_DEFINE_AUTO( osk_enable, OSK_DEFAULT_ENABLE, FCVAR_ARCHIVE | FCVAR_FILTERABLE, "enable built-in on-screen keyboard" );
+
+/* On-screen keyboard, GameCube controller layout.
  *
- * 4 lines with 13 buttons each
- * Left trigger == backspace
- * Right trigger == space
- * Any button press is button press on keyboard
+ * Original implementation, modelled on the interaction of console-style
+ * name-entry keyboards: three pages (abc, ABC, symbols), a 10 column grid
+ * with a row of wide action keys below it.
  *
- * Our layout:
- *  0  1  2  3  4  5  6  7  8  9  10 11 12
- * +--+--+--+--+--+--+--+--+--+--+--+--+--+
- * |` |1 |2 |3 |4 |5 |6 |7 |8 |9 |0 |- |= | 0
- * +--+--+--+--+--+--+--+--+--+--+--+--+--+
- * |q |w |e |r |t |y |u |i |o |p |[ |] |\ | 1
- * +--+--+--+--+--+--+--+--+--+--+--+--+--+
- * |CL|a |s |d |f |g |h |j |k |l |; |' |BS| 2
- * +--+--+--+--+--+--+--+--+--+--+--+--+--+
- * |SH|z |x |c |v |b |n |m |, |. |/ |SP|EN| 3
- * +--+--+--+--+--+--+--+--+--+--+--+--+--+
+ *   D-Pad / stick  move the cursor (wraps at every edge)
+ *   A              type the highlighted key
+ *   B              delete the last character
+ *   X              space
+ *   Y, L, R        next page / previous page / next page
+ *   Start          OK (Enter)
+ *   Z              cancel (Escape)
  */
 
-#define MAX_OSK_ROWS  13
-#define MAX_OSK_LINES 4
+#define OSK_COLS  10
+#define OSK_ROWS  4 // character rows, plus one row of action keys
 
-enum
-{
-	OSK_DEFAULT = 0,
-	OSK_UPPER, // on caps, shift
-	/*
-	OSK_RUSSIAN,
-	OSK_RUSSIAN_UPPER,
-	*/
-	OSK_LAST
-};
+enum { OSK_PAGE_LOWER, OSK_PAGE_UPPER, OSK_PAGE_SYMBOL, OSK_PAGES };
+enum { OSK_ACT_PAGE, OSK_ACT_SPACE, OSK_ACT_DELETE, OSK_ACT_OK, OSK_ACTS };
 
-enum
+static const char *osk_pages[OSK_PAGES][OSK_ROWS] =
 {
-	OSK_TAB = 16,
-	OSK_SHIFT,
-	OSK_BACKSPACE,
-	OSK_ENTER,
-	OSK_SPECKEY_LAST
+	{ "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm.:/" },
+	{ "1234567890", "QWERTYUIOP", "ASDFGHJKL'", "ZXCVBNM.:/" },
+	{ "!@#$%^&*()", "-_=+[]{}\\|", ";:\"',.<>/?", "~`<>#@&;$%" },
 };
-static const char *osk_keylayout[][4] =
-{
-	{
-		"`1234567890-=",             // 13
-		"qwertyuiop[]\\",            // 13
-		"\x10" "asdfghjkl;'" "\x12", // 11 + caps on a left, enter on a right
-		"\x11" "zxcvbnm,./ " "\x13"  // 10 + esc on left + shift on a left/right
-	},
-	{
-		"~!@#$%^&*()_+",
-		"QWERTYUIOP{}|",
-		"\x10" "ASDFGHJKL:\"" "\x12",
-		"\x11" "ZXCVBNM<>? "  "\x13"
-	}
-};
+static const char *osk_page_names[OSK_PAGES] = { "abc", "ABC", "#+=" };
+static const char *osk_act_names[OSK_ACTS] = { NULL, "Space", "Delete", "OK" };
+// first column and width of each action key
+static const int osk_act_col[OSK_ACTS] = { 0, 2, 6, 8 };
+static const int osk_act_width[OSK_ACTS] = { 2, 4, 2, 2 };
 
 static struct osk_s
 {
 	qboolean enable;
-	int      curlayout;
-	qboolean shift;
-	qboolean sending;
-	struct
-	{
-		signed char x;
-		signed char y;
-		char val;
-	} curbutton;
+	qboolean passthru;
+	int      page;
+	int      x, y; // y == OSK_ROWS is the action row, x is then the column
 } osk;
+
+static int OSK_ActionAt( int x )
+{
+	int i;
+
+	for( i = OSK_ACTS - 1; i > 0; i-- )
+		if( x >= osk_act_col[i] )
+			return i;
+	return 0;
+}
+
+static void OSK_SendKey( int key )
+{
+	osk.passthru = true;
+	Key_Event( key, true );
+	Key_Event( key, false );
+	osk.passthru = false;
+}
+
+static void OSK_SendChar( int ch )
+{
+	// do not pass UTF-8 sequence into the engine, convert it here
+	if( !cls.accept_utf8 )
+		ch = Con_UtfProcessCharForce( ch );
+
+	if( ch )
+		CL_CharEvent( ch );
+}
+
+static void OSK_ChangePage( int dir )
+{
+	osk.page = ( osk.page + dir + OSK_PAGES ) % OSK_PAGES;
+}
+
+static void OSK_Move( int dx, int dy )
+{
+	if( dy )
+	{
+		int act = osk.y == OSK_ROWS ? OSK_ActionAt( osk.x ) : -1;
+
+		osk.y = ( osk.y + dy + OSK_ROWS + 1 ) % ( OSK_ROWS + 1 );
+
+		// the action row is coarser than the grid, keep the cursor over the same key
+		if( act >= 0 && osk.y != OSK_ROWS )
+			osk.x = osk_act_col[act] + osk_act_width[act] / 2;
+	}
+
+	if( dx )
+	{
+		if( osk.y == OSK_ROWS )
+		{
+			int act = ( OSK_ActionAt( osk.x ) + dx + OSK_ACTS ) % OSK_ACTS;
+			osk.x = osk_act_col[act];
+		}
+		else osk.x = ( osk.x + dx + OSK_COLS ) % OSK_COLS;
+	}
+}
+
+static void OSK_Activate( void )
+{
+	if( osk.y == OSK_ROWS )
+	{
+		switch( OSK_ActionAt( osk.x ))
+		{
+		case OSK_ACT_PAGE:   OSK_ChangePage( 1 ); break;
+		case OSK_ACT_SPACE:  OSK_SendChar( ' ' ); break;
+		case OSK_ACT_DELETE: OSK_SendKey( K_BACKSPACE ); break;
+		case OSK_ACT_OK:     OSK_SendKey( K_ENTER ); break;
+		}
+		return;
+	}
+
+	OSK_SendChar( (byte)osk_pages[osk.page][osk.y][osk.x] );
+}
 
 qboolean OSK_KeyEvent( int key, int down )
 {
-	if( !osk.enable || !osk_enable.value )
+	qboolean ours;
+
+	if( !osk.enable || !osk_enable.value || osk.passthru )
 		return false;
 
-	if( osk.sending )
-	{
-		osk.sending = false;
-		return false;
-	}
+	// physical keyboards keep working, only the pad and arrows drive the OSK
+	ours = ( key >= K_AUX1 && key <= K_AUX32 ) || key == K_UPARROW || key == K_DOWNARROW
+		|| key == K_LEFTARROW || key == K_RIGHTARROW || key == K_LTRIGGER || key == K_RTRIGGER;
 
-	if( osk.curbutton.val == 0 )
-	{
-		if( key == K_ENTER || key == K_A_BUTTON )
-		{
-			osk.curbutton.val = osk_keylayout[osk.curlayout][osk.curbutton.y][osk.curbutton.x];
-			return true;
-		}
+	if( !ours )
 		return false;
-	}
 
+	if( !down )
+		return true;
 
 	switch( key )
 	{
-	case K_A_BUTTON:
-	case K_ENTER:
-		switch( osk.curbutton.val )
-		{
-		case OSK_ENTER:
-			osk.sending = true;
-			Key_Event( K_ENTER, down );
-			// osk_enable = false; // TODO: handle multiline
-			break;
-		case OSK_SHIFT:
-			if( !down )
-				break;
-
-			if( osk.curlayout & 1 )
-				osk.curlayout--;
-			else
-				osk.curlayout++;
-
-			osk.shift = true;
-			osk.curbutton.val = osk_keylayout[osk.curlayout][osk.curbutton.y][osk.curbutton.x];
-			break;
-		case OSK_BACKSPACE:
-			Key_Event( K_BACKSPACE, down );
-			break;
-		case OSK_TAB:
-			Key_Event( K_TAB, down );
-			break;
-		default:
-		{
-			if( !down )
-			{
-				if( osk.shift && osk.curlayout & 1 )
-					osk.curlayout--;
-
-				osk.shift = false;
-				osk.curbutton.val = osk_keylayout[osk.curlayout][osk.curbutton.y][osk.curbutton.x];
-				break;
-			}
-
-			int ch = (byte)osk.curbutton.val;
-
-			// do not pass UTF-8 sequence into the engine, convert it here
-			if( !cls.accept_utf8 )
-				ch = Con_UtfProcessCharForce( ch );
-
-			if( !ch )
-				break;
-
-			CL_CharEvent( ch );
-			break;
-		}
-		}
-		break;
 	case K_UPARROW:
-		if( down && --osk.curbutton.y < 0 )
-		{
-			osk.curbutton.y = MAX_OSK_LINES - 1;
-			osk.curbutton.val = 0;
-			return true;
-		}
-		break;
+	case K_DPAD_UP:    OSK_Move( 0, -1 ); break;
 	case K_DOWNARROW:
-		if( down && ++osk.curbutton.y >= MAX_OSK_LINES )
-		{
-			osk.curbutton.y = 0;
-			osk.curbutton.val = 0;
-			return true;
-		}
-		break;
+	case K_DPAD_DOWN:  OSK_Move( 0, 1 ); break;
 	case K_LEFTARROW:
-		if( down && --osk.curbutton.x < 0 )
-			osk.curbutton.x = MAX_OSK_ROWS - 1;
-		break;
+	case K_DPAD_LEFT:  OSK_Move( -1, 0 ); break;
 	case K_RIGHTARROW:
-		if( down && ++osk.curbutton.x >= MAX_OSK_ROWS )
-			osk.curbutton.x = 0;
-		break;
-	default:
-		return false;
+	case K_DPAD_RIGHT: OSK_Move( 1, 0 ); break;
+	case K_A_BUTTON:   OSK_Activate(); break;
+	case K_B_BUTTON:   OSK_SendKey( K_BACKSPACE ); break;
+	case K_X_BUTTON:   OSK_SendChar( ' ' ); break;
+	case K_Y_BUTTON:
+	case K_R1_BUTTON:  OSK_ChangePage( 1 ); break;
+	case K_L1_BUTTON:  OSK_ChangePage( -1 ); break;
+	case K_START_BUTTON: OSK_SendKey( K_ENTER ); break;
+	case K_Z_BUTTON:   OSK_SendKey( K_ESCAPE ); break;
+	default: break;
 	}
 
-	osk.curbutton.val = osk_keylayout[osk.curlayout][osk.curbutton.y][osk.curbutton.x];
 	return true;
-
 }
 
 /*
@@ -216,60 +196,45 @@ void OSK_EnableTextInput( qboolean enable, qboolean force )
 
 	if( osk.enable && ( !old || force ))
 	{
-		osk.curlayout = 0;
-		osk.curbutton.val = osk_keylayout[osk.curlayout][osk.curbutton.y][osk.curbutton.x];
+		osk.page = OSK_PAGE_LOWER;
+		osk.x = osk.y = 0;
 	}
 }
 
-#define X_START 0.1347475f
-#define Y_START 0.567f
-#define X_STEP  0.05625
-#define Y_STEP  0.0825
+// layout in the 640x480 virtual screen
+#define OSK_CELL    36
+#define OSK_GAP     4
+#define OSK_PAD     14
+#define OSK_HEADER  26
+#define OSK_FOOTER  22
 
-/*
-============
-OSK_DrawSymbolButton
-
-Draw button with symbol on it
-============
-*/
-static void OSK_DrawSymbolButton( int symb, float x, float y, float width, float height )
+static void OSK_Fill( float sx, float sy, int x, int y, int w, int h, byte r, byte g, byte b, byte a )
 {
-	cl_font_t *font = Con_GetCurFont();
-	byte      color[] = { 255, 255, 255, 255 };
-	int x1 = x * refState.width,
-	    y1 = y * refState.height,
-	    w = width * refState.width,
-	    h = height * refState.height;
-
-	if( symb == osk.curbutton.val )
-		ref.dllFuncs.FillRGBA( kRenderTransTexture, x1, y1, w, h, 255, 160, 0, 100 );
-
-	if( !symb || symb == ' ' || ( symb >= OSK_TAB && symb < OSK_SPECKEY_LAST ))
-		return;
-
-	CL_DrawCharacter(
-		x1 + width * 0.4 * refState.width,
-		y1 + height * 0.4 * refState.height,
-		symb, color, font, 0 );
+	ref.dllFuncs.FillRGBA( kRenderTransTexture, x * sx, y * sy, w * sx, h * sy, r, g, b, a );
 }
 
-/*
-=============
-OSK_DrawSpecialButton
-
-Draw special button, like shift, enter or esc
-=============
-*/
-static void OSK_DrawSpecialButton( const char *name, float x, float y, float width, float height )
+static void OSK_Text( float sx, float sy, int x, int y, const char *s, const rgba_t color )
 {
-	byte color[] = { 0, 255, 0, 255 };
+	Con_DrawString( x * sx, y * sy, s, color );
+}
 
-	Con_DrawString(
-		x * refState.width + width * 0.4 * refState.width,
-		y * refState.height + height * 0.4 * refState.height,
-		name,
-		color );
+static void OSK_TextCentered( float sx, float sy, int x, int y, int w, int h, const char *s, const rgba_t color )
+{
+	int len = 0, hgt = 0;
+
+	Con_DrawStringLen( s, &len, &hgt );
+	Con_DrawString( x * sx + ( w * sx - len ) * 0.5f, y * sy + ( h * sy - hgt ) * 0.5f, s, color );
+}
+
+static void OSK_DrawKey( float sx, float sy, int x, int y, int w, int h, qboolean selected, const char *label )
+{
+	static const rgba_t normal = { 230, 224, 200, 255 };
+	static const rgba_t dark = { 20, 24, 12, 255 };
+
+	if( selected )
+		OSK_Fill( sx, sy, x - 2, y - 2, w + 4, h + 4, 255, 200, 40, 255 );
+	OSK_Fill( sx, sy, x, y, w, h, selected ? 250 : 58, selected ? 240 : 66, selected ? 200 : 40, 255 );
+	OSK_TextCentered( sx, sy, x, y, w, h, label, selected ? dark : normal );
 }
 
 /*
@@ -281,27 +246,52 @@ Draw on screen keyboard, if enabled
 */
 void OSK_Draw( void )
 {
-	const char **curlayout = osk_keylayout[osk.curlayout]; // shortcut :)
-	float      x, y;
-	int i, j;
+	static const rgba_t gold = { 255, 210, 80, 255 };
+	static const rgba_t dim = { 190, 190, 170, 255 };
+	const float sx = refState.width / 640.0f, sy = refState.height / 480.0f;
+	const int width = OSK_COLS * ( OSK_CELL + OSK_GAP ) - OSK_GAP + OSK_PAD * 2;
+	const int rows = OSK_ROWS + 1;
+	const int height = OSK_HEADER + rows * ( OSK_CELL + OSK_GAP ) - OSK_GAP + OSK_FOOTER + OSK_PAD * 2;
+	const int left = ( 640 - width ) / 2, top = 480 - height - 16;
+	char label[2] = { 0, 0 };
+	int i, j, p;
 
-	if( !osk.enable || !osk_enable.value || !osk.curbutton.val )
+	if( !osk.enable || !osk_enable.value )
 		return;
 
-	// draw keyboard
-	ref.dllFuncs.FillRGBA( kRenderTransTexture, X_START * refState.width, Y_START * refState.height,
-			       X_STEP * MAX_OSK_ROWS * refState.width,
-			       Y_STEP * MAX_OSK_LINES * refState.height, 100, 100, 100, 100 );
+	// panel, olive drab like the retail menus
+	OSK_Fill( sx, sy, left - 2, top - 2, width + 4, height + 4, 20, 22, 10, 230 );
+	OSK_Fill( sx, sy, left, top, width, height, 74, 80, 48, 245 );
 
-	OSK_DrawSpecialButton( "-]", X_START, Y_START + Y_STEP * 2, X_STEP, Y_STEP );
-	OSK_DrawSpecialButton( "<-", X_START + X_STEP * 12, Y_START + Y_STEP * 2, X_STEP, Y_STEP );
+	// page tabs
+	for( p = 0; p < OSK_PAGES; p++ )
+		OSK_Text( sx, sy, left + OSK_PAD + p * 60, top + 6, osk_page_names[p], p == osk.page ? gold : dim );
 
-	OSK_DrawSpecialButton( "sh", X_START, Y_START + Y_STEP * 3, X_STEP, Y_STEP );
-	OSK_DrawSpecialButton( "en", X_START + X_STEP * 12, Y_START + Y_STEP * 3, X_STEP, Y_STEP );
+	for( j = 0; j < OSK_ROWS; j++ )
+	{
+		for( i = 0; i < OSK_COLS; i++ )
+		{
+			int x = left + OSK_PAD + i * ( OSK_CELL + OSK_GAP );
+			int y = top + OSK_HEADER + OSK_PAD + j * ( OSK_CELL + OSK_GAP );
 
-	for( y = Y_START, j = 0; j < MAX_OSK_LINES; j++, y += Y_STEP )
-		for( x = X_START, i = 0; i < MAX_OSK_ROWS; i++, x += X_STEP )
-			OSK_DrawSymbolButton( curlayout[j][i], x, y, X_STEP, Y_STEP );
+			label[0] = osk_pages[osk.page][j][i];
+			OSK_DrawKey( sx, sy, x, y, OSK_CELL, OSK_CELL, osk.y == j && osk.x == i, label );
+		}
+	}
+
+	j = OSK_ROWS;
+	for( i = 0; i < OSK_ACTS; i++ )
+	{
+		int x = left + OSK_PAD + osk_act_col[i] * ( OSK_CELL + OSK_GAP );
+		int y = top + OSK_HEADER + OSK_PAD + j * ( OSK_CELL + OSK_GAP );
+		int w = osk_act_width[i] * ( OSK_CELL + OSK_GAP ) - OSK_GAP;
+		const char *name = i == OSK_ACT_PAGE ? osk_page_names[( osk.page + 1 ) % OSK_PAGES] : osk_act_names[i];
+
+		OSK_DrawKey( sx, sy, x, y, w, OSK_CELL, osk.y == OSK_ROWS && OSK_ActionAt( osk.x ) == i, name );
+	}
+
+	OSK_Text( sx, sy, left + OSK_PAD, top + height - OSK_FOOTER - 2,
+		"A type  B delete  X space  Y page  Start OK  Z cancel", dim );
 }
 
 void OSK_Init( void )
