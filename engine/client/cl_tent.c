@@ -90,6 +90,63 @@ static model_t *CL_GCTentModelHandle( int modelindex )
 	return mod;
 }
 #define CL_ModelHandle CL_GCTentModelHandle
+
+/*
+ * Effect sprites were only loaded on first use, and by then a match has
+ * handed the free heap to resident textures and models (dod_charlie: 354 KiB
+ * free at spawn, 22 KiB a little later), so explosion, steam and blood
+ * sprites failed the 80 KiB gate above for the whole map. Load the server's
+ * precached sprites right after the map goes active instead, one per frame,
+ * while 128 KiB stays free.
+ */
+static void CL_GCPrewarmEffectSprites( void )
+{
+	static const void *world;
+	static int next, loaded;
+	static qboolean done;
+
+	if( !SV_Active() || cls.state != ca_active || !cl.worldmodel )
+		return;
+	if( world != (const void *)cl.worldmodel )
+	{
+		world = cl.worldmodel;
+		next = 1;
+		loaded = 0;
+		done = false;
+	}
+	if( done )
+		return;
+	for( ; next < MAX_MODELS; next++ )
+	{
+		const char *name = sv.model_precache[next];
+		model_t *mod;
+
+		if( !name[0] )
+			break;
+		if( cl.models[next] || !Q_stristr( name, ".spr" ))
+			continue;
+		if( GC_MemHeapFreeBytes() < 128 * 1024 )
+		{
+			done = true;
+			Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d, stopped at %s (heap %s)\n",
+				loaded, name, Q_memprint( GC_MemHeapFreeBytes( )));
+			return;
+		}
+		gc_sprite_effect_load = true;
+		mod = CL_LoadClientSprite( name );
+		gc_sprite_effect_load = false;
+		if( mod )
+		{
+			cl.models[next] = mod;
+			loaded++;
+		}
+		next++;
+		return; /* one sprite a frame: no load hitch */
+	}
+	done = true;
+	Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d (heap %s)\n",
+		loaded, Q_memprint( GC_MemHeapFreeBytes( )));
+}
 #endif
 #if XASH_GAMECUBE
 #include "gamecube/mem_gamecube.h"
@@ -670,6 +727,7 @@ void CL_TempEntUpdate( void )
 #if XASH_GAMECUBE
 	gc_tent_linked_n = 0;
 	gc_tent_update_frame = (int)host.framecount;
+	CL_GCPrewarmEffectSprites();
 #endif
 	clgame.dllFuncs.pfnTempEntUpdate( ft, cl.time, gravity, &cl_free_tents, &cl_active_tents, CL_TempEntAddEntity, CL_TempEntPlaySound );
 }
