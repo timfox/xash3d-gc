@@ -2488,6 +2488,9 @@ static int r_gx_cmpr_big_n;
 static unsigned r_gx_cmpr_big_cap;
 static byte *r_gx_cmpr_big_base;
 static qboolean r_gx_cmpr_use_big;
+/* The big slots belong to prop materials (Lost Coast: the two coast rock
+ * textures at 256x256); world textures keep to the near pool and hot window. */
+static qboolean r_gx_cmpr_big_for_props;
 
 static byte *R_GXCmprSlotPtr( int i )
 {
@@ -2642,6 +2645,11 @@ void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap )
 	r_gx_bound_fmt = 0;
 }
 
+void R_GXCmprBigForProps( qboolean on )
+{
+	r_gx_cmpr_big_for_props = on;
+}
+
 /* Call once after GX init / before map load while MEM1 tip is free. */
 void R_GXPreallocCmprBounce( void )
 {
@@ -2792,7 +2800,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				int mi;
 
 				r_gx_cmpr_use_big = false;
-				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n
+				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n && !r_gx_cmpr_big_for_props
 					&& remain > slot_cap && remain <= r_gx_cmpr_big_cap )
 				{
 					slot_cap = r_gx_cmpr_big_cap;
@@ -5810,6 +5818,18 @@ static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
 /* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
 static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+/* Pack v7: per-face prop lighting. Every vertex carries an index into 256
+ * octahedral directions (the table lostcoast-gc tools/bake_lostcoast_props.py
+ * also builds), and every instance three display-space colours taken from
+ * the map's ambient cube and sun at the prop: a base, what the sky adds
+ * along +Z, what the sun adds along its direction. The GX lights add the
+ * last two by N.L, as Source lights a static prop without baked vertex
+ * light. v6 packs (no normals) keep the single colour per instance. */
+static u8 gc_prop_light[GC_PROP_MAX_INST][12];
+static s8 gc_prop_nrm[256][3] __attribute__(( aligned( 32 )));
+static float gc_prop_sun[3];
+static u32 gc_prop_vsize = 10;	/* bytes per vertex: 10 (v6) or 11 (v7) */
+static const u8 *gc_prop_cur_light;	/* the instance being drawn, NULL = flat colour */
 static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligned( 32 )));
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
@@ -5914,9 +5934,9 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 6 )
+		|| hdr[0] != GC_PROP_MAGIC || (( hdr[1] >> 16 ) != 6 && ( hdr[1] >> 16 ) != 7 ))
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6)\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6 or v7)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
@@ -5969,6 +5989,38 @@ static void R_GXPropLoad( void )
 		u32 i;
 
 		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
+		gc_prop_vsize = 10;
+		if(( hdr[1] >> 16 ) == 7 )
+		{
+			const u32 lbytes = ( 32u + gc_prop_ninst * 12u + 31u ) & ~31u;
+			int q;
+
+			if( lbytes <= sizeof( gc_prop_bounce ))
+			{
+				GC_AramTransfer( gc_prop_aram + 32u + bytes, gc_prop_bounce, lbytes, false );
+				for( q = 0; q < 3; q++ )
+					gc_prop_sun[q] = (float)(( (const s16 *)gc_prop_bounce )[q] ) * ( 1.0f / 32767.0f );
+				memcpy( gc_prop_light, gc_prop_bounce + 32, gc_prop_ninst * 12u );
+			}
+			for( q = 0; q < 256; q++ )
+			{
+				const float u = ( (float)( q & 15 ) + 0.5f ) * ( 2.0f / 16.0f ) - 1.0f;
+				const float v = ( (float)( q >> 4 ) + 0.5f ) * ( 2.0f / 16.0f ) - 1.0f;
+				float x = u, y = v, z = 1.0f - fabsf( u ) - fabsf( v ), l;
+
+				if( z < 0.0f )
+				{
+					x = ( 1.0f - fabsf( v )) * ( u < 0.0f ? -1.0f : 1.0f );
+					y = ( 1.0f - fabsf( u )) * ( v < 0.0f ? -1.0f : 1.0f );
+				}
+				l = 64.0f / sqrtf( x * x + y * y + z * z );
+				gc_prop_nrm[q][0] = (s8)( x * l + ( x < 0.0f ? -0.5f : 0.5f ));
+				gc_prop_nrm[q][1] = (s8)( y * l + ( y < 0.0f ? -0.5f : 0.5f ));
+				gc_prop_nrm[q][2] = (s8)( z * l + ( z < 0.0f ? -0.5f : 0.5f ));
+			}
+			DCFlushRange( gc_prop_nrm, sizeof( gc_prop_nrm ));
+			gc_prop_vsize = 11;
+		}
 		bytes = ( gc_prop_nmodels * (u32)sizeof( gc_prop_model_t ) + 31u ) & ~31u;
 		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
 		gc_prop_ntris = 0;
@@ -6077,16 +6129,17 @@ static void R_GXPropLoadTex( void )
 		gc_prop_nmat, size / 1024u );
 }
 
-/* Slot each prop material was last found in, per pool ( 0 near, 1 far ), + 1. */
-static u8 gc_prop_slot_hint[2][128];
+/* Slot each prop material was last found in, per pool ( 0 near, 1 far, 2 big ), + 1. */
+static u8 gc_prop_slot_hint[3][128];
 
-/* True when the near pool holds this material's chain right now. */
-static qboolean R_GXPropNearResident( u8 mat )
+/* True when that pool holds this material's chain and it was bound recently. */
+static qboolean R_GXPropPoolResident( u8 mat, int pool )
 {
-	const int hs = (int)gc_prop_slot_hint[0][mat & 127] - 1;
-	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	const int hs = (int)gc_prop_slot_hint[pool][mat & 127] - 1;
+	const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
 
-	return hs >= 0 && hs < near_n && r_gx_cmpr_slot[hs].valid
+	return hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+		&& ( hs >= big_lo ? 2 : hs >= big_lo - r_gx_cmpr_far_n ? 1 : 0 ) == pool
 		&& r_gx_cmpr_slot[hs].aram == gc_prop_tex_aram + gc_prop_mat_ofs[mat]
 		&& r_gx_cmpr_slot[hs].used + 4096u > r_gx_cmpr_clock;
 }
@@ -6126,14 +6179,25 @@ static int R_GXPropBind( u8 mat )
 		const unsigned cap = ( near_resident ? ( R_GXCmprSetFar( false ), false ) : r_gx_cmpr_want_far )
 			? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 		const int levels_all = gc_prop_mat_levels[mat];
-		unsigned remain = 0, skip_b = 0;
+		unsigned remain = 0, skip_b = 0, cap;
 		int mi, shift = 0, slot = -1;
+		qboolean use_big, near_resident;
 		byte *data;
 		GXTexObj obj;
 
 		for( mi = 0; mi < levels_all; mi++ )
 			remain += R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> mi ),
 				(u16)Q_max( 1, gc_prop_mat_h[mat] >> mi ));
+		/* A chain too large for a near slot (256x256: the coast rocks) lives
+		 * whole in a big slot: for a near instance always, for a far one
+		 * when it is already there. */
+		use_big = r_gx_cmpr_big_n && r_gx_cmpr_big_for_props
+			&& remain > r_gx_cmpr_bounce_cap && remain <= r_gx_cmpr_big_cap
+			&& ( !asked_far || R_GXPropPoolResident( mat, 2 ));
+		near_resident = !use_big && asked_far && R_GXPropPoolResident( mat, 0 );
+		if( near_resident )
+			R_GXCmprSetFar( false );
+		cap = use_big ? r_gx_cmpr_big_cap : r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 		while( remain > cap && shift + 1 < levels_all )
 		{
 			const unsigned lb = R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> shift ),
@@ -6153,13 +6217,14 @@ static int R_GXPropBind( u8 mat )
 			{
 				u8 ( *const hint )[128] = gc_prop_slot_hint;
 				const unsigned key = gc_prop_tex_aram + gc_prop_mat_ofs[mat];
-				const int hs = (int)hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] - 1;
+				const int pool = use_big ? 2 : r_gx_cmpr_want_far ? 1 : 0;
+				const int hs = (int)hint[pool][mat & 127] - 1;
+				const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
 
 				if( hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
 					&& r_gx_cmpr_slot[hs].aram == key && r_gx_cmpr_slot[hs].skip == skip_b
 					&& r_gx_cmpr_slot[hs].bytes == remain
-					&& hs < r_gx_cmpr_nslots - r_gx_cmpr_big_n
-					&& ( hs >= r_gx_cmpr_nslots - r_gx_cmpr_big_n - r_gx_cmpr_far_n ) == ( r_gx_cmpr_want_far ? 1 : 0 ))
+					&& ( hs >= big_lo ? 2 : hs >= big_lo - r_gx_cmpr_far_n ? 1 : 0 ) == pool )
 				{
 					r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
 					r_gx_cmpr_hits++;
@@ -6168,9 +6233,11 @@ static int R_GXPropBind( u8 mat )
 				}
 				else
 				{
+					r_gx_cmpr_use_big = use_big;
 					data = R_GXCmprSlotFor( key, skip_b, remain, &slot );
+					r_gx_cmpr_use_big = false;
 					if( slot >= 0 && slot < 255 )
-						hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] = (u8)( slot + 1 );
+						hint[pool][mat & 127] = (u8)( slot + 1 );
 				}
 			}
 			GX_InitTexObj( &obj, data, (u16)Q_max( 8, gc_prop_mat_w[mat] >> shift ),
@@ -6426,6 +6493,7 @@ static int gc_prop_pf_frames;
 /* Position scale of the vertex layout in place for the props, -1 = not set.
  * Each prop pass resets it after its own state setup. */
 static int gc_prop_vtx_frac = -1;
+static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 0 flat colour, -1 not set */
 
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
@@ -6460,16 +6528,61 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	 * descriptor and format registers before each one. */
 	if( gc_prop_vtx_frac != (int)m->frac )
 	{
-		GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
-			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
 		GX_ClearVtxDesc();
 		GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+		if( gc_prop_vsize == 11 )
+		{
+			GX_SetVtxDesc( GX_VA_NRM, GX_INDEX8 );
+			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
+			GX_SetArray( GX_VA_NRM, gc_prop_nrm, 3 );
+		}
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
 		gc_prop_vtx_frac = (int)m->frac;
+		gc_prop_lit_mode = -1;
 	}
-	GX_SetChanMatColor( GX_COLOR0A0, col );
+	if( gc_prop_vsize == 11 && gc_prop_cur_light )
+	{
+		const u8 *lt = gc_prop_cur_light;
+		const GXColor base = { lt[0], lt[1], lt[2], 255 };
+		const GXColor sky = { lt[3], lt[4], lt[5], 255 };
+		const GXColor sun = { lt[6], lt[7], lt[8], 255 };
+		const GXColor white = { 255, 255, 255, 255 };
+		GXLightObj lo;
+
+		/* Normals through the instance's rotation and the view; the two
+		 * directions are in view space, a long way off. */
+		GX_LoadNrmMtxImm( out, GX_PNMTX0 );
+		GX_InitLightColor( &lo, sky );
+		GX_InitLightPos( &lo, mv[0][2] * 1.0e6f, mv[1][2] * 1.0e6f, mv[2][2] * 1.0e6f );
+		GX_LoadLightObj( &lo, GX_LIGHT0 );
+		GX_InitLightColor( &lo, sun );
+		GX_InitLightPos( &lo,
+			( mv[0][0] * gc_prop_sun[0] + mv[0][1] * gc_prop_sun[1] + mv[0][2] * gc_prop_sun[2] ) * 1.0e6f,
+			( mv[1][0] * gc_prop_sun[0] + mv[1][1] * gc_prop_sun[1] + mv[1][2] * gc_prop_sun[2] ) * 1.0e6f,
+			( mv[2][0] * gc_prop_sun[0] + mv[2][1] * gc_prop_sun[1] + mv[2][2] * gc_prop_sun[2] ) * 1.0e6f );
+		GX_LoadLightObj( &lo, GX_LIGHT1 );
+		if( gc_prop_lit_mode != 1 )
+		{
+			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+				GX_LIGHT0 | GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE );
+			GX_SetChanMatColor( GX_COLOR0A0, white );
+			gc_prop_lit_mode = 1;
+		}
+		GX_SetChanAmbColor( GX_COLOR0A0, base );
+		col = white;
+	}
+	else
+	{
+		if( gc_prop_lit_mode != 0 )
+		{
+			GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
+				GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+			gc_prop_lit_mode = 0;
+		}
+		GX_SetChanMatColor( GX_COLOR0A0, col );
+	}
 	if( far_lod && !gc_prop_far_mem && !gc_prop_far_tried && gc_prop_far_size
 		&& GC_MapLoadBufferTailPeak() > 0 )
 	{
@@ -6524,7 +6637,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		nverts = *(const u16 *)( hdr + 2 );
 		body = *(const u32 *)( hdr + 4 );
 		next = *(const u32 *)( hdr + 8 );
-		if( !nverts || nverts * 10u + 3u > body || body + 32u != bytes )
+		if( !nverts || nverts * gc_prop_vsize + 3u > body || body + 32u != bytes )
 			break;
 		{
 			u64 t0 = gettime();
@@ -6631,8 +6744,10 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		int drawn;
 
 		gc_prop_tex_far = cover2 < 0.30f * 0.30f;
+		gc_prop_cur_light = gc_prop_light[in - gc_prop_inst];
 		drawn = R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
+		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
 		return drawn;
 	}

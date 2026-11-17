@@ -1292,6 +1292,7 @@ void Key_EnableTextInput( qboolean enable, qboolean force );
 void Key_SetTextInputRect( int x, int y, int w, int h );
 void Key_SetTextInputBuffer( const char *text );
 const char *Key_GetTextInputBuffer( void );
+qboolean Key_GetTextInputEditRect( int *x, int *y, int *w, int *h );
 int Key_ToUpper( int key );
 qboolean Cmd_GetKeysList( const char *s, char *completedname, int length, qboolean print_suggestions );
 
@@ -1322,6 +1323,9 @@ void UI_EnableBuiltInFallbackMenu( void );
 void UI_PreloadBuiltInFallbackMenuAssets( void );
 qboolean CL_GameCubePostReconnect( void );
 void CL_GameCubeLeanEmitBrushEntities( void );
+qboolean CL_GCStaticPropFromSignon( const entity_state_t *state );
+void CL_GCClearRemoteStaticProps( void );
+void CL_GCLinkRemoteStaticProps( void );
 #endif
 
 #endif//CLIENT_H

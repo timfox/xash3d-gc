@@ -114,6 +114,7 @@ extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
 extern void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap );
+extern void R_GXCmprBigForProps( qboolean on );
 extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
@@ -673,9 +674,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		const size_t hw = ( Q_max( live, R_GXWorldDLBspFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
-		 * 96 KB, prop far LODs about 360 KB, the fire atlas 33 KB, the water sun 2 KB, the resident skyline 42 KB, and entity
+		 * 96 KB, prop far LODs about 360 KB (284 KB with normals, pack v7), the fire atlas 33 KB, the water sun 2 KB, the resident skyline 42 KB, and entity
 		 * overflow. The ring peaks near 915 KB in the Lost Coast harbor. */
-		const size_t keep = 508u * 1024u;
+		const size_t keep = 532u * 1024u;
 
 		if( cap > hw + keep + 512u * 1024u )
 		{
@@ -690,16 +691,29 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				/* 90 full slots (128x128 chain, 10944 bytes): every world
 				 * texture of Lost Coast at once. 128 slots one mip down
 				 * (64x64 chain, 2752 bytes) for props. 1.31 MB. */
-				const unsigned slot_bytes = 10944u, far_bytes = 2752u;
-				const int nslots = 90, far_n = 128;
+				/* 82 full slots, not one for each of the 90 world textures: a
+				 * view does not bind all of them, and the eight slots (88 KB)
+				 * make two big ones, a whole 256x256 chain each (43680 bytes),
+				 * for the two coast rock textures the props put in front of
+				 * the eye. The far pool stays at 128: the props fill it (96
+				 * slots refetched 60 textures a frame). */
+				const unsigned slot_bytes = 10944u, far_bytes = 2752u, big_bytes = 43680u;
+				const int nslots = 82, far_n = 128, big_n = 2;
 				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
-					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+					(size_t)( nslots + 8 ) * slot_bytes + (size_t)far_n * far_bytes );
 
 				if( tex )
 				{
 					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+					R_GXCmprBigAdopt( tex + (size_t)nslots * slot_bytes + (size_t)far_n * far_bytes, big_n, big_bytes );
+					R_GXCmprBigForProps( true );
 					cmpr_adopted = true;
-					gc_wd_tex_overflow = GC_WorldTexCount() > nslots;
+					/* Not the far-pool mode for distant world chunks: that pool is
+					 * the props'. The near slots turn over by least recent use,
+					 * which holds while a view binds fewer textures than there
+					 * are slots (the map has 96, six of them decal atlases that
+					 * are each seen in one place). */
+					gc_wd_tex_overflow = GC_WorldTexCount() > nslots + nslots / 4;
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
 			}
