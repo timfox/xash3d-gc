@@ -2030,7 +2030,12 @@ void SV_SendServerdata( sizebuf_t *msg, sv_client_t *cl )
 	MSG_WriteLong( msg, sv.worldmapCRC );
 	MSG_WriteByte( msg, cl - svs.clients );
 	MSG_WriteByte( msg, svs.maxclients );
+#if XASH_GAMECUBE
+	/* Split edict table: clients only ever see the networked range. */
+	MSG_WriteWord( msg, sv_gc_net_edicts > 0 ? sv_gc_net_edicts : GI->max_edicts );
+#else
 	MSG_WriteWord( msg, GI->max_edicts );
+#endif
 	MSG_WriteWord( msg, MAX_MODELS );
 	MSG_WriteString( msg, sv.name );
 	MSG_WriteString( msg, SV_GetString( svgame.edicts->v.message )); // Map Message

@@ -7291,8 +7291,10 @@ qboolean SV_LoadProgs( const char *name )
 	if( Sys_CheckParm( "-gcworldrender" ) && !sv_gc_net_edicts
 		&& GI->max_edicts > 0 && GI->max_edicts < GC_SP_EDICT_CAP )
 	{
+		/* GI points at the filesystem's own writable gameinfo; the API
+		 * hands it out const so only this split widens it. */
 		sv_gc_net_edicts = GI->max_edicts;
-		GI->max_edicts = Q_min( GC_SP_EDICT_CAP, sv_gc_net_edicts + 300 );
+		((gameinfo_t *)GI)->max_edicts = Q_min( GC_SP_EDICT_CAP, sv_gc_net_edicts + 300 );
 		Con_Reportf( "Xash3D GameCube: edict table split networked=%d server-only up to %d\n",
 			sv_gc_net_edicts, GI->max_edicts );
 	}
