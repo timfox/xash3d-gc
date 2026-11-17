@@ -607,6 +607,12 @@ void Mod_GCClearRetainedBspScratch( void )
 		extern void SV_GCDropSpillStringArena( void );
 		extern qboolean SV_GCEnsureStringArena( void );
 		SV_GCDropSpillStringArena();
+#if !XASH_DEDICATED
+		{
+			extern void CL_GCDropSpillTempEnts( void );
+			CL_GCDropSpillTempEnts();
+		}
+#endif
 		gc_world_array_spill_pin = 0;
 		gc_world_array_spill_used = 0;
 		Mod_GCAnimPackSpillReset();

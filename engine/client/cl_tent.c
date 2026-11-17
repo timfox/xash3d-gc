@@ -447,6 +447,31 @@ static void CL_GCLoadEffectSprites( void )
 
 /*
 ================
+CL_GCDropSpillTempEnts
+
+Called when the world-array spill is rewound for a new map (mod_bmodel.c).
+A temp entity pool in the spill is gone at that moment, and so are the
+entities on the active list: the client DLL's HUD_TempEntUpdate walked them
+after the new map's arrays had been written over them and jumped through a
+garbage hitcallback (ISI at PC 0x4A8 on a same-map changelevel). Checking
+whether the spill still "holds" the pool is not enough, because the new map
+fills the spill past the old pool's address again.
+================
+*/
+void CL_GCDropSpillTempEnts( void )
+{
+	if( !cl_tempents || !gc_tempents_in_spill )
+		return;
+	cl_tempents = NULL;
+	cl_tempents_count = 0;
+	gc_tempents_in_spill = false;
+	cl_free_tents = cl_active_tents = NULL;
+	gc_tent_linked_n = 0;
+	gc_tent_update_frame = -1;
+}
+
+/*
+================
 CL_GCEnsureTempEntPool
 
 DoD's lean listen route never runs CL_InitTempEnts (MEM1 is too tight at
