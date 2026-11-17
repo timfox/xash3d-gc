@@ -32,11 +32,28 @@ GNU General Public License for more details.
  * entity a TE message made had no model and was dropped (fx diag on charlie:
  * nomodel == alloc). Resolve a missing index from the server precache list
  * on first use: sprites load as client sprites, studio models come from the
- * server's resident handle. Each index is tried once per map.
+ * server's resident handle. A failed index is retried after 10 s.
+ * Sprites load with smaller frames (gc_sprite_effect_load, cl_sprite.c) and
+ * only while 48 KiB of MEM1 stays free, so effects never take the memory
+ * the HUD and the view model skins need.
  */
+extern qboolean gc_sprite_effect_load;
+extern size_t GC_MemHeapFreeBytes( void );
+static model_t *CL_GCLoadEffectSprite( const char *name )
+{
+	model_t *mod;
+
+	if( GC_MemHeapFreeBytes() < 48 * 1024 )
+		return NULL;
+	gc_sprite_effect_load = true;
+	mod = CL_LoadClientSprite( name );
+	gc_sprite_effect_load = false;
+	return mod;
+}
+
 static model_t *CL_GCTentModelHandle( int modelindex )
 {
-	static byte tried[MAX_MODELS];
+	static double retry_at[MAX_MODELS];
 	static const void *tried_world;
 	static int fail_logs;
 	model_t *mod = ( modelindex >= 0 && modelindex < MAX_MODELS ) ? cl.models[modelindex] : NULL;
@@ -46,17 +63,17 @@ static model_t *CL_GCTentModelHandle( int modelindex )
 		return mod;
 	if( tried_world != (const void *)cl.worldmodel )
 	{
-		memset( tried, 0, sizeof( tried ));
+		memset( retry_at, 0, sizeof( retry_at ));
 		tried_world = cl.worldmodel;
 	}
-	if( tried[modelindex] )
+	if( host.realtime < retry_at[modelindex] )
 		return NULL;
-	tried[modelindex] = 1;
+	retry_at[modelindex] = host.realtime + 10.0;
 	name = sv.model_precache[modelindex];
 	if( !name[0] )
 		return NULL;
 	if( Q_stristr( name, ".spr" ))
-		mod = CL_LoadClientSprite( name );
+		mod = CL_GCLoadEffectSprite( name );
 	else
 	{
 		mod = SV_ModelHandle( modelindex );
@@ -66,7 +83,8 @@ static model_t *CL_GCTentModelHandle( int modelindex )
 	if( mod )
 		cl.models[modelindex] = mod;
 	else if( fail_logs++ < 8 )
-		Con_Reportf( "Xash3D GameCube: temp entity model %d %s not loadable\n", modelindex, name );
+		Con_Reportf( "Xash3D GameCube: temp entity model %d %s not loadable (on disc %d, heap %s)\n",
+			modelindex, name, FS_FileExists( name, false ), Q_memprint( GC_MemHeapFreeBytes( )));
 	return mod;
 }
 #define CL_ModelHandle CL_GCTentModelHandle
@@ -337,12 +355,12 @@ static void CL_GCLoadEffectSprites( void )
 
 	if( !cl_sprite_muzzleflash[0] )
 	{
-		cl_sprite_muzzleflash[0] = CL_LoadClientSprite( cl_default_sprites[0] );
-		cl_sprite_muzzleflash[1] = CL_LoadClientSprite( cl_default_sprites[1] );
-		cl_sprite_muzzleflash[2] = CL_LoadClientSprite( cl_default_sprites[2] );
+		cl_sprite_muzzleflash[0] = CL_GCLoadEffectSprite( cl_default_sprites[0] );
+		cl_sprite_muzzleflash[1] = CL_GCLoadEffectSprite( cl_default_sprites[1] );
+		cl_sprite_muzzleflash[2] = CL_GCLoadEffectSprite( cl_default_sprites[2] );
 	}
 	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
-		cl_sprite_ricochet = CL_LoadClientSprite( cl_default_sprites[5] );
+		cl_sprite_ricochet = CL_GCLoadEffectSprite( cl_default_sprites[5] );
 	if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && fail_logs < 4 )
 	{
 		fail_logs++;
