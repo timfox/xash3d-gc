@@ -220,6 +220,14 @@ void R_DrawSpriteModel( cl_entity_t *e )
 		R_AllowFog( false );
 
 	GL_SetRenderMode( e->curstate.rendermode );
+#if XASH_GAMECUBE
+	/* An additive-format sprite has no alpha. Drawn solid or alpha-tested its
+	 * black background is an opaque box (DoD's steam1.spr as explosion smoke,
+	 * kRenderTransAlpha at scale 12): blend it additively instead. */
+	if( psprite->texFormat == SPR_ADDITIVE
+		&& ( e->curstate.rendermode == kRenderNormal || e->curstate.rendermode == kRenderTransAlpha ))
+		GL_SetRenderMode( kRenderTransAdd );
+#endif
 
 	// NOTE: never pass sprites with rendercolor '0 0 0' it's a stupid Valve Hammer Editor bug
 	if( e->curstate.rendercolor.r || e->curstate.rendercolor.g || e->curstate.rendercolor.b )

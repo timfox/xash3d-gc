@@ -42,6 +42,10 @@ static int sprite_tex_format;
  * skins (38 texture OOMs in a charlie match). */
 qboolean gc_sprite_effect_load;
 static int sprite_fx_cap;
+/* Frames of the sprite being loaded were already shrunk by this factor when
+ * read from disc (CL_GCLoadEffectSpriteShrunk, cl_game.c): they are drawn at
+ * their source size. */
+int gc_sprite_fx_prescale = 1;
 int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
 void R_GXHudHiSetTexnum( int handle, int texnum );
 
@@ -402,6 +406,15 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 	pspriteframe->left = pinframe.origin[0];
 	pspriteframe->down = pinframe.origin[1] - pinframe.height;
 	pspriteframe->right = pinframe.width + pinframe.origin[0];
+#if XASH_GAMECUBE
+	if( gc_sprite_fx_prescale > 1 )
+	{
+		pspriteframe->width = pinframe.width * gc_sprite_fx_prescale;
+		pspriteframe->height = pinframe.height * gc_sprite_fx_prescale;
+		pspriteframe->down = pinframe.origin[1] - pspriteframe->height;
+		pspriteframe->right = pspriteframe->width + pinframe.origin[0];
+	}
+#endif
 	pspriteframe->gl_texturenum = gl_texturenum;
 	*ppframe = pspriteframe;
 
