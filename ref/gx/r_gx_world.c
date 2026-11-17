@@ -6077,6 +6077,20 @@ static void R_GXPropLoadTex( void )
 		gc_prop_nmat, size / 1024u );
 }
 
+/* Slot each prop material was last found in, per pool ( 0 near, 1 far ), + 1. */
+static u8 gc_prop_slot_hint[2][128];
+
+/* True when the near pool holds this material's chain right now. */
+static qboolean R_GXPropNearResident( u8 mat )
+{
+	const int hs = (int)gc_prop_slot_hint[0][mat & 127] - 1;
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+
+	return hs >= 0 && hs < near_n && r_gx_cmpr_slot[hs].valid
+		&& r_gx_cmpr_slot[hs].aram == gc_prop_tex_aram + gc_prop_mat_ofs[mat]
+		&& r_gx_cmpr_slot[hs].used + 4096u > r_gx_cmpr_clock;
+}
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6101,7 +6115,16 @@ static int R_GXPropBind( u8 mat )
 	 * turned the village atlas into mush. */
 	if( r_gx_cmpr_nslots > 8 )
 	{
-		const unsigned cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
+		/* A small or distant prop asks for the far pool's copy, one mip down
+		 * (64x64). When the full chain of the same material already sits in
+		 * a near slot, because a nearer prop uses it this frame, that copy
+		 * is bound instead: it costs no memory and no read, the mipmaps do
+		 * the minifying, and a rock at middle distance is not drawn from a
+		 * 64-pixel texture while its neighbour's 128 is resident. */
+		const qboolean asked_far = r_gx_cmpr_want_far;
+		const qboolean near_resident = asked_far && R_GXPropNearResident( mat );
+		const unsigned cap = ( near_resident ? ( R_GXCmprSetFar( false ), false ) : r_gx_cmpr_want_far )
+			? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 		const int levels_all = gc_prop_mat_levels[mat];
 		unsigned remain = 0, skip_b = 0;
 		int mi, shift = 0, slot = -1;
@@ -6128,7 +6151,7 @@ static int R_GXPropBind( u8 mat )
 			 * R_GXCmprSlotFor walks up to 128 slots, and the props bind about
 			 * 500 times a frame over their three passes. */
 			{
-				static u8 hint[2][128];
+				u8 ( *const hint )[128] = gc_prop_slot_hint;
 				const unsigned key = gc_prop_tex_aram + gc_prop_mat_ofs[mat];
 				const int hs = (int)hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] - 1;
 
@@ -6164,8 +6187,12 @@ static int R_GXPropBind( u8 mat )
 			r_gx_cmpr_cur_slot = slot;
 			r_gx_bound_texnum = 0;
 			r_gx_bound_fmt = 0;
+			if( near_resident )
+				R_GXCmprSetFar( true );
 			return 1;
 		}
+		if( near_resident )
+			R_GXCmprSetFar( true );
 	}
 	/* Only without the shared slot cache: its 96 KB went to far LODs. */
 	if( !gc_prop_texmem_tried && r_gx_cmpr_nslots <= 8 && GC_MapLoadBufferTailPeak() > 0 )
