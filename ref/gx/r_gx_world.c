@@ -6175,9 +6175,6 @@ static int R_GXPropBind( u8 mat )
 		 * the minifying, and a rock at middle distance is not drawn from a
 		 * 64-pixel texture while its neighbour's 128 is resident. */
 		const qboolean asked_far = r_gx_cmpr_want_far;
-		const qboolean near_resident = asked_far && R_GXPropNearResident( mat );
-		const unsigned cap = ( near_resident ? ( R_GXCmprSetFar( false ), false ) : r_gx_cmpr_want_far )
-			? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 		const int levels_all = gc_prop_mat_levels[mat];
 		unsigned remain = 0, skip_b = 0, cap;
 		int mi, shift = 0, slot = -1;
