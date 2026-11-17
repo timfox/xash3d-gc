@@ -149,6 +149,7 @@ typedef struct
 	qboolean	valid;
 	qboolean	hud_pin;	/* G183: do not LRU-evict for world binds */
 	qboolean	is_font;	/* menu/HUD font atlas — prefer not to LRU-evict */
+	size_t		heap_bytes;	/* on-demand HUD backing charged to the heap budget */
 } gc_gx_tex_t;
 
 static gc_gx_tex_t r_gx_tex[GC_GX_TEX_SLOTS];
@@ -2738,6 +2739,184 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 }
 
 static int r_gx_prof_hud_uploads_logged;
+/* HUD/menu destination size: round up (see R_GXSnapDimUpMax); wide HUD
+ * sheets (credits font / title logo) keep source width when the area fits
+ * the HUD tile budget. */
+static void R_GXHudDstDims( int src_w, int src_h, int *dst_w, int *dst_h )
+{
+	*dst_w = R_GXSnapDimUpMax( src_w, GC_GX_TEX_HUD_MAX_DIM );
+	*dst_h = R_GXSnapDimUpMax( src_h, GC_GX_TEX_HUD_MAX_DIM );
+	if( src_w > GC_GX_TEX_WORLD_MAX_DIM && src_w <= GC_GX_TEX_HUD_MAX_DIM
+		&& ( src_w & 3 ) == 0
+		&& (size_t)*dst_h * (size_t)src_w <= (size_t)GC_GX_TEX_HUD_MAX_DIM * (size_t)GC_GX_TEX_HUD_MAX_DIM )
+		*dst_w = src_w;
+}
+
+/* On-demand HUD backing: boot arena while open (menu), else a bounded heap
+ * share.  Charged per slot so a slot that grows gives its old share back. */
+static u16 *R_GXHudAllocBacking( size_t need, size_t *heap_bytes )
+{
+	u16 *neu = (u16 *)GC_BootArenaAlloc( need );
+
+	*heap_bytes = 0;
+	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET )
+	{
+		neu = (u16 *)memalign( 32, need );
+		if( neu )
+		{
+			*heap_bytes = need;
+			r_gx_hud_ondemand_heap += need;
+		}
+	}
+	return neu;
+}
+
+static void R_GXHudDropBacking( int slot )
+{
+	gc_gx_tex_t *t = &r_gx_tex[slot];
+
+	if( t->valid && GC_GXFenceWait( r_gx_tex_fence[slot] ))
+		r_gx_tex_fence_stalls++;
+	R_GXFreeTile( t->tiled );
+	if( t->heap_bytes <= r_gx_hud_ondemand_heap )
+		r_gx_hud_ondemand_heap -= t->heap_bytes;
+	else
+		r_gx_hud_ondemand_heap = 0;
+	memset( t, 0, sizeof( *t ));
+	r_gx_tex_lru[slot] = 0;
+}
+
+/*
+ * Pick a HUD/menu slot whose buffer holds `need` bytes, backing one on demand
+ * when that is the better fit.  Size-blind picking made the DoD HUD thrash:
+ * 64x64 clip sheets (8 KiB) took the 32 KiB reserved slabs, the 128x128
+ * hud_layout / crosshair sheets then landed on small slots, failed, refit,
+ * and about five textures re-converted every frame.  Small textures now use
+ * snug buffers and leave the big slabs to big sheets.
+ */
+static int R_GXHudPickSlot( const image_t *img, size_t need )
+{
+	int i, best = -1, unbacked = -1;
+	int snug = -1, any = -1, font_any = -1, grow = -1;
+
+	for( i = GC_GX_TEX_HUD_ONDEMAND0; i < GC_GX_TEX_SLOTS; i++ )
+	{
+		const gc_gx_tex_t *t = &r_gx_tex[i];
+
+		if( !t->tiled )
+		{
+			if( unbacked < 0 && !t->valid )
+				unbacked = i;
+			continue;
+		}
+		if( t->alloc_bytes < need )
+		{
+			/* Only on-demand buffers may be re-sized (the reserved slabs
+			 * and the static font tile are fixed). */
+			if( i < GC_GX_TEX_HUD_SLOT0 && t->tiled != r_gx_font_tile
+				&& ( grow < 0 || r_gx_tex_lru[i] < r_gx_tex_lru[grow] ))
+				grow = i;
+			continue;
+		}
+		if( !t->valid )
+		{
+			if( best < 0 || t->alloc_bytes < r_gx_tex[best].alloc_bytes )
+				best = i;
+			continue;
+		}
+		/* Eviction candidates, fonts last. */
+		if( t->is_font )
+		{
+			if( font_any < 0 || r_gx_tex_lru[i] < r_gx_tex_lru[font_any] )
+				font_any = i;
+			continue;
+		}
+		if( t->alloc_bytes < need * 2
+			&& ( snug < 0 || r_gx_tex_lru[i] < r_gx_tex_lru[snug] ))
+			snug = i;
+		if( any < 0 || r_gx_tex_lru[i] < r_gx_tex_lru[any] )
+			any = i;
+	}
+
+	/* A free buffer that fits snugly. */
+	if( best >= 0 && r_gx_tex[best].alloc_bytes < need * 2 )
+		return best;
+
+	/* Back a fresh slot with exactly what this texture needs. */
+	if( unbacked >= 0 )
+	{
+		size_t heap_bytes;
+		u16 *neu = R_GXHudAllocBacking( need, &heap_bytes );
+
+		if( neu )
+		{
+			gc_gx_tex_t *t = &r_gx_tex[unbacked];
+
+			memset( t, 0, sizeof( *t ));
+			t->tiled = neu;
+			t->alloc_bytes = need;
+			t->heap_bytes = heap_bytes;
+			return unbacked;
+		}
+	}
+
+	/* A free but oversized buffer beats evicting a live texture. */
+	if( best >= 0 )
+		return best;
+	if( snug >= 0 )
+		return snug;
+
+	/* Grow the least recently used on-demand slot: allocate before freeing
+	 * (G183, MEM1 is fragmented), then hand its old share back. */
+	if( grow >= 0 )
+	{
+		size_t heap_bytes;
+		u16 *neu;
+		const size_t old_heap = r_gx_tex[grow].heap_bytes;
+
+		/* Its own share counts as free for the budget check. */
+		if( old_heap <= r_gx_hud_ondemand_heap )
+			r_gx_hud_ondemand_heap -= old_heap;
+		neu = R_GXHudAllocBacking( need, &heap_bytes );
+		r_gx_hud_ondemand_heap += old_heap;
+		if( neu )
+		{
+			gc_gx_tex_t *t = &r_gx_tex[grow];
+
+			R_GXHudDropBacking( grow );
+			t->tiled = neu;
+			t->alloc_bytes = need;
+			t->heap_bytes = heap_bytes;
+			return grow;
+		}
+	}
+
+	if( any >= 0 )
+		return any;
+	if( font_any >= 0 )
+		return font_any;
+
+	/* Last resort for small fonts: the static font tile. */
+	if( img && FBitSet( img->flags, TF_FONT ) && need <= GC_GX_FONT_TILE_BYTES )
+	{
+		for( i = GC_GX_TEX_HUD_ONDEMAND0; i < GC_GX_TEX_SLOTS; i++ )
+		{
+			if( r_gx_tex[i].tiled == r_gx_font_tile )
+				return i;
+		}
+		if( unbacked >= 0 )
+		{
+			gc_gx_tex_t *t = &r_gx_tex[unbacked];
+
+			memset( t, 0, sizeof( *t ));
+			t->tiled = r_gx_font_tile;
+			t->alloc_bytes = GC_GX_FONT_TILE_BYTES;
+			return unbacked;
+		}
+	}
+	return -1;
+}
+
 static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 {
 	image_t *img;
@@ -2746,7 +2925,6 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 	size_t bytes;
 	gc_gx_tex_t *t;
 	const u8 want_fmt = hud_bind ? (u8)GX_TF_RGB5A3 : (u8)GX_TF_RGB565;
-	int hud_evict = -1;
 
 	if( texnum == 0 )
 		return NULL;
@@ -2835,71 +3013,25 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 	victim = -1;
 	if( hud_bind )
 	{
+		size_t need;
+
 		R_GXReserveHudPool();
-		for( i = GC_GX_TEX_HUD_SLOT0; i < GC_GX_TEX_SLOTS; i++ )
-		{
-			if( !r_gx_tex[i].valid && r_gx_tex[i].tiled )
-			{
-				slot = i;
-				break;
-			}
-		}
+		R_GXHudDstDims( img->width, img->height, &dst_w, &dst_h );
+		need = (size_t)dst_w * (size_t)dst_h * sizeof( u16 );
+		slot = R_GXHudPickSlot( img, need );
 		if( slot < 0 )
 		{
-			qboolean partial = false;
-			int font_victim = -1;
+			static int fail_logs;
 
-			for( i = GC_GX_TEX_HUD_ONDEMAND0; i < GC_GX_TEX_SLOTS; i++ )
+			if( fail_logs < 8 )
 			{
-				if( i < GC_GX_TEX_HUD_SLOT0 && !r_gx_tex[i].hud_pin )
-					continue;
-				if( !r_gx_tex[i].tiled )
-					partial = true;
-				if( !r_gx_tex[i].tiled )
-					continue;
-				/* Prefer evicting chrome/logo over the menu font atlas. */
-				if( r_gx_tex[i].is_font )
-				{
-					if( font_victim < 0 || r_gx_tex_lru[i] < r_gx_tex_lru[font_victim] )
-						font_victim = i;
-					continue;
-				}
-				if( victim < 0 || r_gx_tex_lru[i] < r_gx_tex_lru[victim] )
-					victim = i;
+				fail_logs++;
+				gEngfuncs.Con_Reportf(
+					"Xash3D GameCube: HUD bind no buffer %s %dx%d (heap share %u)\n",
+					img->name, dst_w, dst_h, (unsigned)r_gx_hud_ondemand_heap );
 			}
-			if( victim < 0 )
-				victim = font_victim;
-			/* Unreserved slabs (G184 alloc fail at map load): back a free
-			 * slot on demand with a buffer sized to this texture before
-			 * evicting.  With every slab missing, all HUD sprites shared one
-			 * slot and re-converted each other every frame (c0a0e: pain and
-			 * train icons, 2 uploads/frame). */
-			for( i = GC_GX_TEX_HUD_ONDEMAND0; i < GC_GX_TEX_SLOTS; i++ )
-			{
-				if( !r_gx_tex[i].tiled && !r_gx_tex[i].valid )
-				{
-					hud_evict = victim; /* fallback if the heap says no */
-					slot = i;
-					break;
-				}
-			}
-			/* Reuse a reserved slab before trying an unbacked slot. Otherwise
-			 * a partial reservation makes every subsequent HUD bind fail even
-			 * though an older HUD texture could be safely evicted. */
-			if( slot < 0 )
-				slot = victim >= 0 ? victim : GC_GX_TEX_HUD_SLOT0;
-			if( slot == victim && victim >= 0 )
-			{
-				static qboolean logged;
-
-				if( !logged )
-				{
-					logged = true;
-					gEngfuncs.Con_Reportf(
-						"Xash3D GameCube: HUD pool reusing slot=%d partial=%d font=%d\n",
-						slot, partial ? 1 : 0, r_gx_tex[slot].is_font ? 1 : 0 );
-				}
-			}
+			r_gx_hud_bind_fails++;
+			return NULL;
 		}
 	}
 	else
@@ -2933,18 +3065,7 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 
 	src_w = img->width;
 	src_h = img->height;
-	if( hud_bind )
-	{
-		dst_w = R_GXSnapDimUpMax( src_w, GC_GX_TEX_HUD_MAX_DIM );
-		dst_h = R_GXSnapDimUpMax( src_h, GC_GX_TEX_HUD_MAX_DIM );
-		/* Wide HUD sheets (credits font / title logo) keep source width when
-		 * the area fits the HUD tile budget. */
-		if( src_w > GC_GX_TEX_WORLD_MAX_DIM && src_w <= GC_GX_TEX_HUD_MAX_DIM
-			&& ( src_w & 3 ) == 0
-			&& (size_t)dst_h * (size_t)src_w <= (size_t)GC_GX_TEX_HUD_MAX_DIM * (size_t)GC_GX_TEX_HUD_MAX_DIM )
-			dst_w = src_w;
-	}
-	else
+	if( !hud_bind )
 	{
 		dst_w = R_GXSnapDim( src_w );
 		dst_h = R_GXSnapDim( src_h );
@@ -3029,149 +3150,18 @@ static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 	}
 
 	bytes = (size_t)dst_w * (size_t)dst_h * sizeof( u16 );
-	/*
-	 * G183: never free-before-alloc — MEM1 is fragmented after world upload.
-	 * Reuse any staging buffer large enough (HUD snaps are ≤ 64×64).
-	 */
+	/* World binds use the BSS pool; HUD binds got a slot whose buffer fits
+	 * from R_GXHudPickSlot (G183: never free-before-alloc). */
+	if( slot < GC_GX_TEX_WORLD_POOL )
 	{
-		const size_t max_tile = hud_bind
-			? (size_t)GC_GX_TEX_HUD_MAX_DIM * (size_t)GC_GX_TEX_HUD_MAX_DIM * sizeof( u16 )
-			: (size_t)GC_GX_TEX_WORLD_MAX_DIM * (size_t)GC_GX_TEX_WORLD_MAX_DIM * sizeof( u16 );
-		size_t want = bytes;
-
-		/* HUD uploads prefer a reusable staging slab so later sheets reuse;
-		 * a slot backed on demand (no reserved slab) takes only what this
-		 * texture needs, so the heap is not asked for 32 KiB per icon. */
-		if( hud_bind && t->tiled
-			&& want < (size_t)GC_GX_TEX_WORLD_MAX_DIM * (size_t)GC_GX_TEX_WORLD_MAX_DIM * sizeof( u16 ))
-			want = (size_t)GC_GX_TEX_WORLD_MAX_DIM * (size_t)GC_GX_TEX_WORLD_MAX_DIM * sizeof( u16 );
-
-		if( slot < GC_GX_TEX_WORLD_POOL )
-		{
-			t->tiled = r_gx_tex_world_pool[slot];
-			t->alloc_bytes = (size_t)GC_GX_TEX_WORLD_MAX_DIM * (size_t)GC_GX_TEX_WORLD_MAX_DIM * sizeof( u16 );
-			(void)max_tile;
-		}
-		else if( !t->tiled || t->alloc_bytes < bytes )
-		{
-			u16 *neu = NULL;
-			qboolean from_heap = false;
-
-			/* On-demand HUD slot: boot arena while open (menu), else a
-			 * bounded heap share. */
-			if( hud_bind && slot < GC_GX_TEX_HUD_SLOT0 )
-			{
-				neu = (u16 *)GC_BootArenaAlloc( want );
-				if( !neu && r_gx_hud_ondemand_heap + want <= GC_GX_TEX_HUD_HEAP_BUDGET )
-				{
-					neu = (u16 *)memalign( 32, want );
-					from_heap = neu != NULL;
-				}
-			}
-			else
-				neu = (u16 *)memalign( 32, want );
-			if( from_heap )
-				r_gx_hud_ondemand_heap += want;
-
-			if( !neu && hud_evict >= 0 && r_gx_tex[hud_evict].tiled
-				&& r_gx_tex[hud_evict].alloc_bytes >= bytes )
-			{
-				/* No heap for an on-demand slot: evict as before. */
-				slot = hud_evict;
-				t = &r_gx_tex[slot];
-				if( t->valid && GC_GXFenceWait( r_gx_tex_fence[slot] ))
-					r_gx_tex_fence_stalls++;
-			}
-			else if( !neu )
-			{
-				if(( !t->tiled || t->alloc_bytes < bytes )
-					&& hud_bind && FBitSet( img->flags, TF_FONT ) && bytes <= GC_GX_FONT_TILE_BYTES )
-				{
-					int j;
-
-					/* Take the static font tile from whichever slot held it. */
-					for( j = 0; j < GC_GX_TEX_SLOTS; j++ )
-					{
-						if( j != slot && r_gx_tex[j].tiled == r_gx_font_tile )
-						{
-							if( r_gx_tex[j].valid && GC_GXFenceWait( r_gx_tex_fence[j] ))
-								r_gx_tex_fence_stalls++;
-							memset( &r_gx_tex[j], 0, sizeof( r_gx_tex[j] ));
-							r_gx_tex_lru[j] = 0;
-						}
-					}
-					R_GXFreeTile( t->tiled );
-					t->tiled = r_gx_font_tile;
-					t->alloc_bytes = GC_GX_FONT_TILE_BYTES;
-				}
-				/* The LRU victim itself can be a slot backed for a small
-				 * icon: with the heap spent mid-match (DoD clip sheets
-				 * loaded on use), every bind of a larger texture failed
-				 * there each frame. Take the least recently used HUD slot
-				 * whose buffer is big enough instead, fonts last. */
-				if( hud_bind && ( !t->tiled || t->alloc_bytes < bytes ))
-				{
-					int j, fit = -1, font_fit = -1;
-
-					for( j = GC_GX_TEX_HUD_ONDEMAND0; j < GC_GX_TEX_SLOTS; j++ )
-					{
-						if( j == slot || !r_gx_tex[j].tiled || r_gx_tex[j].alloc_bytes < bytes )
-							continue;
-						if( j < GC_GX_TEX_HUD_SLOT0 && !r_gx_tex[j].hud_pin )
-							continue;
-						if( r_gx_tex[j].tiled == r_gx_font_tile )
-							continue;
-						if( r_gx_tex[j].is_font )
-						{
-							if( font_fit < 0 || r_gx_tex_lru[j] < r_gx_tex_lru[font_fit] )
-								font_fit = j;
-							continue;
-						}
-						if( fit < 0 || r_gx_tex_lru[j] < r_gx_tex_lru[fit] )
-							fit = j;
-					}
-					if( fit < 0 )
-						fit = font_fit;
-					if( fit >= 0 )
-					{
-						static int refit_logs;
-
-						if( refit_logs < 4 )
-						{
-							refit_logs++;
-							gEngfuncs.Con_Reportf(
-								"Xash3D GameCube: HUD bind %s slot=%d too small (%u < %u), reusing slot=%d\n",
-								img->name, slot, (unsigned)t->alloc_bytes, (unsigned)bytes, fit );
-						}
-						slot = fit;
-						t = &r_gx_tex[slot];
-						if( t->valid && GC_GXFenceWait( r_gx_tex_fence[slot] ))
-							r_gx_tex_fence_stalls++;
-					}
-				}
-				if( !t->tiled || t->alloc_bytes < bytes )
-				{
-					static int fail_logs;
-
-					if( fail_logs < 8 )
-					{
-						fail_logs++;
-						gEngfuncs.Con_Reportf(
-							"Xash3D GameCube: HUD bind no buffer %s %dx%d slot=%d alloc=%u evict=%d\n",
-							img->name, dst_w, dst_h, slot, (unsigned)t->alloc_bytes, hud_evict );
-					}
-					r_gx_hud_bind_fails++;
-					return NULL;
-				}
-			}
-			else
-			{
-				if( t->tiled )
-					R_GXFreeTile( t->tiled );
-				t->tiled = neu;
-				t->alloc_bytes = want;
-			}
-		}
+		t->tiled = r_gx_tex_world_pool[slot];
+		t->alloc_bytes = (size_t)GC_GX_TEX_WORLD_MAX_DIM * (size_t)GC_GX_TEX_WORLD_MAX_DIM * sizeof( u16 );
+	}
+	if( !t->tiled || t->alloc_bytes < bytes )
+	{
+		if( hud_bind )
+			r_gx_hud_bind_fails++;
+		return NULL;
 	}
 
 	R_GXSwizzleRGB565( r_gx_tex_linear, dst_w, dst_w, dst_h, t->tiled );
