@@ -496,6 +496,35 @@ static void R_StudioPlayerBlend( mstudioseqdesc_t *pseqdesc, int *pBlend, float 
 	// calc up/down pointing
 	*pBlend = ( *pPitch * 3.0f );
 
+#if XASH_GAMECUBE
+	// DoD player models author the aim range high to low (blend XR 45 -45).
+	// The stock bounds test assumes start < end, so every pitch fell into
+	// the first or second branch and the aim was 0 or 255, never between.
+	// Walk the range in whichever direction the model gives it.
+	if( pseqdesc->blendstart[0] > pseqdesc->blendend[0] )
+	{
+		float b = *pPitch * 3.0f;
+		float lo = pseqdesc->blendend[0], hi = pseqdesc->blendstart[0];
+
+		if( b > hi )
+		{
+			*pPitch -= hi / 3.0f;
+			*pBlend = 0;
+		}
+		else if( b < lo )
+		{
+			*pPitch -= lo / 3.0f;
+			*pBlend = 255;
+		}
+		else
+		{
+			*pBlend = (int)( 255.0f * ( hi - b ) / ( hi - lo ));
+			*pPitch = 0.0f;
+		}
+		return;
+	}
+#endif
+
 	if( *pBlend < pseqdesc->blendstart[0] )
 	{
 		*pPitch -= pseqdesc->blendstart[0] / 3.0f;

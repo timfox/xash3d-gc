@@ -312,7 +312,11 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 		 * shown at half size anyway: shrink its indexed pixels in place
 		 * (nearest) before the upload. The frame keeps its source size, so
 		 * SPR_DrawHoles rectangles map onto the smaller texture unchanged. */
-		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width > 128 || pinframe.height > 128 ))
+		/* A 128 px sheet (DoD's crosshair) needs 32 KiB of contiguous heap
+		 * mid-match and failed with ~28 KiB free: below 128 KiB free it takes
+		 * the same ARAM full-resolution route with a small resident copy. */
+		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width > 128 || pinframe.height > 128
+			|| (( pinframe.width >= 128 || pinframe.height >= 128 ) && GC_MemHeapFreeBytes() < 128 * 1024 )))
 		{
 			/* 128 keeps the art at the size it is drawn, but its texture
 			 * needs contiguous heap: on dod_caen 101 KiB free still could not
