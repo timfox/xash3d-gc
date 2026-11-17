@@ -13917,6 +13917,15 @@ void GC_EnableGxWorldLive( void )
 		return;
 	}
 	gc_gx_world_live = true;
+	/* The soft DumpFrames latch is a capture diagnostic. A latch the loading
+	 * plaque of a reload (same-map changelevel) left armed kept the renderer
+	 * on the CPU path for the second map and it died there. */
+	if( gc_cpu_dump_presents_left > 0
+		&& !Sys_CheckParm( "-gcdumpframes" ) && !Sys_CheckParm( "-gcdump" ))
+	{
+		Con_Reportf( "Xash3D GameCube: dump latch %d cleared for GX world\n", gc_cpu_dump_presents_left );
+		gc_cpu_dump_presents_left = 0;
+	}
 	Con_Reportf( "Xash3D GameCube: G151 GX world live enabled (Flipper EFB)\n" );
 #endif
 }

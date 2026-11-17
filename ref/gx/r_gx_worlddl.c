@@ -92,6 +92,7 @@ typedef struct
 extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
+extern unsigned Mod_GCWorldArraySpillGeneration( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
@@ -473,6 +474,7 @@ extern void R_GXFogEnd( void );
 static int gc_wd_state;	/* 0 untried, 1 ready, -1 absent */
 static char gc_wd_map[64];
 static size_t gc_wd_spill_mark;
+static unsigned gc_wd_spill_gen;
 static gc_wd_mat_t gc_wd_mats_local[GC_WD_MAX_MATS];
 static const gc_wd_mat_t *gc_wd_mats = gc_wd_mats_local;
 static gc_wd_slot_t *gc_wd_slots;
@@ -1025,6 +1027,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	else
 		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
+	gc_wd_spill_gen = Mod_GCWorldArraySpillGeneration();
 
 	/* Lazy policy (Codex's pvs-lazy work), opt in with -gclazyworld: keep
 	 * tree/PVS and lightmaps in ARAM and pull the geometry chunks from the
@@ -1254,7 +1257,8 @@ qboolean R_GXWorldDLActive( void )
 		return false;
 	COM_FileBase( world->name, base, sizeof( base ));
 	if( gc_wd_state != 0 && ( Q_stricmp( base, gc_wd_map )
-		|| ( gc_wd_state == 1 && Mod_GCWorldArraySpillUsed() < gc_wd_spill_mark )))
+		|| ( gc_wd_state == 1 && ( Mod_GCWorldArraySpillGeneration() != gc_wd_spill_gen
+			|| Mod_GCWorldArraySpillUsed() < gc_wd_spill_mark ))))
 		gc_wd_state = 0;
 	if( gc_wd_state == 0 )
 	{

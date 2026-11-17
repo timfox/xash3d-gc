@@ -54,6 +54,7 @@ typedef struct
 extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern size_t Mod_GCWorldArraySpillUsed( void );
+extern unsigned Mod_GCWorldArraySpillGeneration( void );
 
 static void R_GXStudioDLAlphaTest( qboolean on )
 {
@@ -72,6 +73,7 @@ static u32 gc_sd_aram;
 static byte *gc_sd_bounce;
 static u32 gc_sd_bounce_size;
 static size_t gc_sd_spill_mark;
+static unsigned gc_sd_spill_gen;
 static int gc_sd_draws;
 static int gc_sd_misses;
 
@@ -207,6 +209,7 @@ static void R_GXStudioDLLoad( const char *map )
 	gc_sd_bounce_size = try_sz;
 	Mod_GCWorldArraySpillPinBase( gc_sd_bounce, try_sz );
 	gc_sd_spill_mark = Mod_GCWorldArraySpillUsed();
+	gc_sd_spill_gen = Mod_GCWorldArraySpillGeneration();
 
 	gc_sd_aram = GC_AramMapReserve( gc_sd_hdr.file_size );
 	bounce = gc_sd_bounce;
@@ -254,7 +257,8 @@ qboolean R_GXStudioDLActive( void )
 		return false;
 	COM_FileBase( world->name, base, sizeof( base ));
 	if( gc_sd_state != 0 && ( Q_stricmp( base, gc_sd_map )
-		|| ( gc_sd_state == 1 && Mod_GCWorldArraySpillUsed() < gc_sd_spill_mark )))
+		|| ( gc_sd_state == 1 && ( Mod_GCWorldArraySpillGeneration() != gc_sd_spill_gen
+			|| Mod_GCWorldArraySpillUsed() < gc_sd_spill_mark ))))
 		gc_sd_state = 0;
 	if( gc_sd_state == 0 )
 	{

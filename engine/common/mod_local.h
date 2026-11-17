@@ -201,6 +201,7 @@ void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 size_t Mod_GCWorldArraySpillFreeLasting( void );
 void *Mod_GCWorldArraySpillTryGrow( const void *ptr, size_t old_bytes, size_t new_bytes, const char *what );
 size_t Mod_GCWorldArraySpillUsed( void );
+unsigned Mod_GCWorldArraySpillGeneration( void );
 void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 qboolean Mod_GCIsWorldArraySpillCache( const void *ptr );
 void Mod_GCWorldArraySpillRewind( const void *ptr, size_t bytes );
