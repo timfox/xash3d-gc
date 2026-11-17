@@ -2736,10 +2736,40 @@ def split_heavy_viewmodel(src: Path, stem: str, data: Path, splitter=None) -> by
 	return core
 
 
+def dod_bsp_prop_models(data: Path) -> tuple[str, ...]:
+	"""Every studio model the staged DoD maps' entity lumps name.
+
+	The allowlist above held only a handful of props, so on dod_charlie 139 of
+	180 env_model / dod_object instances (hedgehogs, barbed wire, pipes, flak,
+	mortars, bushes...) had no model on the disc and were never drawn. Take
+	the full set from each map's entity lump instead.
+	"""
+	refs: set[str] = set()
+	maps = data / "maps"
+	if not maps.is_dir():
+		return ()
+	for bsp in sorted(maps.glob("dod_*.bsp")):
+		try:
+			raw = bsp.read_bytes()
+			off, length = struct.unpack_from("<ii", raw, 4)
+		except (OSError, struct.error):
+			continue
+		if off < 0 or length < 0 or off + length > len(raw):
+			continue
+		ents = raw[off : off + length].decode("latin1", "replace")
+		for m in re.findall(r'"model"\s+"(models/[^"]+\.mdl)"', ents, flags=re.I):
+			refs.add(m.replace("\\", "/").lower())
+	return tuple(sorted(refs))
+
+
 def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
 	"""Add allowlisted MDLs into an existing bootstrap ZIP under gc_studio/."""
 	staged = 0
-	all_stems = {Path(r).stem.lower() for r in GC_STUDIO_MODELS}
+	map_props = tuple(r for r in dod_bsp_prop_models(data) if r not in GC_STUDIO_MODELS)
+	map_prop_stems = {Path(r).stem.lower() for r in map_props}
+	if map_props:
+		print(f"  DoD map props from entity lumps: {len(map_props)} more models")
+	all_stems = {Path(r).stem.lower() for r in GC_STUDIO_MODELS + map_props}
 	# Smoke staging may omit campaign meshes; fall back to retail valve tree.
 	retail = Path(__file__).resolve().parent.parent / "Half-Life" / "valve"
 	# dod-gc content trees (private network-engine often lacks Half-Life/valve).
@@ -2762,8 +2792,9 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 		"sandbags", "bulb", "hk_satchel", "furniture", "by_rubble_set",
 		"arc_xer_tree2", "horse_statue", "by_canopy",
 		"sherman", "jagd", "by_banister", "flags",
+		*map_prop_stems,
 	}
-	for relative in GC_STUDIO_MODELS:
+	for relative in GC_STUDIO_MODELS + map_props:
 		src = data / relative
 		stem = Path(relative).stem.lower()
 		if relative == "models/player.mdl":
@@ -2812,6 +2843,8 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			# 184–288 KiB DoD studio BSS and tip≈6 KiB heap (ava-prop-2
 			# promote ok=0/4). Lean mesh + *t atlas = full fidelity in BSS.
 			"sandbags", "sherman", "jagd", "by_banister", "flags",
+			# Every other prop the maps name: same lean mesh + *t atlas.
+			*map_prop_stems,
 		}
 		dod_full_prop_skins = set()  # avalanche props moved to lean+*t
 		keep_skins = stem in ("forklift", "loader", "filecabinet", "nihilanth", "baby_headcrab") \
