@@ -2242,7 +2242,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->model = mod;
 				VectorCopy( ed->v.origin, ent->origin );
 				VectorCopy( ed->v.angles, ent->angles );
-				ent->angles[0] = 0.0f;
+				/* Keep the aim pitch (angles.x = -v_angle.x / 3): with a gait
+				 * sequence the renderer turns it into the aim blend and
+				 * leaves the root yaw-only (R_StudioPlayerBlend), as stock
+				 * GoldSrc does. Zeroing it held every body at the baked
+				 * mid blend, slightly up (bots "looking at the sky"). */
+				if( dead || !ed->v.gaitsequence )
+					ent->angles[0] = 0.0f;
 				VectorCopy( ent->origin, ent->curstate.origin );
 				VectorCopy( ent->angles, ent->curstate.angles );
 				VectorCopy( ed->v.mins, ent->curstate.mins );
