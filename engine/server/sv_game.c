@@ -6055,12 +6055,39 @@ static qboolean SV_GCParityEntity( const char *classname )
  * ones late in the lump (doors, capture areas, round logic) still fit. */
 static int gc_parity_budget = 0x7fffffff;
 static int gc_parity_kept;
+/* Parity tiers, kept in this order when the budget is short: 0 brush walls
+ * players collide with, 1 map logic (target chains), 2 switchable lights. */
+#define GC_PARITY_TIERS 3
+static int gc_parity_tier_budget[GC_PARITY_TIERS] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
+static int gc_parity_tier_kept[GC_PARITY_TIERS];
+/* Slots left free for run-time entities (weapons, grenades, weapon boxes,
+ * temp ents). DoD builds have five client slots; four bots and a player
+ * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
+#define GC_PARITY_RUNTIME_RESERVE 32
+
+static int SV_GCParityTier( const char *classname )
+{
+	if( !Q_strcmp( classname, "func_wall" ) || !Q_strcmp( classname, "func_wall_toggle" )
+		|| !Q_strcmp( classname, "func_illusionary" ))
+		return 0;
+	if( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" ))
+		return 2;
+	return 1;
+}
 
 static qboolean SV_GCEntityPressure( void )
 {
 	return GC_MemHeapFreeBytes() < 16u * 1024u
 		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
-		|| svgame.numEntities >= GI->max_edicts - 64;
+		|| svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+}
+
+/* An unnamed func_illusionary is non-solid decoration nothing can target:
+ * the CapFaces world bake already draws its faces, so an edict for it would
+ * only cost a networked entity per frame (dod_charlie has 95). */
+static qboolean SV_GCBakedIllusionary( const char *classname, qboolean named )
+{
+	return !named && !Q_strcmp( classname, "func_illusionary" );
 }
 
 /* GoldSrc's CLight removes itself unless it has a targetname; a named light
@@ -6075,13 +6102,20 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 {
 	if( COM_StringEmpty( classname ))
 		return false;
+	if( ent && SV_GCBakedIllusionary( classname, ent->v.targetname != 0 ))
+		return true;
 	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
 	{
 		static int kept, skipped;
-		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget;
+		const int tier = SV_GCParityTier( classname );
+		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget
+			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
 
 		if( !skip )
+		{
 			gc_parity_kept++;
+			gc_parity_tier_kept[tier]++;
+		}
 
 		if( skip ) skipped++; else kept++;
 		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
@@ -6324,8 +6358,15 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	int n_must = 0, n_parity = 0;
 	qboolean named;
 
+	int tier_count[GC_PARITY_TIERS] = { 0, 0, 0 }, baked = 0, t, left;
+
 	gc_parity_kept = 0;
 	gc_parity_budget = 0x7fffffff;
+	for( t = 0; t < GC_PARITY_TIERS; t++ )
+	{
+		gc_parity_tier_kept[t] = 0;
+		gc_parity_tier_budget[t] = 0x7fffffff;
+	}
 	if( !entities || !Sys_CheckParm( "-gcworldrender" ))
 		return;
 	while(( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
@@ -6355,10 +6396,16 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 			statics++;
 			continue;
 		}
+		if( SV_GCBakedIllusionary( classname, named ))
+		{
+			baked++;
+			continue;
+		}
 		if( SV_GCParityEntity( classname )
 			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
 		{
 			parity++;
+			tier_count[SV_GCParityTier( classname )]++;
 			SV_GCCensusAdd( census_parity, &n_parity, classname );
 		}
 		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
@@ -6368,12 +6415,21 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		else
 			SV_GCCensusAdd( census_must, &n_must, classname );
 	}
-	must = total - parity - optional - nofunc - statics;
-	gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
+	must = total - parity - optional - nofunc - statics - baked;
+	gc_parity_budget = GI->max_edicts - GC_PARITY_RUNTIME_RESERVE - ( svs.maxclients + 1 ) - must;
 	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
 		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
+	/* Walls first, then map logic, then lights. */
+	for( t = 0, left = gc_parity_budget; t < GC_PARITY_TIERS; t++ )
+	{
+		gc_parity_tier_budget[t] = Q_min( tier_count[t], left );
+		left -= gc_parity_tier_budget[t];
+	}
 	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d static-props=%d (edicts %d)\n",
 		mapname, total, must, parity, gc_parity_budget, optional, nofunc, statics, GI->max_edicts );
+	Con_Reportf( "Xash3D GameCube: %s parity tiers walls %d/%d logic %d/%d lights %d/%d, baked illusionary %d\n",
+		mapname, gc_parity_tier_budget[0], tier_count[0], gc_parity_tier_budget[1], tier_count[1],
+		gc_parity_tier_budget[2], tier_count[2], baked );
 	SV_GCCensusReport( mapname, "always", census_must, n_must );
 	SV_GCCensusReport( mapname, "parity", census_parity, n_parity );
 }
