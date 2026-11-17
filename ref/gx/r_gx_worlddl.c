@@ -375,7 +375,10 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	}
 	/* Alpha-test on LM-lit cliff/brush mats cut white sky holes through
 	 * solid plates. Keep punch-through only for unlit foliage-style mats. */
-	if( ( flags & 0x02 ) && !gc_wd_chunk_lm )
+	/* Decals (flag 0x08, Source $decal): the alpha is the decal's shape, so
+	 * they cut out on lightmapped walls too. Without it the infodecals and
+	 * overlays on lit walls drew as opaque rectangles. */
+	if(( flags & 0x02 ) && ( !gc_wd_chunk_lm || ( flags & 0x08 )))
 	{
 		GX_SetAlphaCompare( GX_GEQUAL, aref ? aref : 128, GX_AOP_AND, GX_ALWAYS, 0 );
 		GX_SetZCompLoc( GX_FALSE );
