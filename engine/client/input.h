@@ -110,6 +110,8 @@ void OSK_Init( void );
 qboolean OSK_KeyEvent( int key, int down );
 void OSK_EnableTextInput( qboolean enable, qboolean force );
 void OSK_Draw( void );
+void OSK_ChatMessage( const byte *buf, int size );
+void OSK_ChatDraw( void );
 
 //
 // in_joy.c

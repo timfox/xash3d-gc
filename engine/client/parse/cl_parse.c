@@ -2665,6 +2665,14 @@ void CL_ParseUserMessage( sizebuf_t *msg, int svc_num, connprotocol_t proto )
 		CL_GCHudTextShow( (const char *)pbuf );
 		return;
 	}
+
+	/* The quality-0 client does not hook SayText either: keep chat lines in the engine. */
+	if(( !clgame.msg[i].func || clgame.msg[i].func == CL_UserMsgStub )
+		&& !Q_strcmp( clgame.msg[i].name, "SayText" ))
+	{
+		OSK_ChatMessage( pbuf, iSize );
+		return;
+	}
 #endif
 
 	if( clgame.msg[i].func )

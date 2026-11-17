@@ -512,6 +512,107 @@ void OSK_Draw( void )
 		"Y page  Start OK  Z cancel", dim );
 }
 
+/*
+=============
+Chat lines
+
+The quality-0 GameCube client has no SayText handler and draws no chat, so the
+engine keeps the last few lines and draws them with the bitmap font above.
+=============
+*/
+#define OSK_CHAT_LINES 4
+#define OSK_CHAT_CHARS 48
+#define OSK_CHAT_SECONDS 8.0
+
+static struct
+{
+	char   text[OSK_CHAT_LINES][OSK_CHAT_CHARS + 1];
+	double time[OSK_CHAT_LINES];
+	int    count;
+} osk_chat;
+
+void OSK_ChatAdd( const char *text )
+{
+	char line[OSK_CHAT_CHARS + 1];
+	int i, n = 0;
+
+	for( ; *text && n < OSK_CHAT_CHARS; text++ )
+		if( *text >= 32 && *text < 127 ) // drops the colour and newline control bytes
+			line[n++] = *text;
+	line[n] = 0;
+	if( !n )
+		return;
+
+	if( osk_chat.count == OSK_CHAT_LINES )
+	{
+		for( i = 1; i < OSK_CHAT_LINES; i++ )
+		{
+			Q_strncpy( osk_chat.text[i - 1], osk_chat.text[i], sizeof( osk_chat.text[0] ));
+			osk_chat.time[i - 1] = osk_chat.time[i];
+		}
+		osk_chat.count--;
+	}
+	Q_strncpy( osk_chat.text[osk_chat.count], line, sizeof( osk_chat.text[0] ));
+	osk_chat.time[osk_chat.count++] = host.realtime;
+}
+
+// SayText: byte client index, format string, then up to four strings for its %s
+void OSK_ChatMessage( const byte *buf, int size )
+{
+	const char *p = (const char *)buf + 1, *end = (const char *)buf + size;
+	const char *args[4];
+	char out[256];
+	int nargs = 0, o = 0;
+
+	if( size < 2 )
+		return;
+
+	{
+		const char *fmt = p;
+		const char *a = fmt + Q_strlen( fmt ) + 1;
+
+		while( a < end && nargs < 4 && *a )
+		{
+			args[nargs++] = a;
+			a += Q_strlen( a ) + 1;
+		}
+
+		nargs = 0;
+		for( ; *fmt && o < (int)sizeof( out ) - 1; fmt++ )
+		{
+			if( fmt[0] == '%' && fmt[1] == 's' )
+			{
+				const char *src = nargs < 4 && ( nargs == 0 || args[nargs] ) ? args[nargs] : NULL;
+
+				for( nargs++, fmt++; src && *src && o < (int)sizeof( out ) - 1; src++ )
+					out[o++] = *src;
+			}
+			else out[o++] = *fmt;
+		}
+	}
+	out[o] = 0;
+	OSK_ChatAdd( out );
+}
+
+void OSK_ChatDraw( void )
+{
+	static const rgba_t white = { 255, 255, 255, 255 };
+	const float sx = refState.width / 640.0f, sy = refState.height / 480.0f;
+	int i, shown = 0;
+
+	for( i = 0; i < osk_chat.count; i++ )
+	{
+		int y;
+
+		if( host.realtime - osk_chat.time[i] > OSK_CHAT_SECONDS )
+			continue;
+
+		y = 40 + shown++ * ( OSK_GLYPH_H * OSK_FP + 4 );
+		OSK_Fill( sx, sy, 12, y - 2, OSK_TextWidth( osk_chat.text[i] ) + 8, OSK_GLYPH_H * OSK_FP + 4, 0, 0, 0, 150 );
+		OSK_Text( sx, sy, 16, y, osk_chat.text[i], white );
+	}
+}
+
 void OSK_Init( void )
 {
 	Cvar_RegisterVariable( &osk_enable );
