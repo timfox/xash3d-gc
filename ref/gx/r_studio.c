@@ -3431,6 +3431,36 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 					pi, orig_angles[PITCH], RI.currententity->curstate.blending[0],
 					RI.currententity->curstate.sequence, sd->label, sd->blendtype[0],
 					sd->blendstart[0], sd->blendend[0], sd->numblends, pplayer->gaitsequence );
+				/* Yaw check: aim yaw, legs yaw, torso controller (127 = no
+				 * twist), and once per body which bone controllers exist. */
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio yaw player %d aim %.1f legs %.1f twist ctl %d %d %d %d gaitmove %.1f\n",
+					pi, orig_angles[YAW], m_pPlayerInfo ? m_pPlayerInfo->gaityaw : -999.0f,
+					RI.currententity->curstate.controller[0], RI.currententity->curstate.controller[1],
+					RI.currententity->curstate.controller[2], RI.currententity->curstate.controller[3],
+					m_flGaitMovement );
+				{
+					static const studiohdr_t *ctl_logged[8];
+					int k, seen = 0;
+
+					for( k = 0; k < 8; k++ )
+						if( ctl_logged[k] == m_pStudioHeader )
+							seen = 1;
+					if( !seen )
+					{
+						const mstudiobonecontroller_t *bc = (const mstudiobonecontroller_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->bonecontrollerindex );
+						const mstudiobone_t *bones = (const mstudiobone_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+						for( k = 0; k < 8 && ctl_logged[k]; k++ );
+						if( k < 8 )
+							ctl_logged[k] = m_pStudioHeader;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: body %s has %d bone controllers\n",
+							m_pStudioHeader->name, m_pStudioHeader->numbonecontrollers );
+						for( k = 0; k < m_pStudioHeader->numbonecontrollers && k < 8; k++ )
+							gEngfuncs.Con_Reportf( "Xash3D GameCube:   controller %d index %d bone %s type 0x%x range %.0f..%.0f\n",
+								k, bc[k].index, ( bc[k].bone >= 0 && bc[k].bone < m_pStudioHeader->numbones ) ? bones[bc[k].bone].name : "?",
+								bc[k].type, bc[k].start, bc[k].end );
+					}
+				}
 			}
 		}
 #endif
