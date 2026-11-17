@@ -110,5 +110,6 @@ void HTTP_Run( void );
 
 typedef void ( *http_memory_cb_t )( const char *url, qboolean success, const byte *data, size_t size, void *userdata );
 qboolean HTTP_GetToMemory( const char *url, http_memory_cb_t cb, void *userdata );
+qboolean HTTP_RequestToMemory( const char *method, const char *url, const char *body, http_memory_cb_t cb, void *userdata );
 
 #endif//NET_WS_H
