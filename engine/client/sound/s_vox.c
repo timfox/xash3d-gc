@@ -656,6 +656,14 @@ void VOX_LoadSound( channel_t *ch, const char *pszin )
 
 	// words_buf[j].sfx is already NULL from the memset — null terminator
 	ch->words = Mem_Malloc( sndpool, ( j + 1 ) * sizeof( voxword_t ));
+	if( !ch->words )
+	{
+		/* The GameCube Sound Zone soft-fails (returns NULL) when MEM1 is
+		 * exhausted; copying into it was a DSI at c1a3 (DAR=4). Skip the
+		 * sentence like the other error paths here. */
+		Con_Printf( S_ERROR "%s: no memory for sentence %s\n", __func__, pszin );
+		return;
+	}
 	memcpy( ch->words, words_buf, ( j + 1 ) * sizeof( voxword_t ));
 
 	ch->sfx = ch->words[0].sfx;
