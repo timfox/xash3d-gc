@@ -2488,6 +2488,9 @@ static int r_gx_cmpr_big_n;
 static unsigned r_gx_cmpr_big_cap;
 static byte *r_gx_cmpr_big_base;
 static qboolean r_gx_cmpr_use_big;
+/* The big slots belong to prop materials (Lost Coast: the two coast rock
+ * textures at 256x256); world textures keep to the near pool and hot window. */
+static qboolean r_gx_cmpr_big_for_props;
 
 static byte *R_GXCmprSlotPtr( int i )
 {
@@ -2642,6 +2645,11 @@ void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap )
 	r_gx_bound_fmt = 0;
 }
 
+void R_GXCmprBigForProps( qboolean on )
+{
+	r_gx_cmpr_big_for_props = on;
+}
+
 /* Call once after GX init / before map load while MEM1 tip is free. */
 void R_GXPreallocCmprBounce( void )
 {
@@ -2792,7 +2800,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				int mi;
 
 				r_gx_cmpr_use_big = false;
-				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n
+				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n && !r_gx_cmpr_big_for_props
 					&& remain > slot_cap && remain <= r_gx_cmpr_big_cap )
 				{
 					slot_cap = r_gx_cmpr_big_cap;
@@ -6121,6 +6129,21 @@ static void R_GXPropLoadTex( void )
 		gc_prop_nmat, size / 1024u );
 }
 
+/* Slot each prop material was last found in, per pool ( 0 near, 1 far, 2 big ), + 1. */
+static u8 gc_prop_slot_hint[3][128];
+
+/* True when that pool holds this material's chain and it was bound recently. */
+static qboolean R_GXPropPoolResident( u8 mat, int pool )
+{
+	const int hs = (int)gc_prop_slot_hint[pool][mat & 127] - 1;
+	const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
+
+	return hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+		&& ( hs >= big_lo ? 2 : hs >= big_lo - r_gx_cmpr_far_n ? 1 : 0 ) == pool
+		&& r_gx_cmpr_slot[hs].aram == gc_prop_tex_aram + gc_prop_mat_ofs[mat]
+		&& r_gx_cmpr_slot[hs].used + 4096u > r_gx_cmpr_clock;
+}
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6145,16 +6168,33 @@ static int R_GXPropBind( u8 mat )
 	 * turned the village atlas into mush. */
 	if( r_gx_cmpr_nslots > 8 )
 	{
-		const unsigned cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
+		/* A small or distant prop asks for the far pool's copy, one mip down
+		 * (64x64). When the full chain of the same material already sits in
+		 * a near slot, because a nearer prop uses it this frame, that copy
+		 * is bound instead: it costs no memory and no read, the mipmaps do
+		 * the minifying, and a rock at middle distance is not drawn from a
+		 * 64-pixel texture while its neighbour's 128 is resident. */
+		const qboolean asked_far = r_gx_cmpr_want_far;
 		const int levels_all = gc_prop_mat_levels[mat];
-		unsigned remain = 0, skip_b = 0;
+		unsigned remain = 0, skip_b = 0, cap;
 		int mi, shift = 0, slot = -1;
+		qboolean use_big, near_resident;
 		byte *data;
 		GXTexObj obj;
 
 		for( mi = 0; mi < levels_all; mi++ )
 			remain += R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> mi ),
 				(u16)Q_max( 1, gc_prop_mat_h[mat] >> mi ));
+		/* A chain too large for a near slot (256x256: the coast rocks) lives
+		 * whole in a big slot: for a near instance always, for a far one
+		 * when it is already there. */
+		use_big = r_gx_cmpr_big_n && r_gx_cmpr_big_for_props
+			&& remain > r_gx_cmpr_bounce_cap && remain <= r_gx_cmpr_big_cap
+			&& ( !asked_far || R_GXPropPoolResident( mat, 2 ));
+		near_resident = !use_big && asked_far && R_GXPropPoolResident( mat, 0 );
+		if( near_resident )
+			R_GXCmprSetFar( false );
+		cap = use_big ? r_gx_cmpr_big_cap : r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 		while( remain > cap && shift + 1 < levels_all )
 		{
 			const unsigned lb = R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> shift ),
@@ -6172,15 +6212,16 @@ static int R_GXPropBind( u8 mat )
 			 * R_GXCmprSlotFor walks up to 128 slots, and the props bind about
 			 * 500 times a frame over their three passes. */
 			{
-				static u8 hint[2][128];
+				u8 ( *const hint )[128] = gc_prop_slot_hint;
 				const unsigned key = gc_prop_tex_aram + gc_prop_mat_ofs[mat];
-				const int hs = (int)hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] - 1;
+				const int pool = use_big ? 2 : r_gx_cmpr_want_far ? 1 : 0;
+				const int hs = (int)hint[pool][mat & 127] - 1;
+				const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
 
 				if( hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
 					&& r_gx_cmpr_slot[hs].aram == key && r_gx_cmpr_slot[hs].skip == skip_b
 					&& r_gx_cmpr_slot[hs].bytes == remain
-					&& hs < r_gx_cmpr_nslots - r_gx_cmpr_big_n
-					&& ( hs >= r_gx_cmpr_nslots - r_gx_cmpr_big_n - r_gx_cmpr_far_n ) == ( r_gx_cmpr_want_far ? 1 : 0 ))
+					&& ( hs >= big_lo ? 2 : hs >= big_lo - r_gx_cmpr_far_n ? 1 : 0 ) == pool )
 				{
 					r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
 					r_gx_cmpr_hits++;
@@ -6189,9 +6230,11 @@ static int R_GXPropBind( u8 mat )
 				}
 				else
 				{
+					r_gx_cmpr_use_big = use_big;
 					data = R_GXCmprSlotFor( key, skip_b, remain, &slot );
+					r_gx_cmpr_use_big = false;
 					if( slot >= 0 && slot < 255 )
-						hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] = (u8)( slot + 1 );
+						hint[pool][mat & 127] = (u8)( slot + 1 );
 				}
 			}
 			GX_InitTexObj( &obj, data, (u16)Q_max( 8, gc_prop_mat_w[mat] >> shift ),
@@ -6208,8 +6251,12 @@ static int R_GXPropBind( u8 mat )
 			r_gx_cmpr_cur_slot = slot;
 			r_gx_bound_texnum = 0;
 			r_gx_bound_fmt = 0;
+			if( near_resident )
+				R_GXCmprSetFar( true );
 			return 1;
 		}
+		if( near_resident )
+			R_GXCmprSetFar( true );
 	}
 	/* Only without the shared slot cache: its 96 KB went to far LODs. */
 	if( !gc_prop_texmem_tried && r_gx_cmpr_nslots <= 8 && GC_MapLoadBufferTailPeak() > 0 )
