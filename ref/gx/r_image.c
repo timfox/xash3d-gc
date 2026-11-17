@@ -252,6 +252,11 @@ void GAME_EXPORT GL_Bind( int tmu, unsigned int texnum )
 #if XASH_GAMECUBE
 	/* Studio Flipper mesh path may not have ForceBegin yet — TriAPI-only
 	 * bind left r_gx_studio_bound_tex=0 and EmitTriC fell back to white (G376). */
+	{
+		extern unsigned r_gx_effects_pending_texnum;
+
+		r_gx_effects_pending_texnum = texnum;
+	}
 	if( R_GXTriApiIsActive() || R_GXStudioIsActive() )
 		R_GXStudioBindTexnum( texnum );
 #endif
