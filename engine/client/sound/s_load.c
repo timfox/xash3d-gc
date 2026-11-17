@@ -800,6 +800,22 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 	if( GC_MapLoadMemoryOpt() && Q_stricmp( sfx->name, "*default" )
 		&& !S_GCAllowRuntimeSoundLoad() )
 	{
+		/* In a match with the MEM1 budget full, retail would still play
+		 * it: take it from the ARAM store (or stream it there) rather than
+		 * drop it. Registration and map load stay lean. */
+		if( GC_MenuRunsServer() && cls.state == ca_active && !s_registering )
+		{
+			if(( sfx->cache = S_GCSoundFromStore( sfx )) != NULL )
+				return sfx->cache;
+			if( (uint32_t)( host.realtime * 10.0 ) < s_gc_sfx_cooldown[sfx - s_knownSfx] )
+				return NULL;
+			sfx->cache = S_GCStreamSoundToAram( sfx );
+			if( !sfx->cache )
+				S_GCSfxCooldown( sfx, GC_SFX_REFUSE_COOLDOWN );
+			else if( s_gcmapSoundSkips++ < 8 )
+				Con_Reportf( "Xash3D GameCube: sound budget full, %s plays from ARAM\n", sfx->name );
+			return sfx->cache;
+		}
 		if( s_gcmapSoundSkips < 8 )
 			Con_Reportf( "Xash3D GameCube: sound load skipped for map-load memopt %s\n", sfx->name );
 		s_gcmapSoundSkips++;
@@ -1173,8 +1189,10 @@ sound_t S_RegisterSound( const char *name )
 	if( name[0] == '/' || name[0] == '\\' ) name++;
 
 #if XASH_GAMECUBE
-	/* G126: only ric1 is preloaded; alias ric2–5 so dynamic Find/FS never runs. */
-	if( GC_MapLoadMemoryOpt()
+	/* G126: only ric1 is preloaded; alias ric2–5 so dynamic Find/FS never runs.
+	 * A match (menu runs the server) has the ARAM sound store, so it plays
+	 * all five ricochets as retail does. */
+	if( GC_MapLoadMemoryOpt() && !GC_MenuRunsServer()
 		&& !Q_strnicmp( name, "weapons/ric", 11 )
 		&& Q_stricmp( name, "weapons/ric1.wav" ))
 		name = "weapons/ric1.wav";
