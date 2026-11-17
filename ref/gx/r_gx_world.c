@@ -5806,11 +5806,17 @@ typedef struct
 {
 	u32	dl_ofs, first_bytes;
 	u16	tris;
-	u8	frac, pad;
+	u8	frac;
+	/* Close model (below): its range in units of 8. 0 = none. */
+	u8	close_dist8;
 	/* Far level of detail: about a sixth of the triangles. Same piece
 	 * chain layout; equal to the full chain for tiny models. */
 	u32	far_ofs, far_bytes;
-	u16	far_tris, pad2;
+	u16	far_tris;
+	/* Record + 1 of the close model: Source's LOD 0 of the same prop, drawn
+	 * instead of this one inside close_dist8 (Source's own LOD 0 range).
+	 * The pack keeps every model small, which showed next to the player. */
+	u16	close_model;
 } gc_prop_model_t;
 
 static unsigned gc_prop_aram;
@@ -6458,6 +6464,10 @@ static void R_GXPropSetLitAt( const float *org )
  * Angles are radians, Source order (pitch, yaw, roll). */
 /* Resident copy of a model's full chain, or NULL to stream it this frame. */
 static u32 gc_prop_want_frame[GC_PROP_MAX_MODELS], gc_prop_want_bytes, gc_prop_want_peak;
+/* Last frame's whole demand on the chain cache, and what close models newly
+ * asked for in this one: a close model is only taken while it fits beside
+ * everything else, never by pushing a chain out to be streamed again. */
+static u32 gc_prop_want_prev, gc_prop_close_new;
 
 static byte *R_GXPropCacheGet( unsigned model )
 {
@@ -6929,7 +6939,36 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 
 		gc_prop_tex_far = cover2 < 0.30f * 0.30f;
 		gc_prop_cur_light = gc_prop_light[in - gc_prop_inst];
-		drawn = R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
+		unsigned model = in->model;
+		const gc_prop_model_t *bm = &gc_prop_models[model];
+
+		/* Inside Source's LOD 0 range, and only while the prop fills the
+		 * view (its sphere wider than about 45 degrees): Source's whole
+		 * range put a dozen full models on screen at once in the harbor,
+		 * which the frame does not have. Never in the water mirror. */
+		if( bm->close_model && bm->close_model <= gc_prop_nmodels && !r_gx_mirror
+			&& cover2 > 0.40f * 0.40f )
+		{
+			const float cd = (float)bm->close_dist8 * 8.0f;
+
+			if( d2 < cd * cd )
+			{
+				const unsigned cm = bm->close_model - 1u;
+				const u32 cb = gc_prop_chain_bytes[cm];
+				const qboolean held = gc_prop_want_frame[cm] == gc_prop_cache_frame
+					|| gc_prop_want_frame[cm] == gc_prop_cache_frame + 1u;
+
+				if( held )
+					model = cm;
+				else if( gc_prop_cache_size
+					&& gc_prop_want_prev + gc_prop_close_new + cb + 32u * 1024u <= gc_prop_cache_size )
+				{
+					gc_prop_close_new += cb;
+					model = cm;
+				}
+			}
+		}
+		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
 		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
@@ -7129,6 +7168,8 @@ void R_GXPropDrawHorizon( const float *org )
 
 	if( gc_prop_want_bytes > gc_prop_want_peak )
 		gc_prop_want_peak = gc_prop_want_bytes;
+	gc_prop_want_prev = gc_prop_want_bytes;
+	gc_prop_close_new = 0;
 	gc_prop_want_bytes = 0;
 	gc_prop_cache_frame++;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
