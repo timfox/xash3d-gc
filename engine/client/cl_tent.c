@@ -383,6 +383,15 @@ CL_TEntAddEntity
 add entity to renderlist
 ==============
 */
+#if XASH_GAMECUBE
+/* The lean emit (cl_frame.c) clears the scene after CL_EmitEntities has
+ * linked the temp entities, so it links them again from this list. */
+#define GC_TENT_RELINK_MAX 96
+static cl_entity_t *gc_tent_linked[GC_TENT_RELINK_MAX];
+static int gc_tent_linked_n;
+static int gc_tent_update_frame = -1;
+#endif
+
 static int CL_TempEntAddEntity( cl_entity_t *pEntity )
 {
 	vec3_t mins, maxs;
@@ -405,6 +414,10 @@ static int CL_TempEntAddEntity( cl_entity_t *pEntity )
 
 		// add to list
 		CL_AddVisibleEntity( pEntity, ET_TEMPENTITY );
+#if XASH_GAMECUBE
+		if( gc_tent_linked_n < GC_TENT_RELINK_MAX )
+			gc_tent_linked[gc_tent_linked_n++] = pEntity;
+#endif
 
 		return 1;
 	}
@@ -425,8 +438,49 @@ void CL_TempEntUpdate( void )
 	double	ft = cl.time - cl.oldtime;
 	float	gravity = clgame.movevars.gravity;
 
+#if XASH_GAMECUBE
+	gc_tent_linked_n = 0;
+	gc_tent_update_frame = (int)host.framecount;
+#endif
 	clgame.dllFuncs.pfnTempEntUpdate( ft, cl.time, gravity, &cl_free_tents, &cl_active_tents, CL_TempEntAddEntity, CL_TempEntPlaySound );
 }
+
+#if XASH_GAMECUBE
+/*
+==============
+CL_GCRelinkTempEnts
+
+The lean emit clears the scene CL_EmitEntities filled. Link this frame's
+temp entities (muzzle flashes, smoke and explosion sprites, shells, gibs)
+again; if the temp entities were not updated this frame at all, run the
+events and the update here. Returns how many were linked.
+==============
+*/
+int CL_GCRelinkTempEnts( void )
+{
+	static int logs;
+	int i, ran = 0;
+
+	if( gc_tent_update_frame != (int)host.framecount )
+	{
+		CL_FireEvents();
+		CL_TempEntUpdate();
+		ran = 1;
+	}
+	else
+	{
+		for( i = 0; i < gc_tent_linked_n; i++ )
+			CL_AddVisibleEntity( gc_tent_linked[i], ET_TEMPENTITY );
+	}
+	if( gc_tent_linked_n > 0 && logs < 6 )
+	{
+		logs++;
+		Con_Reportf( "Xash3D GameCube: lean temp entities linked %d (%s)\n",
+			gc_tent_linked_n, ran ? "updated here" : "relinked" );
+	}
+	return gc_tent_linked_n;
+}
+#endif
 
 /*
 ==============

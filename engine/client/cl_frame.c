@@ -2762,6 +2762,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		}
 	}
 
+	/* R_ClearScene above dropped the temp entities CL_EmitEntities linked. */
+	CL_GCRelinkTempEnts();
+
 	if( log_n < 4 || ( studios > 0 && log_n < 8 ))
 	{
 		Con_Reportf( "Xash3D GameCube: lean EmitBrush entities=%d studios=%d ents=%d brush=%d studio_seen=%d skip=%d view=(%.0f,%.0f,%.0f)\n",
