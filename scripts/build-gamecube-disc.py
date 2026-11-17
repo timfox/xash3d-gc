@@ -2240,6 +2240,66 @@ def build_music_overlays(source: Path, output: Path, cache: Path) -> list[tuple[
 	return overlays
 
 
+def build_prop_packs(
+	source: Path,
+	output: Path,
+	cache: Path,
+	map_stems: set[str] | None = None,
+) -> list[tuple[str, Path]]:
+	"""media/gp_<map>.gcp + media/pt_<map>.gct for every Day of Defeat map:
+	its unnamed env_model / dod_object props as instanced GX display lists
+	with their own CMPR textures (scripts/bake_props_goldsrc.py, runtime
+	ref/gx/r_gx_world.c R_GXProp*). The engine draws them from ARAM without
+	loading a studio model, so a map is no longer held to six prop models.
+	Cached by BSP size and mtime."""
+	sys.path.insert(0, str(Path(__file__).resolve().parent))
+	import bake_props_goldsrc  # type: ignore
+
+	cache.mkdir(parents=True, exist_ok=True)
+	roots = [source] + [
+		root for root in (
+			Path(os.environ.get("DODGC_FULL_DOD", "").strip() or "/nonexistent"),
+			source.parent / "dod",
+			Path("/home/tim/Desktop/dod-gc/content/dod"),
+			Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
+			source.parent / "valve",
+			Path("/home/tim/Desktop/dod-gc/content/valve"),
+		) if root.is_dir()
+	]
+	overlays: list[tuple[str, Path]] = []
+	for bsp in sorted((source / "maps").glob("dod_*.bsp")):
+		stem = bsp.stem.lower()
+		if map_stems is not None and stem not in map_stems:
+			continue
+		st = bsp.stat()
+		gcp, gct, stamp = cache / f"gp_{stem}.gcp", cache / f"pt_{stem}.gct", cache / f"gp_{stem}.stamp"
+		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-1"
+		if not (stamp.is_file() and stamp.read_text() == key):
+			for stale in (gcp, gct):
+				stale.unlink(missing_ok=True)
+			stamp.unlink(missing_ok=True)
+			try:
+				stats = bake_props_goldsrc.bake(bsp, roots, gcp, gct, gx_cmpr_encode_blocks)
+			except (Exception, SystemExit) as error:  # the map keeps the engine's own static props
+				print(f"  props: bake failed for {bsp.name}: {error}")
+				stats = None
+				for stale in (gcp, gct):
+					stale.unlink(missing_ok=True)
+			# A bake that could not find a model file is tried again next
+			# build, when the file may be there.
+			if stats is None or not stats["missing"]:
+				stamp.write_text(key)
+		if not (gcp.is_file() and gct.is_file()):
+			continue
+		for name, src in ((f"gp_{stem}.gcp", gcp), (f"pt_{stem}.gct", gct)):
+			dest = output / "media" / name
+			dest.parent.mkdir(parents=True, exist_ok=True)
+			shutil.copy2(src, dest)
+			overlays.append((f"media/{name}", dest))
+	print(f"  props: {len(overlays) // 2} map prop pack(s)")
+	return overlays
+
+
 def build_world_texture_packs(
 	source: Path,
 	output: Path,
@@ -3663,6 +3723,7 @@ def create_retail_boot_overlays(
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
 	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
+	overlays.extend(build_prop_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-gp-cache"))
 	# Offline CapFaces packs (media/cf_<map>.gcp) — load-time DL for 60 FPS Flipper.
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore
 
@@ -4053,6 +4114,12 @@ def stage_smoke_data(
 		source,
 		output,
 		Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache",
+		pack_stems,
+	)
+	build_prop_packs(
+		source,
+		output,
+		Path(__file__).resolve().parents[1] / "build" / "gc-gp-cache",
 		pack_stems,
 	)
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore

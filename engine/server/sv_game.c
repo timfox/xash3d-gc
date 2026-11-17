@@ -6238,11 +6238,24 @@ static qboolean SV_GCStaticPropClass( const char *classname )
 	return !Q_strcmp( classname, "env_model" ) || !Q_strcmp( classname, "dod_object" );
 }
 
+/* media/gp_<map>.gcp (scripts/bake_props_goldsrc.py): every unnamed
+ * env_model / dod_object of the map as instanced display lists with their
+ * own textures, drawn by the renderer straight from ARAM on the host and on
+ * every client. With it no prop model is loaded at all, so nothing here is
+ * capped: the entities are only consumed. */
+static qboolean gc_static_prop_pack;
+static int gc_static_prop_packed;
+
 static void SV_GCStaticPropsReset( void )
 {
+	char path[96];
+
 	gc_num_static_props = 0;
 	gc_static_prop_nmodels = 0;
 	gc_static_prop_deferred = 0;
+	gc_static_prop_packed = 0;
+	Q_snprintf( path, sizeof( path ), "media/gp_%s.gcp", sv.name );
+	gc_static_prop_pack = !Sys_CheckParm( "-gcnoproppack" ) && FS_FileExists( path, false );
 }
 
 /* Model index for a static prop. Unique paths are capped like the game's own
@@ -6338,10 +6351,15 @@ static qboolean SV_GCTryStaticProp( char **pfile )
 			prop.rendercolor.b = (byte)b;
 		}
 	}
-	if( !is_prop || named || gc_num_static_props >= GC_STATIC_PROPS_MAX )
+	if( !is_prop || named || ( !gc_static_prop_pack && gc_num_static_props >= GC_STATIC_PROPS_MAX ))
 		return false;
 
 	*pfile = p;
+	if( gc_static_prop_pack )
+	{
+		gc_static_prop_packed++;
+		return true;	/* the renderer draws it from the map's prop pack */
+	}
 	if( model[0] )
 		prop.modelindex = (short)SV_GCStaticPropModel( model );
 	if( prop.modelindex <= 0 )
@@ -7156,8 +7174,8 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			}
 		}
 		Con_Reportf( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
-		Con_Reportf( "Xash3D GameCube: static props %d drawn from %d models, %d without a model; edicts in use %d\n",
-			gc_num_static_props, gc_static_prop_nmodels, gc_static_prop_deferred, svgame.numEntities );
+		Con_Reportf( "Xash3D GameCube: static props %d drawn from %d models, %d without a model, %d in the prop pack; edicts in use %d\n",
+			gc_num_static_props, gc_static_prop_nmodels, gc_static_prop_deferred, gc_static_prop_packed, svgame.numEntities );
 		SV_GCSignonStaticProps();
 		SYS_Report( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 #endif
