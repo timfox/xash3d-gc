@@ -182,6 +182,7 @@ CL_ClearTempEnts
  * below GI->max_tents). Linking GI->max_tents entries wrote free-list
  * pointers past the end of a 4-entry allocation. */
 static int cl_tempents_count;
+static qboolean gc_tempents_in_spill;
 unsigned gc_fx_tent_alloc, gc_fx_tent_overflow, gc_fx_tent_nomodel, gc_fx_te_parsed;
 #endif
 
@@ -195,6 +196,18 @@ static void CL_ClearTempEnts( void )
 		max_tents = Q_min( max_tents, cl_tempents_count );
 #endif
 
+#if XASH_GAMECUBE
+	/* A spill pool (CL_GCEnsureTempEntPool) may already be rewound for the
+	 * next map: drop it rather than write the free list into new data. */
+	if( cl_tempents && gc_tempents_in_spill )
+	{
+		cl_tempents = NULL;
+		cl_tempents_count = 0;
+		gc_tempents_in_spill = false;
+		cl_free_tents = cl_active_tents = NULL;
+		return;
+	}
+#endif
 	if( !cl_tempents ) return;
 
 	for( int i = 0; i < max_tents - 1; i++ )
@@ -246,6 +259,90 @@ void CL_InitTempEnts( void )
 	CL_LoadClientSprites ();
 }
 
+#if XASH_GAMECUBE
+/*
+================
+CL_GCEnsureTempEntPool
+
+DoD's lean listen route never runs CL_InitTempEnts (MEM1 is too tight at
+client init), so every temp entity was refused: no muzzle flash, smoke,
+explosion, ricochet or shell. Once a map is up, give the pool 16 entries
+(~2 KiB each): from the heap when it keeps a 64 KiB margin, else from the
+world-array spill, which is rewound per map, so it is redone per world.
+Also loads the muzzle flash sprites the route skipped.
+================
+*/
+void CL_GCEnsureTempEntPool( void )
+{
+	extern size_t GC_MemHeapFreeBytes( void );
+	extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+	extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+	extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
+	static double next_try;
+	const int want = 16;
+	const size_t bytes = sizeof( TEMPENTITY ) * want;
+	const char *where = "heap";
+	int i;
+
+	/* A spill pool dies with its map: drop it once the spill was rewound. */
+	if( cl_tempents && gc_tempents_in_spill
+		&& !Mod_GCWorldArraySpillHolds( cl_tempents, sizeof( TEMPENTITY ) * cl_tempents_count ))
+	{
+		cl_tempents = NULL;
+		cl_tempents_count = 0;
+		cl_free_tents = cl_active_tents = NULL;
+		gc_tempents_in_spill = false;
+	}
+	if( cl_tempents || !cl.worldmodel || host.realtime < next_try )
+		return;
+	next_try = host.realtime + 5.0;
+	if( GC_MemHeapFreeBytes() > bytes + 64 * 1024 )
+		cl_tempents = Mem_Calloc( cls.mempool, bytes );
+	if( !cl_tempents )
+	{
+		cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
+		if( cl_tempents )
+		{
+			memset( cl_tempents, 0, bytes );
+			Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
+			gc_tempents_in_spill = true;
+			where = "spill";
+		}
+	}
+	if( !cl_tempents )
+	{
+		static int fail_logs;
+
+		cl_free_tents = cl_active_tents = NULL;
+		if( fail_logs++ < 3 )
+			Con_Reportf( "Xash3D GameCube: client tempents unavailable (%s needed, heap %s)\n",
+				Q_memprint( bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
+		return;
+	}
+	cl_tempents_count = want;
+	for( i = 0; i < want - 1; i++ )
+	{
+		cl_tempents[i].next = &cl_tempents[i + 1];
+		cl_tempents[i].entity.trivial_accept = INVALID_HANDLE;
+	}
+	cl_tempents[want - 1].next = NULL;
+	cl_tempents[want - 1].entity.trivial_accept = INVALID_HANDLE;
+	cl_free_tents = cl_tempents;
+	cl_active_tents = NULL;
+	if( !cl_sprite_muzzleflash[0] )
+	{
+		cl_sprite_muzzleflash[0] = CL_LoadClientSprite( cl_default_sprites[0] );
+		cl_sprite_muzzleflash[1] = CL_LoadClientSprite( cl_default_sprites[1] );
+		cl_sprite_muzzleflash[2] = CL_LoadClientSprite( cl_default_sprites[2] );
+	}
+	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
+		cl_sprite_ricochet = CL_LoadClientSprite( cl_default_sprites[5] );
+	Con_Reportf( "Xash3D GameCube: client tempents %d in %s (%s), muzzle flash %s, heap %s\n",
+		want, where, Q_memprint( bytes ), cl_sprite_muzzleflash[0] ? "loaded" : "missing",
+		Q_memprint( GC_MemHeapFreeBytes( )));
+}
+#endif
+
 /*
 ================
 CL_FreeTempEnts
@@ -254,8 +351,16 @@ CL_FreeTempEnts
 */
 void CL_FreeTempEnts( void )
 {
+#if XASH_GAMECUBE
+	/* A spill pool belongs to the map arena, not the mempool. */
+	if( cl_tempents && !gc_tempents_in_spill )
+		Mem_Free( cl_tempents );
+	cl_tempents_count = 0;
+	gc_tempents_in_spill = false;
+#else
 	if( cl_tempents )
 		Mem_Free( cl_tempents );
+#endif
 	cl_tempents = NULL;
 }
 
@@ -474,6 +579,7 @@ int CL_GCRelinkTempEnts( void )
 	static int logs;
 	int i, ran = 0;
 
+	CL_GCEnsureTempEntPool();
 	if( gc_tent_update_frame != (int)host.framecount )
 	{
 		CL_FireEvents();
