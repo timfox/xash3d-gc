@@ -244,7 +244,7 @@ class DropToFloorTests(unittest.TestCase):
 			],
 		)
 		light.floors = []
-		light.heads = [(0, (0.0, 0.0, 0.0), None, None)]
+		light.heads = [(0, (0.0, 0.0, 0.0), None, None, -1)]
 		self.assertAlmostEqual(light.drop((0.0, 0.0, -10.0)), -160.0, delta=0.01)
 		added = light.add_brush_entities([
 			{"classname": "func_wall", "model": "*1"},
@@ -255,6 +255,12 @@ class DropToFloorTests(unittest.TestCase):
 		self.assertAlmostEqual(light.drop((0.0, 0.0, -10.0)), -88.0, delta=0.01)
 		# Outside the slab the world floor still counts.
 		self.assertAlmostEqual(light.drop((900.0, 0.0, -10.0)), -160.0, delta=0.01)
+		# The game spawns entities in lump order: a prop that comes before
+		# the slab (entity 0) falls through it, and one that starts inside
+		# it is not stuck. A later prop lands on it.
+		self.assertAlmostEqual(light.drop((0.0, 0.0, -10.0), before=0), -160.0, delta=0.01)
+		self.assertAlmostEqual(light.drop((0.0, 0.0, -100.0), before=0), -160.0, delta=0.01)
+		self.assertAlmostEqual(light.drop((0.0, 0.0, -10.0), before=1), -88.0, delta=0.01)
 
 	def test_spawnflag_2_marks_a_prop_for_the_drop(self):
 		ents = [

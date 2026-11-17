@@ -306,7 +306,7 @@ def _floats(s: str, n: int):
 def static_props(ents: list[dict]) -> list[dict]:
 	"""The entities SV_GCTryStaticProp consumes, with the keys it reads."""
 	out = []
-	for e in ents:
+	for ent_index, e in enumerate(ents):
 		if e.get("classname") not in PROP_CLASSES or e.get("targetname"):
 			continue
 		model = e.get("model", "").replace("\\", "/")
@@ -340,6 +340,9 @@ def static_props(ents: list[dict]) -> list[dict]:
 			# env_model spawnflag 2: the game drops the model onto the floor
 			# at spawn (charlie's hedgehogs and wire sit 16-36 units up).
 			"drop": bool(int(_floats(e.get("spawnflags", "0"), 1)[0]) & 2),
+			# Lump position: the game spawns entities in this order, and a
+			# prop dropping to the floor only meets what already spawned.
+			"ent": ent_index,
 		})
 	return out
 
@@ -374,7 +377,7 @@ class FloorLight:
 		self.floors = []
 		# Hull-0 roots a point trace tests: the world, then solid brush
 		# entities as (head node, origin offset, mins, maxs).
-		self.heads = [(0, (0.0, 0.0, 0.0), None, None)] if self.bsp.nodes else []
+		self.heads = [(0, (0.0, 0.0, 0.0), None, None, -1)] if self.bsp.nodes else []
 		first, count = 0, len(self.bsp.faces)
 		if self.bsp.models:
 			first, count = self.bsp.models[0][-2], self.bsp.models[0][-1]
@@ -388,11 +391,12 @@ class FloorLight:
 	))
 
 	def add_brush_entities(self, ents: list[dict]) -> int:
-		"""Solid brush entities (func_wall and the like) are ground too:
-		dod_charlie's beach sand is one, 60-84 units above the world brush
-		under it."""
+		"""Solid brush entities (func_wall and the like) are ground too, for
+		the props that spawn after them. dod_charlie's invisible func_wall
+		over the beach comes after its hedgehogs in the entity lump, so they
+		fall through to the world sand under it."""
 		added = 0
-		for e in ents:
+		for ent_index, e in enumerate(ents):
 			model = e.get("model", "")
 			cls = e.get("classname", "")
 			if not model.startswith("*") or not cls.startswith("func_") or cls in self.NOT_SOLID:
@@ -405,7 +409,7 @@ class FloorLight:
 				continue
 			vals = self.bsp.models[mi]
 			org = tuple(_floats(e.get("origin", "0 0 0"), 3))
-			self.heads.append((vals[9], org, vals[0:3], vals[3:6]))
+			self.heads.append((vals[9], org, vals[0:3], vals[3:6], ent_index))
 			if org == (0.0, 0.0, 0.0):
 				self._add_floors(vals[-2], vals[-1])
 			added += 1
@@ -428,10 +432,13 @@ class FloorLight:
 			xs, ys = [p[0] for p in pts], [p[1] for p in pts]
 			self.floors.append((min(xs), min(ys), max(xs), max(ys), (nx, ny, nz, dist), pts, f, ti0, ti1, flags))
 
-	def solid(self, p) -> bool:
-		"""Point contents of the world hull: true inside solid."""
+	def solid(self, p, before=None) -> bool:
+		"""Point contents of the world hull: true inside solid. With before,
+		only brush entities that spawn earlier in the entity lump count."""
 		bsp = self.bsp
-		for head, org, mins, maxs in getattr(self, "heads", [(0, (0.0, 0.0, 0.0), None, None)]):
+		for head, org, mins, maxs, owner in getattr(self, "heads", [(0, (0.0, 0.0, 0.0), None, None, -1)]):
+			if before is not None and owner >= before:
+				continue
 			q = (p[0] - org[0], p[1] - org[1], p[2] - org[2])
 			if mins is not None and any(q[a] < mins[a] - 1.0 or q[a] > maxs[a] + 1.0 for a in range(3)):
 				continue
@@ -447,20 +454,20 @@ class FloorLight:
 				return True
 		return False
 
-	def drop(self, p, reach: float = 256.0):
+	def drop(self, p, reach: float = 256.0, before=None):
 		"""DROP_TO_FLOOR for a point entity: the z where a trace straight
 		down from p first meets solid within reach, or None when p starts in
 		solid or nothing is hit (the game leaves the entity where it is)."""
 		x, y, z0 = p[0], p[1], p[2]
-		if self.solid((x, y, z0)):
+		if self.solid((x, y, z0), before):
 			return None
 		step, lo = 1.0, z0
 		while lo - step >= z0 - reach:
-			if self.solid((x, y, lo - step)):
+			if self.solid((x, y, lo - step), before):
 				hi, bot = lo, lo - step
 				for _ in range(12):
 					mid = 0.5 * (hi + bot)
-					if self.solid((x, y, mid)):
+					if self.solid((x, y, mid), before):
 						bot = mid
 					else:
 						hi = mid
@@ -626,7 +633,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		for prop in props:
 			if not prop["drop"]:
 				continue
-			z = floor.drop(prop["origin"])
+			z = floor.drop(prop["origin"], before=prop.get("ent"))
 			if z is not None:
 				prop["origin"] = [prop["origin"][0], prop["origin"][1], z]
 				dropped += 1
