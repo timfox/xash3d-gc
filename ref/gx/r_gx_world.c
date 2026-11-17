@@ -1763,10 +1763,14 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 }
 
 static void R_GXCmprSlotsReset( void );
+/* Counts world changes, for state that hangs off the map (the prop pack). */
+static unsigned r_gx_world_epoch;
 
 static void R_GXTexCacheReset( void )
 {
 	int i;
+
+	r_gx_world_epoch++;
 	const size_t pool_bytes =
 		(size_t)GC_GX_TEX_MAX_DIM * (size_t)GC_GX_TEX_MAX_DIM * sizeof( u16 );
 
@@ -5941,17 +5945,96 @@ static qboolean R_GXPropIsWorldPlate( const gc_prop_inst_t *in )
 	return true;
 }
 
+/* Slot each prop material was last found in, per pool ( 0 near, 1 far, 2 big ), + 1. */
+static u8 gc_prop_slot_hint[3][128];
+
+/* The map the pack state belongs to. Lost Coast has one map and one pack;
+ * a Day of Defeat disc has a pack per map (scripts/bake_props_goldsrc.py:
+ * every unnamed env_model / dod_object of the BSP, as instanced display
+ * lists), so the state follows the world model. */
+static char gc_prop_map[64];
+static qboolean gc_prop_map_owned;
+static unsigned gc_prop_epoch;
+static size_t gc_prop_spill_mark;
+
+static void R_GXPropMapCheck( void )
+{
+	const model_t *world = WORLDMODEL;
+	char base[64];
+	int k;
+
+	if( !world || !world->name[0] )
+		return;
+	if( Q_stristr( world->name, "lostcoast" ))
+		Q_strncpy( base, "d2_lostcoast", sizeof( base ));
+	else
+		COM_FileBase( world->name, base, sizeof( base ));
+	if( !Q_stricmp( base, gc_prop_map ))
+	{
+		extern size_t Mod_GCWorldArraySpillUsed( void );
+
+		/* Same map loaded again: the pack in ARAM is still this map's, but
+		 * the spill block of the resident chains went with the old load. */
+		if( gc_prop_map_owned && gc_prop_cache_tried
+			&& ( gc_prop_epoch != r_gx_world_epoch
+			|| ( gc_prop_cache && Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark )))
+		{
+			GX_DrawDone();
+			gc_prop_cache = NULL;
+			gc_prop_cache_size = gc_prop_cache_head = 0;
+			gc_prop_cache_tried = false;
+			for( k = 0; k < GC_PROP_MAX_MODELS; k++ )
+				gc_prop_cache_ofs[k] = -1;
+		}
+		gc_prop_epoch = r_gx_world_epoch;
+		return;
+	}
+	gc_prop_epoch = r_gx_world_epoch;
+	if( gc_prop_map[0] )
+	{
+		/* The GP may still be reading the old pack's lists and textures. */
+		GX_DrawDone();
+		if( gc_prop_map_owned )
+		{
+			if( gc_prop_aram )
+				GC_AramFree( gc_prop_aram );
+			if( gc_prop_tex_aram )
+				GC_AramFree( gc_prop_tex_aram );
+		}
+		R_GXCmprSlotsReset();
+	}
+	gc_prop_aram = 0;
+	gc_prop_tex_aram = 0;
+	gc_prop_nmat = 0;
+	gc_prop_ninst = 0;
+	gc_prop_nmodels = 0;
+	gc_prop_cache = NULL;
+	gc_prop_cache_size = gc_prop_cache_head = 0;
+	gc_prop_cache_tried = false;
+	for( k = 0; k < GC_PROP_MAX_MODELS; k++ )
+		gc_prop_cache_ofs[k] = -1;
+	memset( gc_prop_slot_hint, 0, sizeof( gc_prop_slot_hint ));
+	Q_strncpy( gc_prop_map, base, sizeof( gc_prop_map ));
+	gc_prop_map_owned = Q_stricmp( base, "d2_lostcoast" ) != 0;
+	gc_prop_state = 0;
+}
+
 static void R_GXPropLoad( void )
 {
 	file_t *f;
 	u32 hdr[8];
 	u32 size, off;
 
+	char path[96];
+
 	gc_prop_state = -1;
-	f = gEngfuncs.fsapi->Open( "media/gp_d2_lostcoast.gcp", "rb", false );
+	if( gc_prop_map_owned && gEngfuncs.Sys_CheckParm( "-gcnoproppack" ))
+		return;
+	Q_snprintf( path, sizeof( path ), "media/gp_%s.gcp", gc_prop_map );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
 	if( !f )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack missing\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack missing (%s)\n", path );
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
@@ -5982,7 +6065,9 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	gc_prop_far_size = size - gc_prop_far_base;
-	gc_prop_aram = GC_AramReserve( size );
+	/* Lost Coast keeps its pack for the session. Any other map's pack is
+	 * this map's only: its block goes back when the map changes. */
+	gc_prop_aram = gc_prop_map_owned ? GC_AramAllocTagged( size, false, "props" ) : GC_AramReserve( size );
 	if( !gc_prop_aram )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack no ARAM (%u Kb)\n", size / 1024u );
@@ -6070,8 +6155,8 @@ static void R_GXPropLoad( void )
 		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack v6 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
-		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
+		"Xash3D GameCube: prop pack %s v%u inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		gc_prop_map, hdr[1] >> 16, gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
 		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
 }
@@ -6090,7 +6175,10 @@ static void R_GXPropLoadTex( void )
 	u32 size, off, data_ofs, i;
 	int s;
 
-	f = gEngfuncs.fsapi->Open( "media/pt_d2_lostcoast.gct", "rb", false );
+	char path[96];
+
+	Q_snprintf( path, sizeof( path ), "media/pt_%s.gct", gc_prop_map );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
 	if( !f )
 		return;
 	if( gEngfuncs.fsapi->Read( f, hdr, 12 ) != 12 || hdr[0] != GC_WT_MAGIC
@@ -6120,7 +6208,7 @@ static void R_GXPropLoadTex( void )
 	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
 	size = (u32)gEngfuncs.fsapi->Tell( f );
 	size = ( size + 31u ) & ~31u;
-	gc_prop_tex_aram = GC_AramReserve( size );
+	gc_prop_tex_aram = gc_prop_map_owned ? GC_AramAllocTagged( size, false, "proptex" ) : GC_AramReserve( size );
 	if( !gc_prop_tex_aram )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tex no ARAM (%u Kb)\n", size / 1024u );
@@ -6151,8 +6239,6 @@ static void R_GXPropLoadTex( void )
 		gc_prop_nmat, size / 1024u );
 }
 
-/* Slot each prop material was last found in, per pool ( 0 near, 1 far, 2 big ), + 1. */
-static u8 gc_prop_slot_hint[3][128];
 
 /* True when that pool holds this material's chain and it was bound recently. */
 static qboolean R_GXPropPoolResident( u8 mat, int pool )
@@ -6382,6 +6468,8 @@ static byte *R_GXPropCacheGet( unsigned model )
 
 	/* A new generation (map load, cap faces rewrite) releases the memory the
 	 * cache lived in. From Codex's prop-coalesce work. */
+	if( generation != gc_prop_cache_generation && gc_prop_map_owned )
+		gc_prop_cache_generation = generation;	/* its block is the spill's: R_GXPropMapCheck drops it */
 	if( generation != gc_prop_cache_generation )
 	{
 		if( gc_prop_cache )
@@ -6404,8 +6492,44 @@ static byte *R_GXPropCacheGet( unsigned model )
 	{
 		u32 try_sz;
 
+		if( gc_prop_cache_tried )
+			return NULL;
+		if( gc_prop_map_owned )
+		{
+			/* A map pack (Day of Defeat): the studio arena belongs to the
+			 * players and the view models, so the chains go in what the
+			 * map left of the world-array spill, and no more than all of
+			 * them need. What does not fit is streamed. */
+			extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+			extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+			extern size_t Mod_GCWorldArraySpillFreeLasting( void );
+			const size_t room = Mod_GCWorldArraySpillFreeLasting();
+			const size_t margin = 48u * 1024u;
+			u32 all = 0;
+
+			gc_prop_cache_tried = true;
+			for( k = 0; k < gc_prop_nmodels; k++ )
+				all += gc_prop_chain_bytes[k];
+			try_sz = room > margin ? (u32)(( room - margin ) & ~31u ) : 0;
+			if( try_sz > all )
+				try_sz = all;
+			if( try_sz >= 8u * 1024u )
+				gc_prop_cache = (byte *)Mod_GCWorldArraySpillTryAlloc( try_sz, "prop chains" );
+			if( gc_prop_cache )
+			{
+				extern size_t Mod_GCWorldArraySpillUsed( void );
+
+				Mod_GCWorldArraySpillPinBase( gc_prop_cache, try_sz );
+				gc_prop_cache_size = try_sz;
+				gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb of %u Kb (spill, %u Kb free)\n",
+				gc_prop_cache_size / 1024u, all / 1024u, (unsigned)( room / 1024u ));
+		}
+		else
+		{
 		/* Only beside the adopted texture cache: that marks a large world. */
-		if( gc_prop_cache_tried || r_gx_cmpr_nslots <= 8 )
+		if( r_gx_cmpr_nslots <= 8 )
 			return NULL;
 		gc_prop_cache_tried = true;
 		/* In 16 KB steps: 640 KB did not fit, the next try was 512 KB, and
@@ -6441,6 +6565,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb (map arena tail)\n",
 				gc_prop_cache_size / 1024u );
+		}
 		}
 		if( !gc_prop_cache )
 			return NULL;
@@ -6527,8 +6652,14 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	const float sy = yaw != 0.0f ? sinf( yaw ) : 0.0f, cy = yaw != 0.0f ? cosf( yaw ) : 1.0f;
 	const float sr = roll != 0.0f ? sinf( roll ) : 0.0f, cr = roll != 0.0f ? cosf( roll ) : 1.0f;
 
+	const qboolean far_tex = far_lod;
+
 	if( model >= gc_prop_nmodels )
 		return 0;
+	/* A map pack has no far chains: its models are a few hundred triangles
+	 * and the resident copy is the full one. Only the texture goes far. */
+	if( gc_prop_map_owned )
+		far_lod = false;
 	m = &gc_prop_models[model];
 	mm[0][0] = cp * cy; mm[0][1] = sr * sp * cy - cr * sy; mm[0][2] = cr * sp * cy + sr * sy; mm[0][3] = org[0];
 	mm[1][0] = cp * sy; mm[1][1] = sr * sp * sy + cr * cy; mm[1][2] = cr * sp * sy - sr * cy; mm[1][3] = org[1];
@@ -6615,7 +6746,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 				gc_prop_far_size / 1024u );
 		}
 	}
-	R_GXCmprSetFar( far_lod || gc_prop_tex_far );
+	R_GXCmprSetFar( far_tex || gc_prop_tex_far );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
 	if( far_lod && gc_prop_far_mem )
@@ -7005,6 +7136,7 @@ void R_GXPropDrawHorizon( const float *org )
 	u16 tmp;
 	float ftmp;
 
+	R_GXPropMapCheck();
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
@@ -7096,6 +7228,7 @@ static void R_GXPropDraw( const float *org )
 	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	int i, drawn = 0, near = 0;
 
+	R_GXPropMapCheck();
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
