@@ -6043,7 +6043,16 @@ static qboolean SV_GCParityEntity( const char *classname )
 		|| !Q_strcmp( classname, "info_target" )
 		|| !Q_strcmp( classname, "trigger_relay" )
 		|| !Q_strcmp( classname, "trigger_auto" )
-		|| !Q_strcmp( classname, "trigger_changetarget" );
+		|| !Q_strcmp( classname, "trigger_changetarget" )
+		/* Map sound and scripted effects, kept within the edict budget:
+		 * the round-win fanfares (ambience/uswin.wav, germanwin.wav,
+		 * britwin.wav) are ambient_generics fired by the win relays, and
+		 * map ambience, scripted blasts and smoke come from these too. */
+		|| !Q_strcmp( classname, "ambient_generic" )
+		|| !Q_strcmp( classname, "env_explosion" )
+		|| !Q_strcmp( classname, "env_shooter" )
+		|| !Q_strcmp( classname, "env_sprite" )
+		|| !Q_strcmp( classname, "env_shake" );
 }
 
 /* Their private data comes from the static entity slab, not the heap (on
@@ -6056,7 +6065,8 @@ static qboolean SV_GCParityEntity( const char *classname )
 static int gc_parity_budget = 0x7fffffff;
 static int gc_parity_kept;
 /* Parity tiers, kept in this order when the budget is short: 0 brush walls
- * players collide with, 1 map logic (target chains), 2 switchable lights. */
+ * players collide with, 1 map logic (target chains, ambient_generic sounds,
+ * env_explosion), 2 switchable lights and decorative effects. */
 #define GC_PARITY_TIERS 3
 static int gc_parity_tier_budget[GC_PARITY_TIERS] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
 static int gc_parity_tier_kept[GC_PARITY_TIERS];
@@ -6070,7 +6080,9 @@ static int SV_GCParityTier( const char *classname )
 	if( !Q_strcmp( classname, "func_wall" ) || !Q_strcmp( classname, "func_wall_toggle" )
 		|| !Q_strcmp( classname, "func_illusionary" ))
 		return 0;
-	if( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" ))
+	if( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )
+		|| !Q_strcmp( classname, "env_shooter" ) || !Q_strcmp( classname, "env_sprite" )
+		|| !Q_strcmp( classname, "env_shake" ))
 		return 2;
 	return 1;
 }
