@@ -50,6 +50,7 @@ Not feature-parity: full brush-mover lighting remains soft/diagnostic.
 #include <math.h>
 #include <stdlib.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
+#include "../../engine/platform/gamecube/hud_hires.h"
 
 extern qboolean GC_UseGxWorldDraw( void );
 extern qboolean GC_UseGxRenderer( void );
@@ -587,6 +588,189 @@ void R_GXReserveHudPoolEarly( void )
 }
 
 /*
+ * Full-resolution HUD cells (hud_hires.c). DoD's 256 px HUD sheets keep their
+ * indices in ARAM; a HUD draw from one of them gets a GX texture of just the
+ * cell it draws, at full resolution, built once and kept while it is drawn.
+ * The shrunk sheet upload stays as the fallback.
+ */
+#define GC_HUDHI_ARENA_MAX	( 64u * 1024u )
+static gc_hudhi_t r_hudhi;
+static qboolean r_hudhi_ready, r_hudhi_failed;
+static int r_hudhi_sheets;
+static void *r_hudhi_arena;
+static unsigned r_hudhi_arena_tries_frame;
+static unsigned r_hudhi_frames;
+static gc_gx_tex_t r_hudhi_tex;
+
+static void R_GXHudHiGpuIdle( void )
+{
+	GX_DrawDone();
+}
+
+static qboolean R_GXHudHiEnsure( void )
+{
+	gc_aram_cache_t *cache;
+
+	if( r_hudhi_ready )
+		return true;
+	if( r_hudhi_failed )
+		return false;
+	cache = GC_AramAssetCacheGet();
+	if( !cache )
+	{
+		r_hudhi_failed = true;
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res off (no ARAM cache)\n" );
+		return false;
+	}
+	GC_HudHiInit( &r_hudhi, cache, R_GXHudHiGpuIdle );
+	r_hudhi_ready = true;
+	return true;
+}
+
+/* Called by cl_sprite.c before it shrinks a big HUD sheet. */
+int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette )
+{
+	int handle;
+
+	if( !R_GXHudHiEnsure() || w < 1 || h < 1 || w > GC_HUDHI_MAX_DIM || h > GC_HUDHI_MAX_DIM )
+		return -1;
+	handle = GC_HudHiRegister( &r_hudhi, texname, (uint16_t)w, (uint16_t)h, indices, rgba_palette );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res %s %dx%d %s (sheet %d)\n",
+		texname, w, h, handle >= 0 ? "kept in ARAM" : "refused", handle );
+	return handle;
+}
+
+void R_GXHudHiSetTexnum( int handle, int texnum )
+{
+	if( !r_hudhi_ready || handle < 0 )
+		return;
+	GC_HudHiSetTexnum( &r_hudhi, handle, texnum );
+	r_hudhi_sheets++;
+}
+
+void R_GXHudHiBeginFrame( void )
+{
+	r_hudhi_frames++;
+	if( r_hudhi_ready )
+		GC_HudHiBeginFrame( &r_hudhi );
+}
+
+static void R_GXHudHiReleaseArena( void )
+{
+	if( !r_hudhi_arena )
+		return;
+	GX_DrawDone();
+	GC_HudHiSetArena( &r_hudhi, NULL, 0 );
+	free( r_hudhi_arena );
+	r_hudhi_arena = NULL;
+}
+
+/* The cell arena comes from the heap on the first hi-res draw after a map
+ * load (it is released before the next one). Asked for at most once a
+ * second when the heap says no. */
+static qboolean R_GXHudHiArena( void )
+{
+	static const unsigned sizes[] = { GC_HUDHI_ARENA_MAX, 48u * 1024u, 32u * 1024u };
+	size_t i;
+
+	if( r_hudhi_arena )
+		return true;
+	if( r_hudhi_arena_tries_frame && r_hudhi_frames - r_hudhi_arena_tries_frame < 60 )
+		return false;
+	r_hudhi_arena_tries_frame = r_hudhi_frames ? r_hudhi_frames : 1;
+	for( i = 0; i < sizeof( sizes ) / sizeof( sizes[0] ); i++ )
+	{
+		r_hudhi_arena = memalign( 32, sizes[i] );
+		if( r_hudhi_arena )
+		{
+			GC_HudHiSetArena( &r_hudhi, r_hudhi_arena, sizes[i] );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res cell arena %uK\n",
+				sizes[i] / 1024u );
+			return true;
+		}
+	}
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res cell arena refused (heap %u)\n",
+		(unsigned)GC_MemHeapFreeBytes());
+	return false;
+}
+
+/* Bind the full-resolution cell for a HUD draw from a registered sheet and
+ * remap its texture coordinates onto the cell. NULL: draw the shrunk sheet. */
+static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, float *t2 )
+{
+	image_t *img;
+	int handle, x0, y0, x1, y1, fresh;
+	uint16_t sw, sh, tw, th;
+	const uint16_t *texels;
+	float smin, smax, tmin, tmax;
+
+	if( !r_hudhi_ready || r_hudhi_sheets <= 0 )
+		return NULL;
+	img = R_GetTexture( (unsigned)texnum );
+	if( !img )
+		return NULL;
+	handle = GC_HudHiFind( &r_hudhi, texnum, img->name );
+	if( handle < 0 || !R_GXHudHiArena())
+		return NULL;
+	GC_HudHiSheetSize( &r_hudhi, handle, &sw, &sh );
+	smin = Q_min( *s1, *s2 );
+	smax = Q_max( *s1, *s2 );
+	tmin = Q_min( *t1, *t2 );
+	tmax = Q_max( *t1, *t2 );
+	x0 = (int)floorf( smin * sw + 0.01f );
+	x1 = (int)ceilf( smax * sw - 0.01f );
+	y0 = (int)floorf( tmin * sh + 0.01f );
+	y1 = (int)ceilf( tmax * sh - 0.01f );
+	if( x0 < 0 ) x0 = 0;
+	if( y0 < 0 ) y0 = 0;
+	if( x1 > sw ) x1 = sw;
+	if( y1 > sh ) y1 = sh;
+	if( x1 <= x0 || y1 <= y0 )
+		return NULL;
+	texels = GC_HudHiCell( &r_hudhi, handle, x0, y0, x1 - x0, y1 - y0, &tw, &th, &fresh );
+	if( !texels )
+	{
+		static int refuse_logs;
+
+		if( refuse_logs < 6 )
+		{
+			refuse_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res cell %s %d,%d %dx%d refused, shrunk sheet drawn\n",
+				img->name, x0, y0, x1 - x0, y1 - y0 );
+		}
+		return NULL;
+	}
+	if( fresh )
+	{
+		/* A build may have packed older cells too: flush everything in use. */
+		DCFlushRange( r_hudhi_arena, r_hudhi.arena_used );
+		GX_InvalidateTexAll();
+		r_gx_tex_invalidates++;
+		r_gx_tex_uploads++;
+	}
+	GX_InitTexObj( &r_hudhi_tex.obj, (void *)texels, tw, th, GX_TF_RGB5A3, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	/* The HUD is laid out at 640 and shown on a 320-wide framebuffer:
+	 * bilinear averages the two source columns behind each pixel instead of
+	 * dropping one (holes carry their neighbours' colour, so edges stay clean). */
+	GX_InitTexObjFilterMode( &r_hudhi_tex.obj, GX_LINEAR, GX_LINEAR );
+	GX_LoadTexObj( &r_hudhi_tex.obj, GX_TEXMAP0 );
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	r_gx_tex_loads++;
+	*s1 = ( *s1 * sw - x0 ) / tw;
+	*s2 = ( *s2 * sw - x0 ) / tw;
+	*t1 = ( *t1 * sh - y0 ) / th;
+	*t2 = ( *t2 * sh - y0 ) / th;
+	r_hudhi_tex.texnum = (unsigned)texnum;
+	r_hudhi_tex.w = tw;
+	r_hudhi_tex.h = th;
+	r_hudhi_tex.fmt = GX_TF_RGB5A3;
+	r_hudhi_tex.tiled = (u16 *)texels;
+	r_hudhi_tex.valid = true;
+	return &r_hudhi_tex;
+}
+
+/*
  * Release HUD Flipper slabs + menu background before New Game client InitInput.
  * Soft imagepool empties alone leave these memalign() blocks on the tip and the
  * first pfnAddCommand (19-byte BaseCmd name) then Sys_Errors.
@@ -608,6 +792,7 @@ void R_GXReleaseHudPoolForMapLoad( void )
 	}
 	r_gx_hud_ondemand_heap = 0;
 	r_gx_hud_pool_ready = false;
+	R_GXHudHiReleaseArena();
 	R_GXReleaseMenuBackgroundTexture( 0 );
 	R_GXReleaseCinematicTexture( 0 );
 	if( gEngfuncs.Con_Reportf )
@@ -10575,7 +10760,9 @@ qboolean R_GXDrawStretchPic( float x, float y, float w, float h,
 	if( !r_gx_hud_2d_ready )
 		return false;
 
-	gxt = R_GXBindTexnum( (unsigned)texnum, true );
+	gxt = R_GXHudHiBind( texnum, &s1, &t1, &s2, &t2 );
+	if( !gxt )
+		gxt = R_GXBindTexnum( (unsigned)texnum, true );
 	if( !gxt )
 	{
 		static int gc_hud_stretch_bind_fail_logs;
