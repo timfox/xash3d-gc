@@ -90,6 +90,8 @@ static size_t gc_fx_pixels_used;
  * freed while a later one is still live. The top rewinds over freed entries,
  * so the transient copies a sprite upload makes do not stay charged. */
 static uint gc_fx_pixels_at[GC_FX_PIXELS_ALLOCS];
+/* Bytes at the end of the block lent out as scratch (R_GCFxScratchAlloc). */
+static size_t gc_fx_scratch;
 static int gc_fx_pixels_count;
 
 static qboolean R_GCIsFxPixels( const void *ptr )
@@ -103,7 +105,7 @@ static byte *R_GCAllocFxPixels( size_t bytes )
 	byte *out;
 
 	if( !gc_sprite_effect_load || bytes == 0 || gc_fx_pixels_count >= GC_FX_PIXELS_ALLOCS
-		|| gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+		|| gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES - gc_fx_scratch )
 		return NULL;
 	out = gc_fx_pixels + gc_fx_pixels_used;
 	gc_fx_pixels_at[gc_fx_pixels_count++] = (uint)gc_fx_pixels_used;
@@ -131,7 +133,26 @@ static void R_GCFreeFxPixels( const void *ptr )
 
 size_t R_GCFxPixelsFree( void )
 {
-	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used;
+	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used - gc_fx_scratch;
+}
+
+/* The unused end of the block as scratch for one sprite load: the shrunk copy
+ * of a large sprite file (cl_game.c) is 50 KiB in one piece, which the
+ * fragmented heap of a match cannot give. One loan at a time; frames keep
+ * filling the block from the start meanwhile. */
+byte *R_GCFxScratchAlloc( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+
+	if( gc_fx_scratch || bytes == 0 || gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+		return NULL;
+	gc_fx_scratch = need;
+	return gc_fx_pixels + GC_FX_PIXELS_BYTES - need;
+}
+
+void R_GCFxScratchFree( void )
+{
+	gc_fx_scratch = 0;
 }
 
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can

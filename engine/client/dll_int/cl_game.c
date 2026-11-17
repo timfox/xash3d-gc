@@ -1708,6 +1708,20 @@ static void CL_GCReleaseHudSpriteBss( byte *buf )
  */
 extern qboolean gc_sprite_effect_load;
 extern int gc_sprite_fx_prescale;
+extern byte *R_GCFxScratchAlloc( size_t bytes );
+extern void R_GCFxScratchFree( void );
+static byte *gc_fx_spr_scratch;
+
+static void CL_GCFreeEffectSpriteShrunk( byte *buf )
+{
+	if( buf == gc_fx_spr_scratch )
+	{
+		gc_fx_spr_scratch = NULL;
+		R_GCFxScratchFree();
+	}
+	else
+		free( buf );
+}
 
 static byte *CL_GCLoadEffectSpriteShrunk( const char *path, fs_offset_t *sizeptr, int *prescale )
 {
@@ -1761,7 +1775,19 @@ static byte *CL_GCLoadEffectSpriteShrunk( const char *path, fs_offset_t *sizeptr
 		goto fail;
 
 	out_bytes = head + (size_t)numframes * ( sizeof( ftype ) + sizeof( fr )) + pixels / ( (size_t)fac * fac );
-	out = (byte *)malloc( out_bytes );
+	/* The copy goes to the free end of the renderer's effect block: 50 KiB
+	 * in one piece is more than the fragmented heap of a match gives. If
+	 * the block is short too, a smaller copy from the heap. */
+	out = R_GCFxScratchAlloc( out_bytes );
+	gc_fx_spr_scratch = out;
+	if( !out )
+		out = (byte *)malloc( out_bytes );
+	while( !out && fac < 16 && minw >= fac * 2 && minh >= fac * 2 )
+	{
+		fac *= 2;
+		out_bytes = head + (size_t)numframes * ( sizeof( ftype ) + sizeof( fr )) + pixels / ( (size_t)fac * fac );
+		out = (byte *)malloc( out_bytes );
+	}
 	if( !out )
 		goto fail;
 	FS_Seek( f, 0, SEEK_SET );
@@ -1802,7 +1828,7 @@ static byte *CL_GCLoadEffectSpriteShrunk( const char *path, fs_offset_t *sizeptr
 fail:
 	FS_Close( f );
 	if( out )
-		free( out );
+		CL_GCFreeEffectSpriteShrunk( out );
 	return NULL;
 }
 #endif
@@ -1982,7 +2008,9 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 			}
 
 			gc_sprite_fx_prescale = 1;
-			if( buf == gc_hud_spr_bss || Image_GCIsMdlDecode( buf ))
+			if( gc_fx_spr_scratch && buf == gc_fx_spr_scratch )
+				CL_GCFreeEffectSpriteShrunk( buf );
+			else if( buf == gc_hud_spr_bss || Image_GCIsMdlDecode( buf ))
 				CL_GCReleaseHudSpriteBss( buf );
 			else if( used_sys )
 				free( buf );
