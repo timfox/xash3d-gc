@@ -283,15 +283,37 @@ static void GC_FlipXFB( void )
  * -gcstrictvsync restores the old wait-after-present behaviour. */
 static qboolean gc_flip_pending;
 static u32 gc_flip_retrace;
+/* libogc has no retrace counter getter: count retraces from the VI
+ * post-retrace callback (registered once, on first use). */
+static volatile u32 gc_retrace_count;
+static qboolean gc_retrace_hooked;
+static VIRetraceCallback gc_retrace_prev;
+
+static void GC_PostRetrace( u32 retrace_cnt )
+{
+	gc_retrace_count++;
+	if( gc_retrace_prev )
+		gc_retrace_prev( retrace_cnt );
+}
+
+static u32 GC_RetraceNow( void )
+{
+	if( !gc_retrace_hooked )
+	{
+		gc_retrace_hooked = true;
+		gc_retrace_prev = VIDEO_SetPostRetraceCallback( GC_PostRetrace );
+	}
+	return gc_retrace_count;
+}
 static double gc_flip_wait_ms_total;
 static u32 gc_flip_wait_count;
 
 static void GC_WaitPendingFlip( void )
 {
-	if( gc_flip_pending && VIDEO_GetRetraceCount() == gc_flip_retrace )
+	if( gc_flip_pending && GC_RetraceNow() == gc_flip_retrace )
 	{
 		const double t0 = Sys_FloatTime();
-		while( VIDEO_GetRetraceCount() == gc_flip_retrace )
+		while( GC_RetraceNow() == gc_flip_retrace )
 			VIDEO_WaitVSync();
 		gc_flip_wait_ms_total += ( Sys_FloatTime() - t0 ) * 1000.0;
 		gc_flip_wait_count++;
@@ -9201,7 +9223,7 @@ static void GC_PresentBuffer( void )
 			{
 				/* VI takes the queued XFB at the next retrace; the
 				 * next EFB->XFB copy waits for it (GC_WaitPendingFlip). */
-				gc_flip_retrace = VIDEO_GetRetraceCount();
+				gc_flip_retrace = GC_RetraceNow();
 				gc_flip_pending = true;
 			}
 			else
