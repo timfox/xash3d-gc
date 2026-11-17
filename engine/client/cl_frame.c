@@ -2372,7 +2372,6 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->model = mod;
 				VectorCopy( ed->v.origin, ent->origin );
 				VectorCopy( ed->v.angles, ent->angles );
-				ent->angles[0] = 0.0f;
 				VectorCopy( ent->origin, ent->curstate.origin );
 				VectorCopy( ent->angles, ent->curstate.angles );
 				VectorCopy( ed->v.mins, ent->curstate.mins );
@@ -2462,6 +2461,16 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
 						else if( speed > 10.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_walk" );
+						else
+						{
+							/* Standing still: idle legs. The HL "idle" lookup
+							 * finds look_idle, sequence 0, which the renderer
+							 * reads as "no gait": the body then ignored the aim
+							 * pitch whenever a bot stood still to shoot. */
+							dgait = CL_GCLeanFindSeq( bh, "dod_idle1" );
+							if( dgait <= 0 )
+								dgait = CL_GCLeanFindSeq( bh, "standing_idle" );
+						}
 						if( aim >= 0 )
 							idle = aim;
 						if( dgait >= 0 )
@@ -2506,6 +2515,29 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							e, sq, sok ? sd[sq].label : "?", sok ? sd[sq].numframes : -1, sok ? sd[sq].fps : 0.0f,
 							gq, gok ? sd[gq].label : "?", gok ? sd[gq].numframes : -1,
 							speed, bh ? bh->numseq : -1 );
+					}
+				}
+				/* Keep the aim pitch (angles.x = -v_angle.x / 3): with a gait
+				 * sequence the renderer turns it into the aim blend and
+				 * leaves the root yaw-only (R_StudioPlayerBlend), as stock
+				 * GoldSrc does. Decide on the gait this emit chose above:
+				 * DoD's server leaves v.gaitsequence 0, so testing the edict
+				 * zeroed the pitch of every bot (held at the baked mid
+				 * blend, looking slightly up). Without a gait the pitch
+				 * would tilt the whole body, so it stays 0 then. */
+				if( dead || !ent->curstate.gaitsequence )
+					ent->angles[0] = 0.0f;
+				ent->curstate.angles[0] = ent->angles[0];
+				{
+					/* Aim check: what pitch each player hands the renderer. */
+					static double next_aim_log[MAX_CLIENTS + 1];
+
+					if( e <= MAX_CLIENTS && host.realtime >= next_aim_log[e] )
+					{
+						next_aim_log[e] = host.realtime + 2.0;
+						Con_Reportf( "Xash3D GameCube: lean aim player %d v_angle.x %.1f angles.x %.1f gait %d seq %d -> pitch %.1f%s\n",
+							e, ed->v.v_angle[0], ed->v.angles[0], ent->curstate.gaitsequence, ent->curstate.sequence,
+							ent->angles[0], dead ? " (dead)" : "" );
 					}
 				}
 				/* v.weaponmodel is a string_t (the p_ model path); the renderer
