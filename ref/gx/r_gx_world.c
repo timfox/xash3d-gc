@@ -5856,6 +5856,7 @@ static unsigned gc_prop_tex_aram;
 static u16 gc_prop_nmat;
 static u16 gc_prop_mat_w[128], gc_prop_mat_h[128];
 static u8 gc_prop_mat_levels[128];
+static u8 gc_prop_mat_atest[128];	/* Source $alphatest: the texture's 1-bit alpha cuts holes */
 static u32 gc_prop_mat_ofs[128];
 static byte gc_prop_texmem[GC_PROP_TEX_SLOTS * GC_PROP_TEX_BYTES] __attribute__(( aligned( 32 )));
 /* 16 slots are static. A large world lends 48 more from the map arena: the
@@ -6113,6 +6114,7 @@ static void R_GXPropLoadTex( void )
 		gc_prop_mat_w[i] = (u16)(( e[16] << 8 ) | e[17] );
 		gc_prop_mat_h[i] = (u16)(( e[18] << 8 ) | e[19] );
 		gc_prop_mat_levels[i] = e[20] ? e[20] : 1;
+		gc_prop_mat_atest[i] = e[21] & 1;
 		gc_prop_mat_ofs[i] = data_ofs + ((u32)e[24] << 24 | (u32)e[25] << 16 | (u32)e[26] << 8 | e[27] );
 	}
 	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
@@ -6633,6 +6635,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		const u16 *p;
 		u32 nverts, body, next, n;
 		qboolean additive;
+		qboolean atest;
 
 		if( resident )
 		{
@@ -6668,6 +6671,16 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		 * solid white sheets, and edge-on a white hook hanging in the
 		 * air. Add them faintly over the scene, without writing depth. */
 		additive = ( hdr[0] & 0x80 ) != 0;
+		/* Source $alphatest (chain-link fence, crab pots, crates): the
+		 * bake put the cut-out in the CMPR alpha bit at the material's
+		 * own reference. The test must run before the depth write, or
+		 * the holes still hide what is behind them. */
+		atest = !additive && gc_prop_mat_atest[hdr[0] & 0x7f];
+		if( atest )
+		{
+			GX_SetAlphaCompare( GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_FALSE );
+		}
 		if( additive )
 		{
 			const GXColor dim = { 70, 66, 54, 255 };
@@ -6704,6 +6717,11 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			GX_End();
 			gc_prop_pf[2] += gettime() - t0;
 			gc_prop_pf_cnt[2] += *(const u16 *)( hdr + 12 );
+		}
+		if( atest )
+		{
+			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_TRUE );
 		}
 		if( additive )
 		{
