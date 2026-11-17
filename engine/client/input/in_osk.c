@@ -258,6 +258,7 @@ void OSK_EnableTextInput( qboolean enable, qboolean force )
 #define OSK_GLYPH_H   8
 #define OSK_GLYPH_ADV 6
 #define OSK_FP        2 // virtual pixels per font pixel: one or two real pixels at 320 or 640 wide
+#define OSK_FP_KEY    4 // the single character keys use a font twice that size
 
 static const byte osk_font[95][OSK_GLYPH_H] =
 {
@@ -367,14 +368,19 @@ static void OSK_Fill( float sx, float sy, int x, int y, int w, int h, byte r, by
 		ref.dllFuncs.FillRGBA( kRenderTransTexture, rx, ry, rw, rh, r, g, b, a );
 }
 
-static int OSK_TextWidth( const char *s )
+static int OSK_TextWidthFp( const char *s, int fp )
 {
-	return (int)Q_strlen( s ) * OSK_GLYPH_ADV * OSK_FP;
+	return (int)Q_strlen( s ) * OSK_GLYPH_ADV * fp;
 }
 
-static void OSK_Text( float sx, float sy, int x, int y, const char *s, const rgba_t color )
+static int OSK_TextWidth( const char *s )
 {
-	for( ; *s; s++, x += OSK_GLYPH_ADV * OSK_FP )
+	return OSK_TextWidthFp( s, OSK_FP );
+}
+
+static void OSK_TextFp( float sx, float sy, int x, int y, const char *s, const rgba_t color, int fp )
+{
+	for( ; *s; s++, x += OSK_GLYPH_ADV * fp )
 	{
 		const byte *glyph;
 		int row, col, run;
@@ -393,15 +399,23 @@ static void OSK_Text( float sx, float sy, int x, int y, const char *s, const rgb
 
 				while( col + run < OSK_GLYPH_W && ( glyph[row] & ( 0x10 >> ( col + run ))))
 					run++;
-				OSK_Fill( sx, sy, x + col * OSK_FP, y + row * OSK_FP, run * OSK_FP, OSK_FP, color[0], color[1], color[2], color[3] );
+				OSK_Fill( sx, sy, x + col * fp, y + row * fp, run * fp, fp, color[0], color[1], color[2], color[3] );
 			}
 		}
 	}
 }
 
+static void OSK_Text( float sx, float sy, int x, int y, const char *s, const rgba_t color )
+{
+	OSK_TextFp( sx, sy, x, y, s, color, OSK_FP );
+}
+
 static void OSK_TextCentered( float sx, float sy, int x, int y, int w, int h, const char *s, const rgba_t color )
 {
-	OSK_Text( sx, sy, x + ( w - OSK_TextWidth( s ) + OSK_FP ) / 2, y + ( h - OSK_GLYPH_H * OSK_FP ) / 2, s, color );
+	// one character gets the big font, longer labels (Space, Delete) do not fit it
+	const int fp = Q_strlen( s ) == 1 ? OSK_FP_KEY : OSK_FP;
+
+	OSK_TextFp( sx, sy, x + ( w - OSK_TextWidthFp( s, fp ) + fp ) / 2, y + ( h - OSK_GLYPH_H * fp ) / 2, s, color, fp );
 }
 
 static void OSK_DrawKey( float sx, float sy, int x, int y, int w, int h, qboolean selected, const char *label )
@@ -431,13 +445,23 @@ void OSK_Draw( void )
 	const int width = OSK_COLS * ( OSK_CELL + OSK_GAP ) - OSK_GAP + OSK_PAD * 2;
 	const int rows = OSK_ROWS + 1;
 	const int height = OSK_HEADER + rows * ( OSK_CELL + OSK_GAP ) - OSK_GAP + OSK_FOOTER + OSK_PAD * 2;
-	const int left = ( 640 - width ) / 2, top = 480 - height - 16;
+	const int left = ( 640 - width ) / 2;
+	int top = 480 - height - 16;
 	const int tabw = 4 * OSK_GLYPH_ADV * OSK_FP;
 	char label[2] = { 0, 0 };
 	int i, j, p;
 
 	if( !osk.enable || !osk_enable.value )
 		return;
+
+	// if the edited field is under the keyboard, and in the lower half, put the keyboard on top instead
+	{
+		int ex, ey, ew, eh;
+
+		if( Key_GetTextInputEditRect( &ex, &ey, &ew, &eh ) && ew > 0 && eh > 0 && sy > 0.0f
+			&& ey + eh > top * sy && ey + eh / 2 > refState.height / 2 )
+			top = 16;
+	}
 
 	// panel, olive drab like the retail menus
 	OSK_Fill( sx, sy, left - 2, top - 2, width + 4, height + 4, 20, 22, 10, 230 );

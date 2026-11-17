@@ -370,6 +370,11 @@ static void CL_ParseStaticEntity( sizebuf_t *msg )
 
 	MSG_ReadUBitLong( msg, MAX_ENTITY_BITS );
 	MSG_ReadDeltaEntity( msg, &from, &to, 0, DELTA_STATIC, cl.mtime[0] );
+#if XASH_GAMECUBE
+	/* DoD static props: kept in the compact prop list, not as cl_entity_t. */
+	if( CL_GCStaticPropFromSignon( &to ))
+		return;
+#endif
 
 	int i = clgame.numStatics;
 	if( i >= MAX_STATIC_ENTITIES )
@@ -945,6 +950,9 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 	int	i, required_version;
 
 	HPAK_CheckSize( hpk_custom_file.string );
+#if XASH_GAMECUBE
+	CL_GCClearRemoteStaticProps();
+#endif
 
 	switch( proto )
 	{

@@ -6346,6 +6346,48 @@ static qboolean SV_GCTryStaticProp( char **pfile )
 	return true;
 }
 
+/* Send the static props to remote clients in the signon, as GoldSrc sends
+ * its static entities (svc_spawnstatic, no edict). The listen host already
+ * draws them from gc_static_props and skips these messages; a remote client
+ * fills its own copy of the list from them (cl_parse.c). */
+static void SV_GCSignonStaticProps( void )
+{
+	entity_state_t nullstate, state;
+	int i, sent = 0;
+	size_t before;
+
+	if( svs.maxclients <= 1 || gc_num_static_props <= 0 )
+		return;
+	before = (size_t)MSG_GetNumBytesWritten( &sv.signon );
+	memset( &nullstate, 0, sizeof( nullstate ));
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+
+		if( MSG_GetNumBytesLeft( &sv.signon ) < 64 )
+			break;
+		memset( &state, 0, sizeof( state ));
+		state.entityType = ENTITY_NORMAL;
+		state.modelindex = sp->modelindex;
+		VectorCopy( sp->origin, state.origin );
+		VectorCopy( sp->angles, state.angles );
+		state.scale = sp->scale;
+		state.framerate = sp->framerate;
+		state.sequence = sp->sequence;
+		state.skin = sp->skin;
+		state.body = sp->body;
+		state.rendermode = sp->rendermode;
+		state.renderamt = sp->renderamt;
+		state.renderfx = sp->renderfx;
+		state.rendercolor = sp->rendercolor;
+		MSG_BeginServerCmd( &sv.signon, svc_spawnstatic );
+		MSG_WriteDeltaEntity( &nullstate, &state, &sv.signon, true, DELTA_STATIC, sv.time, 0 );
+		sent++;
+	}
+	Con_Reportf( "Xash3D GameCube: static props signon %d/%d (%s)\n", sent, gc_num_static_props,
+		Q_memprint( (size_t)MSG_GetNumBytesWritten( &sv.signon ) - before ));
+}
+
 /* Pre-scan the entity lump: count the entities that always take an edict
  * (everything but the soft-skipped decoration, classes the game DLL has no
  * spawn function for, and the parity set), and give the parity set what the
@@ -7109,6 +7151,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 		Con_Reportf( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 		Con_Reportf( "Xash3D GameCube: static props %d drawn from %d models, %d without a model; edicts in use %d\n",
 			gc_num_static_props, gc_static_prop_nmodels, gc_static_prop_deferred, svgame.numEntities );
+		SV_GCSignonStaticProps();
 		SYS_Report( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 #endif
 	}
