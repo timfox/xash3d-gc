@@ -6782,6 +6782,8 @@ static int gc_prop_pf_frames;
 static int gc_prop_vtx_frac = -1;
 static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 0 flat colour, -1 not set */
 
+static u32 gc_prop_far_fallbacks;	/* small props drawn from the far chain because the cache was full */
+
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
 	const gc_prop_model_t *m;
@@ -6902,6 +6904,20 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		resident = R_GXPropCacheGet( model );
 		if( resident )
 			resident_end = resident + gc_prop_chain_bytes[model];
+		/* The chain cache is full (one stretch of the harbor wants 763 KB
+		 * of 614): a prop that is small on screen takes its resident far
+		 * chain instead of being streamed from ARAM every frame, which
+		 * cost 4 to 7 ms there. Props that fill more of the view still
+		 * stream their full chain. */
+		else if( gc_prop_tex_far && gc_prop_far_mem && m->far_bytes )
+		{
+			far_lod = true;
+			ofs = m->far_ofs;
+			bytes = m->far_bytes;
+			resident = gc_prop_far_mem + ofs;
+			resident_end = gc_prop_far_mem + gc_prop_far_size;
+			gc_prop_far_fallbacks++;
+		}
 	}
 	while( bytes >= 64u && bytes <= sizeof( gc_prop_bounce ) && !( bytes & 31u ))
 	{
@@ -9077,10 +9093,12 @@ static int R_GXDrawWorldDLFrame( void )
 		const float k = 1.0f / ( 1000.0f * 120.0f );
 
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris) want=%uKb\n",
+			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris) want=%uKb far-for-full=%u\n",
 			(float)ticks_to_microsecs( gc_prop_pf[0] ) * k, gc_prop_pf_cnt[0] / 120u,
 			(float)ticks_to_microsecs( gc_prop_pf[1] ) * k, gc_prop_pf_cnt[1] / 120u,
-			(float)ticks_to_microsecs( gc_prop_pf[2] ) * k, gc_prop_pf_cnt[2] / 120u, gc_prop_want_peak / 1024u );
+			(float)ticks_to_microsecs( gc_prop_pf[2] ) * k, gc_prop_pf_cnt[2] / 120u, gc_prop_want_peak / 1024u,
+			gc_prop_far_fallbacks / 120u );
+		gc_prop_far_fallbacks = 0;
 		gc_prop_want_peak = 0;
 		memset( gc_prop_pf, 0, sizeof( gc_prop_pf ));
 		memset( gc_prop_pf_cnt, 0, sizeof( gc_prop_pf_cnt ));
