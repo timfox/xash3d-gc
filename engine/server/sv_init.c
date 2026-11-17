@@ -832,11 +832,29 @@ void SV_ActivateServer( int runPhysics )
 #if XASH_GAMECUBE
 		if( GC_MapLoadMemoryOpt() && !Sys_CheckParm( "-gcfullphysics" ))
 		{
+			/* Reset the channel but keep who it belongs to. Zeroed outright
+			 * it had no pfnBlockSize, and on a changelevel the still
+			 * connected local client got the reliable datagram through it
+			 * (SV_SendClientMessages) before its "new" set it up again:
+			 * ISI at PC 0 in Netchan_CreateFragments_. */
+			const netadr_t keep_adr = cl->netchan.remote_address;
+			const int keep_qport = cl->netchan.qport;
+			int ( *keep_pfn )( void *, fragsize_t ) = cl->netchan.pfnBlockSize;
+			uint keep_flags = 0;
+
+			if( cl->netchan.use_munge ) SetBits( keep_flags, NETCHAN_USE_MUNGE );
+			if( cl->netchan.use_bz2 ) SetBits( keep_flags, NETCHAN_USE_BZIP2 );
+			if( cl->netchan.use_lzss ) SetBits( keep_flags, NETCHAN_USE_LZSS );
+			if( cl->netchan.gs_netchan ) SetBits( keep_flags, NETCHAN_GOLDSRC );
+			if( cl->netchan.use_cookie ) SetBits( keep_flags, NETCHAN_USE_COOKIE );
 			memset( &cl->netchan, 0, sizeof( cl->netchan ));
 #if XASH_GC_SLIM_CLIENTS
 			SV_GCBindClientBuffers( cl );
 #endif
-			Con_Reportf( "Xash3D GameCube: local client netchan reset for map route\n" );
+			if( keep_pfn )
+				Netchan_Setup( NS_SERVER, &cl->netchan, keep_adr, keep_qport, cl, keep_pfn, keep_flags );
+			Con_Reportf( "Xash3D GameCube: local client netchan reset for map route (%s)\n",
+				keep_pfn ? "channel kept" : "not set up yet" );
 		}
 		else
 #endif
