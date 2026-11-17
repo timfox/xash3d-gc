@@ -1700,28 +1700,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( FBitSet( ed->v.effects, EF_NODRAW ))
 				continue;
 			mod = SV_ModelHandle( ed->v.modelindex );
-			if( !mod || mod->type != mod_studio )
-				continue;
-			/* A weapon a player carries keeps its w_ model at the player's
-			 * origin; it drew as a white rifle lying at the bot's feet
-			 * (ceres 18e0d6f). Carried items belong to the player model. */
-			if(( ed->v.owner && SV_IsValidEdict( ed->v.owner )
-					&& NUM_FOR_EDICT( ed->v.owner ) >= 1 && NUM_FOR_EDICT( ed->v.owner ) <= svs.maxclients )
-				|| ed->v.movetype == MOVETYPE_FOLLOW
-				|| ( ed->v.aiment && SV_IsValidEdict( ed->v.aiment )))
-			{
-				static int carried_logs;
-
-				if( carried_logs < 4 )
-				{
-					carried_logs++;
-					Con_Reportf( "Xash3D GameCube: lean skip carried %s (entity %d, owner %d)\n",
-						mod->name, e, NUM_FOR_EDICT( ed->v.owner ));
-				}
-				continue;
-			}
-			scan_studio++;
-			if(( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
+			/* Before the type test: an unloaded handle is not mod_studio yet. */
+			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
 				&& Q_stristr( mod->name, "mapmodels/" ))
 			{
 				/* A map model precached by the game at spawn (DoD control
@@ -1763,6 +1743,27 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					mod = found;
 				}
 			}
+			if( !mod || mod->type != mod_studio )
+				continue;
+			/* A weapon a player carries keeps its w_ model at the player's
+			 * origin; it drew as a white rifle lying at the bot's feet
+			 * (ceres 18e0d6f). Carried items belong to the player model. */
+			if(( ed->v.owner && SV_IsValidEdict( ed->v.owner )
+					&& NUM_FOR_EDICT( ed->v.owner ) >= 1 && NUM_FOR_EDICT( ed->v.owner ) <= svs.maxclients )
+				|| ed->v.movetype == MOVETYPE_FOLLOW
+				|| ( ed->v.aiment && SV_IsValidEdict( ed->v.aiment )))
+			{
+				static int carried_logs;
+
+				if( carried_logs < 4 )
+				{
+					carried_logs++;
+					Con_Reportf( "Xash3D GameCube: lean skip carried %s (entity %d, owner %d)\n",
+						mod->name, e, NUM_FOR_EDICT( ed->v.owner ));
+				}
+				continue;
+			}
+			scan_studio++;
 			if( mod->needload != NL_PRESENT || !mod->name[0] || !mod->cache.data )
 			{
 				scan_studio_skip++;
