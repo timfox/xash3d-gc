@@ -169,12 +169,16 @@ void R_DrawSpriteModel( cl_entity_t *e )
 	float original_blend = tr.blend;
 	int vis = GC_GetVisualQuality();
 	qboolean low_quality_skip_occlusion = ( vis == 0 );
+	/* Not on Day of Defeat: at half brightness its pale explosion burst
+	 * (zerogxplode.spr, renderamt 180) was a faint tan haze. */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
 	if( low_quality_skip_occlusion && ( e->curstate.rendermode == kRenderGlow ||
 	                                    e->curstate.rendermode == kRenderTransAdd ))
 	{
 		// Reduce brightness for glow/additive sprites in low-memory mode
 		tr.blend *= 0.5f;
 	}
+#endif
 #endif
 
 	mspriteframe_t *frame = NULL;
