@@ -231,6 +231,15 @@ CL_ClearTempEnts
  * pointers past the end of a 4-entry allocation. */
 static int cl_tempents_count;
 static qboolean gc_tempents_in_spill;
+/* The lean emit (cl_frame.c) clears the scene after CL_EmitEntities has
+ * linked the temp entities, so it links them again from this list. */
+#define GC_TENT_RELINK_MAX 96
+static cl_entity_t *gc_tent_linked[GC_TENT_RELINK_MAX];
+static int gc_tent_linked_n;
+static int gc_tent_update_frame = -1;
+/* The pool came from CL_GCEnsureTempEntPool (lean route), which also owns
+ * reloading the effect sprites; CL_InitTempEnts' route loads them once. */
+static qboolean gc_tempents_lean_pool;
 unsigned gc_fx_tent_alloc, gc_fx_tent_overflow, gc_fx_tent_nomodel, gc_fx_te_parsed;
 #endif
 
@@ -245,6 +254,17 @@ static void CL_ClearTempEnts( void )
 #endif
 
 #if XASH_GAMECUBE
+	/* A new world (or a reconnect): the relink list points into old temp
+	 * entities, and CL_ClearSpriteTextures may free the effect sprites once
+	 * the next map loads. Look them up again in CL_GCEnsureTempEntPool. */
+	gc_tent_linked_n = 0;
+	gc_tent_update_frame = -1;
+	if( gc_tempents_lean_pool )
+	{
+		cl_sprite_muzzleflash[0] = cl_sprite_muzzleflash[1] = cl_sprite_muzzleflash[2] = NULL;
+		cl_sprite_ricochet = NULL;
+	}
+
 	/* A spill pool (CL_GCEnsureTempEntPool) may already be rewound for the
 	 * next map: drop it rather than write the free list into new data. */
 	if( cl_tempents && gc_tempents_in_spill )
@@ -308,6 +328,31 @@ void CL_InitTempEnts( void )
 }
 
 #if XASH_GAMECUBE
+/* Muzzle flashes and ricochet sparks (the lean route skips
+ * CL_LoadClientSprites). Logs once per failure with whether the file is on
+ * the disc at all. */
+static void CL_GCLoadEffectSprites( void )
+{
+	static int fail_logs;
+
+	if( !cl_sprite_muzzleflash[0] )
+	{
+		cl_sprite_muzzleflash[0] = CL_LoadClientSprite( cl_default_sprites[0] );
+		cl_sprite_muzzleflash[1] = CL_LoadClientSprite( cl_default_sprites[1] );
+		cl_sprite_muzzleflash[2] = CL_LoadClientSprite( cl_default_sprites[2] );
+	}
+	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
+		cl_sprite_ricochet = CL_LoadClientSprite( cl_default_sprites[5] );
+	if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && fail_logs < 4 )
+	{
+		fail_logs++;
+		Con_Reportf( "Xash3D GameCube: client sprites: %s %s, %s %s (on disc: %d %d)\n",
+			cl_default_sprites[0], cl_sprite_muzzleflash[0] ? "ok" : "failed",
+			cl_default_sprites[5], cl_sprite_ricochet ? "ok" : "failed",
+			FS_FileExists( cl_default_sprites[0], false ), FS_FileExists( cl_default_sprites[5], false ));
+	}
+}
+
 /*
 ================
 CL_GCEnsureTempEntPool
@@ -326,7 +371,7 @@ void CL_GCEnsureTempEntPool( void )
 	extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 	extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 	extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
-	static double next_try;
+	static double next_try, next_sprite_try;
 	const int want = 16;
 	const size_t bytes = sizeof( TEMPENTITY ) * want;
 	const char *where = "heap";
@@ -341,7 +386,19 @@ void CL_GCEnsureTempEntPool( void )
 		cl_free_tents = cl_active_tents = NULL;
 		gc_tempents_in_spill = false;
 	}
-	if( cl_tempents || !cl.worldmodel || host.realtime < next_try )
+	if( !cl.worldmodel )
+		return;
+	if( cl_tempents )
+	{
+		/* The pool outlives a changelevel; the sprites do not. */
+		if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && host.realtime >= next_sprite_try )
+		{
+			next_sprite_try = host.realtime + 5.0;
+			CL_GCLoadEffectSprites();
+		}
+		return;
+	}
+	if( host.realtime < next_try )
 		return;
 	next_try = host.realtime + 5.0;
 	if( GC_MemHeapFreeBytes() > bytes + 64 * 1024 )
@@ -377,19 +434,9 @@ void CL_GCEnsureTempEntPool( void )
 	cl_tempents[want - 1].entity.trivial_accept = INVALID_HANDLE;
 	cl_free_tents = cl_tempents;
 	cl_active_tents = NULL;
-	if( !cl_sprite_muzzleflash[0] )
-	{
-		cl_sprite_muzzleflash[0] = CL_LoadClientSprite( cl_default_sprites[0] );
-		cl_sprite_muzzleflash[1] = CL_LoadClientSprite( cl_default_sprites[1] );
-		cl_sprite_muzzleflash[2] = CL_LoadClientSprite( cl_default_sprites[2] );
-	}
-	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
-		cl_sprite_ricochet = CL_LoadClientSprite( cl_default_sprites[5] );
-	if( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet )
-		Con_Reportf( "Xash3D GameCube: client sprites: %s %s, %s %s (on disc: %d %d)\n",
-			cl_default_sprites[0], cl_sprite_muzzleflash[0] ? "ok" : "failed",
-			cl_default_sprites[5], cl_sprite_ricochet ? "ok" : "failed",
-			FS_FileExists( cl_default_sprites[0], false ), FS_FileExists( cl_default_sprites[5], false ));
+	gc_tempents_lean_pool = true;
+	next_sprite_try = host.realtime + 5.0;
+	CL_GCLoadEffectSprites();
 	Con_Reportf( "Xash3D GameCube: client tempents %d in %s (%s), muzzle flash %s, heap %s\n",
 		want, where, Q_memprint( bytes ), cl_sprite_muzzleflash[0] ? "loaded" : "missing",
 		Q_memprint( GC_MemHeapFreeBytes( )));
@@ -554,15 +601,6 @@ CL_TEntAddEntity
 add entity to renderlist
 ==============
 */
-#if XASH_GAMECUBE
-/* The lean emit (cl_frame.c) clears the scene after CL_EmitEntities has
- * linked the temp entities, so it links them again from this list. */
-#define GC_TENT_RELINK_MAX 96
-static cl_entity_t *gc_tent_linked[GC_TENT_RELINK_MAX];
-static int gc_tent_linked_n;
-static int gc_tent_update_frame = -1;
-#endif
-
 static int CL_TempEntAddEntity( cl_entity_t *pEntity )
 {
 	vec3_t mins, maxs;
