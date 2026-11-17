@@ -1083,10 +1083,20 @@ static void R_GXBuildWorldProjection( Mtx44 out )
 		guFrustum( out, yMax, -yMax, -xMax, xMax, zNear, zFar );
 }
 
-/* Viewmodel: near=4 matches CPU depth gate; world FOV (CapFaces authoring). */
+/* Near plane of the viewmodel pass. The world's 4 units is too far for a
+ * gun held at the eye: the hands, forearms and the stock sit 1 to 4 units
+ * out, and every vertex nearer than the plane is pushed onto it (see
+ * R_GXStudioPushVmVert). Pushed vertices all share one depth, so those
+ * parts drew in submission order and the far side showed through the near
+ * side (Tim: "polys rendered out of order" on arms, hands and guns). The
+ * pass has its own slice of the depth range, so a closer plane costs the
+ * world nothing. */
+#define R_GX_VM_NEAR 1.0f
+
+/* Viewmodel: world FOV (CapFaces authoring), near plane as the CPU gate. */
 static void R_GXBuildViewmodelProjection( Mtx44 out )
 {
-	const f32 zNear = 4.0f;
+	const f32 zNear = R_GX_VM_NEAR;
 	const f32 zFar = Q_max( 256.0f, RI.farClip > 1.0f ? RI.farClip : 4096.0f );
 	const f32 world_x = RI.rvp.fov_x > 1.0f ? RI.rvp.fov_x : 90.0f;
 	const f32 world_y = RI.rvp.fov_y > 1.0f ? RI.rvp.fov_y : ( world_x * 0.75f );
@@ -10503,8 +10513,6 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 G155: Flipper studio / viewmodel overlay (TriAPI → EFB)
 ================
 */
-#define R_GX_VM_NEAR 4.0f
-
 static float R_GXStudioEyeDepth( float x, float y, float z )
 {
 	vec3_t delta;
@@ -10576,7 +10584,7 @@ static void R_GXStudioNoteNdcVert( float x, float y, float z )
 	delta[2] = z - r_gx_vm_eye[2];
 	clip_y = DotProduct( r_gx_vm_up, delta );
 	clip_w = DotProduct( r_gx_vm_forward, delta );
-	if( clip_w < 4.0f )
+	if( clip_w < R_GX_VM_NEAR )
 		return;
 	ndc_y = clip_y / ( clip_w * r_gx_vm_tan_half_fov_y );
 	if( ndc_y < r_gx_vm_ndc_ymin )
@@ -10588,7 +10596,7 @@ static void R_GXStudioNoteNdcVert( float x, float y, float z )
 
 /* Far end of the EFB depth range the viewmodel pass draws into (see
  * R_GXPrepareStudioState). */
-#define GC_GX_VIEWMODEL_DEPTH_FAR 0.001f
+#define GC_GX_VIEWMODEL_DEPTH_FAR 0.004f
 
 static void R_GXPrepareStudioState( qboolean viewmodel )
 {
@@ -10640,8 +10648,10 @@ static void R_GXPrepareStudioState( qboolean viewmodel )
 		 * stock and the back of the hand showed through the near side
 		 * (Tim: "depth pass not used"). Squeeze the gun into the
 		 * nearest sliver of the EFB depth range, where no world pixel
-		 * sits, and test and write it normally there. 24-bit Z leaves
-		 * about 16k steps for the gun's own sorting. */
+		 * sits, and test and write it normally there. A world pixel
+		 * only falls inside the slice within 0.02 units of its own near
+		 * plane. 24-bit Z leaves about 67k steps for the gun's own
+		 * sorting, 40 a unit at the muzzle with the 1 unit near plane. */
 		if( rmode )
 			GX_SetViewport( 0.0f, 0.0f, (f32)rmode->fbWidth, (f32)rmode->efbHeight,
 				0.0f, GC_GX_VIEWMODEL_DEPTH_FAR );
