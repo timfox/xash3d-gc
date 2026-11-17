@@ -206,5 +206,42 @@ class PropPackTest(unittest.TestCase):
 		self.assertIn('"media/gp_%s.gcp"', server)
 
 
+class DropToFloorTests(unittest.TestCase):
+	"""env_model spawnflag 2 is the game's DROP_TO_FLOOR."""
+
+	@classmethod
+	def setUpClass(cls):
+		cls.props = load("bake_props_goldsrc", "scripts/bake_props_goldsrc.py")
+
+	def floor(self):
+		import types
+
+		# One node: the plane z = -40, empty above (leaf 1), solid below (leaf 0).
+		light = self.props.FloorLight.__new__(self.props.FloorLight)
+		light.bsp = types.SimpleNamespace(
+			planes=[(0.0, 0.0, 1.0, -40.0)],
+			nodes=[(0, -2, -1)],
+			leaves=[(-2,), (-1,)],
+		)
+		return light
+
+	def test_spawnflag_2_marks_a_prop_for_the_drop(self):
+		ents = [
+			{"classname": "env_model", "model": "models/a.mdl", "origin": "0 0 4", "spawnflags": "2"},
+			{"classname": "env_model", "model": "models/a.mdl", "origin": "0 0 4"},
+		]
+		props = self.props.static_props(ents)
+		self.assertEqual([p["drop"] for p in props], [True, False])
+
+	def test_drop_lands_on_the_first_solid_below(self):
+		z = self.floor().drop((10.0, 20.0, 4.0))
+		self.assertAlmostEqual(z, -40.0, delta=0.01)
+
+	def test_no_drop_from_inside_solid_or_past_the_reach(self):
+		light = self.floor()
+		self.assertIsNone(light.drop((0.0, 0.0, -60.0)))
+		self.assertIsNone(light.drop((0.0, 0.0, 300.0)))
+
+
 if __name__ == "__main__":
 	unittest.main()
