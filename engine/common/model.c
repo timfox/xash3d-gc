@@ -75,6 +75,8 @@ static qboolean Mod_GCIsWeaponModelPath( const char *path )
 		/* BAR, British and para loadouts. */
 		"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley",
 		"p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
+		/* Bipod down / up third-person models. */
+		"p_barbd", "p_brenbd", "p_brenbu", "p_fg42bd", "p_fg42bu", "p_scopedfg42bu", "p_mg34bd", "p_mg34bu", "p_mg42bd", "p_mg42bu",
 		NULL
 	};
 	char bare[64];
@@ -392,7 +394,7 @@ static void Mod_GCVMSlotEvict( int i )
  * owner. NULL (caller falls back to the arena bump) if it does not fit. */
 static byte *Mod_GCVMSlotAlloc( size_t size )
 {
-	int i, pick = -1;
+	int i, pick = -1, held = -1;
 
 	if( size == 0 || size > GC_VM_SLOT_SIZE )
 		return NULL;
@@ -409,9 +411,22 @@ static byte *Mod_GCVMSlotAlloc( size_t size )
 			pick = i;
 			break;
 		}
+		/* The weapon in hand is never the victim while another slot can
+		 * go: late precaches of a map's other loadouts (v_sten, v_webley
+		 * ... on dod_caen) evicted the held v_enfield, which then drew
+		 * nothing until it was promoted back. */
+		if( gc_landmark_viewmodel[0]
+			&& !Q_stricmp( gc_vm_slot[i].owner->name, gc_landmark_viewmodel ))
+		{
+			if( held < 0 )
+				held = i;
+			continue;
+		}
 		if( pick < 0 || gc_vm_slot[i].used < gc_vm_slot[pick].used )
 			pick = i;
 	}
+	if( pick < 0 )
+		pick = held;
 	if( pick < 0 )
 	{
 		Con_Reportf( "Xash3D GameCube: viewmodel slot alloc failed (%s, studio bump=%s)\n",

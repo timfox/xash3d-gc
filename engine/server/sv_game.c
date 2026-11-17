@@ -6031,15 +6031,71 @@ static qboolean SV_GCEntityKeptWhenStarved( const char *classname )
 		&& ( !Q_strncmp( classname, "info_player_", 12 ) || !Q_strcmp( classname, "dod_control_point" ));
 }
 
-static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
+/* Entities retail DoD maps need for parity: brush walls players collide with
+ * or see, and the map logic their target chains run through. They spawn on
+ * the DoD route unless the entity slab or edict table is nearly spent; then they
+ * fall back to the old soft-skip so the map still loads. */
+static qboolean SV_GCParityEntity( const char *classname )
+{
+	return !Q_strcmp( classname, "func_wall" )
+		|| !Q_strcmp( classname, "func_illusionary" )
+		|| !Q_strcmp( classname, "func_wall_toggle" )
+		|| !Q_strcmp( classname, "info_target" )
+		|| !Q_strcmp( classname, "trigger_relay" )
+		|| !Q_strcmp( classname, "trigger_auto" )
+		|| !Q_strcmp( classname, "trigger_changetarget" );
+}
+
+/* Their private data comes from the static entity slab, not the heap (on
+ * dod_charlie the heap is already under 48 KiB during the entity loop, which
+ * skipped every func_wall). So the guard is the slab and the edict table,
+ * plus a true heap floor for the strings and links each one adds. */
+/* How many parity entities this map can keep: what the edict table holds
+ * after the entities that always spawn (SV_GCBudgetParityEntities), so the
+ * ones late in the lump (doors, capture areas, round logic) still fit. */
+static int gc_parity_budget = 0x7fffffff;
+static int gc_parity_kept;
+
+static qboolean SV_GCEntityPressure( void )
+{
+	return GC_MemHeapFreeBytes() < 16u * 1024u
+		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
+		|| svgame.numEntities >= GI->max_edicts - 64;
+}
+
+/* GoldSrc's CLight removes itself unless it has a targetname; a named light
+ * is a switchable light style and counts as a parity entity. */
+static qboolean SV_GCParityLight( const edict_t *ent, const char *classname )
+{
+	return ( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" ))
+		&& ent && ent->v.targetname;
+}
+
+static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *classname )
 {
 	if( COM_StringEmpty( classname ))
 		return false;
+	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
+	{
+		static int kept, skipped;
+		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget;
+
+		if( !skip )
+			gc_parity_kept++;
+
+		if( skip ) skipped++; else kept++;
+		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
+			Con_Reportf( "Xash3D GameCube: DoD parity entity %s %s (kept=%d skipped=%d slab=%zu heap=%s edicts=%d)\n",
+				classname, skip ? "skipped" : "kept", kept, skipped, gc_ent_priv_slab_used,
+				Q_memprint( GC_MemHeapFreeBytes( )), svgame.numEntities );
+		return skip;
+	}
+
 	/* Tip-safe CapFaces: drop decorative ents early so players / triggers /
-	 * doors keep tip slots on dense maps (caen 621>460). Keeping func_wall /
-	 * cycler (props1) tip-starved caen to a black EFB — leave them skipped.
-	 * (20261110-032103 capped-32 allow also blacked caen; bake walls into
-	 * CapFaces spatial or defer post-densify instead.)
+	 * doors keep tip slots on dense maps (caen 621>460). The func_wall
+	 * family and map logic below are only reached under pressure (see
+	 * SV_GCParityEntity); keeping them once tip-starved caen to a black EFB
+	 * (20261110-032103), before the heap guard existed.
 	 * multi_manager stays: DoD's round flow (allieswin_mm / axiswin_mm on
 	 * dod_charlie) runs through it, so without it no round ever ended. */
 	if( !Q_strcmp( classname, "func_wall" )
@@ -6073,24 +6129,77 @@ static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 	return false;
 }
 
+/* Pre-scan the entity lump: count the entities that always take an edict
+ * (everything but the soft-skipped decoration, classes the game DLL has no
+ * spawn function for, and the parity set), and give the parity set what the
+ * edict table has left after them, keeping 64 slots for run-time entities. */
+static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
+{
+	char key[2048], value[2048], classname[64];
+	int total = 0, parity = 0, optional = 0, nofunc = 0, must;
+	qboolean named;
+
+	gc_parity_kept = 0;
+	gc_parity_budget = 0x7fffffff;
+	if( !entities || !Sys_CheckParm( "-gcworldrender" ))
+		return;
+	while(( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
+	{
+		if( key[0] != '{' )
+			return;	/* malformed: leave it to the real parser */
+		classname[0] = '\0';
+		named = false;
+		for( ;; )
+		{
+			if(( entities = COM_ParseFile( entities, key, sizeof( key ))) == NULL )
+				return;
+			if( key[0] == '}' && key[1] == '\0' )
+				break;
+			if(( entities = COM_ParseFile( entities, value, sizeof( value ))) == NULL )
+				return;
+			if( !Q_strcmp( key, "classname" ))
+				Q_strncpy( classname, value, sizeof( classname ));
+			else if( !Q_strcmp( key, "targetname" ) && value[0] )
+				named = true;
+		}
+		if( !classname[0] || !Q_strcmp( classname, "worldspawn" ))
+			continue;
+		total++;
+		if( SV_GCParityEntity( classname )
+			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
+			parity++;
+		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
+			optional++;
+		else if( !SV_GetEntityClass( classname ))
+			nofunc++;
+	}
+	must = total - parity - optional - nofunc;
+	gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
+	if( gc_parity_budget < 0 )
+		gc_parity_budget = 0;
+	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d (edicts %d)\n",
+		mapname, total, must, parity, gc_parity_budget, optional, nofunc, GI->max_edicts );
+}
+
 /* Consume one `{ ... }` entity block without allocating an edict. */
 static qboolean SV_GCSkipBraceEntity( char **pfile )
 {
 	char token[2048];
-	int depth = 1;
 
 	if( !pfile || !*pfile )
 		return false;
-	while( depth > 0 )
+	/* Walk key/value pairs: a value such as "{CRACK4" (a texture name on
+	 * dod_charlie's func_walls) is not a brace, so counting every token that
+	 * starts with one read on to EOF and Host_Error'd the load. */
+	for( ;; )
 	{
 		if(( *pfile = COM_ParseFile( *pfile, token, sizeof( token ))) == NULL )
 			return false;
-		if( token[0] == '{' )
-			depth++;
-		else if( token[0] == '}' )
-			depth--;
+		if( token[0] == '}' && token[1] == '\0' )
+			return true;
+		if(( *pfile = COM_ParseFile( *pfile, token, sizeof( token ))) == NULL )
+			return false;
 	}
-	return true;
 }
 
 /* G433: Replace policy-based entity inhibition with measured budgeting
@@ -6494,6 +6603,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_ent_priv_slab_hits = 0;
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;
+	SV_GCBudgetParityEntities( mapname, entities );
 #endif
 
 	// user dll can override spawn entities function (Xash3D extension)
@@ -6625,7 +6735,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			/* Progressive CapFaces: drop decorative ents early so players /
 			 * triggers / doors keep tip slots on dense maps (caen 621>460). */
 			if( Sys_CheckParm( "-gcworldrender" )
-				&& SV_GCCapFacesOptionalEntity( SV_ClassName( ent )))
+				&& SV_GCCapFacesOptionalEntity( ent, SV_ClassName( ent )))
 			{
 				if( gc_cf_opt_skip < 12 )
 				{

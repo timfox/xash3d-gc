@@ -1452,6 +1452,8 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 		{ "p_barbu", "mg" }, { "p_enfield", "bolt" }, { "p_enfields", "bolt" }, { "p_sten", "mp40" },
 		{ "p_piat", "bazooka" }, { "p_webley", "pistol" }, { "p_fairbairn", "knife" }, { "p_paraknife", "knife" },
 		{ "p_mills", "gren" }, { "p_m1carb", "rifle" }, { "p_grease", "tommy" }, { "p_fg42", "stg44" },
+		/* Bipod deployed / up variants (p_*bd, p_*bu) not covered by a prefix above. */
+		{ "p_scopedfg42", "stg44" }, { "p_mg34", "mg" },
 	};
 	const char *name;
 	int i;
@@ -2085,15 +2087,28 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						char label[48];
 						int aim = -1, dgait = -1;
 
+						/* iuser3 bit 0 is prone, bit 1 deployed (dod-gc
+						 * docs/DOD_ENGINE_REQUESTS.md). */
+						const qboolean prone = ( ed->v.iuser3 & 1 ) != 0;
+
 						if( tok )
 						{
 							Q_snprintf( label, sizeof( label ), "%s_%s_aim",
-								FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
+								prone ? "prone" : FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
 							aim = CL_GCLeanFindSeq( bh, label );
 						}
+						if( aim < 0 && prone )
+							aim = CL_GCLeanFindSeq( bh, "prone_idle" );
 						if( aim < 0 )
 							aim = CL_GCLeanFindSeq( bh, "dod_idle1" );
-						if( speed > 200.0f )
+						/* Crouched legs: dod_crawl when moving, dod_crouch_idle
+						 * when still (standing legs under a crouched torso
+						 * before). */
+						if( prone )
+							dgait = speed > 10.0f ? CL_GCLeanFindSeq( bh, "prone_forward" ) : aim;
+						else if( FBitSet( ed->v.flags, FL_DUCKING ))
+							dgait = CL_GCLeanFindSeq( bh, speed > 10.0f ? "dod_crawl" : "dod_crouch_idle" );
+						else if( speed > 200.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_sprint" );
 						else if( speed > 120.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
@@ -2376,6 +2391,10 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( held && held->type == mod_studio && held->cache.data
 				&& clgame.viewent.model != held )
 			{
+				/* A gun the server precache already made resident skipped
+				 * the ensure call above, so it never got its *t skins (flat
+				 * pink v_enfield) or became the protected held slot. */
+				Mod_GCEnsureLandmarkViewModel( vpath );
 				clgame.viewent.model = held;
 				clgame.viewent.curstate.modelindex = vmi;
 				clgame.viewent.curstate.animtime = (float)cl.time;
