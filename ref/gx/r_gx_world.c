@@ -6678,6 +6678,9 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		atest = !additive && gc_prop_mat_atest[hdr[0] & 0x7f];
 		if( atest )
 		{
+			/* The prop stage passes the vertex alpha; the cut-out is in
+			 * the texture's. */
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
 			GX_SetAlphaCompare( GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0 );
 			GX_SetZCompLoc( GX_FALSE );
 		}
@@ -6720,6 +6723,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		}
 		if( atest )
 		{
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
 			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 			GX_SetZCompLoc( GX_TRUE );
 		}
