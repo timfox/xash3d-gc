@@ -10885,7 +10885,11 @@ void R_GXStudioBindTexnum( unsigned texnum )
 
 			R_GXSetTexAlphaTest( hands_ate );
 			GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-			GX_SetZMode( GX_TRUE, GX_ALWAYS, GX_FALSE );
+			/* Depth test and write, as R_GXPrepareStudioState set them.
+			 * This bind (a skin the native path turned down) used to put
+			 * the old Z-always overlay back for the rest of the mesh, so
+			 * that mesh drew in submission order. */
+			GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 		}
 		if( !bind_ok_logged && texnum != (unsigned)tr.whiteTexture
 			&& texnum != (unsigned)tr.defaultTexture )
