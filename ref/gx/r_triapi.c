@@ -224,7 +224,14 @@ void GAME_EXPORT _TriColor4f( float rr, float gg, float bb, float aa )
 		unsigned cg = gg <= 0.0f ? 0u : ( gg >= 1.0f ? 255u : (unsigned)( gg * 255.0f ));
 		unsigned cb = bb <= 0.0f ? 0u : ( bb >= 1.0f ? 255u : (unsigned)( bb * 255.0f ));
 
-		gx_rgba = ( cr << 24 ) | ( cg << 16 ) | ( cb << 8 ) | 0xFFu;
+		/* Additive modes carry the fade in RGB (scaled above); the blended
+		 * ones (smoke puffs, TransTexture sprites) fade through alpha. */
+		unsigned ca = 0xFFu;
+
+		if( vid.rendermode == kRenderTransTexture || vid.rendermode == kRenderTransAlpha
+			|| vid.rendermode == kRenderTransColor )
+			ca = aa <= 0.0f ? 0u : ( aa >= 1.0f ? 255u : (unsigned)( aa * 255.0f ));
+		gx_rgba = ( cr << 24 ) | ( cg << 16 ) | ( cb << 8 ) | ca;
 	}
 #endif
 

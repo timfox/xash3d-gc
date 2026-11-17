@@ -837,6 +837,10 @@ void R_GXEffectsTriBegin( void )
 		/* G291: particles/beams/sprites share studio TriAPI emit, with
 		 * billboard cull + additive blend (PrepareStudioState is opaque). */
 		R_GXPrepareStudioState( false );
+		/* Effects are texture x vertex colour, as in GoldSrc: REPLACE drew
+		 * every particle, spark and blood drop in the white particle
+		 * texture's colour (Tim: sparks and blood looked white). */
+		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
@@ -10190,6 +10194,10 @@ static void R_GXEnsureTriApiLayout( void )
 	else
 	{
 		R_GXPrepareStudioState( false );
+		/* Effects are texture x vertex colour, as in GoldSrc: REPLACE drew
+		 * every particle, spark and blood drop in the white particle
+		 * texture's colour (Tim: sparks and blood looked white). */
+		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
