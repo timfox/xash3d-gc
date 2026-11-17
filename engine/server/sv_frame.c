@@ -137,7 +137,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 
 		VectorCopy( pViewEnt->v.origin, view_org );
 
-		for( e = 1; e < svgame.numEntities; e++ )
+		for( e = 1; e < SV_GCNetEntityLimit( ); e++ )
 		{
 			edict_t		*ent = SV_EdictNum( e );
 			entity_state_t	*state;
@@ -270,7 +270,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 	if( !clientpvs ) fullvis = true;
 
 	// g-cont: of course we can send world but not want to do it :-)
-	for( int e = 1; e < svgame.numEntities; e++ )
+	for( int e = 1; e < SV_GCNetEntityLimit( ); e++ )
 	{
 		byte	*pset;
 		edict_t	*ent = SV_EdictNum( e );

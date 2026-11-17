@@ -724,6 +724,18 @@ static inline qboolean SV_CheckEdict( const edict_t *e, const char *file, const 
 	return false;
 }
 
+/* Entities at or above this index are never networked (GameCube split
+ * edict table, sv_game.c SV_AllocEdict); elsewhere it is numEntities. */
+#if XASH_GAMECUBE
+extern int sv_gc_net_edicts;
+static inline int SV_GCNetEntityLimit( void )
+{
+	return ( sv_gc_net_edicts > 0 && sv_gc_net_edicts < svgame.numEntities ) ? sv_gc_net_edicts : svgame.numEntities;
+}
+#else
+#define SV_GCNetEntityLimit() ( svgame.numEntities )
+#endif
+
 static inline edict_t *SV_EdictNum( int n )
 {
 	if( likely( n >= 0 && n < GI->max_edicts ))

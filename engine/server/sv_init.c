@@ -634,7 +634,7 @@ static void SV_CreateBaseline( void )
 
 	memset( &nullstate, 0, sizeof( nullstate ));
 
-	for( entnum = 0; entnum < svgame.numEntities; entnum++ )
+	for( entnum = 0; entnum < SV_GCNetEntityLimit( ); entnum++ )
 	{
 		edict_t	*pEdict = SV_EdictNum( entnum );
 
@@ -672,7 +672,7 @@ static void SV_CreateBaseline( void )
 	// now put the baseline into the signon message.
 	MSG_BeginServerCmd( &sv.signon, svc_spawnbaseline );
 
-	for( entnum = 0; entnum < svgame.numEntities; entnum++ )
+	for( entnum = 0; entnum < SV_GCNetEntityLimit( ); entnum++ )
 	{
 		edict_t	*pEdict = SV_EdictNum( entnum );
 

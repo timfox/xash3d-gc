@@ -1720,10 +1720,97 @@ SV_AllocEdict
 allocate new or reuse existing
 ==============
 */
+#if XASH_GAMECUBE
+/* Split edict table on the DoD route. The client keeps 460 entity slots
+ * (744 KiB of cl_entity_t), but much of a dense map is server-only: spawn
+ * points, triggers, relays, multi_managers, info_targets. Those take edicts
+ * above sv_gc_net_edicts, which are never networked; everything else, and
+ * every run-time allocation, stays below it. 0 = no split. */
+int sv_gc_net_edicts;
+static qboolean sv_gc_alloc_high;
+
+static edict_t *SV_GCAllocInRange( int lo, int hi )
+{
+	for( int i = lo; i < hi; i++ )
+	{
+		edict_t *e = SV_EdictNum( i );
+
+		if( e && e->free && ( e->freetime < 2.0f || ( sv.time - e->freetime ) > 0.5f ))
+		{
+			if( i >= svgame.numEntities )
+				svgame.numEntities = i + 1;
+			SV_InitEdict( e );
+			return e;
+		}
+	}
+	return NULL;
+}
+
+/* Slots above the ones in use start free, so either range can hand them out
+ * and every loop over [0, numEntities) skips the gaps. */
+static void SV_GCSplitEdictsPrepare( void )
+{
+	if( !sv_gc_net_edicts )
+		return;
+	for( int i = svgame.numEntities; i < GI->max_edicts; i++ )
+	{
+		edict_t *e = SV_EdictNum( i );
+
+		if( !e )
+			break;
+		memset( e, 0, sizeof( *e ));
+		e->free = true;
+		e->freetime = 0.0f;
+	}
+}
+
+/* Classes that never send an entity to clients: point entities with no
+ * model, and trigger brushes that are EF_NODRAW. Not func_ladder (client
+ * prediction needs it) and not anything that makes sounds or effects at its
+ * own origin. */
+static qboolean SV_GCServerOnlyClass( const char *classname )
+{
+	static const char *const names[] = {
+		"info_player_allies", "info_player_axis", "info_player_deathmatch",
+		"info_player_start", "info_player_observer", "info_target",
+		"info_doddetect", "info_teleport_destination", "info_landmark",
+		"trigger_relay", "trigger_auto", "trigger_changetarget",
+		"trigger_multiple", "trigger_once", "trigger_hurt",
+		"multi_manager", "path_corner", "path_track",
+		"game_score", "game_counter", "game_end", "game_text",
+		"env_state", "env_render", "env_message",
+		"dod_point_relay", "dod_score_ent", "dod_round_timer",
+		"dod_control_point_master", "dod_location", "dod_capture_area",
+		"dod_trigger_sandbag", "light", "light_spot",
+		NULL
+	};
+
+	if( COM_StringEmpty( classname ))
+		return false;
+	for( int i = 0; names[i]; i++ )
+		if( !Q_strcmp( classname, names[i] ))
+			return true;
+	return false;
+}
+#endif
+
 edict_t *GAME_EXPORT SV_AllocEdict( void )
 {
 	edict_t	*e;
 	int	i;
+#if XASH_GAMECUBE
+	if( sv_gc_net_edicts > 0 )
+	{
+		e = sv_gc_alloc_high ? SV_GCAllocInRange( sv_gc_net_edicts, GI->max_edicts ) : NULL;
+		if( !e )
+			e = SV_GCAllocInRange( svs.maxclients + 1, sv_gc_net_edicts );
+		if( e )
+			return e;
+		Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d networked) — soft-skip further spawns\n",
+			sv_gc_net_edicts );
+		return NULL;
+	}
+#endif
 	for( i = svs.maxclients + 1; i < svgame.numEntities; i++ )
 	{
 		e = SV_EdictNum( i );
@@ -6055,12 +6142,16 @@ static qboolean SV_GCParityEntity( const char *classname )
  * ones late in the lump (doors, capture areas, round logic) still fit. */
 static int gc_parity_budget = 0x7fffffff;
 static int gc_parity_kept;
+/* With the split table, server-only parity entities (relays, targets,
+ * named lights) have their own budget in the upper range. */
+static int gc_parity_budget_high = 0x7fffffff;
+static int gc_parity_kept_high;
 
 static qboolean SV_GCEntityPressure( void )
 {
 	return GC_MemHeapFreeBytes() < 16u * 1024u
 		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
-		|| svgame.numEntities >= GI->max_edicts - 64;
+		|| ( !sv_gc_net_edicts && svgame.numEntities >= GI->max_edicts - 64 );
 }
 
 /* GoldSrc's CLight removes itself unless it has a targetname; a named light
@@ -6078,10 +6169,15 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
 	{
 		static int kept, skipped;
-		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget;
+		const qboolean high = sv_gc_net_edicts && ent && NUM_FOR_EDICT( ent ) >= sv_gc_net_edicts;
+		const qboolean skip = SV_GCEntityPressure()
+			|| ( high ? gc_parity_kept_high >= gc_parity_budget_high : gc_parity_kept >= gc_parity_budget );
 
 		if( !skip )
-			gc_parity_kept++;
+		{
+			if( high ) gc_parity_kept_high++;
+			else gc_parity_kept++;
+		}
 
 		if( skip ) skipped++; else kept++;
 		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
@@ -6133,14 +6229,38 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
  * (everything but the soft-skipped decoration, classes the game DLL has no
  * spawn function for, and the parity set), and give the parity set what the
  * edict table has left after them, keeping 64 slots for run-time entities. */
+/* The classname of the entity block that starts at pfile (just after its
+ * opening brace), without consuming it. */
+static void SV_GCPeekClassname( char *pfile, char *out, size_t size )
+{
+	char key[2048], value[2048];
+
+	out[0] = '\0';
+	while( pfile )
+	{
+		if(( pfile = COM_ParseFile( pfile, key, sizeof( key ))) == NULL )
+			return;
+		if( key[0] == '}' && key[1] == '\0' )
+			return;
+		if(( pfile = COM_ParseFile( pfile, value, sizeof( value ))) == NULL )
+			return;
+		if( !Q_strcmp( key, "classname" ))
+		{
+			Q_strncpy( out, value, size );
+			return;
+		}
+	}
+}
+
 static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 {
 	char key[2048], value[2048], classname[64];
 	int total = 0, parity = 0, optional = 0, nofunc = 0, must;
+	int must_high = 0, parity_high = 0;
 	qboolean named;
 
-	gc_parity_kept = 0;
-	gc_parity_budget = 0x7fffffff;
+	gc_parity_kept = gc_parity_kept_high = 0;
+	gc_parity_budget = gc_parity_budget_high = 0x7fffffff;
 	if( !entities || !Sys_CheckParm( "-gcworldrender" ))
 		return;
 	while(( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
@@ -6167,18 +6287,35 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		total++;
 		if( SV_GCParityEntity( classname )
 			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
+		{
 			parity++;
+			if( sv_gc_net_edicts && SV_GCServerOnlyClass( classname ))
+				parity_high++;
+		}
 		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
 			optional++;
 		else if( !SV_GetEntityClass( classname ))
 			nofunc++;
+		else if( sv_gc_net_edicts && SV_GCServerOnlyClass( classname ))
+			must_high++;
 	}
 	must = total - parity - optional - nofunc;
-	gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
+	if( sv_gc_net_edicts )
+	{
+		const int high_slots = GI->max_edicts - sv_gc_net_edicts;
+
+		/* What overflows the upper range falls back to the lower one. */
+		int spill = must_high - high_slots;
+
+		gc_parity_budget_high = Q_max( 0, high_slots - 8 - must_high );
+		gc_parity_budget = sv_gc_net_edicts - 64 - ( svs.maxclients + 1 ) - ( must - must_high ) - Q_max( 0, spill );
+	}
+	else gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
 	if( gc_parity_budget < 0 )
 		gc_parity_budget = 0;
-	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d (edicts %d)\n",
-		mapname, total, must, parity, gc_parity_budget, optional, nofunc, GI->max_edicts );
+	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d (server-only %d) parity=%d (server-only %d) budget=%d+%d optional=%d no-spawn=%d (edicts %d, networked %d)\n",
+		mapname, total, must, must_high, parity, parity_high, gc_parity_budget,
+		sv_gc_net_edicts ? gc_parity_budget_high : 0, optional, nofunc, GI->max_edicts, sv_gc_net_edicts );
 }
 
 /* Consume one `{ ... }` entity block without allocating an edict. */
@@ -6603,6 +6740,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_ent_priv_slab_hits = 0;
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;
+	SV_GCSplitEdictsPrepare();
 	SV_GCBudgetParityEntities( mapname, entities );
 #endif
 
@@ -6635,6 +6773,17 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 				create_world = false;
 				ent = SV_EdictNum( 0 ); // already initialized
 			}
+#if XASH_GAMECUBE
+			else if( sv_gc_net_edicts > 0 )
+			{
+				char peek[64];
+
+				SV_GCPeekClassname( entities, peek, sizeof( peek ));
+				sv_gc_alloc_high = SV_GCServerOnlyClass( peek );
+				ent = SV_AllocEdict();
+				sv_gc_alloc_high = false;
+			}
+#endif
 			else ent = SV_AllocEdict();
 #if XASH_GAMECUBE
 			/* CapFaces tip: no free edict — skip remaining brace blocks. */
@@ -7136,6 +7285,18 @@ qboolean SV_LoadProgs( const char *name )
 
 	svgame.globals->pStringBase = ""; // setup string base
 
+#if XASH_GAMECUBE
+	/* Split table (see SV_AllocEdict): the server holds up to 300 more
+	 * server-only edicts in the BSS it already reserves for 900. */
+	if( Sys_CheckParm( "-gcworldrender" ) && !sv_gc_net_edicts
+		&& GI->max_edicts > 0 && GI->max_edicts < GC_SP_EDICT_CAP )
+	{
+		sv_gc_net_edicts = GI->max_edicts;
+		GI->max_edicts = Q_min( GC_SP_EDICT_CAP, sv_gc_net_edicts + 300 );
+		Con_Reportf( "Xash3D GameCube: edict table split networked=%d server-only up to %d\n",
+			sv_gc_net_edicts, GI->max_edicts );
+	}
+#endif
 	svgame.globals->maxEntities = GI->max_edicts;
 	svgame.globals->maxClients = svs.maxclients;
 #if XASH_GAMECUBE

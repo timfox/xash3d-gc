@@ -73,6 +73,16 @@ static int CL_GameCubeClientEdictLimit( int requested )
 		limit = Q_max( GC_GCMAP_DEFAULT_CLIENT_EDICTS, SV_GCEntityCount() + 160 );
 	}
 
+	/* A local server with a split edict table networks only its lower
+	 * range; the server-only entities above it never reach the client. */
+	if( Host_IsLocalClient( ))
+	{
+		extern int sv_gc_net_edicts;
+
+		if( sv_gc_net_edicts > 0 )
+			limit = Q_min( limit, sv_gc_net_edicts );
+	}
+
 	/* Allow GC map-route caps below MIN_EDICTS when intentionally small. */
 	limit = bound( 2, limit, requested );
 	Con_Reportf( "Xash3D GameCube: client edicts capped for map route max=%d requested=%d\n",
