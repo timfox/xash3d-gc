@@ -273,6 +273,39 @@ static void GC_FlipXFB( void )
 	else
 		which_fb = 0;
 }
+
+/* Late flip pacing. The main present queues the finished XFB with
+ * VIDEO_SetNextFramebuffer and returns without waiting for the retrace; the
+ * wait moves to just before the next EFB->XFB copy, which is the first point
+ * that writes the buffer VI may still be scanning out. A frame that runs a
+ * little over 16.7ms then costs its own time instead of locking the game to
+ * 33.4ms (30 FPS), and the swap still lands on a retrace (no tearing, 60 cap).
+ * -gcstrictvsync restores the old wait-after-present behaviour. */
+static qboolean gc_flip_pending;
+static u32 gc_flip_retrace;
+static double gc_flip_wait_ms_total;
+static u32 gc_flip_wait_count;
+
+static void GC_WaitPendingFlip( void )
+{
+	if( gc_flip_pending && VIDEO_GetRetraceCount() == gc_flip_retrace )
+	{
+		const double t0 = Sys_FloatTime();
+		while( VIDEO_GetRetraceCount() == gc_flip_retrace )
+			VIDEO_WaitVSync();
+		gc_flip_wait_ms_total += ( Sys_FloatTime() - t0 ) * 1000.0;
+		gc_flip_wait_count++;
+	}
+	gc_flip_pending = false;
+}
+
+static qboolean GC_LateFlipEnabled( void )
+{
+	static int cached = -1;
+	if( cached < 0 )
+		cached = Sys_CheckParm( "-gcstrictvsync" ) ? 0 : 1;
+	return cached ? true : false;
+}
 static GXRModeObj *rmode = NULL;
 #if XASH_DODGC_NETWORK
 static GXRModeObj gc_network_video_mode;
@@ -8590,6 +8623,7 @@ static void GC_PresentBufferViaGX( void )
 	/* G191: keep soft RGB565 on EFB during dump latch — Dolphin DumpFramesAsImages
 	 * after changelevel tracks EFB; CopyDisp clear left flat sky in dumps. */
 	copy_clear = dump_latch ? GX_FALSE : GX_TRUE;
+	GC_WaitPendingFlip();
 	GX_CopyDisp( xfb[which_fb], copy_clear );
 	/* Flush only — a second DrawDone after CopyDisp was locking soft presents
 	 * near 33ms. VIDEO_WaitVSync (retail) covers copy retirement. */
@@ -8897,6 +8931,7 @@ static void GC_PresentBuffer( void )
 			if( gc_gx_world_efb_ready )
 			{
 				GC_GXDrawDoneTimed( "transition hold" );
+				GC_WaitPendingFlip();
 				GX_CopyDisp( xfb[which_fb], GX_TRUE );
 				GX_Flush();
 				gc_gx_world_efb_ready = false;
@@ -9041,6 +9076,8 @@ static void GC_PresentBuffer( void )
 			if( gc_present_count == 20 || gc_present_count == 28 || gc_present_count == 36 )
 				Con_Reportf( "Xash3D GameCube: present Flipper DrawDone end presents=%u\n",
 					gc_present_count );
+			GC_WaitPendingFlip();
+			GC_ProfMark( "present: flip wait" );
 			GX_CopyDisp( xfb[which_fb], GX_FALSE );
 			GX_Flush();
 			GC_ProfMark( "present: CopyDisp" );
@@ -9158,10 +9195,26 @@ static void GC_PresentBuffer( void )
 			 * Flipper work (vsync locked every sample to ~16.7ms). Retail and
 			 * post-sample presents still VI-pace at 60 fields/sec. */
 			GC_ProfMark( "present: pre-vsync" );
-			if( !budget_no_vsync )
+			if( budget_no_vsync )
+				gc_flip_pending = false;
+			else if( GC_LateFlipEnabled() && xfb[0] && xfb[1] )
+			{
+				/* VI takes the queued XFB at the next retrace; the
+				 * next EFB->XFB copy waits for it (GC_WaitPendingFlip). */
+				gc_flip_retrace = VIDEO_GetRetraceCount();
+				gc_flip_pending = true;
+			}
+			else
 				VIDEO_WaitVSync();
 			GC_ProfMark( "present: VI vsync wait" );
 			GC_FlipXFB();
+			if(( gc_present_count % 600u ) == 0u && gc_flip_wait_count )
+			{
+				Con_Reportf( "Xash3D GameCube: late flip waits=%u avg=%.2fms over 600 presents\n",
+					gc_flip_wait_count, gc_flip_wait_ms_total / gc_flip_wait_count );
+				gc_flip_wait_count = 0;
+				gc_flip_wait_ms_total = 0.0;
+			}
 			if( gc_present_count == 20 || gc_present_count == 28 || gc_present_count == 36 )
 				Con_Reportf( "Xash3D GameCube: present Flipper vsync done presents=%u\n",
 					gc_present_count );
