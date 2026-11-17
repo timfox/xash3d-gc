@@ -130,10 +130,10 @@ static void CL_GCPrewarmEffectSprites( void )
 			continue;
 		/* The frames go to the renderer's effect block (ref/gx/r_image.c),
 		 * not the heap. The heap still pays for the file read and the
-		 * sprite headers: keep 64 KiB free for the read, and stop once the
+		 * sprite headers: keep 48 KiB free for the read, and stop once the
 		 * prewarm itself has kept 24 KiB, which the grenade view model
 		 * skins need later (measured on dod_charlie). */
-		if( GC_MemHeapFreeBytes() < 64 * 1024 || heap_taken >= 24 * 1024
+		if( GC_MemHeapFreeBytes() < 48 * 1024 || heap_taken >= 24 * 1024
 			|| R_GCFxPixelsFree() < 4 * 1024 )
 		{
 			done = true;
