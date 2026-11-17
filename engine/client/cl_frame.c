@@ -2085,15 +2085,28 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						char label[48];
 						int aim = -1, dgait = -1;
 
+						/* The game sets iuser3 = 1 while prone (dod-gc
+						 * docs/DOD_ENGINE_REQUESTS.md). */
+						const qboolean prone = ed->v.iuser3 == 1;
+
 						if( tok )
 						{
 							Q_snprintf( label, sizeof( label ), "%s_%s_aim",
-								FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
+								prone ? "prone" : FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
 							aim = CL_GCLeanFindSeq( bh, label );
 						}
+						if( aim < 0 && prone )
+							aim = CL_GCLeanFindSeq( bh, "prone_idle" );
 						if( aim < 0 )
 							aim = CL_GCLeanFindSeq( bh, "dod_idle1" );
-						if( speed > 200.0f )
+						/* Crouched legs: dod_crawl when moving, dod_crouch_idle
+						 * when still (standing legs under a crouched torso
+						 * before). */
+						if( prone )
+							dgait = speed > 10.0f ? CL_GCLeanFindSeq( bh, "prone_forward" ) : aim;
+						else if( FBitSet( ed->v.flags, FL_DUCKING ))
+							dgait = CL_GCLeanFindSeq( bh, speed > 10.0f ? "dod_crawl" : "dod_crouch_idle" );
+						else if( speed > 200.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_sprint" );
 						else if( speed > 120.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
