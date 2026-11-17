@@ -137,7 +137,8 @@ static void CL_GCPrewarmEffectSprites( void )
 		if( !start_free )
 			start_free = GC_MemHeapFreeBytes();
 		if( GC_MemHeapFreeBytes() < 96 * 1024
-			|| start_free - GC_MemHeapFreeBytes() >= 24 * 1024 )
+			|| ( start_free > GC_MemHeapFreeBytes()
+				&& start_free - GC_MemHeapFreeBytes() >= 24 * 1024 ))
 		{
 			done = true;
 			Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d, stopped at %s (heap %s)\n",
