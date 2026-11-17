@@ -61,6 +61,259 @@ qboolean R_GXBloomEnabled( void )
 }
 
 /*
+ * Auto-exposure, as Source's HDR path does it, with the limits the map sets
+ * (media/tm_d2_lostcoast.bin, lostcoast-gc tools/bake_lostcoast_tonemap.py).
+ *
+ * The lighting is baked at one exposure. Source moves a tonemap scale every
+ * frame: it finds the luminance that only 2 % of the frame exceeds and aims
+ * to put it at 60 % of white, never letting the median fall under 3 %
+ * (mat_tonemap_percent_bright_pixels / _percent_target / _min_avglum), then
+ * clamps the scale to [min, max]. The map's env_tonemap_controller takes
+ * those limits from trigger volumes: 0.5 to 2 at the start, up to 10 inside
+ * the monastery. The camera stands in for the player.
+ *
+ * The frame is measured on last frame's half-res luma copy (the bloom's), and
+ * the scale is applied as one fullscreen multiply before the bloom:
+ * display = gamma( light x scale ), so the gain over the baked exposure is
+ * ( scale / baked )^( 1 / 2.2 ). The sky (depth at the far plane) is left
+ * alone: its art is authored for the screen, not in light units.
+ */
+#define GC_EXPO_MAX_VOLUMES 16
+
+typedef struct
+{
+	float	mins[3], maxs[3];
+	float	enter_max, enter_min, leave_max, leave_min;
+	u32	flags;
+} gc_expo_vol_t;
+
+static struct
+{
+	s8	state;		/* 0 untried, 1 ready, -1 none */
+	u8	n, inside[GC_EXPO_MAX_VOLUMES], fired[GC_EXPO_MAX_VOLUMES];
+	float	baked, lim_min, lim_max, scale, last_time, last_org[3];
+	int	frames;
+	gc_expo_vol_t	vol[GC_EXPO_MAX_VOLUMES];
+} gc_expo;
+
+static void R_GXExposureLoad( void )
+{
+	file_t *f;
+	u32 hdr[6];
+
+	gc_expo.state = -1;
+	f = gEngfuncs.fsapi->Open( "media/tm_d2_lostcoast.bin", "rb", false );
+	if( !f )
+		return;
+	if( gEngfuncs.fsapi->Read( f, hdr, 24 ) == 24 && hdr[0] == 0x4743746du && ( hdr[1] >> 16 ) == 1
+		&& ( hdr[1] & 0xffffu ) <= GC_EXPO_MAX_VOLUMES )
+	{
+		gc_expo.n = (u8)( hdr[1] & 0xffffu );
+		memcpy( &gc_expo.baked, &hdr[2], 12 );
+		if( gc_expo.baked > 0.0f && gc_expo.lim_max >= gc_expo.lim_min && gc_expo.lim_min > 0.0f
+			&& gEngfuncs.fsapi->Read( f, gc_expo.vol, gc_expo.n * 44 ) == (fs_offset_t)( gc_expo.n * 44 ))
+		{
+			/* Start where the baked look was, inside the limits. */
+			gc_expo.scale = gc_expo.baked > gc_expo.lim_max ? gc_expo.lim_max : gc_expo.baked;
+			gc_expo.state = 1;
+		}
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: map exposure volumes=%d limits %.2f..%.2f baked %.2f\n",
+		gc_expo.state > 0 ? gc_expo.n : -1, gc_expo.lim_min, gc_expo.lim_max, gc_expo.baked );
+}
+
+/* Did the camera's step from a to b pass through the box (the door triggers are 8 units thin)? */
+static qboolean R_GXExposureSegBox( const float *a, const float *b, const gc_expo_vol_t *v )
+{
+	float t0 = 0.0f, t1 = 1.0f;
+	int i;
+
+	for( i = 0; i < 3; i++ )
+	{
+		const float d = b[i] - a[i];
+
+		if( d > -0.001f && d < 0.001f )
+		{
+			if( a[i] < v->mins[i] || a[i] > v->maxs[i] )
+				return false;
+		}
+		else
+		{
+			float ta = ( v->mins[i] - a[i] ) / d, tb = ( v->maxs[i] - a[i] ) / d;
+
+			if( ta > tb ) { const float sw = ta; ta = tb; tb = sw; }
+			if( ta > t0 ) t0 = ta;
+			if( tb < t1 ) t1 = tb;
+			if( t0 > t1 )
+				return false;
+		}
+	}
+	return true;
+}
+
+/* Returns the display gain for this frame. buf is last frame's luma copy. */
+static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
+{
+	const float *org = RI.rvp.vieworigin;
+	const float now = gp_cl ? (float)gp_cl->time : 0.0f;
+	float dt, goal;
+	int i;
+
+	if( !gc_expo.state )
+		R_GXExposureLoad();
+	if( gc_expo.state <= 0 )
+		return 1.0f;
+	if( gc_expo.frames == 0 )
+		VectorCopy( org, gc_expo.last_org );
+	/* The map's triggers. */
+	for( i = 0; i < gc_expo.n; i++ )
+	{
+		const gc_expo_vol_t *v = &gc_expo.vol[i];
+		const qboolean in = R_GXExposureSegBox( gc_expo.last_org, org, v );
+
+		if( in && !gc_expo.inside[i] && !(( v->flags & 1u ) && gc_expo.fired[i] ))
+		{
+			if( v->enter_max >= 0.0f ) gc_expo.lim_max = v->enter_max;
+			if( v->enter_min >= 0.0f ) gc_expo.lim_min = v->enter_min;
+			gc_expo.fired[i] = 1;
+		}
+		else if( !in && gc_expo.inside[i] )
+		{
+			if( v->leave_max >= 0.0f ) gc_expo.lim_max = v->leave_max;
+			if( v->leave_min >= 0.0f ) gc_expo.lim_min = v->leave_min;
+		}
+		gc_expo.inside[i] = in ? 1 : 0;
+	}
+	VectorCopy( org, gc_expo.last_org );
+	dt = now - gc_expo.last_time;
+	gc_expo.last_time = now;
+	if( dt < 0.0f || dt > 0.1f )
+		dt = 0.1f;
+	goal = gc_expo.scale;
+	if( buf && gc_expo.frames >= 4 )
+	{
+		/* Histogram of a 20 x 12 grid over the centre 90 % x 85 % of the frame
+		 * (mat_exposure_center_region). I8 texels sit in 8 x 4 tiles. */
+		u16 hist[32];
+		int gx, gy, n = 0, acc, hi = 31, med = 0;
+		float lum_hi, lum_med, t1, t2;
+
+		memset( hist, 0, sizeof( hist ));
+		for( gy = 0; gy < 12; gy++ )
+		{
+			const int y = (int)(( 0.075f + 0.85f * ( (float)gy + 0.5f ) / 12.0f ) * (float)bh );
+
+			for( gx = 0; gx < 20; gx++ )
+			{
+				const int x = (int)(( 0.05f + 0.9f * ( (float)gx + 0.5f ) / 20.0f ) * (float)bw );
+
+				hist[buf[(( y >> 2 ) * ( bw >> 3 ) + ( x >> 3 )) * 32 + ( y & 3 ) * 8 + ( x & 7 )] >> 3]++;
+				n++;
+			}
+		}
+		/* The level 2 % of the samples exceed, and the median. */
+		for( acc = 0, hi = 31; hi > 0; hi-- )
+		{
+			acc += hist[hi];
+			if( acc * 50 >= n )
+				break;
+		}
+		for( acc = 0, med = 0; med < 31; med++ )
+		{
+			acc += hist[med];
+			if( acc * 2 >= n )
+				break;
+		}
+		/* A copy that reads back all black is no measurement: Dolphin only
+		 * writes EFB copies to memory with "Store EFB Copies to Texture Only"
+		 * off, and the Null backend never does. Hold the scale then. */
+		if( hist[0] == n )
+			hi = -1;
+		/* Bin centres back to linear light, as shares of white. */
+		if( hi >= 0 )
+		{
+			lum_hi = powf(( (float)hi + 0.5f ) * ( 1.0f / 32.0f ), 2.2f );
+			lum_med = powf(( (float)med + 0.5f ) * ( 1.0f / 32.0f ), 2.2f );
+			t1 = 0.60f / ( lum_hi > 0.0001f ? lum_hi : 0.0001f );
+			t2 = 0.03f / ( lum_med > 0.0001f ? lum_med : 0.0001f );
+			goal = gc_expo.scale * ( t2 > t1 ? t2 : t1 );
+		}
+	}
+	if( goal > gc_expo.lim_max ) goal = gc_expo.lim_max;
+	if( goal < gc_expo.lim_min ) goal = gc_expo.lim_min;
+	/* Toward the goal at mat_hdr_manual_tonemap_rate (1 per second), three
+	 * times as fast on the way down (mat_accelerate_adjust_exposure_down). */
+	{
+		float k = dt * ( goal < gc_expo.scale ? 3.0f : 1.0f );
+
+		if( k > 1.0f ) k = 1.0f;
+		gc_expo.scale += ( goal - gc_expo.scale ) * k;
+	}
+	gc_expo.frames++;
+	if(( gc_expo.frames & 255 ) == 1 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: exposure scale=%.2f goal=%.2f limits %.2f..%.2f\n",
+			gc_expo.scale, goal, gc_expo.lim_min, gc_expo.lim_max );
+	return powf( gc_expo.scale / gc_expo.baked, 1.0f / 2.2f );
+}
+
+/* One fullscreen multiply by the gain, over everything nearer than the far plane. */
+static void R_GXExposureApply( GXRModeObj *rmode, float gain )
+{
+	const f32 w = (f32)rmode->fbWidth, h = (f32)rmode->efbHeight;
+	Mtx44 ortho;
+	Mtx ident;
+	GXColor c;
+	int v;
+
+	if( gain > 0.995f && gain < 1.005f )
+		return;
+	if( gain > 2.0f ) gain = 2.0f;
+	if( gain < 0.0f ) gain = 0.0f;
+	v = (int)(( gain > 1.0f ? gain - 1.0f : gain ) * 255.0f + 0.5f );
+	c.r = c.g = c.b = (u8)( v > 255 ? 255 : v );
+	c.a = 255;
+	GX_SetViewport( 0.0f, 0.0f, w, h, 0.0f, 1.0f );
+	GX_SetScissor( 0, 0, rmode->fbWidth, rmode->efbHeight );
+	guOrtho( ortho, 0.0f, h, 0.0f, w, 0.0f, 1.0f );
+	GX_LoadProjectionMtx( ortho, GX_ORTHOGRAPHIC );
+	guMtxIdentity( ident );
+	GX_LoadPosMtxImm( ident, GX_PNMTX0 );
+	GX_SetCurrentMtx( GX_PNMTX0 );
+	/* Only where the scene wrote a depth nearer than the far plane. */
+	GX_SetZMode( GX_TRUE, GX_GREATER, GX_FALSE );
+	GX_SetZCompLoc( GX_TRUE );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetColorUpdate( GX_TRUE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	/* Brighter: dst + dst x ( gain - 1 ). Darker: dst x gain. */
+	if( gain > 1.0f )
+		GX_SetBlendMode( GX_BM_BLEND, GX_BL_DSTCLR, GX_BL_ONE, GX_LO_NOOP );
+	else
+		GX_SetBlendMode( GX_BM_BLEND, GX_BL_ZERO, GX_BL_SRCCLR, GX_LO_NOOP );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetChanMatColor( GX_COLOR0A0, c );
+	GX_SetNumTexGens( 0 );
+	GX_SetNumIndStages( 0 );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevDirect( GX_TEVSTAGE0 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
+	GX_SetTevOp( GX_TEVSTAGE0, GX_PASSCLR );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT7, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_Begin( GX_QUADS, GX_VTXFMT7, 4 );
+	GX_Position3f32( 0.0f, 0.0f, -0.9999990f );
+	GX_Position3f32( w, 0.0f, -0.9999990f );
+	GX_Position3f32( w, h, -0.9999990f );
+	GX_Position3f32( 0.0f, h, -0.9999990f );
+	GX_End();
+	GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+}
+
+/*
  * Apply bloom to the current EFB. Leaves GX in a 2D ortho state; the caller
  * must restore its 3D pipe (projection, VAT/desc, TEV, blend, Z).
  * Returns true if the pass ran.
@@ -95,6 +348,10 @@ qboolean R_GXBloomApply( void *rmode_ptr )
 	gc_bloom_buf = (u8 *)R_GcmapBorrowSoftZ( 0, (u32)bw * bh );
 	if( !gc_bloom_buf )
 		return false;
+
+	/* Exposure first: measured on last frame's copy still in the buffer,
+	 * applied before this frame's copy so the bloom sees the result. */
+	R_GXExposureApply( rmode, R_GXExposureUpdate( gc_bloom_buf, bw, bh ));
 
 	/* 1) EFB -> half-res luma through the copy box filter. */
 	GX_SetTexCopySrc( 0, 0, efb_w, efb_h );
