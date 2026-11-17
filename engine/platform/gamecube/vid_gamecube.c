@@ -307,6 +307,7 @@ static u32 GC_RetraceNow( void )
 }
 static double gc_flip_wait_ms_total;
 static u32 gc_flip_wait_count;
+static u32 gc_flip_late_presents;	/* single XFB: presents that skipped the wait */
 
 static void GC_WaitPendingFlip( void )
 {
@@ -9226,16 +9227,37 @@ static void GC_PresentBuffer( void )
 				gc_flip_retrace = GC_RetraceNow();
 				gc_flip_pending = true;
 			}
+			else if( GC_LateFlipEnabled() && xfb[0] && !xfb[1] )
+			{
+				/* Single XFB (DoD: no MEM1 for a second one). The copy
+				 * already lands in the scanned-out buffer, so the wait only
+				 * paces. Wait while still inside the retrace interval of the
+				 * last present (60 cap); a frame that already ran past it
+				 * presents now instead of losing a whole extra retrace. */
+				static u32 last_present_retrace;
+				const u32 now = GC_RetraceNow();
+
+				if( now == last_present_retrace )
+				{
+					while( GC_RetraceNow() == now )
+						VIDEO_WaitVSync();
+				}
+				else
+					gc_flip_late_presents++;
+				last_present_retrace = GC_RetraceNow();
+			}
 			else
 				VIDEO_WaitVSync();
 			GC_ProfMark( "present: VI vsync wait" );
 			GC_FlipXFB();
-			if(( gc_present_count % 600u ) == 0u && gc_flip_wait_count )
+			if(( gc_present_count % 600u ) == 0u && ( gc_flip_wait_count || gc_flip_late_presents ))
 			{
-				Con_Reportf( "Xash3D GameCube: late flip waits=%u avg=%.2fms over 600 presents\n",
-					gc_flip_wait_count, gc_flip_wait_ms_total / gc_flip_wait_count );
+				Con_Reportf( "Xash3D GameCube: late flip waits=%u avg=%.2fms late presents=%u over 600 presents\n",
+					gc_flip_wait_count, gc_flip_wait_count ? gc_flip_wait_ms_total / gc_flip_wait_count : 0.0,
+					gc_flip_late_presents );
 				gc_flip_wait_count = 0;
 				gc_flip_wait_ms_total = 0.0;
+				gc_flip_late_presents = 0;
 			}
 			if( gc_present_count == 20 || gc_present_count == 28 || gc_present_count == 36 )
 				Con_Reportf( "Xash3D GameCube: present Flipper vsync done presents=%u\n",
