@@ -830,6 +830,7 @@ static int r_gx_effects_mode = -1;
 void R_GXEffectsTriBegin( void )
 {
 	extern qboolean GC_IsFrameBudgetProbeActive( void );
+	extern qboolean r_gx_effects_darken;
 
 	if( !GC_UseGxWorldDraw() )
 		return;
@@ -863,10 +864,12 @@ void R_GXEffectsTriBegin( void )
 	/* Each sprite, beam or particle batch sets its own render mode while the
 	 * pipe stays open: a muzzle flash (additive) after a smoke puff
 	 * (blended) took the puff's blend before. */
-	if( vid.rendermode != r_gx_effects_mode )
+	if(( vid.rendermode | ( r_gx_effects_darken ? 0x100 : 0 )) != r_gx_effects_mode )
 	{
-		r_gx_effects_mode = vid.rendermode;
-		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
+		r_gx_effects_mode = vid.rendermode | ( r_gx_effects_darken ? 0x100 : 0 );
+		if( r_gx_effects_darken ) /* frame * ( 1 - texel * vertex colour ) */
+			GX_SetBlendMode( GX_BM_BLEND, GX_BL_ZERO, GX_BL_INVSRCCLR, GX_LO_NOOP );
+		else if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
 		else if( vid.rendermode == kRenderTransTexture
 			|| vid.rendermode == kRenderTransAlpha
