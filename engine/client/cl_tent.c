@@ -106,6 +106,7 @@ static void CL_GCPrewarmEffectSprites( void )
 {
 	static const void *world;
 	static int next, loaded;
+	static size_t start_free;
 	static qboolean done;
 
 	if( !SV_Active() || cls.state != ca_active || !cl.worldmodel )
@@ -115,6 +116,7 @@ static void CL_GCPrewarmEffectSprites( void )
 		world = cl.worldmodel;
 		next = 1;
 		loaded = 0;
+		start_free = 0;
 		done = false;
 	}
 	if( done )
@@ -128,7 +130,14 @@ static void CL_GCPrewarmEffectSprites( void )
 			break;
 		if( cl.models[next] || !Q_stristr( name, ".spr" ))
 			continue;
-		if( GC_MemHeapFreeBytes() < 96 * 1024 )
+		/* A match uses every free byte later, so the floor alone protects
+		 * nothing: with 112 KiB more heap the prewarm took a second sprite
+		 * and the grenade view model skins failed again. Cap what the
+		 * prewarm itself takes (the explosion sprite is 32 KiB). */
+		if( !start_free )
+			start_free = GC_MemHeapFreeBytes();
+		if( GC_MemHeapFreeBytes() < 96 * 1024
+			|| start_free - GC_MemHeapFreeBytes() >= 24 * 1024 )
 		{
 			done = true;
 			Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d, stopped at %s (heap %s)\n",
