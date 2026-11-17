@@ -636,7 +636,10 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 	 * world leaves the soft surface-cache store idle (the transition save
 	 * borrows it only later), so read a file that will not fit into it.
 	 * The game copies what it needs and frees the buffer right away. */
-	if( !pfile && GC_MenuRunsServer() && sv.state == ss_loading && !com_gc_borrowed_file )
+	/* DoD bots read their waypoint graph (22-31 KiB) after the map is up,
+	 * not only while it loads; the store claim refuses while another owner
+	 * (the transition save) holds it, so any time is safe. */
+	if( !pfile && GC_MenuRunsServer() && !com_gc_borrowed_file )
 	{
 		extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
 		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
@@ -665,6 +668,9 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 			}
 			else R_GCReleaseSurfaceCacheStore( "file" );
 		}
+		if( !pfile )
+			Con_Reportf( S_WARN "Xash3D GameCube: %s (%s) did not fit the heap or the surface-cache store%s\n",
+				name, Q_memprint( want > 0 ? (size_t)want : 0 ), store_size ? "" : " (store busy)" );
 	}
 #endif
 	if( pLength ) *pLength = (int)iLength;
