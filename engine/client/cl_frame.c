@@ -2461,6 +2461,16 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
 						else if( speed > 10.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_walk" );
+						else
+						{
+							/* Standing still: idle legs. The HL "idle" lookup
+							 * finds look_idle, sequence 0, which the renderer
+							 * reads as "no gait": the body then ignored the aim
+							 * pitch whenever a bot stood still to shoot. */
+							dgait = CL_GCLeanFindSeq( bh, "dod_idle1" );
+							if( dgait <= 0 )
+								dgait = CL_GCLeanFindSeq( bh, "standing_idle" );
+						}
 						if( aim >= 0 )
 							idle = aim;
 						if( dgait >= 0 )
