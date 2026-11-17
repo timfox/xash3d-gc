@@ -1471,6 +1471,7 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 }
 
 extern void GC_ProfMark( const char *name );
+void R_GXStudioInvalidateBindings( void );
 
 /* First sequence of a studio header whose label contains `want`, or -1. */
 static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want );
@@ -1741,6 +1742,40 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
 						sv.models[ed->v.modelindex] = found;
 					mod = found;
+				}
+			}
+			if( mod && mod->type == mod_studio && mod->needload == NL_PRESENT && mod->cache.data
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A promoted map model has its lean mesh only; attach its *t
+				 * skin atlas too, or it draws flat grey (ceres 3282517bd).
+				 * Bound skins return at once; stop checking after that. */
+				extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+				static byte skin_state[32];	/* 0..2 fails, 0xff bound */
+				static double skin_next[32];
+				static int skin_spawn = -1;
+				const int sk = ed->v.modelindex & 31;
+
+				if( skin_spawn != svs.spawncount )
+				{
+					memset( skin_state, 0, sizeof( skin_state ));
+					memset( skin_next, 0, sizeof( skin_next ));
+					skin_spawn = svs.spawncount;
+				}
+				if( skin_state[sk] < 3 && host.realtime >= skin_next[sk] )
+				{
+					if( Mod_GCAttachStudioSkins( mod ))
+					{
+						skin_state[sk] = 0xff;
+						R_GXStudioInvalidateBindings();
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' bound\n", mod->name );
+					}
+					else
+					{
+						skin_state[sk]++;
+						skin_next[sk] = host.realtime + 5.0;
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' failed (%d)\n", mod->name, skin_state[sk] );
+					}
 				}
 			}
 			if( !mod || mod->type != mod_studio )
