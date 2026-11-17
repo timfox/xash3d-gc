@@ -549,6 +549,95 @@ upload texture into video memory
 */
 static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic );
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/*
+A view model skin's chromakey, applied to the decoded RGBA in place before it
+is encoded as CMPR. Same rules as the RGB565 path below (vm_rgb565) and the
+ARAM skin builder (R_GXSkinBuildTiled): key colours become holes; the hands
+keep them as a 1-bit cut-out, a gun skin floods them from its neighbours so no
+key colour is left to bleed under the linear filter. Returns true when the
+skin is a cut-out.
+*/
+static qboolean R_GCViewModelSkinKey( byte *rgba, int w, int h, qboolean hands, qboolean onebit )
+{
+	const int n = w * h;
+	int i, pass, holes = 0;
+	byte last[3] = { 96, 80, 64 };	/* warm wood fallback */
+
+	for( i = 0; i < n; i++ )
+	{
+		byte *p = rgba + i * 4;
+		const unsigned r8 = p[0], g8 = p[1], b8 = p[2];
+		qboolean key = false;
+
+		if( onebit && p[3] < 128 )
+			key = true;
+		else if( r8 > 200 && b8 > 180 && g8 + 40 < r8 && g8 + 40 < b8 )
+			key = true;	/* magenta / hot pink */
+		else if( r8 < 40 && g8 < 40 && b8 > 200 )
+			key = true;	/* blue */
+		else if( r8 > 220 && g8 < 40 && b8 > 220 )
+			key = true;
+		else if( hands && r8 < 16 && g8 < 16 && b8 < 16 )
+			key = true;	/* the hands atlas keys on black */
+		p[3] = key ? 0 : 255;
+		if( key )
+			holes++;
+	}
+	if( !holes )
+		return false;
+	if( hands )
+		return true;
+	for( pass = 0; pass < 64 && holes; pass++ )
+	{
+		for( i = 0; i < n; i++ )
+		{
+			byte *p = rgba + i * 4;
+			const int px = i % w, py = i / w;
+			int ox, oy;
+
+			if( p[3] )
+			{
+				if( p[3] == 255 )
+					continue;
+				p[3] = 255;	/* filled last pass */
+				continue;
+			}
+			for( oy = -1; oy <= 1 && !p[3]; oy++ )
+				for( ox = -1; ox <= 1 && !p[3]; ox++ )
+				{
+					const int sx = px + ox, sy = py + oy;
+					const byte *q;
+
+					if( sx < 0 || sy < 0 || sx >= w || sy >= h )
+						continue;
+					q = rgba + ( sy * w + sx ) * 4;
+					if( q[3] != 255 )
+						continue;
+					p[0] = q[0]; p[1] = q[1]; p[2] = q[2];
+					p[3] = 254;	/* a source for the next pass, not this one */
+					holes--;
+				}
+		}
+	}
+	for( i = 0; i < n; i++ )
+	{
+		byte *p = rgba + i * 4;
+
+		if( p[3] == 0 )
+		{
+			p[0] = last[0]; p[1] = last[1]; p[2] = last[2];
+		}
+		else
+		{
+			last[0] = p[0]; last[1] = p[1]; last[2] = p[2];
+		}
+		p[3] = 255;
+	}
+	return false;
+}
+#endif
+
 /* GameCube: menu/UI images (resource/, gfx/shell/) may take their pixel and
  * alpha planes from the boot arena when the heap is short before the first
  * map load.  They are released by R_GcFreeMenuImages, which the first map
@@ -748,6 +837,64 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 						tex->name, pic->width, pic->height, cw, ch, masked ? 1 : 0, Q_memprint( bytes ));
 				return true;
 			}
+		}
+	}
+#endif
+
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* DoD view model skins as GX CMPR. The 192 KiB window that streams the
+	 * full skin from ARAM never fits beside a DoD match (about 100 KiB of
+	 * heap is free), so the gun drew from its 64 px RGB565 low mip. CMPR is
+	 * a quarter of the bytes per texel: the same 8 KiB holds the skin at
+	 * 128 px, twice the detail each way, resident. */
+	if( tex->name[0] == '#' && Q_stristr( tex->name, "models/v_" )
+		&& pic->type == PF_RGBA_32 && pic->width >= 8 && pic->height >= 8 && pic->depth <= 1
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprvmskins" ))
+	{
+		int cw, ch;
+		size_t bytes;
+		byte *dst = NULL;
+
+		R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
+		while(( cw > 128 || ch > 128 ) && cw > 8 && ch > 8 )
+		{
+			cw >>= 1;
+			ch >>= 1;
+		}
+		bytes = R_GXCmprBytes( cw, ch );
+		if( r_gc_studio_skins_in_arena )
+			dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+		if( !dst )
+			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+		if( dst && !((uintptr_t)dst & 31 ))
+		{
+			static int vm_cmpr_logged;
+			const qboolean hands = Q_stristr( tex->name, "hands" ) != NULL;
+			const qboolean onebit = !sw_noalphabrushes.value && FBitSet( pic->flags, IMAGE_ONEBIT_ALPHA );
+			const qboolean masked = R_GCViewModelSkinKey( buf, pic->width, pic->height, hands, onebit );
+
+			tex->width = cw;
+			tex->height = ch;
+			tex->depth = 1;
+			tex->alpha_pixels = NULL;
+			ClearBits( tex->flags, TF_HAS_ALPHA );
+			tex->gc_gx_native_alpha = R_GXEncodeCmprSkin( buf, pic->width, pic->height, cw, ch, masked, dst ) ? 1 : 0;
+			tex->pixels[0] = (pixel_t *)dst;
+			tex->gc_gx_native = true;
+			tex->gc_gx_cmpr = 1;
+			tex->numMips = 1;
+			tex->size = bytes;
+			if( vm_cmpr_logged++ < 12 )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR view model skin %s %dx%d -> %dx%d masked=%d (%s)\n",
+					tex->name, pic->width, pic->height, cw, ch, masked ? 1 : 0, Q_memprint( bytes ));
+			return true;
+		}
+		{
+			static int vm_cmpr_fail_logged;
+
+			if( vm_cmpr_fail_logged++ < 4 )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR view model skin %s no room (%s), RGB565 low mip\n",
+					tex->name, Q_memprint( bytes ));
 		}
 	}
 #endif
