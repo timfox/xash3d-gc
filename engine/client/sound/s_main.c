@@ -674,13 +674,32 @@ void S_GCVoiceStop( void );
 qboolean S_GCVoiceStart( const char *path );
 void S_GCVoiceUpdate( void );
 
+/* Larger than the ARAM sound store takes in one piece (it keeps half of
+ * its 2 MiB for others): DoD's round-win fanfares, ambience/uswin.wav,
+ * britwin.wav and germanwin.wav, are 0.9-1.1 MB. A whole-file load needs
+ * that much MEM1 and failed, so they stream from the disc on the
+ * soundtrack channel, like the announcer. Non-positional, at music volume. */
+#define GC_SND_DISC_STREAM_BYTES ( 900u * 1024u )
+
 static qboolean S_GCStreamVoice( const sfx_t *sfx, int flags )
 {
 	char path[MAX_QPATH];
 
-	if( !GC_MenuRunsServer() || Q_strnicmp( sfx->name, "tride/", 6 ))
+	if( !GC_MenuRunsServer( ))
 		return false;
-	Q_snprintf( path, sizeof( path ), "media/%s", sfx->name + 6 );
+	if( Q_strnicmp( sfx->name, "tride/", 6 ))
+	{
+		const char *name = sfx->name[0] == '*' ? sfx->name + 1 : sfx->name;
+
+		/* Only sounds that never made it into a cache are candidates. */
+		if( sfx->cache || name[0] == '!' )
+			return false;
+		Q_snprintf( path, sizeof( path ), "sound/%s%s", name, COM_FileExtension( name )[0] ? "" : ".wav" );
+		if( FS_FileSize( path, false ) <= (fs_offset_t)GC_SND_DISC_STREAM_BYTES )
+			return false;
+	}
+	else
+		Q_snprintf( path, sizeof( path ), "media/%s", sfx->name + 6 );
 	if( FBitSet( flags, SND_STOP ))
 	{
 		if( !Q_stricmp( S_GCVoiceCurrent( ), path ))
