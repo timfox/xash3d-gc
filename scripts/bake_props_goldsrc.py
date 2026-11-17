@@ -321,7 +321,6 @@ def static_props(ents: list[dict]) -> list[dict]:
 				angles[0] = 90.0
 			else:
 				angles[1] = a
-		scale = _floats(e.get("scale", "1"), 1)[0]
 		rendermode = int(_floats(e.get("rendermode", "0"), 1)[0])
 		renderamt = int(_floats(e.get("renderamt", "255"), 1)[0])
 		if rendermode != 0 and renderamt <= 0:
@@ -330,7 +329,10 @@ def static_props(ents: list[dict]) -> list[dict]:
 			"model": model.lower(),
 			"origin": _floats(e.get("origin", "0 0 0"), 3),
 			"angles": angles,
-			"scale": scale if scale > 0.0 else 1.0,
+			# The engine draws a studio entity at its model's own size
+			# (R_StudioSetUpTransform passes 1.0), as GoldSrc does: "scale"
+			# is a sprite key. Baking it made charlie's hedgehogs 2.5x too big.
+			"scale": 1.0,
 			"sequence": int(_floats(e.get("sequence", "0"), 1)[0]),
 			"skin": int(_floats(e.get("skin", "0"), 1)[0]),
 			"body": int(_floats(e.get("body", "0"), 1)[0]),

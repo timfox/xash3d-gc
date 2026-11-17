@@ -6504,8 +6504,22 @@ static byte *R_GXPropCacheGet( unsigned model )
 			extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 			extern size_t Mod_GCWorldArraySpillFreeLasting( void );
 			const size_t room = Mod_GCWorldArraySpillFreeLasting();
-			const size_t margin = 48u * 1024u;
+			/* The team bodies load into the spill when a player of that
+			 * team first shows up, which is after the first prop is drawn:
+			 * a cache sized to the free spill left us-inf without a body.
+			 * Keep room for both cores (as the world chunk cache does). */
+			static const char *const team_cores[] = { "gc_studio/us-inf.mdl", "gc_studio/axis-inf.mdl" };
+			size_t margin = 48u * 1024u;
 			u32 all = 0;
+			int c;
+
+			for( c = 0; c < 2; c++ )
+			{
+				const fs_offset_t sz = gEngfuncs.fsapi->FileSize( team_cores[c], false );
+
+				if( sz > 0 )
+					margin += (( (size_t)sz + 31u ) & ~(size_t)31u ) + 4096u;
+			}
 
 			gc_prop_cache_tried = true;
 			for( k = 0; k < gc_prop_nmodels; k++ )
