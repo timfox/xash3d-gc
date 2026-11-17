@@ -17792,6 +17792,12 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				if( trace )
 					Con_Reportf( "Xash3D GameCube: newgame frame %d HUD begin\n", frame_trace );
 				CL_DrawHUD( CL_ACTIVE );
+				/* this frame loop replaces SCR_UpdateScreen, so the chat keyboard is drawn here */
+				{
+					extern void OSK_Draw( void );
+
+					OSK_Draw();
+				}
 				GC_ProfMark( "render: HUD" );
 				/* VGUI is skipped on GC — CapFaces listen team picker painted
 				 * to match DoD Teammenu.res (dark/tan ClassMenu palette).
