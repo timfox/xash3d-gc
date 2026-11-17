@@ -797,7 +797,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 					 * which holds while a view binds fewer textures than there
 					 * are slots (the map has 96, six of them decal atlases that
 					 * are each seen in one place). */
-					gc_wd_tex_overflow = GC_WorldTexCount() > nslots + nslots / 4;
+					gc_wd_tex_overflow = GC_WorldTexCount() > nslots;
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
 			}
