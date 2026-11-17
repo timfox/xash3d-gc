@@ -374,12 +374,14 @@ static void R_GXTevMatAppend( int id, int a, int b )
 		GX_SetTevAlphaIn( GX_TEVSTAGE0 + base_stages, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
 		GX_SetTevAlphaOp( GX_TEVSTAGE0 + base_stages, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 	}
-	/* Alpha-test on LM-lit cliff/brush mats cut white sky holes through
-	 * solid plates. Keep punch-through only for unlit foliage-style mats. */
-	/* Decals (flag 0x08, Source $decal): the alpha is the decal's shape, so
-	 * they cut out on lightmapped walls too. Without it the infodecals and
-	 * overlays on lit walls drew as opaque rectangles. */
-	if(( flags & 0x02 ) && ( !gc_wd_chunk_lm || ( flags & 0x08 )))
+	/* Source $alphatest, $translucent and $decal: the alpha is the shape of
+	 * the grate, rail or decal, so it cuts out on lightmapped chunks as well
+	 * as vertex-lit ones. (It used to be held back on lightmapped chunks,
+	 * from a time when the flag reached materials that had no cut-out; the
+	 * bake now sets it from the VMT alone and encodes the alpha bit for the
+	 * same materials.) Without it the rail and the Combine grate drew their
+	 * holes as black blocks. */
+	if( flags & 0x02 )
 	{
 		GX_SetAlphaCompare( GX_GEQUAL, aref ? aref : 128, GX_AOP_AND, GX_ALWAYS, 0 );
 		GX_SetZCompLoc( GX_FALSE );
