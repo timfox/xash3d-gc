@@ -3425,9 +3425,12 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			if( pi > 0 && pi <= MAX_CLIENTS && gp_host->realtime >= next_blend_log[pi] )
 			{
 				next_blend_log[pi] = gp_host->realtime + 2.0;
-				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio aim player %d pitch in %.1f blend %d seq %d gait %d\n",
+				const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + RI.currententity->curstate.sequence;
+
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio aim player %d pitch in %.1f blend %d seq %d '%s' (blend type %d %.1f..%.1f, %d blends) gait %d\n",
 					pi, orig_angles[PITCH], RI.currententity->curstate.blending[0],
-					RI.currententity->curstate.sequence, pplayer->gaitsequence );
+					RI.currententity->curstate.sequence, sd->label, sd->blendtype[0],
+					sd->blendstart[0], sd->blendend[0], sd->numblends, pplayer->gaitsequence );
 			}
 		}
 #endif
