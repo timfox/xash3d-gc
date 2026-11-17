@@ -289,9 +289,64 @@ static byte *R_GXWorldDLLmPage( u32 page )
  * identical setup saved 1.3 ms per world pass (two passes with the mirror). */
 static int gc_wd_tev_key = -1;
 
+/* Soft decals (recipe flag 0x10, lostcoast-gc tools/bake_infodecals.py).
+ * Source blends a $translucent decal by its alpha; a CMPR texture has one
+ * alpha bit, which turned graffiti into fat cut-outs. The paint decals share
+ * one atlas whose alpha is a second texture, media/da_<map>.bin: 128x128 I4,
+ * 8 KB resident in the map arena. */
+static int gc_wd_dalpha_state;	/* 0 untried, 1 ready, -1 absent */
+static GXTexObj gc_wd_dalpha_obj;
+static qboolean gc_wd_soft_on;
+
+static qboolean R_GXWorldDLDecalAlpha( void )
+{
+	char path[96];
+	byte head[32], *mem;
+	file_t *f;
+	u32 w, h, bytes;
+
+	if( gc_wd_dalpha_state )
+		return gc_wd_dalpha_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;	/* the arena is still loading the map: ask again */
+	gc_wd_dalpha_state = -1;
+	Q_snprintf( path, sizeof( path ), "media/da_%s.bin", gc_wd_mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f )
+		return false;
+	if( gEngfuncs.fsapi->Read( f, head, 32 ) == 32 && head[0] == 'G' && head[1] == 'C'
+		&& head[2] == 'd' && head[3] == 'a'
+		&& ( w = ( head[4] << 8 ) | head[5] ) >= 8 && ( h = ( head[6] << 8 ) | head[7] ) >= 8
+		&& w <= 256 && h <= 256 && !( w & 7 ) && !( h & 7 )
+		&& ( bytes = w * h / 2u ) != 0
+		&& ( mem = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes )) != NULL
+		&& gEngfuncs.fsapi->Read( f, mem, bytes ) == (fs_offset_t)bytes )
+	{
+		DCFlushRange( mem, bytes );
+		GX_InitTexObj( &gc_wd_dalpha_obj, mem, (u16)w, (u16)h, GX_TF_I4, GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wd_dalpha_obj, GX_LINEAR, GX_LINEAR );
+		gc_wd_dalpha_state = 1;
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL decal alpha %s ready=%d\n", path, gc_wd_dalpha_state > 0 );
+	return gc_wd_dalpha_state > 0;
+}
+
+static void R_GXWorldDLSoftOff( void )
+{
+	if( !gc_wd_soft_on )
+		return;
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	gc_wd_soft_on = false;
+	gc_wd_tev_key = -1;
+}
+
 static void R_GXWorldDLSetupLit( int lightmap )
 {
 	gc_wd_tev_key = -1;
+	R_GXWorldDLSoftOff();
 	GX_SetNumIndStages( 0 );
 	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	GX_SetZCompLoc( GX_TRUE );
@@ -385,6 +440,29 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	{
 		GX_SetAlphaCompare( GX_GEQUAL, aref ? aref : 128, GX_AOP_AND, GX_ALWAYS, 0 );
 		GX_SetZCompLoc( GX_FALSE );
+	}
+	/* Soft decal: one more stage takes the alpha from the I4 page (same
+	 * texture coordinates as the atlas), and the quad blends over the wall
+	 * already drawn. Decal materials are the last in the pack, so their
+	 * group comes after every wall's. No depth write: nothing sorts
+	 * against a decal a unit off its wall. */
+	if(( flags & 0x10 ) && R_GXWorldDLDecalAlpha())
+	{
+		const u8 st = (u8)( GX_TEVSTAGE0 + base_stages );
+
+		GX_LoadTexObj( &gc_wd_dalpha_obj, GX_TEXMAP3 );
+		GX_SetNumTevStages( (u8)( base_stages + 1 ));
+		GX_SetTevDirect( st );
+		GX_SetTevOrder( st, GX_TEXCOORD0, GX_TEXMAP3, GX_COLORNULL );
+		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+		GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetAlphaCompare( GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+		GX_SetZCompLoc( GX_FALSE );
+		GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+		gc_wd_soft_on = true;
 	}
 }
 static void R_GXTevMatEndAlphaTest( void ) {}
@@ -2533,6 +2611,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 	}
 	gc_wd_defer_n = 0;
 	R_GXCmprSetFar( false );
+	R_GXWorldDLSoftOff();	/* the decal group is the last one */
 }
 
 int R_GXWorldDLDraw( void )
