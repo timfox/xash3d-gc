@@ -75,8 +75,17 @@ qboolean R_GXBloomEnabled( void )
  * The frame is measured on last frame's half-res luma copy (the bloom's), and
  * the scale is applied as one fullscreen multiply before the bloom:
  * display = gamma( light x scale ), so the gain over the baked exposure is
- * ( scale / baked )^( 1 / 2.2 ). The sky (depth at the far plane) is left
- * alone: its art is authored for the screen, not in light units.
+ * ( scale / baked )^( 1 / 2.2 ).
+ *
+ * The sky (depth at the far plane) follows the scale too when the bake says
+ * its textures are light: the map's HDR sky x sky_baked (the last header word;
+ * 0 = screen art, leave it alone). Source draws the sky as HDR x tonemap
+ * scale, which is why it blows out white behind dark cliffs and goes deep
+ * blue over a sunlit yard.
+ *
+ * Samples at full white are left out of the histogram, as in Source, whose
+ * luminance buckets end at 1: what is already blown out has no say. Without
+ * that the sun's glare alone holds the scale at its minimum.
  */
 #define GC_EXPO_MAX_VOLUMES 16
 
@@ -92,6 +101,7 @@ static struct
 	s8	state;		/* 0 untried, 1 ready, -1 none */
 	u8	n, inside[GC_EXPO_MAX_VOLUMES], fired[GC_EXPO_MAX_VOLUMES];
 	float	baked, lim_min, lim_max, scale, last_time, last_org[3];
+	float	sky_baked;	/* tonemap scale the sky textures were baked at, 0 = none */
 	int	frames;
 	gc_expo_vol_t	vol[GC_EXPO_MAX_VOLUMES];
 } gc_expo;
@@ -110,6 +120,9 @@ static void R_GXExposureLoad( void )
 	{
 		gc_expo.n = (u8)( hdr[1] & 0xffffu );
 		memcpy( &gc_expo.baked, &hdr[2], 12 );
+		memcpy( &gc_expo.sky_baked, &hdr[5], 4 );
+		if( !( gc_expo.sky_baked > 0.0f && gc_expo.sky_baked < 100.0f ))
+			gc_expo.sky_baked = 0.0f;
 		if( gc_expo.baked > 0.0f && gc_expo.lim_max >= gc_expo.lim_min && gc_expo.lim_min > 0.0f
 			&& gEngfuncs.fsapi->Read( f, gc_expo.vol, gc_expo.n * 44 ) == (fs_offset_t)( gc_expo.n * 44 ))
 		{
@@ -153,6 +166,21 @@ static qboolean R_GXExposureSegBox( const float *a, const float *b, const gc_exp
 }
 
 /* Returns the display gain for this frame. buf is last frame's luma copy. */
+/* Which histogram samples are sky. The retail still of the cove has the sky
+ * at tonemap scale 1.55 with half the frame brighter than 60 % of white, which
+ * the 2 % rule would never allow if the sky had a vote: the world sets the
+ * exposure and the sky follows it. Sky = depth still at the far plane. A
+ * second half-res copy takes the low byte of Z (the other half of the idle
+ * soft Z buffer the luma copy borrows): 0xff there for the far plane, any
+ * value for geometry. */
+static const u8 *gc_expo_zbuf;
+/* The copied region in half-res texels: origin and size (8 x 4 tiles). */
+#define GC_EXPO_ZX 16
+#define GC_EXPO_ZY 18
+#define GC_EXPO_ZW 288
+#define GC_EXPO_ZH 204
+static int gc_expo_dbg[4];	/* samples counted, bright bin, median bin, sky samples: for the log */
+
 static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 {
 	const float *org = RI.rvp.vieworigin;
@@ -196,7 +224,7 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 		/* Histogram of a 20 x 12 grid over the centre 90 % x 85 % of the frame
 		 * (mat_exposure_center_region). I8 texels sit in 8 x 4 tiles. */
 		u16 hist[32];
-		int gx, gy, n = 0, acc, hi = 31, med = 0;
+		int gx, gy, n = 0, acc, hi = 31, med = 0, nsky = 0;
 		float lum_hi, lum_med, t1, t2;
 
 		memset( hist, 0, sizeof( hist ));
@@ -208,7 +236,22 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 			{
 				const int x = (int)(( 0.05f + 0.9f * ( (float)gx + 0.5f ) / 20.0f ) * (float)bw );
 
-				hist[buf[(( y >> 2 ) * ( bw >> 3 ) + ( x >> 3 )) * 32 + ( y & 3 ) * 8 + ( x & 7 )] >> 3]++;
+				const u8 l = buf[(( y >> 2 ) * ( bw >> 3 ) + ( x >> 3 )) * 32 + ( y & 3 ) * 8 + ( x & 7 )];
+
+				if( gc_expo.sky_baked > 0.0f )
+				{
+					const int zx = x - GC_EXPO_ZX, zy = y - GC_EXPO_ZY;
+
+					if( gc_expo_zbuf && bw == 320 && zx >= 0 && zy >= 0 && zx < GC_EXPO_ZW && zy < GC_EXPO_ZH
+						&& gc_expo_zbuf[(( zy >> 2 ) * ( GC_EXPO_ZW >> 3 ) + ( zx >> 3 )) * 32 + ( zy & 3 ) * 8 + ( zx & 7 )] == 0xff )
+					{
+						nsky++;
+						continue;	/* sky */
+					}
+					if( l >= 250 )
+						continue;	/* blown out: above the top bucket */
+				}
+				hist[l >> 3]++;
 				n++;
 			}
 		}
@@ -228,8 +271,9 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 		/* A copy that reads back all black is no measurement: Dolphin only
 		 * writes EFB copies to memory with "Store EFB Copies to Texture Only"
 		 * off, and the Null backend never does. Hold the scale then. */
-		if( hist[0] == n )
-			hi = -1;
+		gc_expo_dbg[0] = n; gc_expo_dbg[1] = hi; gc_expo_dbg[2] = med; gc_expo_dbg[3] = nsky;
+		if( hist[0] == n || n < 24 )
+			hi = -1;	/* also when nearly every sample is blown out */
 		/* Bin centres back to linear light, as shares of white. */
 		if( hi >= 0 )
 		{
@@ -252,13 +296,24 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 	}
 	gc_expo.frames++;
 	if(( gc_expo.frames & 255 ) == 1 )
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: exposure scale=%.2f goal=%.2f limits %.2f..%.2f\n",
-			gc_expo.scale, goal, gc_expo.lim_min, gc_expo.lim_max );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: exposure scale=%.2f goal=%.2f limits %.2f..%.2f counted=%d sky=%d hi=%d med=%d\n",
+			gc_expo.scale, goal, gc_expo.lim_min, gc_expo.lim_max, gc_expo_dbg[0], gc_expo_dbg[3], gc_expo_dbg[1], gc_expo_dbg[2] );
 	return powf( gc_expo.scale / gc_expo.baked, 1.0f / 2.2f );
 }
 
-/* One fullscreen multiply by the gain, over everything nearer than the far plane. */
-static void R_GXExposureApply( GXRModeObj *rmode, float gain )
+/* For the sky box drawn into the water mirror: the mirror is part of the
+ * world, which takes the world's gain afterwards, so its sky has to be in the
+ * world's baked units. Returns the factor over the sky textures, 0 = none. */
+float R_GXExposureMirrorSkyGain( void )
+{
+	if( gc_expo.state <= 0 || gc_expo.sky_baked <= 0.0f || gc_expo.baked <= 0.0f )
+		return 0.0f;
+	return powf( gc_expo.baked / gc_expo.sky_baked, 1.0f / 2.2f );
+}
+
+/* One fullscreen multiply by the gain: over everything nearer than the far
+ * plane, or (sky) over what is left at the far plane. */
+static void R_GXExposureApply( GXRModeObj *rmode, float gain, qboolean sky )
 {
 	const f32 w = (f32)rmode->fbWidth, h = (f32)rmode->efbHeight;
 	Mtx44 ortho;
@@ -281,7 +336,7 @@ static void R_GXExposureApply( GXRModeObj *rmode, float gain )
 	GX_LoadPosMtxImm( ident, GX_PNMTX0 );
 	GX_SetCurrentMtx( GX_PNMTX0 );
 	/* Only where the scene wrote a depth nearer than the far plane. */
-	GX_SetZMode( GX_TRUE, GX_GREATER, GX_FALSE );
+	GX_SetZMode( GX_TRUE, sky ? GX_LEQUAL : GX_GREATER, GX_FALSE );
 	GX_SetZCompLoc( GX_TRUE );
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetColorUpdate( GX_TRUE );
@@ -351,12 +406,33 @@ qboolean R_GXBloomApply( void *rmode_ptr )
 
 	/* Exposure first: measured on last frame's copy still in the buffer,
 	 * applied before this frame's copy so the bloom sees the result. */
-	R_GXExposureApply( rmode, R_GXExposureUpdate( gc_bloom_buf, bw, bh ));
+	R_GXExposureApply( rmode, R_GXExposureUpdate( gc_bloom_buf, bw, bh ), false );
+	if( gc_expo.state > 0 && gc_expo.sky_baked > 0.0f )
+		R_GXExposureApply( rmode, powf( gc_expo.scale / gc_expo.sky_baked, 1.0f / 2.2f ), true );
 
 	/* 1) EFB -> half-res luma through the copy box filter. */
 	GX_SetTexCopySrc( 0, 0, efb_w, efb_h );
 	GX_SetTexCopyDst( bw, bh, GX_TF_I8, GX_TRUE );
 	DCInvalidateRange( gc_bloom_buf, (u32)bw * bh );
+	if( gc_expo.state > 0 && gc_expo.sky_baked > 0.0f )
+	{
+		/* Low byte of Z for the same picture: next frame's sky mask. */
+		/* Only the part of the frame the histogram samples (the centre
+		 * 90 % x 85 %): the whole frame does not fit the borrowed half. */
+		u8 *zb = ( efb_w == 640 && efb_h == 480 )
+			? (u8 *)R_GcmapBorrowSoftZ( (u32)bw * bh, GC_EXPO_ZW * GC_EXPO_ZH ) : NULL;
+
+		if( zb )
+		{
+			GX_SetTexCopySrc( GC_EXPO_ZX * 2, GC_EXPO_ZY * 2, GC_EXPO_ZW * 2, GC_EXPO_ZH * 2 );
+			GX_SetTexCopyDst( GC_EXPO_ZW, GC_EXPO_ZH, GX_CTF_Z8L, GX_TRUE );
+			DCInvalidateRange( zb, GC_EXPO_ZW * GC_EXPO_ZH );
+			GX_CopyTex( zb, GX_FALSE );
+			GX_SetTexCopySrc( 0, 0, efb_w, efb_h );
+			GX_SetTexCopyDst( bw, bh, GX_TF_I8, GX_TRUE );
+		}
+		gc_expo_zbuf = zb;
+	}
 	GX_CopyTex( gc_bloom_buf, GX_FALSE );
 	GX_PixModeSync();
 	GX_InitTexObj( &gc_bloom_tex, gc_bloom_buf, bw, bh, GX_TF_I8,
