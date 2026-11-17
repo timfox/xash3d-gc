@@ -1549,6 +1549,32 @@ static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want )
 	return -1;
 }
 
+/* Keep the nearest `cap` candidates: id is an edict number, or -(prop + 1)
+ * for a static prop. */
+static void CL_GCLeanPick( int *picks, float *dists, int *n, int cap, int id, float dist )
+{
+	int slot, worst = 0;
+
+	if( *n < cap )
+	{
+		picks[*n] = id;
+		dists[*n] = dist;
+		( *n )++;
+		return;
+	}
+	for( slot = 1; slot < *n; slot++ )
+		if( dists[slot] > dists[worst] )
+			worst = slot;
+	if( *n > 0 && dist < dists[worst] )
+	{
+		picks[worst] = id;
+		dists[worst] = dist;
+	}
+}
+
+/* World DL visibility memo keys for static props (edicts use their number). */
+#define GC_STATIC_PROP_KEY0	4096
+
 /* Death pose for a dead player or a body-queue corpse. The server's player
  * model is a hull stub, so the game cannot always look the sequence up: keep
  * the game's sequence when it is a valid one-shot of this body, else use the
@@ -1738,6 +1764,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		int n_bodies = 0;
 		int picks[24];
 		float pick_dists[24];
+		/* Leave room for the other players and bots (emitted after). */
+		const int pick_cap = Q_max( 1, studio_budget - Q_max( 0, svs.maxclients - 1 ));
 		int n_picks = 0;
 		int slot;
 
@@ -1748,7 +1776,6 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			vec3_t delta;
 			float dist;
 			qboolean allow;
-			int slot;
 
 			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex )
 				continue;
@@ -1956,33 +1983,74 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 			/* Insert into nearest-N picks. */
-			if( n_picks < studio_budget )
-			{
-				picks[n_picks] = e;
-				pick_dists[n_picks] = dist;
-				n_picks++;
-			}
-			else
-			{
-				int worst = 0;
-				for( slot = 1; slot < n_picks; slot++ )
-				{
-					if( pick_dists[slot] > pick_dists[worst] )
-						worst = slot;
-				}
-				if( dist < pick_dists[worst] )
-				{
-					picks[worst] = e;
-					pick_dists[worst] = dist;
-				}
-			}
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, dist );
+		}
+		/* Static props (unnamed env_model / dod_object, no edict). */
+		for( e = 0; e < gc_num_static_props; e++ )
+		{
+			const gc_static_prop_t *sp = &gc_static_props[e];
+			extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+			model_t *mod = SV_ModelHandle( sp->modelindex );
+			vec3_t delta, bmin, bmax;
+			float dist;
+
+			if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+				continue;
+			VectorSubtract( sp->origin, view_org, delta );
+			dist = VectorLength( delta );
+			if( dist > studio_max_dist )
+				continue;
+			VectorSet( bmin, sp->origin[0] - 48.0f, sp->origin[1] - 48.0f, sp->origin[2] );
+			VectorSet( bmax, sp->origin[0] + 48.0f, sp->origin[1] + 48.0f, sp->origin[2] + 80.0f );
+			if( !R_GXWorldDLEntityVisible( GC_STATIC_PROP_KEY0 + e, bmin, bmax ))
+				continue;
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, -( e + 1 ), dist );
 		}
 		for( slot = 0; slot < n_picks && studio_slots < studio_budget; slot++ )
 		{
-			edict_t *ed = SV_EdictNum( picks[slot] );
-			model_t *mod = SV_ModelHandle( ed->v.modelindex );
+			edict_t *ed;
+			model_t *mod;
 			cl_entity_t *ent = &lean_studio_ents[studio_slots];
 
+			if( picks[slot] < 0 )
+			{
+				const gc_static_prop_t *sp = &gc_static_props[-picks[slot] - 1];
+
+				mod = SV_ModelHandle( sp->modelindex );
+				if( !mod )
+					continue;
+				if( sp->modelindex > 0 && sp->modelindex < MAX_MODELS )
+					cl.models[sp->modelindex] = mod;
+				memset( ent, 0, sizeof( *ent ));
+				ent->index = 0;
+				ent->model = mod;
+				VectorCopy( sp->origin, ent->origin );
+				VectorCopy( sp->angles, ent->angles );
+				VectorCopy( sp->origin, ent->curstate.origin );
+				VectorCopy( sp->angles, ent->curstate.angles );
+				ent->curstate.modelindex = sp->modelindex;
+				ent->curstate.sequence = sp->sequence;
+				ent->curstate.body = sp->body;
+				ent->curstate.skin = sp->skin;
+				ent->curstate.scale = sp->scale > 0.0f ? sp->scale : 1.0f;
+				ent->curstate.framerate = sp->framerate != 0.0f ? sp->framerate : 1.0f;
+				ent->curstate.rendermode = sp->rendermode;
+				ent->curstate.renderamt = sp->renderamt;
+				ent->curstate.renderfx = sp->renderfx;
+				ent->curstate.rendercolor = sp->rendercolor;
+				ent->curstate.entityType = ENTITY_NORMAL;
+				ent->prevstate = ent->curstate;
+				VectorCopy( ent->origin, ent->latched.prevorigin );
+				VectorCopy( ent->angles, ent->latched.prevangles );
+				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					studios++;
+					studio_slots++;
+				}
+				continue;
+			}
+			ed = SV_EdictNum( picks[slot] );
+			mod = SV_ModelHandle( ed->v.modelindex );
 			if( !mod )
 				continue;
 			if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
