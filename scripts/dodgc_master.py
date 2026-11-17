@@ -45,9 +45,9 @@ MAX_RATE_ENTRIES = 10000
 MAX_CONNECTIONS = 64
 SOCKET_TIMEOUT = 5.0
 
-RE_GAMEDIR = re.compile(r"^[a-z0-9_]{1,16}$")
-RE_MAP = re.compile(r"^[A-Za-z0-9_\-]{1,32}$")
-RE_NAME = re.compile(r"^[A-Za-z0-9 _.\-\[\]()+!?#:'@]{0,32}$")
+RE_GAMEDIR = re.compile(r"[a-z0-9_]{1,16}\Z")
+RE_MAP = re.compile(r"[A-Za-z0-9_\-]{1,32}\Z")
+RE_NAME = re.compile(r"[A-Za-z0-9 _.\-\[\]()+!?#:'@]{0,32}\Z")
 POST_KEYS = {"port", "gamedir", "map", "players", "max", "name"}
 
 

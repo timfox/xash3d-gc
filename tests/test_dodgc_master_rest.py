@@ -53,7 +53,8 @@ class RulesTests(unittest.TestCase):
                good(port=27015.0), good(gamedir="DOD"), good(gamedir="../x"), good(map="a b"),
                good(map=""), good(map="x" * 33), good(players=17), good(players=-1),
                good(max=0), good(max=33), good(name="<script>"), good(name="a" * 33),
-               good(name="café"), good(name='q"q'), good(name="a\\b"), good(name=5)]
+               good(name="café"), good(name='q"q'), good(name="a\\b"), good(name=5),
+               good(map="dod_x\n"), good(gamedir="dod\n"), good(name="x\n")]
         for doc in bad:
             self.assertEqual(self.post(doc)[0], 400, doc)
         missing = good()

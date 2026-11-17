@@ -109,6 +109,8 @@ docker run -p 8080:8080 dodgc-master
 python3 -m unittest tests.test_dodgc_master_rest tests.test_dodgc_master_http
 ```
 
+On ordinary shared hosting use the PHP or CGI edition instead, see `docs/MASTER_HOSTING.md`.
+
 Behind nginx/Caddy/Cloudflare add `--trust-proxy` so the registered address is the last
 `X-Forwarded-For` hop (only do this when the proxy sets that header itself). Use
 `--allow-private` only for a LAN test master. Hosts behind a home router must forward
