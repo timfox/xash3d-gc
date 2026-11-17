@@ -197,6 +197,14 @@ void *R_GCBorrowMapLoadStaticArena( size_t size, size_t *capacity )
 	return base;
 }
 
+/* The lookup-table arena was handed to a map load and not rebuilt since: on
+ * the live-BSP routes the world's planes/nodes stay in it for the map's life,
+ * so nothing may write the soft tables (vid.screen, blend maps) there. */
+qboolean R_GcmapTablesLeftToBSP( void )
+{
+	return gc_static_map_arena_dirty;
+}
+
 qboolean R_GCReleaseMapLoadStaticArena( void *ptr )
 {
 	if( !ptr || ptr != (void *)R_GcmapStaticArenaBase() || !gc_static_map_arena_in_use )

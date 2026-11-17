@@ -555,6 +555,9 @@ void R_GCRebuildBlendMaps( void )
 	memset( vid.modmap, 0, sizeof( vid.modmap ));
 	memset( vid.alphamap, 0, sizeof( vid.alphamap ));
 	R_BuildBlendMaps();
+	/* R_AllocScreen skips the screen map while the arena holds a live BSP;
+	 * the arena is ours again here, so rebuild it with the blend tables. */
+	R_BuildScreenMap();
 }
 
 void R_GcmapTrimScreenBuffers( void )
@@ -698,9 +701,25 @@ qboolean R_AllocScreen( void )
 				   &swblit.rmask, &swblit.gmask, &swblit.bmask ))
 		return false;
 
-	R_BuildScreenMap();
 #if XASH_GAMECUBE
-	gEngfuncs.Con_Reportf( "Xash3D GameCube: renderer screen map ready\n" );
+	{
+		extern qboolean R_GcmapTablesLeftToBSP( void );
+
+		/* vid.screen lies in the table arena; on the live-BSP routes the
+		 * world keeps its planes there (charlie: planes 26207..32357 under
+		 * vid.screen were rewritten as 565 pixels, so brush walls whose
+		 * clipnodes use them stopped blocking). GX does not need the soft
+		 * screen map; leave the arena to the BSP. */
+		if( R_GcmapTablesLeftToBSP( ))
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: renderer screen map skipped (table arena holds the live BSP)\n" );
+		else
+		{
+			R_BuildScreenMap();
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: renderer screen map ready\n" );
+		}
+	}
+#else
+	R_BuildScreenMap();
 #endif
 	vid.width = gpGlobals->width;
 	vid.height = gpGlobals->height;
