@@ -2249,6 +2249,18 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				 * mid blend, slightly up (bots "looking at the sky"). */
 				if( dead || !ed->v.gaitsequence )
 					ent->angles[0] = 0.0f;
+				{
+					/* Aim check: what pitch each player hands the renderer. */
+					static double next_aim_log[MAX_CLIENTS + 1];
+
+					if( e <= MAX_CLIENTS && host.realtime >= next_aim_log[e] )
+					{
+						next_aim_log[e] = host.realtime + 2.0;
+						Con_Reportf( "Xash3D GameCube: lean aim player %d v_angle.x %.1f angles.x %.1f gait %d seq %d -> pitch %.1f%s\n",
+							e, ed->v.v_angle[0], ed->v.angles[0], ed->v.gaitsequence, ed->v.sequence,
+							ent->angles[0], dead ? " (dead)" : "" );
+					}
+				}
 				VectorCopy( ent->origin, ent->curstate.origin );
 				VectorCopy( ent->angles, ent->curstate.angles );
 				VectorCopy( ed->v.mins, ent->curstate.mins );
