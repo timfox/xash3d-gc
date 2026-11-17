@@ -2211,8 +2211,17 @@ static void CL_Reconnect_f( void )
 	{
 		connprotocol_t proto = cls.net_protocol;
 
+#if XASH_GAMECUBE
+		const qboolean gc_keep_memopt = SV_Active() && GC_MapLoadMemoryOpt();
+#endif
 		if( cls.state >= ca_connected )
 			CL_Disconnect();
+#if XASH_GAMECUBE
+		/* CL_Disconnect clears the lean map route; a local reconnect
+		 * (same-map changelevel on the listen route) must keep it. */
+		if( gc_keep_memopt )
+			GC_SetMapLoadMemoryOptSession( true );
+#endif
 
 		cls.connect_time = MAX_HEARTBEAT;	// fire immediately
 		cls.demonum = cls.movienum = -1;	// not in the demo loop now

@@ -1281,6 +1281,14 @@ void GC_ClearMapLoadMemoryOpt( void )
 	GC_PrefetchResetForMenu();
 }
 
+/* A local reconnect (same-map changelevel on the listen route) goes through
+ * CL_Disconnect, which clears the session flag; the reload must keep the lean
+ * map route it had. */
+void GC_SetMapLoadMemoryOptSession( qboolean on )
+{
+	gc_mapload_memopt_session = on;
+}
+
 qboolean GC_MapLoadMemoryOpt( void )
 {
 	return gc_mapload_memopt_session

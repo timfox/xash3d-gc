@@ -132,6 +132,7 @@ void GC_BeginMapLoadMemoryOpt( void );
 void GC_EndMapLoadMemoryOpt( void );
 void GC_ClearMapLoadMemoryOpt( void );
 qboolean GC_MapLoadMemoryOpt( void );
+void GC_SetMapLoadMemoryOptSession( qboolean on );
 size_t GC_MemHeapFreeBytes( void );
 /* Walks newlib bins and chunks; logs and returns false on the first bad link. */
 qboolean GC_HeapCheck( const char *tag );

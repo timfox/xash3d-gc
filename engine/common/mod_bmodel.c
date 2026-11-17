@@ -585,6 +585,17 @@ qboolean Mod_GCIsRetainedBspScratch( const void *buf )
 static byte *gc_menu_lm_atlas;
 static int gc_menu_ls_count; /* animated faces kept in the scratch, see below */
 
+/* Bumped every time the world-array spill is rewound for a new map load. The
+ * spill levels alone cannot tell a reload from steady state: the new map
+ * refills the spill past the old mark before anyone checks it, so renderer
+ * packs that keep pointers into the spill compare this instead. */
+static unsigned gc_world_array_spill_generation;
+
+unsigned Mod_GCWorldArraySpillGeneration( void )
+{
+	return gc_world_array_spill_generation;
+}
+
 void Mod_GCClearRetainedBspScratch( void )
 {
 	gc_menu_lm_atlas = NULL; /* lives in the scratch */
@@ -615,6 +626,7 @@ void Mod_GCClearRetainedBspScratch( void )
 #endif
 		gc_world_array_spill_pin = 0;
 		gc_world_array_spill_used = 0;
+		gc_world_array_spill_generation++;
 		Mod_GCAnimPackSpillReset();
 		SV_GCEnsureStringArena();
 	}
@@ -5985,6 +5997,20 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 		{
 			hits++;
 			hit_bytes += bytes;
+			/* A texture already in the ARAM store (a reload of the same map)
+			 * used to end the pack ("stop ... reason=resident-budget") once
+			 * the staging window was full; the first load flips to stub +
+			 * ARAM streaming there. Do the same for a hit. */
+			if( !aram_only && !stream_only && bytes - skip > room )
+			{
+				if( !logged_aram_continue )
+				{
+					logged_aram_continue = true;
+					Con_Reportf( "Xash3D GameCube: texture pack continue ARAM-stream map=%s from=%u reason=store-hit bytes=%u room=%u\n",
+						stem, (unsigned)i, (unsigned)bytes, (unsigned)room );
+				}
+				stream_only = true;
+			}
 		}
 		else
 		{

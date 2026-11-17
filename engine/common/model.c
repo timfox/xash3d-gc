@@ -2699,6 +2699,19 @@ static void Mod_PurgeStudioCache( void )
 		if( mod_known[i].needload == NL_UNREFERENCED )
 			continue;
 
+#if XASH_GAMECUBE
+		/* The spill was rewound above. A studio model whose data lives in it
+		 * (mapmodel-studio, merged T.mdl blocks) would otherwise be marked
+		 * free-unused, reused by the next map as present, and read memory the
+		 * new world DL tables and chunk cache now own. Drop it so the next
+		 * load fetches it again. */
+		if( mod_known[i].type == mod_studio && mod_known[i].cache.data
+			&& Mod_GCIsWorldArraySpillCache( mod_known[i].cache.data ))
+		{
+			Mod_FreeModel( &mod_known[i] );
+			continue;
+		}
+#endif
 		if( mod_known[i].type == mod_studio )
 			mod_known[i].submodels = NULL;
 
