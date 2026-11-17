@@ -337,6 +337,9 @@ def static_props(ents: list[dict]) -> list[dict]:
 			"skin": int(_floats(e.get("skin", "0"), 1)[0]),
 			"body": int(_floats(e.get("body", "0"), 1)[0]),
 			"additive": rendermode == 5,
+			# env_model spawnflag 2: the game drops the model onto the floor
+			# at spawn (charlie's hedgehogs and wire sit 16-36 units up).
+			"drop": bool(int(_floats(e.get("spawnflags", "0"), 1)[0]) & 2),
 		})
 	return out
 
@@ -387,6 +390,40 @@ class FloorLight:
 				continue
 			xs, ys = [p[0] for p in pts], [p[1] for p in pts]
 			self.floors.append((min(xs), min(ys), max(xs), max(ys), (nx, ny, nz, dist), pts, f, ti0, ti1, flags))
+
+	def solid(self, p) -> bool:
+		"""Point contents of the world hull: true inside solid."""
+		bsp = self.bsp
+		if not bsp.nodes:
+			return False
+		idx = 0
+		while idx >= 0:
+			node = bsp.nodes[idx]
+			nx, ny, nz, dist = bsp.planes[node[0]]
+			idx = node[1] if nx * p[0] + ny * p[1] + nz * p[2] - dist >= 0.0 else node[2]
+		leaf = -1 - idx
+		return 0 <= leaf < len(bsp.leaves) and bsp.leaves[leaf][0] == -2
+
+	def drop(self, p, reach: float = 256.0):
+		"""DROP_TO_FLOOR for a point entity: the z where a trace straight
+		down from p first meets solid within reach, or None when p starts in
+		solid or nothing is hit (the game leaves the entity where it is)."""
+		x, y, z0 = p[0], p[1], p[2]
+		if self.solid((x, y, z0)):
+			return None
+		step, lo = 1.0, z0
+		while lo - step >= z0 - reach:
+			if self.solid((x, y, lo - step)):
+				hi, bot = lo, lo - step
+				for _ in range(12):
+					mid = 0.5 * (hi + bot)
+					if self.solid((x, y, mid)):
+						bot = mid
+					else:
+						hi = mid
+				return hi
+			lo -= step
+		return None
 
 	def at(self, p):
 		best, bz = None, -1e30
@@ -540,6 +577,17 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	except (Exception, SystemExit) as error:  # lighting is optional; geometry is not
 		log(f"  props: {bsp_path.name}: no floor light ({error})")
 		floor = None
+	dropped = 0
+	if floor is not None:
+		for prop in props:
+			if not prop["drop"]:
+				continue
+			z = floor.drop(prop["origin"])
+			if z is not None:
+				prop["origin"] = [prop["origin"][0], prop["origin"][1], z]
+				dropped += 1
+		if dropped:
+			log(f"  props: {bsp_path.name}: {dropped} dropped to the floor")
 	sun = sun_direction(ents)
 
 	def find_model(rel: str) -> Path | None:
