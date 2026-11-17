@@ -33,6 +33,62 @@ static uint  r_texFlags = 0;
 static int   sprite_version;
 #if XASH_GAMECUBE
 static qboolean sprite_masked;	/* SPR_ALPHTEST: index 255 is the hole */
+static const byte *sprite_pal;	/* the sprite's palette as stored (RGB) */
+static int sprite_pal_count;
+static int sprite_tex_format;
+int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
+void R_GXHudHiSetTexnum( int handle, int texnum );
+
+/* The palette the image loader would install for this sprite (see
+ * Image_SetPalette), as RGBA, for the renderer's full-resolution HUD cells. */
+static qboolean Mod_SpriteHudPalette( byte *rgba )
+{
+	int i;
+
+	if( !sprite_pal || sprite_pal_count < 1 || sprite_pal_count > 256 )
+		return false;
+	memset( rgba, 0, 256 * 4 );
+	for( i = 0; i < sprite_pal_count; i++ )
+	{
+		const byte *c = sprite_pal + i * 3;
+		byte *d = rgba + i * 4;
+
+		switch( sprite_tex_format )
+		{
+		case SPR_INDEXALPHA:
+		{
+			const byte *last = sprite_pal + ( sprite_pal_count - 1 ) * 3;
+
+			d[0] = last[0];
+			d[1] = last[1];
+			d[2] = last[2];
+			d[3] = (byte)i;
+			break;
+		}
+		case SPR_ALPHTEST:
+			d[0] = c[0];
+			d[1] = c[1];
+			d[2] = c[2];
+			d[3] = i == 255 ? 0 : 255;
+			break;
+		default:
+			d[0] = TextureToGamma( c[0] );
+			d[1] = TextureToGamma( c[1] );
+			d[2] = TextureToGamma( c[2] );
+			d[3] = 255;
+			break;
+		}
+	}
+	if( sprite_tex_format == SPR_INDEXALPHA )
+	{
+		for( ; i < 256; i++ )
+		{
+			memcpy( rgba + i * 4, rgba + ( sprite_pal_count - 1 ) * 4, 3 );
+			rgba[i * 4 + 3] = (byte)i;
+		}
+	}
+	return true;
+}
 #endif
 
 /*
@@ -186,6 +242,9 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 	if( FBitSet( mod->flags, MODEL_CLIENT )) // it's a HUD sprite
 	{
 		size_t load_bytes = pinframe.width * pinframe.height * bytes;
+#if XASH_GAMECUBE
+		int hud_hires = -1;
+#endif
 
 		Q_snprintf( texname, sizeof( texname ), "#HUD/%s(%s:%i%i).spr", sprite_name, group_suffix, num / 10, num % 10 );
 #if XASH_GAMECUBE
@@ -201,7 +260,14 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 			 * needs contiguous heap: on dod_caen 101 KiB free still could not
 			 * hold the 16 KiB pixels and the sheet fell to a 2x2 fallback.
 			 * Below 256 KiB free, 64 fits the small HUD slots. */
-			const int cap = ( Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
+			/* Full-resolution copy in ARAM first: HUD draws then use cells
+			 * built from it at full size, and the resident shrunk copy is
+			 * only the fallback, so it can be the small one. */
+			byte hud_rgba[256 * 4];
+			const qboolean hires = Mod_SpriteHudPalette( hud_rgba )
+				&& ( hud_hires = R_GXHudHiRegister( texname, pinframe.width, pinframe.height,
+					(const byte *)pin + sizeof( dspriteframe_t ), hud_rgba )) >= 0;
+			const int cap = ( hires || Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
 			int f = 1;
 
 			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
@@ -265,6 +331,8 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 #endif
 		gl_texturenum = ref.dllFuncs.GL_LoadTexture( texname, pin, load_bytes, r_texFlags );
 #if XASH_GAMECUBE
+		if( gl_texturenum && hud_hires >= 0 )
+			R_GXHudHiSetTexnum( hud_hires, gl_texturenum );
 		if( !gl_texturenum )
 			Con_Reportf( S_WARN "Xash3D GameCube: HUD sprite %s texture failed (%dx%d)\n",
 				texname, pinframe.width, pinframe.height );
@@ -357,6 +425,9 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 	sprite_version = pin->version;
 #if XASH_GAMECUBE
 	sprite_masked = false;
+	sprite_pal = NULL;
+	sprite_pal_count = 0;
+	sprite_tex_format = psprite->texFormat;
 #endif
 	Q_strncpy( sprite_name, mod->name, sizeof( sprite_name ));
 	COM_StripExtension( sprite_name );
@@ -377,6 +448,8 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 
 #if XASH_GAMECUBE
 		sprite_masked = psprite->texFormat == SPR_ALPHTEST;
+		sprite_pal = src;
+		sprite_pal_count = *numi;
 #endif
 		// install palette
 		switch( psprite->texFormat )
