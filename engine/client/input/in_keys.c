@@ -925,6 +925,30 @@ static void Key_GetTextInputRect( int *x, int *y, int *w, int *h )
 
 /*
 ================
+Key_GetTextInputEditRect
+
+Where the text is edited, in render coordinates, false if nobody told us
+================
+*/
+qboolean Key_GetTextInputEditRect( int *x, int *y, int *w, int *h )
+{
+	if( Con_GetInputRect( x, y, w, h ))
+		return true;
+
+	if( key_textinput_rect.w > 0 && key_textinput_rect.h > 0 )
+	{
+		*x = key_textinput_rect.x;
+		*y = key_textinput_rect.y;
+		*w = key_textinput_rect.w;
+		*h = key_textinput_rect.h;
+		return true;
+	}
+
+	return false;
+}
+
+/*
+================
 Key_SetTextInputRect
 
 ================
@@ -984,6 +1008,8 @@ void Key_EnableTextInput( qboolean enable, qboolean force )
 	{
 		OSK_EnableTextInput( enable, force );
 		Key_SetTextInputBuffer( NULL );
+		if( !enable ) // do not move the next keyboard away from a field that is gone
+			memset( &key_textinput_rect, 0, sizeof( key_textinput_rect ));
 		return;
 	}
 
