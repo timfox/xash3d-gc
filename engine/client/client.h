@@ -1323,6 +1323,7 @@ void UI_EnableBuiltInFallbackMenu( void );
 void UI_PreloadBuiltInFallbackMenuAssets( void );
 qboolean CL_GameCubePostReconnect( void );
 void CL_GameCubeLeanEmitBrushEntities( void );
+int CL_GCRelinkTempEnts( void );
 qboolean CL_GCStaticPropFromSignon( const entity_state_t *state );
 void CL_GCClearRemoteStaticProps( void );
 void CL_GCLinkRemoteStaticProps( void );

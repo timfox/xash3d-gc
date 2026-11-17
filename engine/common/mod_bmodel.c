@@ -1018,6 +1018,17 @@ size_t Mod_GCBspScratchFloor( void )
 	return gc_bsp_scratch_size + gc_bsp_scratch_carve_high;
 }
 
+/* True while [ptr, ptr+bytes) is still inside the allocated spill (not
+ * rewound by a map change). */
+qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( !p || p < gc_world_array_spill || p >= gc_world_array_spill + GC_WORLD_ARRAY_SPILL_BYTES )
+		return false;
+	return (size_t)( p - gc_world_array_spill ) + bytes <= gc_world_array_spill_used;
+}
+
 size_t Mod_GCWorldArraySpillFree( void )
 {
 	size_t cap = Mod_GCWorldArraySpillCap();

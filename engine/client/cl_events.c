@@ -227,6 +227,10 @@ void CL_RegisterEvent( int lastnum, const char *szEvName, pfnEventHook func )
 	ev->func = func;
 }
 
+#if XASH_GAMECUBE
+unsigned gc_fx_events_fired;
+#endif
+
 /*
 =============
 CL_FireEvent
@@ -278,6 +282,9 @@ static qboolean CL_FireEvent( event_info_t *ei, int slot )
 			{
 				CL_DescribeEvent( ei, slot );
 				ev->func( &ei->args );
+#if XASH_GAMECUBE
+				gc_fx_events_fired++;
+#endif
 				return true;
 			}
 

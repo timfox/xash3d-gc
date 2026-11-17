@@ -24,6 +24,74 @@ GNU General Public License for more details.
 #include "wadfile.h"	// acess decal size
 #include "sound.h"
 #if XASH_GAMECUBE
+#include "server.h"
+
+/*
+ * The lean DoD listen route never loads the server's precached sprites into
+ * cl.models (only the studio props the lean emit draws), so every temp
+ * entity a TE message made had no model and was dropped (fx diag on charlie:
+ * nomodel == alloc). Resolve a missing index from the server precache list
+ * on first use: sprites load as client sprites, studio models come from the
+ * server's resident handle. A failed index is retried after 10 s.
+ * Sprites load with smaller frames (gc_sprite_effect_load, cl_sprite.c) and
+ * only while 80 KiB of MEM1 stays free, so effects never take the memory
+ * the HUD and the view model skins need.
+ */
+extern qboolean gc_sprite_effect_load;
+extern size_t GC_MemHeapFreeBytes( void );
+static model_t *CL_GCLoadEffectSprite( const char *name )
+{
+	model_t *mod;
+
+	/* Leave room for HUD sheets that load mid-match (the 128x128
+	 * crosshair needs 32 KiB). */
+	if( GC_MemHeapFreeBytes() < 80 * 1024 )
+		return NULL;
+	gc_sprite_effect_load = true;
+	mod = CL_LoadClientSprite( name );
+	gc_sprite_effect_load = false;
+	return mod;
+}
+
+static model_t *CL_GCTentModelHandle( int modelindex )
+{
+	static double retry_at[MAX_MODELS];
+	static const void *tried_world;
+	static int fail_logs;
+	model_t *mod = ( modelindex >= 0 && modelindex < MAX_MODELS ) ? cl.models[modelindex] : NULL;
+	const char *name;
+
+	if( mod || modelindex <= 0 || modelindex >= MAX_MODELS || !SV_Active( ))
+		return mod;
+	if( tried_world != (const void *)cl.worldmodel )
+	{
+		memset( retry_at, 0, sizeof( retry_at ));
+		tried_world = cl.worldmodel;
+	}
+	if( host.realtime < retry_at[modelindex] )
+		return NULL;
+	retry_at[modelindex] = host.realtime + 10.0;
+	name = sv.model_precache[modelindex];
+	if( !name[0] )
+		return NULL;
+	if( Q_stristr( name, ".spr" ))
+		mod = CL_GCLoadEffectSprite( name );
+	else
+	{
+		mod = SV_ModelHandle( modelindex );
+		if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->type != mod_brush )
+			mod = NULL;
+	}
+	if( mod )
+		cl.models[modelindex] = mod;
+	else if( fail_logs++ < 8 )
+		Con_Reportf( "Xash3D GameCube: temp entity model %d %s not loadable (on disc %d, heap %s)\n",
+			modelindex, name, FS_FileExists( name, false ), Q_memprint( GC_MemHeapFreeBytes( )));
+	return mod;
+}
+#define CL_ModelHandle CL_GCTentModelHandle
+#endif
+#if XASH_GAMECUBE
 #include "gamecube/mem_gamecube.h"
 #endif
 
@@ -177,14 +245,57 @@ CL_ClearTempEnts
 
 ================
 */
+#if XASH_GAMECUBE
+/* Entries actually allocated in cl_tempents (CL_InitTempEnts caps the pool
+ * below GI->max_tents). Linking GI->max_tents entries wrote free-list
+ * pointers past the end of a 4-entry allocation. */
+static int cl_tempents_count;
+static qboolean gc_tempents_in_spill;
+/* The lean emit (cl_frame.c) clears the scene after CL_EmitEntities has
+ * linked the temp entities, so it links them again from this list. */
+#define GC_TENT_RELINK_MAX 96
+static cl_entity_t *gc_tent_linked[GC_TENT_RELINK_MAX];
+static int gc_tent_linked_n;
+static int gc_tent_update_frame = -1;
+/* The pool came from CL_GCEnsureTempEntPool (lean route), which also owns
+ * reloading the effect sprites; CL_InitTempEnts' route loads them once. */
+static qboolean gc_tempents_lean_pool;
+unsigned gc_fx_tent_alloc, gc_fx_tent_overflow, gc_fx_tent_nomodel, gc_fx_te_parsed;
+#endif
+
 static void CL_ClearTempEnts( void )
 {
 	int max_tents = GI->max_tents;
 #if XASH_GAMECUBE
 	if( Sys_CheckParm( "-gcmap" ))
 		max_tents = Q_min( max_tents, 4 );
+	if( cl_tempents_count > 0 )
+		max_tents = Q_min( max_tents, cl_tempents_count );
 #endif
 
+#if XASH_GAMECUBE
+	/* A new world (or a reconnect): the relink list points into old temp
+	 * entities, and CL_ClearSpriteTextures may free the effect sprites once
+	 * the next map loads. Look them up again in CL_GCEnsureTempEntPool. */
+	gc_tent_linked_n = 0;
+	gc_tent_update_frame = -1;
+	if( gc_tempents_lean_pool )
+	{
+		cl_sprite_muzzleflash[0] = cl_sprite_muzzleflash[1] = cl_sprite_muzzleflash[2] = NULL;
+		cl_sprite_ricochet = NULL;
+	}
+
+	/* A spill pool (CL_GCEnsureTempEntPool) may already be rewound for the
+	 * next map: drop it rather than write the free list into new data. */
+	if( cl_tempents && gc_tempents_in_spill )
+	{
+		cl_tempents = NULL;
+		cl_tempents_count = 0;
+		gc_tempents_in_spill = false;
+		cl_free_tents = cl_active_tents = NULL;
+		return;
+	}
+#endif
 	if( !cl_tempents ) return;
 
 	for( int i = 0; i < max_tents - 1; i++ )
@@ -218,6 +329,9 @@ void CL_InitTempEnts( void )
 #endif
 
 	cl_tempents = Mem_Calloc( cls.mempool, sizeof( TEMPENTITY ) * max_tents );
+#if XASH_GAMECUBE
+	cl_tempents_count = cl_tempents ? max_tents : 0;
+#endif
 	CL_ClearTempEnts();
 
 	// load tempent sprites (glowshell, muzzleflashes etc)
@@ -233,6 +347,122 @@ void CL_InitTempEnts( void )
 	CL_LoadClientSprites ();
 }
 
+#if XASH_GAMECUBE
+/* Muzzle flashes and ricochet sparks (the lean route skips
+ * CL_LoadClientSprites). Logs once per failure with whether the file is on
+ * the disc at all. */
+static void CL_GCLoadEffectSprites( void )
+{
+	static int fail_logs;
+
+	if( !cl_sprite_muzzleflash[0] )
+	{
+		cl_sprite_muzzleflash[0] = CL_GCLoadEffectSprite( cl_default_sprites[0] );
+		cl_sprite_muzzleflash[1] = CL_GCLoadEffectSprite( cl_default_sprites[1] );
+		cl_sprite_muzzleflash[2] = CL_GCLoadEffectSprite( cl_default_sprites[2] );
+	}
+	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
+		cl_sprite_ricochet = CL_GCLoadEffectSprite( cl_default_sprites[5] );
+	if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && fail_logs < 4 )
+	{
+		fail_logs++;
+		Con_Reportf( "Xash3D GameCube: client sprites: %s %s, %s %s (on disc: %d %d)\n",
+			cl_default_sprites[0], cl_sprite_muzzleflash[0] ? "ok" : "failed",
+			cl_default_sprites[5], cl_sprite_ricochet ? "ok" : "failed",
+			FS_FileExists( cl_default_sprites[0], false ), FS_FileExists( cl_default_sprites[5], false ));
+	}
+}
+
+/*
+================
+CL_GCEnsureTempEntPool
+
+DoD's lean listen route never runs CL_InitTempEnts (MEM1 is too tight at
+client init), so every temp entity was refused: no muzzle flash, smoke,
+explosion, ricochet or shell. Once a map is up, give the pool 16 entries
+(~2 KiB each): from the heap when it keeps a 64 KiB margin, else from the
+world-array spill, which is rewound per map, so it is redone per world.
+Also loads the muzzle flash sprites the route skipped.
+================
+*/
+void CL_GCEnsureTempEntPool( void )
+{
+	extern size_t GC_MemHeapFreeBytes( void );
+	extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+	extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+	extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
+	static double next_try, next_sprite_try;
+	const int want = 16;
+	const size_t bytes = sizeof( TEMPENTITY ) * want;
+	const char *where = "heap";
+	int i;
+
+	/* A spill pool dies with its map: drop it once the spill was rewound. */
+	if( cl_tempents && gc_tempents_in_spill
+		&& !Mod_GCWorldArraySpillHolds( cl_tempents, sizeof( TEMPENTITY ) * cl_tempents_count ))
+	{
+		cl_tempents = NULL;
+		cl_tempents_count = 0;
+		cl_free_tents = cl_active_tents = NULL;
+		gc_tempents_in_spill = false;
+	}
+	if( !cl.worldmodel )
+		return;
+	if( cl_tempents )
+	{
+		/* The pool outlives a changelevel; the sprites do not. */
+		if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && host.realtime >= next_sprite_try )
+		{
+			next_sprite_try = host.realtime + 5.0;
+			CL_GCLoadEffectSprites();
+		}
+		return;
+	}
+	if( host.realtime < next_try )
+		return;
+	next_try = host.realtime + 5.0;
+	/* World spill first: 27 KiB of heap for the pool left the view model
+	 * and the crosshair without texture memory (dark rifle, crosshair OOM
+	 * on charlie). The heap only when it is plentiful. */
+	cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
+	if( cl_tempents )
+	{
+		memset( cl_tempents, 0, bytes );
+		Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
+		gc_tempents_in_spill = true;
+		where = "spill";
+	}
+	else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
+		cl_tempents = Mem_Calloc( cls.mempool, bytes );
+	if( !cl_tempents )
+	{
+		static int fail_logs;
+
+		cl_free_tents = cl_active_tents = NULL;
+		if( fail_logs++ < 3 )
+			Con_Reportf( "Xash3D GameCube: client tempents unavailable (%s needed, heap %s)\n",
+				Q_memprint( bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
+		return;
+	}
+	cl_tempents_count = want;
+	for( i = 0; i < want - 1; i++ )
+	{
+		cl_tempents[i].next = &cl_tempents[i + 1];
+		cl_tempents[i].entity.trivial_accept = INVALID_HANDLE;
+	}
+	cl_tempents[want - 1].next = NULL;
+	cl_tempents[want - 1].entity.trivial_accept = INVALID_HANDLE;
+	cl_free_tents = cl_tempents;
+	cl_active_tents = NULL;
+	gc_tempents_lean_pool = true;
+	next_sprite_try = host.realtime + 5.0;
+	CL_GCLoadEffectSprites();
+	Con_Reportf( "Xash3D GameCube: client tempents %d in %s (%s), muzzle flash %s, heap %s\n",
+		want, where, Q_memprint( bytes ), cl_sprite_muzzleflash[0] ? "loaded" : "missing",
+		Q_memprint( GC_MemHeapFreeBytes( )));
+}
+#endif
+
 /*
 ================
 CL_FreeTempEnts
@@ -241,8 +471,16 @@ CL_FreeTempEnts
 */
 void CL_FreeTempEnts( void )
 {
+#if XASH_GAMECUBE
+	/* A spill pool belongs to the map arena, not the mempool. */
+	if( cl_tempents && !gc_tempents_in_spill )
+		Mem_Free( cl_tempents );
+	cl_tempents_count = 0;
+	gc_tempents_in_spill = false;
+#else
 	if( cl_tempents )
 		Mem_Free( cl_tempents );
+#endif
 	cl_tempents = NULL;
 }
 
@@ -405,6 +643,10 @@ static int CL_TempEntAddEntity( cl_entity_t *pEntity )
 
 		// add to list
 		CL_AddVisibleEntity( pEntity, ET_TEMPENTITY );
+#if XASH_GAMECUBE
+		if( gc_tent_linked_n < GC_TENT_RELINK_MAX )
+			gc_tent_linked[gc_tent_linked_n++] = pEntity;
+#endif
 
 		return 1;
 	}
@@ -425,8 +667,104 @@ void CL_TempEntUpdate( void )
 	double	ft = cl.time - cl.oldtime;
 	float	gravity = clgame.movevars.gravity;
 
+#if XASH_GAMECUBE
+	gc_tent_linked_n = 0;
+	gc_tent_update_frame = (int)host.framecount;
+#endif
 	clgame.dllFuncs.pfnTempEntUpdate( ft, cl.time, gravity, &cl_free_tents, &cl_active_tents, CL_TempEntAddEntity, CL_TempEntPlaySound );
 }
+
+#if XASH_GAMECUBE
+/*
+==============
+CL_GCRelinkTempEnts
+
+The lean emit clears the scene CL_EmitEntities filled. Link this frame's
+temp entities (muzzle flashes, smoke and explosion sprites, shells, gibs)
+again; if the temp entities were not updated this frame at all, run the
+events and the update here. Returns how many were linked.
+==============
+*/
+int CL_GCRelinkTempEnts( void )
+{
+	static int logs;
+	static convar_t *gc_fxtest;
+	static double next_fxtest;
+	int i, ran = 0;
+
+	CL_GCEnsureTempEntPool();
+	/* gc_fxtest 1: a muzzle flash sprite 64 units in front of the view every
+	 * second, living a second, so a capture can prove the sprite path draws
+	 * without having to catch a 0.1 s flash. */
+	if( !gc_fxtest )
+		gc_fxtest = Cvar_Get( "gc_fxtest", "0", 0, "GameCube test: 1 shows a muzzle flash sprite in front of the view every second" );
+	if( gc_fxtest && gc_fxtest->value && cl_tempents && cl_sprite_muzzleflash[0] && host.realtime >= next_fxtest )
+	{
+		static int fx_logs;
+		vec3_t forward, org;
+		TEMPENTITY *t;
+
+		next_fxtest = host.realtime + 1.0;
+		AngleVectors( cl.viewangles, forward, NULL, NULL );
+		VectorMA( refState.vieworg, 64.0f, forward, org );
+		t = CL_TempEntAlloc( org, cl_sprite_muzzleflash[0] );
+		if( t )
+		{
+			t->entity.curstate.rendermode = kRenderTransAdd;
+			t->entity.curstate.renderamt = 255;
+			t->entity.curstate.scale = 0.5f;
+			t->die = cl.time + 1.0f;
+		}
+		if( fx_logs++ < 4 )
+			Con_Reportf( "Xash3D GameCube: fx test sprite %s at (%.0f %.0f %.0f)\n",
+				t ? "spawned" : "refused", org[0], org[1], org[2] );
+	}
+	if( gc_tent_update_frame != (int)host.framecount )
+	{
+		CL_FireEvents();
+		CL_TempEntUpdate();
+		ran = 1;
+	}
+	else
+	{
+		for( i = 0; i < gc_tent_linked_n; i++ )
+			CL_AddVisibleEntity( gc_tent_linked[i], ET_TEMPENTITY );
+	}
+	{
+		/* Every 5 s: why effects do or do not show on this route. */
+		extern unsigned gc_fx_particles_alloc, gc_fx_particles_noframe, gc_fx_events_fired;
+		static double next_diag;
+		TEMPENTITY *t;
+		int active = 0, nomodel = 0;
+
+		if( host.realtime >= next_diag )
+		{
+			next_diag = host.realtime + 5.0;
+			for( t = cl_active_tents; t && active < 1024; t = t->next )
+			{
+				active++;
+				if( !t->entity.model )
+					nomodel++;
+			}
+			Con_Reportf( "Xash3D GameCube: fx diag cl.time=%.3f dt=%.4f pool=%d active=%d (no model %d) linked=%d %s; "
+				"tents alloc=%u overflow=%u nomodel=%u; TE=%u events=%u; particles alloc=%u refused(dt=0)=%u; muzzle sprite=%s\n",
+				cl.time, cl.time - cl.oldtime, cl_tempents_count, active, nomodel, gc_tent_linked_n,
+				ran ? "updated here" : "relinked", gc_fx_tent_alloc, gc_fx_tent_overflow, gc_fx_tent_nomodel,
+				gc_fx_te_parsed, gc_fx_events_fired, gc_fx_particles_alloc, gc_fx_particles_noframe,
+				cl_sprite_muzzleflash[0] ? "loaded" : "missing" );
+			gc_fx_tent_alloc = gc_fx_tent_overflow = gc_fx_tent_nomodel = gc_fx_te_parsed = 0;
+			gc_fx_events_fired = gc_fx_particles_alloc = gc_fx_particles_noframe = 0;
+		}
+	}
+	if( gc_tent_linked_n > 0 && logs < 6 )
+	{
+		logs++;
+		Con_Reportf( "Xash3D GameCube: lean temp entities linked %d (%s)\n",
+			gc_tent_linked_n, ran ? "updated here" : "relinked" );
+	}
+	return gc_tent_linked_n;
+}
+#endif
 
 /*
 ==============
@@ -476,6 +814,9 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 
 	if( !cl_free_tents )
 	{
+#if XASH_GAMECUBE
+		gc_fx_tent_overflow++;
+#endif
 		if( cl_lasttimewarn < host.realtime )
 		{
 			Con_DPrintf( "Overflow %d temporary ents!\n", GI->max_tents );
@@ -488,6 +829,11 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 	cl_free_tents = pTemp->next;
 
 	CL_PrepareTEnt( pTemp, pmodel );
+#if XASH_GAMECUBE
+	gc_fx_tent_alloc++;
+	if( !pmodel )
+		gc_fx_tent_nomodel++;
+#endif
 
 	pTemp->priority = TENTPRIORITY_LOW;
 	if( org ) VectorCopy( org, pTemp->entity.origin );
@@ -1909,6 +2255,9 @@ void CL_ParseTempEntity( sizebuf_t *msg, connprotocol_t proto )
 	sound_t	hSound;
 	const char *name;
 
+#if XASH_GAMECUBE
+	gc_fx_te_parsed++;
+#endif
 	if( proto != PROTO_GOLDSRC )
 	{
 		int iSize = MSG_ReadWord( msg );

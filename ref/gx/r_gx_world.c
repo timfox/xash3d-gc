@@ -821,6 +821,12 @@ qboolean R_GXTriApiIsActive( void )
 	return r_gx_studio_active || r_gx_effects_tri;
 }
 
+/* The last texture GL_Bind asked for (r_image.c). Sprites bind before
+ * TriBegin opens the effects pipe, so the first sprite of every batch
+ * drew the white texture: take the pending bind when the pipe opens. */
+unsigned r_gx_effects_pending_texnum;
+static int r_gx_effects_mode = -1;
+
 void R_GXEffectsTriBegin( void )
 {
 	extern qboolean GC_IsFrameBudgetProbeActive( void );
@@ -837,8 +843,29 @@ void R_GXEffectsTriBegin( void )
 		/* G291: particles/beams/sprites share studio TriAPI emit, with
 		 * billboard cull + additive blend (PrepareStudioState is opaque). */
 		R_GXPrepareStudioState( false );
+		/* Effects are texture x vertex colour, as in GoldSrc: REPLACE drew
+		 * every particle, spark and blood drop in the white particle
+		 * texture's colour (Tim: sparks and blood looked white). */
+		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+		r_gx_effects_tri = true;
+		r_gx_effects_tris = 0;
+		r_gx_studio_bound_tex = 0;
+		r_gx_face_mode = GC_GX_FACE_MODE_NONE;
+		r_gx_bound_texnum = 0;
+		r_gx_bound_fmt = 0;
+		r_gx_effects_mode = -1;
+		if( r_gx_effects_pending_texnum )
+			R_GXStudioBindTexnum( r_gx_effects_pending_texnum );
+		GC_MarkGxWorldEfbReady();
+	}
+	/* Each sprite, beam or particle batch sets its own render mode while the
+	 * pipe stays open: a muzzle flash (additive) after a smoke puff
+	 * (blended) took the puff's blend before. */
+	if( vid.rendermode != r_gx_effects_mode )
+	{
+		r_gx_effects_mode = vid.rendermode;
 		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
 		else if( vid.rendermode == kRenderTransTexture
@@ -847,13 +874,6 @@ void R_GXEffectsTriBegin( void )
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
 		else
 			GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-		r_gx_effects_tri = true;
-		r_gx_effects_tris = 0;
-		r_gx_studio_bound_tex = 0;
-		r_gx_face_mode = GC_GX_FACE_MODE_NONE;
-		r_gx_bound_texnum = 0;
-		r_gx_bound_fmt = 0;
-		GC_MarkGxWorldEfbReady();
 	}
 }
 
@@ -10329,6 +10349,10 @@ static void R_GXEnsureTriApiLayout( void )
 	else
 	{
 		R_GXPrepareStudioState( false );
+		/* Effects are texture x vertex colour, as in GoldSrc: REPLACE drew
+		 * every particle, spark and blood drop in the white particle
+		 * texture's colour (Tim: sparks and blood looked white). */
+		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
@@ -11509,6 +11533,7 @@ qboolean R_GXStudioVmDirectReady( void ) { return false; }
 void R_GXStudioVmPushVerts( vec3_t *verts, int n ) { (void)verts; (void)n; }
 qboolean R_GXTriApiIsActive( void ) { return false; }
 void R_GXEffectsTriBegin( void ) {}
+unsigned r_gx_effects_pending_texnum;
 void R_GXEffectsTriEnd( void ) {}
 int R_GXDrawBrushModel( cl_entity_t *e ) { (void)e; return 0; }
 int R_GXDrawTramBaked( const float *origin, const float *angles )
