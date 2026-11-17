@@ -6129,6 +6129,56 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 	return false;
 }
 
+/* Per-class entity census for the edict budget log (top classes first). */
+#define GC_CENSUS_MAX 64
+typedef struct { char name[32]; int count; } gc_census_t;
+
+static void SV_GCCensusAdd( gc_census_t *c, int *n, const char *classname )
+{
+	int i;
+
+	for( i = 0; i < *n; i++ )
+	{
+		if( !Q_strncmp( c[i].name, classname, sizeof( c[i].name ) - 1 ))
+		{
+			c[i].count++;
+			return;
+		}
+	}
+	if( *n >= GC_CENSUS_MAX )
+		return;
+	Q_strncpy( c[*n].name, classname, sizeof( c[*n].name ));
+	c[*n].count = 1;
+	( *n )++;
+}
+
+static void SV_GCCensusReport( const char *mapname, const char *what, gc_census_t *c, int n )
+{
+	char line[256];
+	int i, j, len = 0;
+
+	/* Insertion sort, most entities first. */
+	for( i = 1; i < n; i++ )
+	{
+		gc_census_t t = c[i];
+
+		for( j = i; j > 0 && c[j - 1].count < t.count; j-- )
+			c[j] = c[j - 1];
+		c[j] = t;
+	}
+	line[0] = '\0';
+	for( i = 0; i < n; i++ )
+	{
+		len += Q_snprintf( line + len, sizeof( line ) - len, " %s=%d", c[i].name, c[i].count );
+		if( len > 180 || i == n - 1 )
+		{
+			Con_Reportf( "Xash3D GameCube: %s census %s:%s\n", mapname, what, line );
+			line[0] = '\0';
+			len = 0;
+		}
+	}
+}
+
 /* Pre-scan the entity lump: count the entities that always take an edict
  * (everything but the soft-skipped decoration, classes the game DLL has no
  * spawn function for, and the parity set), and give the parity set what the
@@ -6137,6 +6187,8 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 {
 	char key[2048], value[2048], classname[64];
 	int total = 0, parity = 0, optional = 0, nofunc = 0, must;
+	static gc_census_t census_must[GC_CENSUS_MAX], census_parity[GC_CENSUS_MAX];
+	int n_must = 0, n_parity = 0;
 	qboolean named;
 
 	gc_parity_kept = 0;
@@ -6167,11 +6219,16 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		total++;
 		if( SV_GCParityEntity( classname )
 			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
+		{
 			parity++;
+			SV_GCCensusAdd( census_parity, &n_parity, classname );
+		}
 		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
 			optional++;
 		else if( !SV_GetEntityClass( classname ))
 			nofunc++;
+		else
+			SV_GCCensusAdd( census_must, &n_must, classname );
 	}
 	must = total - parity - optional - nofunc;
 	gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
@@ -6179,6 +6236,8 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		gc_parity_budget = 0;
 	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d (edicts %d)\n",
 		mapname, total, must, parity, gc_parity_budget, optional, nofunc, GI->max_edicts );
+	SV_GCCensusReport( mapname, "always", census_must, n_must );
+	SV_GCCensusReport( mapname, "parity", census_parity, n_parity );
 }
 
 /* Consume one `{ ... }` entity block without allocating an edict. */
