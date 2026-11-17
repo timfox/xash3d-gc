@@ -81,7 +81,16 @@ static qboolean R_GCIsStudioSkinOverflow( const void *ptr )
  * changelevel entity fallback and the unused pool chain slots). Freed BSS that
  * went to the heap instead was taken at once by a third resident view model
  * and left the grenade hands without skins. */
+/* Only the DoD build gave that BSS up, and only DoD fills the block. In the
+ * Half-Life and Lost Coast builds the same 208 KiB came out of the heap
+ * instead: Lost Coast could no longer load its map ("Could not load model
+ * maps/d2_lostcoast.bsp"). There the block is a stub; every allocation
+ * falls through to the heap as before. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
 #define GC_FX_PIXELS_BYTES ( 208u * 1024u )
+#else
+#define GC_FX_PIXELS_BYTES 32u
+#endif
 #define GC_FX_PIXELS_ALLOCS 256
 extern qboolean gc_sprite_effect_load;
 static byte gc_fx_pixels[GC_FX_PIXELS_BYTES] __attribute__((aligned(32)));
