@@ -121,6 +121,7 @@ extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
 extern unsigned r_gx_hot_weight;
+extern unsigned r_gx_cmpr_near_miss_total;
 extern qboolean R_GXTexnumIsLargeChain( unsigned texnum );
 /* Mirror-pass clip stage: see r_gx_world.c. */
 extern qboolean r_gx_mirror_clip;
@@ -2849,6 +2850,49 @@ int R_GXWorldDLDraw( void )
 			 * not redo the distance, the span and two tower tests per chunk:
 			 * about fifty int-to-float conversions each, the slow kind on
 			 * the Gekko. */
+			/* Which chunks sample the small far textures. The base rule (past
+			 * 1400 units and under an eighth of the distance across) leaves
+			 * some views with more near textures than slots: from the
+			 * monastery terrace the whole map is in sight and 31 textures
+			 * were read from ARAM again every frame (5 ms a pass). While a
+			 * frame misses more than a few, the rule reaches nearer and to
+			 * larger chunks, one step at a time; it steps back after two
+			 * seconds without a miss. Not in the mirror pass, which has
+			 * already bound its textures by then. */
+			static const float far_dist[4] = { 1400.0f, 1100.0f, 850.0f, 650.0f };
+			static const float far_frac[4] = { 0.015625f, 0.04f, 0.0625f, 0.11f };
+			static unsigned far_seen;
+			static int far_level, far_calm, far_wait = 120, far_since_back = 1000;
+			float far_d2, far_span;
+
+			if( !r_gx_mirror )
+			{
+				const unsigned now = r_gx_cmpr_near_miss_total;
+
+				if( far_since_back < 1000 )
+					far_since_back++;
+				if( now - far_seen > 6u )
+				{
+					if( far_level < 3 )
+						far_level++;
+					/* Stepping back brought the misses straight back: the
+					 * view still needs this level, so wait longer before
+					 * trying again (a retry costs one frame of reads). */
+					far_wait = far_since_back < 30 ? Q_min( far_wait * 4, 1920 ) : 120;
+					far_calm = 0;
+				}
+				else if( now != far_seen )
+					far_calm = 0;
+				else if( ++far_calm > far_wait && far_level > 0 )
+				{
+					far_level--;
+					far_calm = 0;
+					far_since_back = 0;
+				}
+				far_seen = now;
+			}
+			far_d2 = far_dist[far_level] * far_dist[far_level];
+			far_span = far_frac[far_level];
 			for( a = 0; a < norder; a++ )
 			{
 				const u32 ci = (u32)( keys[a] & 0xffffu );
@@ -2861,8 +2905,8 @@ int R_GXWorldDLDraw( void )
 				d.u = (u32)( keys[a] >> 16 );
 				order[a] = (u16)( ci
 					| ( R_GXWorldDLIsTower( ci ) ? 0x8000u : 0u )
-					| (( gc_wd_tex_overflow && d.f > 1400.0f * 1400.0f
-						&& span * span < d.f * 0.015625f ) ? 0x4000u : 0u ));
+					| (( gc_wd_tex_overflow && d.f > far_d2
+						&& span * span < d.f * far_span ) ? 0x4000u : 0u ));
 			}
 			if( gc_wd_pf_on > 0 )
 			{

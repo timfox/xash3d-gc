@@ -2654,6 +2654,9 @@ static int r_gx_cmpr_cur_slot = -1;	/* slot of the texture bound now */
 static unsigned r_gx_cmpr_bounce_texnum;
 static unsigned r_gx_cmpr_bounce_stalls;
 static unsigned r_gx_cmpr_hits, r_gx_cmpr_misses, r_gx_cmpr_dma_bytes;
+/* Near-slot misses since boot, never reset: the world pass reads it to see
+ * whether a view binds more textures than the near slots hold. */
+unsigned r_gx_cmpr_near_miss_total;
 
 /* A new map reuses texnums and ARAM windows: forget what the slots hold. */
 static void R_GXCmprSlotsReset( void )
@@ -2832,6 +2835,8 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	r_gx_cmpr_slot[pick].valid = true;
 	r_gx_cmpr_slot[pick].used = ++r_gx_cmpr_clock;
 	r_gx_cmpr_misses++;
+	if( !r_gx_cmpr_want_far )
+		r_gx_cmpr_near_miss_total++;
 	r_gx_cmpr_dma_bytes += bytes;
 	*slot_out = pick;
 	return R_GXCmprSlotPtr( pick );
