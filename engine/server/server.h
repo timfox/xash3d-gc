@@ -799,4 +799,27 @@ static inline qboolean SV_CheckGroupTrace( const edict_t *e1, const edict_t *e2 
 	return true;
 }
 
+#if XASH_GAMECUBE
+/* Unnamed env_model / dod_object: drawn from this list, no edict (sv_game.c). */
+#define GC_STATIC_PROPS_MAX	192
+#define GC_STATIC_PROP_MODELS	6
+typedef struct
+{
+	vec3_t	origin;
+	vec3_t	angles;
+	float	scale;
+	float	framerate;
+	short	modelindex;
+	short	sequence;
+	short	skin;
+	short	body;
+	byte	rendermode;
+	byte	renderamt;
+	byte	renderfx;
+	color24	rendercolor;
+} gc_static_prop_t;
+extern gc_static_prop_t gc_static_props[GC_STATIC_PROPS_MAX];
+extern int gc_num_static_props;
+#endif
+
 #endif//SERVER_H
