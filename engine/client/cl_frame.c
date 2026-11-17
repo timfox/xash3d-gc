@@ -1727,31 +1727,51 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				continue;
 			}
 			/* Weapons + lean NPCs + Xen bosses + CapFaces mapmodels.
-			 * Skip v_* / player. */
-			allow = false;
-			if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
-				allow = true;
-			else if( Q_stristr( mod->name, "mapmodels/" )
-				|| Q_stristr( mod->name, "hk_satchel" )
-				|| Q_stristr( mod->name, "sandbags" )
-				|| Q_stristr( mod->name, "by_rubble" )
-				|| Q_stristr( mod->name, "horse_statue" )
-				|| Q_stristr( mod->name, "by_canopy" )
-				|| Q_stristr( mod->name, "arc_xer_tree" )
-				|| Q_stristr( mod->name, "furniture" )
-				|| Q_stristr( mod->name, "bulb" ))
-				allow = true;
-			else if( Q_stristr( mod->name, "scientist" )
-				|| Q_stristr( mod->name, "barney" )
-				|| Q_stristr( mod->name, "headcrab" )
-				|| Q_stristr( mod->name, "zombie" )
-				|| Q_stristr( mod->name, "roach" )
-				|| Q_stristr( mod->name, "nihilanth" )
-				|| Q_stristr( mod->name, "controller" )
-				|| Q_stristr( mod->name, "islave" )
-				|| Q_stristr( mod->name, "models/lc/" ))	/* Lost Coast cast */
-				allow = true;
-			if( !allow || Q_stristr( mod->name, "player.mdl" ))
+			 * Skip v_* / player. The answer only depends on the model name,
+			 * and it took up to twenty case-insensitive substring searches
+			 * per studio entity per frame: remember it per model. */
+			{
+				static struct { const model_t *mod; char name[40]; signed char ok; } memo[8];
+				const unsigned mi = ( (unsigned)(size_t)mod >> 4 ) & 7u;
+
+				if( memo[mi].mod == mod && memo[mi].ok >= 0 && !Q_strcmp( memo[mi].name, mod->name ))
+					allow = memo[mi].ok != 0;
+				else
+				{
+				allow = false;
+				if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
+					allow = true;
+				else if( Q_stristr( mod->name, "mapmodels/" )
+					|| Q_stristr( mod->name, "hk_satchel" )
+					|| Q_stristr( mod->name, "sandbags" )
+					|| Q_stristr( mod->name, "by_rubble" )
+					|| Q_stristr( mod->name, "horse_statue" )
+					|| Q_stristr( mod->name, "by_canopy" )
+					|| Q_stristr( mod->name, "arc_xer_tree" )
+					|| Q_stristr( mod->name, "furniture" )
+					|| Q_stristr( mod->name, "bulb" ))
+					allow = true;
+				else if( Q_stristr( mod->name, "scientist" )
+					|| Q_stristr( mod->name, "barney" )
+					|| Q_stristr( mod->name, "headcrab" )
+					|| Q_stristr( mod->name, "zombie" )
+					|| Q_stristr( mod->name, "roach" )
+					|| Q_stristr( mod->name, "nihilanth" )
+					|| Q_stristr( mod->name, "controller" )
+					|| Q_stristr( mod->name, "islave" )
+					|| Q_stristr( mod->name, "models/lc/" ))	/* Lost Coast cast */
+					allow = true;
+					if( Q_stristr( mod->name, "player.mdl" ))
+						allow = false;
+					if( Q_strlen( mod->name ) < sizeof( memo[mi].name ))
+					{
+						memo[mi].mod = mod;
+						Q_strncpy( memo[mi].name, mod->name, sizeof( memo[mi].name ));
+						memo[mi].ok = allow ? 1 : 0;
+					}
+				}
+			}
+			if( !allow )
 			{
 				scan_studio_skip++;
 				continue;
