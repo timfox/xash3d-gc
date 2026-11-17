@@ -5822,6 +5822,11 @@ static s8 gc_prop_nrm[256][3] __attribute__(( aligned( 32 )));
 static float gc_prop_sun[3];
 static u32 gc_prop_vsize = 10;	/* bytes per vertex: 10 (v6) or 11 (v7) */
 static const u8 *gc_prop_cur_light;	/* the instance being drawn, NULL = flat colour */
+/* Reflective prop materials (pack env table): texture chain, mask chain, constant. */
+#define GC_PENV_MAX 16
+static struct { u8 mat, mask, k[3], pad[3]; } gc_penv[GC_PENV_MAX];
+static u8 gc_penv_of[128];	/* texture chain -> env entry + 1 */
+extern unsigned int GC_AramReserveTagged( unsigned int size, const char *tag );
 static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligned( 32 )));
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
@@ -6012,6 +6017,21 @@ static void R_GXPropLoad( void )
 			}
 			DCFlushRange( gc_prop_nrm, sizeof( gc_prop_nrm ));
 			gc_prop_vsize = 11;
+			/* Reflective materials, after the lights ("PEnv", u16 count, 8 bytes each). */
+			memset( gc_penv_of, 0, sizeof( gc_penv_of ));
+			if( 32u + bytes + lbytes + 32u <= hdr[4] )
+			{
+				GC_AramTransfer( gc_prop_aram + 32u + bytes + lbytes, gc_prop_bounce, 160u, false );
+				if( !memcmp( gc_prop_bounce, "PEnv", 4 ) && (( const u16 *)gc_prop_bounce )[2] <= GC_PENV_MAX )
+				{
+					const int ne = (( const u16 *)gc_prop_bounce )[2];
+
+					memcpy( gc_penv, gc_prop_bounce + 32, ne * 8 );
+					for( q = 0; q < ne; q++ )
+						gc_penv_of[gc_penv[q].mat & 127] = (u8)( q + 1 );
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: prop reflective materials=%d\n", ne );
+				}
+			}
 		}
 		bytes = ( gc_prop_nmodels * (u32)sizeof( gc_prop_model_t ) + 31u ) & ~31u;
 		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
@@ -6121,6 +6141,8 @@ static void R_GXPropLoadTex( void )
 		gc_prop_nmat, size / 1024u );
 }
 
+static u8 gc_prop_bind_map = GX_TEXMAP0;	/* GX_TEXMAP5 while the reflection mask is bound */
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6136,7 +6158,7 @@ static int R_GXPropBind( u8 mat )
 	}
 	if( !gc_prop_tex_aram || mat >= gc_prop_nmat )
 	{
-		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
+		GX_LoadTexObj( &gc_prop_grey_obj, gc_prop_bind_map );
 		return 0;
 	}
 	/* With the adopted slot cache a prop texture is a full mip chain at up
@@ -6202,7 +6224,7 @@ static int R_GXPropBind( u8 mat )
 					GX_FALSE, GX_TRUE, GX_ANISO_1 );
 			else
 				GX_InitTexObjFilterMode( &obj, GX_LINEAR, GX_LINEAR );
-			GX_LoadTexObj( &obj, GX_TEXMAP0 );
+			GX_LoadTexObj( &obj, gc_prop_bind_map );
 			if( slot >= 0 )
 				r_gx_cmpr_slot[slot].fence = GC_GXFenceNext();
 			r_gx_cmpr_cur_slot = slot;
@@ -6226,7 +6248,7 @@ static int R_GXPropBind( u8 mat )
 	{
 		if( gc_prop_slot_mat[s] == (s16)mat )
 		{
-			GX_LoadTexObj( &gc_prop_slot_obj[s], GX_TEXMAP0 );
+			GX_LoadTexObj( &gc_prop_slot_obj[s], gc_prop_bind_map );
 			return 1;
 		}
 	}
@@ -6242,7 +6264,7 @@ static int R_GXPropBind( u8 mat )
 	bytes = R_GXPropCmprBytes( w, h );
 	if( bytes == 0 || bytes > GC_PROP_TEX_BYTES )
 	{
-		GX_LoadTexObj( &gc_prop_grey_obj, GX_TEXMAP0 );
+		GX_LoadTexObj( &gc_prop_grey_obj, gc_prop_bind_map );
 		return 0;
 	}
 	s = gc_prop_tex_cursor % gc_prop_tex_nslots;
@@ -6254,7 +6276,7 @@ static int R_GXPropBind( u8 mat )
 		GX_REPEAT, GX_REPEAT, GX_FALSE );
 	GX_InitTexObjFilterMode( &gc_prop_slot_obj[s], GX_LINEAR, GX_LINEAR );
 	gc_prop_slot_mat[s] = (s16)mat;
-	GX_LoadTexObj( &gc_prop_slot_obj[s], GX_TEXMAP0 );
+	GX_LoadTexObj( &gc_prop_slot_obj[s], gc_prop_bind_map );
 	return 1;
 }
 
@@ -6440,6 +6462,222 @@ static u64 gc_prop_pf[4];
 static u32 gc_prop_pf_cnt[4];
 static int gc_prop_pf_frames;
 
+/* Reflections on props (Source $envmap on a model, the coast rocks' glints).
+ *
+ * The pack's env table (lostcoast-gc tools/bake_lostcoast_props.py) names the
+ * reflective materials with their mask chain and constant. The cubemap is the
+ * map's env_cubemap sample nearest the camera (media/cs_d2_lostcoast.bin,
+ * tools/bake_prop_cubes.py: six 8 x 8 HDR faces each, kept in ARAM). GX can
+ * derive a texture coordinate from the vertex normal but not a reflection
+ * vector, so each frame the cube is resampled into a 16 x 16 sphere map for
+ * the current view: the texel at view-space normal ( u, v ) holds the cube
+ * along that normal's reflection. A flagged piece is then drawn a second
+ * time, added: ( cubemap x tint x mask )^2 x 2 x exposure, the same term and
+ * TEV recipe as the world's reflective surfaces. Main view, full detail only. */
+static u32 gc_pcube_aram;
+static u16 gc_pcube_n;
+static s16 gc_pcube_org[128][3];
+static u8 gc_pcube_faces[1152] __attribute__(( aligned( 32 )));
+static u16 gc_psphere[256] __attribute__(( aligned( 32 )));
+static s8 gc_psphere_r[256][3];
+static GXTexObj gc_psphere_obj;
+static int gc_pcube_cur = -1, gc_psphere_frame = -1;
+static s8 gc_pcube_state;	/* 0 untried, 1 ready, -1 none */
+
+static void R_GXPropEnvLoad( void )
+{
+	file_t *f;
+	u16 hdr[16];
+	u32 off, bytes;
+	int i;
+
+	gc_pcube_state = -1;
+	f = gEngfuncs.fsapi->Open( "media/cs_d2_lostcoast.bin", "rb", false );
+	if( !f )
+		return;
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) == 32 && hdr[0] == 0x4743 && hdr[1] == 0x6373 && hdr[2] == 1
+		&& hdr[3] > 0 && hdr[3] <= 128 && hdr[4] == 8 )
+	{
+		const u32 tab = ( hdr[3] * 6u + 31u ) & ~31u;
+
+		gc_pcube_n = hdr[3];
+		bytes = gc_pcube_n * 1152u;
+		if( gEngfuncs.fsapi->Read( f, gc_prop_bounce, tab ) == (fs_offset_t)tab
+			&& ( gc_pcube_aram = GC_AramReserveTagged( bytes, "prop cubemaps" )) != 0 )
+		{
+			memcpy( gc_pcube_org, gc_prop_bounce, gc_pcube_n * 6u );
+			for( off = 0; off < bytes; off += 11520u )
+			{
+				const u32 n = bytes - off > 11520u ? 11520u : bytes - off;
+
+				if( gEngfuncs.fsapi->Read( f, gc_prop_bounce, n ) != (fs_offset_t)n )
+					break;
+				GC_AramTransfer( gc_pcube_aram + off, gc_prop_bounce, n, true );
+			}
+			if( off >= bytes )
+				gc_pcube_state = 1;
+		}
+	}
+	gEngfuncs.fsapi->Close( f );
+	/* Reflection of the view axis about each texel's normal, in view space
+	 * ( x right, y up, z toward the viewer ): ( 2 nz u, 2 nz v, 2 nz^2 - 1 ). */
+	for( i = 0; i < 256; i++ )
+	{
+		float u = ( (float)( i & 15 ) + 0.5f ) * ( 1.0f / 8.0f ) - 1.0f;
+		float v = ( (float)( i >> 4 ) + 0.5f ) * ( 1.0f / 8.0f ) - 1.0f;
+		float r2 = u * u + v * v, nz;
+
+		if( r2 > 0.98f )
+		{
+			const float k = sqrtf( 0.98f / r2 );
+
+			u *= k; v *= k; r2 = 0.98f;
+		}
+		nz = sqrtf( 1.0f - r2 );
+		gc_psphere_r[i][0] = (s8)( 2.0f * nz * u * 127.0f );
+		gc_psphere_r[i][1] = (s8)( 2.0f * nz * v * 127.0f );
+		gc_psphere_r[i][2] = (s8)(( 2.0f * nz * nz - 1.0f ) * 127.0f );
+	}
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop reflections cubemaps=%d\n",
+		gc_pcube_state > 0 ? gc_pcube_n : -1 );
+}
+
+/* The sphere map for this frame's view. False when there is nothing to reflect. */
+static qboolean R_GXPropEnvFrame( void )
+{
+	const float *eye = RI.rvp.vieworigin;
+	vec3_t fw, rt, up;
+	int i, best = 0;
+	float bd = 1e30f;
+
+	if( !gc_pcube_state )
+		R_GXPropEnvLoad();
+	if( gc_pcube_state <= 0 )
+		return false;
+	if( gc_psphere_frame == (int)gc_prop_cache_frame )
+		return true;
+	gc_psphere_frame = (int)gc_prop_cache_frame;
+	for( i = 0; i < gc_pcube_n; i++ )
+	{
+		const float dx = (float)gc_pcube_org[i][0] - eye[0], dy = (float)gc_pcube_org[i][1] - eye[1];
+		const float dz = (float)gc_pcube_org[i][2] - eye[2];
+		const float d = dx * dx + dy * dy + dz * dz;
+
+		if( d < bd )
+		{
+			bd = d;
+			best = i;
+		}
+	}
+	if( best != gc_pcube_cur )
+	{
+		int q, sum[6] = { 0, 0, 0, 0, 0, 0 };
+
+		GC_AramTransfer( gc_pcube_aram + (u32)best * 1152u, gc_pcube_faces, 1152u, false );
+		gc_pcube_cur = best;
+		for( q = 0; q < 384; q++ )
+			sum[q / 64] += gc_pcube_faces[q * 3 + 1];
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop cubemap %d at (%d %d %d) face means %d %d %d %d %d %d\n", best,
+			gc_pcube_org[best][0], gc_pcube_org[best][1], gc_pcube_org[best][2],
+			sum[0] / 64, sum[1] / 64, sum[2] / 64, sum[3] / 64, sum[4] / 64, sum[5] / 64 );
+	}
+	AngleVectors( RI.rvp.viewangles, fw, rt, up );
+	for( i = 0; i < 256; i++ )
+	{
+		const float rx = (float)gc_psphere_r[i][0], ry = (float)gc_psphere_r[i][1], rz = (float)gc_psphere_r[i][2];
+		const float w[3] = {
+			rx * rt[0] + ry * up[0] - rz * fw[0],
+			rx * rt[1] + ry * up[1] - rz * fw[1],
+			rx * rt[2] + ry * up[2] - rz * fw[2] };
+		const float ax = fabsf( w[0] ), ay = fabsf( w[1] ), az = fabsf( w[2] );
+		int face, ti, tj;
+		float s, t, ma;
+		const u8 *c;
+
+		if( ax >= ay && ax >= az ) { face = w[0] < 0.0f; ma = ax; s = w[1]; t = w[2]; }
+		else if( ay >= az ) { face = 2 + ( w[1] < 0.0f ); ma = ay; s = w[0]; t = w[2]; }
+		else { face = 4 + ( w[2] < 0.0f ); ma = az; s = w[0]; t = w[1]; }
+		if( ma < 0.001f ) ma = 0.001f;
+		ti = (int)(( s / ma + 1.0f ) * 4.0f );
+		tj = (int)(( t / ma + 1.0f ) * 4.0f );
+		if( ti > 7 ) ti = 7;
+		if( tj > 7 ) tj = 7;
+		if( ti < 0 ) ti = 0;
+		if( tj < 0 ) tj = 0;
+		c = &gc_pcube_faces[( face * 64 + tj * 8 + ti ) * 3];
+		/* RGB565 texels sit in 4 x 4 tiles. */
+		gc_psphere[(( i >> 6 ) * 4 + (( i & 15 ) >> 2 )) * 16 + (( i >> 4 ) & 3 ) * 4 + ( i & 3 )] =
+			(u16)((( c[0] >> 3 ) << 11 ) | (( c[1] >> 2 ) << 5 ) | ( c[2] >> 3 ));
+	}
+	DCFlushRange( gc_psphere, sizeof( gc_psphere ));
+	GX_InitTexObj( &gc_psphere_obj, gc_psphere, 16, 16, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjFilterMode( &gc_psphere_obj, GX_LINEAR, GX_LINEAR );
+	GX_InvalidateTexAll();
+	return true;
+}
+
+static int R_GXPropBind( u8 mat );
+
+/* A reflective piece again, added: lookup by the view-space normal, mask by
+ * the piece's own texture coordinate. out = view x instance rotation. */
+static void R_GXPropEnvPass( const u8 *hdr, u32 body, Mtx out, int entry )
+{
+	const GXColor k = { gc_penv[entry].k[0], gc_penv[entry].k[1], gc_penv[entry].k[2], 255 };
+	Mtx tm;
+	int c, st;
+
+	for( c = 0; c < 3; c++ )
+	{
+		tm[0][c] = 0.5f * out[0][c];
+		tm[1][c] = 0.5f * out[1][c];
+		tm[2][c] = 0.0f;
+	}
+	tm[0][3] = tm[1][3] = 0.5f;
+	tm[2][3] = 1.0f;
+	GX_LoadTexMtxImm( tm, GX_TEXMTX2, GX_MTX2x4 );
+	gc_prop_bind_map = GX_TEXMAP5;
+	R_GXPropBind( gc_penv[entry].mask );
+	gc_prop_bind_map = GX_TEXMAP0;
+	GX_LoadTexObj( &gc_psphere_obj, GX_TEXMAP6 );
+	GX_SetNumTexGens( 2 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_NRM, GX_TEXMTX2 );
+	GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetTevKColor( GX_KCOLOR0, k );
+	GX_SetNumTevStages( 4 );
+	/* The sphere texel is sqrt( cube / 2 ). Stage 0 squares it, stage 1
+	 * squares that x2, stage 2 multiplies by the constant x4, stage 3 by
+	 * the mask ( already squared ) x2. */
+	for( st = 0; st < 4; st++ )
+	{
+		GX_SetTevDirect( GX_TEVSTAGE0 + st );
+		GX_SetTevOrder( GX_TEVSTAGE0 + st, st == 3 ? GX_TEXCOORD1 : GX_TEXCOORD0,
+			st == 3 ? GX_TEXMAP5 : GX_TEXMAP6, GX_COLORNULL );
+		GX_SetTevKColorSel( GX_TEVSTAGE0 + st, GX_TEV_KCSEL_K0 );
+		GX_SetTevColorIn( GX_TEVSTAGE0 + st, GX_CC_ZERO,
+			st == 0 ? GX_CC_TEXC : GX_CC_CPREV,
+			st == 0 ? GX_CC_TEXC : st == 1 ? GX_CC_CPREV : st == 2 ? GX_CC_KONST : GX_CC_TEXC, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO,
+			st == 0 ? GX_CS_SCALE_1 : st == 2 ? GX_CS_SCALE_4 : GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE0 + st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST );
+		GX_SetTevAlphaOp( GX_TEVSTAGE0 + st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	}
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+	GX_CallDispList( (void *)( hdr + 32 ), body );
+	/* Back to the props' own state. */
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetNumTexGens( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+	GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
+	GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+}
+
 /* Position scale of the vertex layout in place for the props, -1 = not set.
  * Each prop pass resets it after its own state setup. */
 static int gc_prop_vtx_frac = -1;
@@ -6614,6 +6852,9 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			/* Resident piece: a display list the GP reads in place. No
 			 * per-vertex CPU work at all for the horizon pass. */
 			GX_CallDispList( (void *)( hdr + 32 ), body );
+			if(( hdr[1] & 2 ) && !far_lod && !r_gx_mirror && !additive && gc_prop_vsize == 11
+				&& gc_penv_of[hdr[0] & 0x7f] && R_GXPropEnvFrame())
+				R_GXPropEnvPass( hdr, body, out, gc_penv_of[hdr[0] & 0x7f] - 1 );
 		}
 		else
 		{
