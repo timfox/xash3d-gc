@@ -785,6 +785,26 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 		}
 	}
 
+#if XASH_GAMECUBE
+	/* No lightmap sample under the entity (the baked light faces miss some
+	 * floors, e.g. parts of dod_charlie): bodies went pure black (amb=1
+	 * shade=0). Fall back to a dim light from the sky colour and direction,
+	 * about the level of a normally lit floor sample. */
+	if(( light.r + light.g + light.b ) == 0
+		&& ( mv->skycolor[0] + mv->skycolor[1] + mv->skycolor[2] ) != 0 )
+	{
+		const float peak = Q_max( Q_max( mv->skycolor[0], mv->skycolor[1] ), mv->skycolor[2] );
+		const float k = peak > 0.0f ? 48.0f / peak : 0.0f;
+
+		light.r = (unsigned)bound( 0.0f, mv->skycolor[0] * k, 255.0f );
+		light.g = (unsigned)bound( 0.0f, mv->skycolor[1] * k, 255.0f );
+		light.b = (unsigned)bound( 0.0f, mv->skycolor[2] * k, 255.0f );
+		if( !VectorIsNull( mv->skyvec ))
+			VectorCopy( mv->skyvec, lightDir );
+		r_gc_light_path = 5;	/* fallback */
+	}
+#endif
+
 	if( ent->curstate.renderfx == kRenderFxLightMultiplier && ent->curstate.iuser4 != 10 )
 	{
 		light.r *= ent->curstate.iuser4 / 10.0f;
