@@ -5905,6 +5905,17 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
  * boats read as one surface under the tight bloom. */
 #define GC_PROP_MAGIC		0x47437072u
 #define GC_PROP_MAX_INST	512
+/* A prop switches to its far chain when its bounding sphere covers less
+ * than this fraction of the view distance (radius / distance). The switch is
+ * a visible pop, so it is pushed as far out as the chain cache allows: the
+ * fraction drifts down to GC_PROP_FAR_COVER_MIN (2.4 times the distance) while
+ * last frame's full chains took under three quarters of the cache, and back
+ * up to GC_PROP_FAR_COVER_MAX when they took over 92 %. One percent a frame:
+ * props change one at a time, not all at once. In the harbor the cache is
+ * full and the fraction stays where it always was. */
+#define GC_PROP_FAR_COVER_MAX	0.12f
+#define GC_PROP_FAR_COVER_MIN	0.05f
+static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
 #define GC_PROP_DRAW_TRIS	6000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
 #define GC_PROP_TEX_SLOTS	16
@@ -7115,7 +7126,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 			}
 		}
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
-			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
+			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < gc_prop_far_cover * gc_prop_far_cover );
 		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
 		return drawn;
@@ -7316,6 +7327,17 @@ void R_GXPropDrawHorizon( const float *org )
 		gc_prop_want_peak = gc_prop_want_bytes;
 	gc_prop_want_prev = gc_prop_want_bytes;
 	gc_prop_close_new = 0;
+	if( gc_prop_cache_size )
+	{
+		if( gc_prop_want_bytes > gc_prop_cache_size / 100u * 92u )
+			gc_prop_far_cover *= 1.01f;
+		else if( gc_prop_want_bytes < gc_prop_cache_size / 4u * 3u )
+			gc_prop_far_cover *= 0.99f;
+		if( gc_prop_far_cover > GC_PROP_FAR_COVER_MAX )
+			gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
+		if( gc_prop_far_cover < GC_PROP_FAR_COVER_MIN )
+			gc_prop_far_cover = GC_PROP_FAR_COVER_MIN;
+	}
 	gc_prop_want_bytes = 0;
 	gc_prop_cache_frame++;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
@@ -9104,11 +9126,11 @@ static int R_GXDrawWorldDLFrame( void )
 		const float k = 1.0f / ( 1000.0f * 120.0f );
 
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris) want=%uKb far-for-full=%u\n",
+			"Xash3D GameCube: props ms/frame aram=%.1f(%u reads) bind=%.1f(%u) fifo=%.1f(%u tris) want=%uKb far-for-full=%u far-cover=%.3f\n",
 			(float)ticks_to_microsecs( gc_prop_pf[0] ) * k, gc_prop_pf_cnt[0] / 120u,
 			(float)ticks_to_microsecs( gc_prop_pf[1] ) * k, gc_prop_pf_cnt[1] / 120u,
 			(float)ticks_to_microsecs( gc_prop_pf[2] ) * k, gc_prop_pf_cnt[2] / 120u, gc_prop_want_peak / 1024u,
-			gc_prop_far_fallbacks / 120u );
+			gc_prop_far_fallbacks / 120u, gc_prop_far_cover );
 		gc_prop_far_fallbacks = 0;
 		gc_prop_want_peak = 0;
 		memset( gc_prop_pf, 0, sizeof( gc_prop_pf ));
