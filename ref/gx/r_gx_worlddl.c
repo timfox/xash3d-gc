@@ -114,6 +114,7 @@ extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 extern void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n, unsigned far_bytes );
 extern void R_GXCmprSetFar( qboolean far_pool );
 extern void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap );
+extern void R_GXCmprBigForProps( qboolean on );
 extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
@@ -288,9 +289,64 @@ static byte *R_GXWorldDLLmPage( u32 page )
  * identical setup saved 1.3 ms per world pass (two passes with the mirror). */
 static int gc_wd_tev_key = -1;
 
+/* Soft decals (recipe flag 0x10, lostcoast-gc tools/bake_infodecals.py).
+ * Source blends a $translucent decal by its alpha; a CMPR texture has one
+ * alpha bit, which turned graffiti into fat cut-outs. The paint decals share
+ * one atlas whose alpha is a second texture, media/da_<map>.bin: 128x128 I4,
+ * 8 KB resident in the map arena. */
+static int gc_wd_dalpha_state;	/* 0 untried, 1 ready, -1 absent */
+static GXTexObj gc_wd_dalpha_obj;
+static qboolean gc_wd_soft_on;
+
+static qboolean R_GXWorldDLDecalAlpha( void )
+{
+	char path[96];
+	byte head[32], *mem;
+	file_t *f;
+	u32 w, h, bytes;
+
+	if( gc_wd_dalpha_state )
+		return gc_wd_dalpha_state > 0;
+	if( GC_MapLoadBufferTailPeak() == 0 )
+		return false;	/* the arena is still loading the map: ask again */
+	gc_wd_dalpha_state = -1;
+	Q_snprintf( path, sizeof( path ), "media/da_%s.bin", gc_wd_mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f )
+		return false;
+	if( gEngfuncs.fsapi->Read( f, head, 32 ) == 32 && head[0] == 'G' && head[1] == 'C'
+		&& head[2] == 'd' && head[3] == 'a'
+		&& ( w = ( head[4] << 8 ) | head[5] ) >= 8 && ( h = ( head[6] << 8 ) | head[7] ) >= 8
+		&& w <= 256 && h <= 256 && !( w & 7 ) && !( h & 7 )
+		&& ( bytes = w * h / 2u ) != 0
+		&& ( mem = (byte *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes )) != NULL
+		&& gEngfuncs.fsapi->Read( f, mem, bytes ) == (fs_offset_t)bytes )
+	{
+		DCFlushRange( mem, bytes );
+		GX_InitTexObj( &gc_wd_dalpha_obj, mem, (u16)w, (u16)h, GX_TF_I4, GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_wd_dalpha_obj, GX_LINEAR, GX_LINEAR );
+		gc_wd_dalpha_state = 1;
+	}
+	gEngfuncs.fsapi->Close( f );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL decal alpha %s ready=%d\n", path, gc_wd_dalpha_state > 0 );
+	return gc_wd_dalpha_state > 0;
+}
+
+static void R_GXWorldDLSoftOff( void )
+{
+	if( !gc_wd_soft_on )
+		return;
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	gc_wd_soft_on = false;
+	gc_wd_tev_key = -1;
+}
+
 static void R_GXWorldDLSetupLit( int lightmap )
 {
 	gc_wd_tev_key = -1;
+	R_GXWorldDLSoftOff();
 	GX_SetNumIndStages( 0 );
 	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	GX_SetZCompLoc( GX_TRUE );
@@ -373,15 +429,40 @@ static void R_GXTevMatAppend( int id, int a, int b )
 		GX_SetTevAlphaIn( GX_TEVSTAGE0 + base_stages, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
 		GX_SetTevAlphaOp( GX_TEVSTAGE0 + base_stages, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 	}
-	/* Alpha-test on LM-lit cliff/brush mats cut white sky holes through
-	 * solid plates. Keep punch-through only for unlit foliage-style mats. */
-	/* Decals (flag 0x08, Source $decal): the alpha is the decal's shape, so
-	 * they cut out on lightmapped walls too. Without it the infodecals and
-	 * overlays on lit walls drew as opaque rectangles. */
-	if(( flags & 0x02 ) && ( !gc_wd_chunk_lm || ( flags & 0x08 )))
+	/* Source $alphatest, $translucent and $decal: the alpha is the shape of
+	 * the grate, rail or decal, so it cuts out on lightmapped chunks as well
+	 * as vertex-lit ones. (It used to be held back on lightmapped chunks,
+	 * from a time when the flag reached materials that had no cut-out; the
+	 * bake now sets it from the VMT alone and encodes the alpha bit for the
+	 * same materials.) Without it the rail and the Combine grate drew their
+	 * holes as black blocks. */
+	if( flags & 0x02 )
 	{
 		GX_SetAlphaCompare( GX_GEQUAL, aref ? aref : 128, GX_AOP_AND, GX_ALWAYS, 0 );
 		GX_SetZCompLoc( GX_FALSE );
+	}
+	/* Soft decal: one more stage takes the alpha from the I4 page (same
+	 * texture coordinates as the atlas), and the quad blends over the wall
+	 * already drawn. Decal materials are the last in the pack, so their
+	 * group comes after every wall's. No depth write: nothing sorts
+	 * against a decal a unit off its wall. */
+	if(( flags & 0x10 ) && R_GXWorldDLDecalAlpha())
+	{
+		const u8 st = (u8)( GX_TEVSTAGE0 + base_stages );
+
+		GX_LoadTexObj( &gc_wd_dalpha_obj, GX_TEXMAP3 );
+		GX_SetNumTevStages( (u8)( base_stages + 1 ));
+		GX_SetTevDirect( st );
+		GX_SetTevOrder( st, GX_TEXCOORD0, GX_TEXMAP3, GX_COLORNULL );
+		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+		GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetAlphaCompare( GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+		GX_SetZCompLoc( GX_FALSE );
+		GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+		gc_wd_soft_on = true;
 	}
 }
 static void R_GXTevMatEndAlphaTest( void ) {}
@@ -673,9 +754,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		const size_t hw = ( Q_max( live, R_GXWorldDLBspFloor()) + 31u ) & ~(size_t)31u;
 		const size_t cap = GC_MapLoadBufferCapacity();
 		/* Left above the chunk ring: water table 34 KB, prop texture slots
-		 * 96 KB, prop far LODs about 360 KB, the fire atlas 33 KB, the water sun 2 KB, the resident skyline 42 KB, and entity
+		 * 96 KB, prop far LODs about 360 KB (284 KB with normals, pack v7), the fire atlas 33 KB, the water sun 2 KB, the resident skyline 42 KB, and entity
 		 * overflow. The ring peaks near 915 KB in the Lost Coast harbor. */
-		const size_t keep = 508u * 1024u;
+		const size_t keep = 532u * 1024u;
 
 		if( cap > hw + keep + 512u * 1024u )
 		{
@@ -690,16 +771,29 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				/* 90 full slots (128x128 chain, 10944 bytes): every world
 				 * texture of Lost Coast at once. 128 slots one mip down
 				 * (64x64 chain, 2752 bytes) for props. 1.31 MB. */
-				const unsigned slot_bytes = 10944u, far_bytes = 2752u;
-				const int nslots = 90, far_n = 128;
+				/* 82 full slots, not one for each of the 90 world textures: a
+				 * view does not bind all of them, and the eight slots (88 KB)
+				 * make two big ones, a whole 256x256 chain each (43680 bytes),
+				 * for the two coast rock textures the props put in front of
+				 * the eye. The far pool stays at 128: the props fill it (96
+				 * slots refetched 60 textures a frame). */
+				const unsigned slot_bytes = 10944u, far_bytes = 2752u, big_bytes = 43680u;
+				const int nslots = 82, far_n = 128, big_n = 2;
 				byte *tex = (byte *)GC_MapLoadBufferTailAlloc( hw,
-					(size_t)nslots * slot_bytes + (size_t)far_n * far_bytes );
+					(size_t)( nslots + 8 ) * slot_bytes + (size_t)far_n * far_bytes );
 
 				if( tex )
 				{
 					R_GXCmprBounceAdopt( tex, nslots, slot_bytes, far_n, far_bytes );
+					R_GXCmprBigAdopt( tex + (size_t)nslots * slot_bytes + (size_t)far_n * far_bytes, big_n, big_bytes );
+					R_GXCmprBigForProps( true );
 					cmpr_adopted = true;
-					gc_wd_tex_overflow = GC_WorldTexCount() > nslots;
+					/* Not the far-pool mode for distant world chunks: that pool is
+					 * the props'. The near slots turn over by least recent use,
+					 * which holds while a view binds fewer textures than there
+					 * are slots (the map has 96, six of them decal atlases that
+					 * are each seen in one place). */
+					gc_wd_tex_overflow = GC_WorldTexCount() > nslots + nslots / 4;
 					hw2 = ( GC_MapLoadBufferTailHighwater() + 31u ) & ~(size_t)31u;
 				}
 			}
@@ -2517,6 +2611,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 	}
 	gc_wd_defer_n = 0;
 	R_GXCmprSetFar( false );
+	R_GXWorldDLSoftOff();	/* the decal group is the last one */
 }
 
 int R_GXWorldDLDraw( void )

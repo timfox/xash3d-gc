@@ -116,6 +116,7 @@ typedef struct
 // studio-related cvars
 CVAR_DEFINE_AUTO( r_studio_sort_textures, "0", FCVAR_GLCONFIG, "change draw order for additive meshes" );
 static cvar_t *cl_righthand = NULL;
+static CVAR_DEFINE_AUTO( r_gc_aim_yaw_flip, "0", 0, "DoD aim grid: mirror the torso yaw row (test)" );
 
 static r_studio_interface_t *pStudioDraw;
 static studio_draw_state_t  g_studio;                   // global studio state
@@ -146,6 +147,7 @@ void R_StudioInit( void )
 	// g-cont. cvar disabled by Valve
 //	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
 
+	gEngfuncs.Cvar_RegisterVariable( &r_gc_aim_yaw_flip );
 	g_studio.interpolate = true;
 	g_studio.framecount = 0;
 	m_fDoRemap = false;
@@ -496,6 +498,35 @@ static void R_StudioPlayerBlend( mstudioseqdesc_t *pseqdesc, int *pBlend, float 
 	// calc up/down pointing
 	*pBlend = ( *pPitch * 3.0f );
 
+#if XASH_GAMECUBE
+	// DoD player models author the aim range high to low (blend XR 45 -45).
+	// The stock bounds test assumes start < end, so every pitch fell into
+	// the first or second branch and the aim was 0 or 255, never between.
+	// Walk the range in whichever direction the model gives it.
+	if( pseqdesc->blendstart[0] > pseqdesc->blendend[0] )
+	{
+		float b = *pPitch * 3.0f;
+		float lo = pseqdesc->blendend[0], hi = pseqdesc->blendstart[0];
+
+		if( b > hi )
+		{
+			*pPitch -= hi / 3.0f;
+			*pBlend = 0;
+		}
+		else if( b < lo )
+		{
+			*pPitch -= lo / 3.0f;
+			*pBlend = 255;
+		}
+		else
+		{
+			*pBlend = (int)( 255.0f * ( hi - b ) / ( hi - lo ));
+			*pPitch = 0.0f;
+		}
+		return;
+	}
+#endif
+
 	if( *pBlend < pseqdesc->blendstart[0] )
 	{
 		*pPitch -= pseqdesc->blendstart[0] / 3.0f;
@@ -830,6 +861,63 @@ static void R_StudioCalcRotations( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 
 /*
 ====================
+StudioCalcGridBlend
+
+Day of Defeat (and Counter-Strike) player sequences carry 9 animations: a
+3 x 3 grid, torso yaw along the row (blending[0]) and aim pitch down the
+column (blending[1]); 0-127 runs from the first cell to the middle one,
+128-255 from the middle to the last. The player models have no bone
+controllers, so this grid is the only torso twist they have. Sequences
+with 3 animations (sandbag, bipod) are one row of it. The stock code
+blended animation 0 with animation 1 whatever the count: a body turned
+hard to one side, looking up.
+====================
+*/
+// blend scratch, shared by StudioSetupBones and the grid blend
+static vec3_t pos2[MAXSTUDIOBONES], pos3[MAXSTUDIOBONES], pos4[MAXSTUDIOBONES];
+static vec4_t q2[MAXSTUDIOBONES], q3[MAXSTUDIOBONES], q4[MAXSTUDIOBONES];
+
+static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, mstudioseqdesc_t *pseqdesc,
+	mstudioanim_t *panim, float f, float s, float t )
+{
+	const int nb = m_pStudioHeader->numbones;
+	int col = 0, row = 0;
+
+	if( s > 127.0f )
+	{
+		s = 2.0f * ( s - 127.0f );
+		col = 1;
+	}
+	else s = 2.0f * s;
+	s = bound( 0.0f, s / 255.0f, 1.0f );
+
+	if( pseqdesc->numblends == 3 )
+	{
+		R_StudioCalcRotations( e, pos, q, pseqdesc, panim + col * nb, f );
+		R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( col + 1 ) * nb, f );
+		R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
+		return;
+	}
+
+	if( t > 127.0f )
+	{
+		t = 2.0f * ( t - 127.0f );
+		row = 1;
+	}
+	else t = 2.0f * t;
+	t = bound( 0.0f, t / 255.0f, 1.0f );
+
+	R_StudioCalcRotations( e, pos, q, pseqdesc, panim + ( row * 3 + col ) * nb, f );
+	R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( row * 3 + col + 1 ) * nb, f );
+	R_StudioCalcRotations( e, pos3, q3, pseqdesc, panim + (( row + 1 ) * 3 + col ) * nb, f );
+	R_StudioCalcRotations( e, pos4, q4, pseqdesc, panim + (( row + 1 ) * 3 + col + 1 ) * nb, f );
+	R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
+	R_StudioSlerpBones( nb, q3, pos3, q4, pos4, s );
+	R_StudioSlerpBones( nb, q, pos, q3, pos3, t );
+}
+
+/*
+====================
 StudioMergeBones
 
 ====================
@@ -1042,12 +1130,6 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	matrix3x4        bonematrix;
 	static vec3_t    pos[MAXSTUDIOBONES];
 	static vec4_t    q[MAXSTUDIOBONES];
-	static vec3_t    pos2[MAXSTUDIOBONES];
-	static vec4_t    q2[MAXSTUDIOBONES];
-	static vec3_t    pos3[MAXSTUDIOBONES];
-	static vec4_t    q3[MAXSTUDIOBONES];
-	static vec3_t    pos4[MAXSTUDIOBONES];
-	static vec4_t    q4[MAXSTUDIOBONES];
 	int i;
 #if XASH_GAMECUBE
 	{
@@ -1123,9 +1205,19 @@ static void R_StudioSetupBones( cl_entity_t *e )
 #endif
 
 	panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, pseqdesc );
+	if( pseqdesc->numblends == 9 || pseqdesc->numblends == 3 )
+	{
+		const float dadt = R_StudioEstimateInterpolant( e );
+
+		R_StudioCalcGridBlend( e, pos, q, pseqdesc, panim, f,
+			e->curstate.blending[0] * dadt + e->latched.prevblending[0] * ( 1.0f - dadt ),
+			e->curstate.blending[1] * dadt + e->latched.prevblending[1] * ( 1.0f - dadt ));
+	}
+	else
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim, f );
 
-	if( pseqdesc->numblends > 1 && pseqdesc->numblends <= 16 )
+	if( pseqdesc->numblends > 1 && pseqdesc->numblends <= 16
+		&& pseqdesc->numblends != 9 && pseqdesc->numblends != 3 )
 	{
 		float s;
 		float dadt;
@@ -1167,9 +1259,13 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, pseqdesc );
 
 		// clip prevframe
+		if( pseqdesc->numblends == 9 || pseqdesc->numblends == 3 )
+			R_StudioCalcGridBlend( e, pos1b, q1b, pseqdesc, panim, e->latched.prevframe,
+				e->latched.prevseqblending[0], e->latched.prevseqblending[1] );
+		else
 		R_StudioCalcRotations( e, pos1b, q1b, pseqdesc, panim, e->latched.prevframe );
 
-		if( pseqdesc->numblends > 1 )
+		if( pseqdesc->numblends > 1 && pseqdesc->numblends != 9 && pseqdesc->numblends != 3 )
 		{
 			panim += m_pStudioHeader->numbones;
 			R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim, e->latched.prevframe );
@@ -3278,6 +3374,7 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 {
 	mstudioseqdesc_t *pseqdesc;
 	int   iBlend;
+	qboolean grid;
 	float dt, flYaw; // view direction relative to movement
 
 	if( RI.currententity->curstate.sequence < 0 || RI.currententity->curstate.sequence >= m_pStudioHeader->numseq )
@@ -3287,12 +3384,29 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + RI.currententity->curstate.sequence;
 
+	grid = pseqdesc->numblends == 9 || pseqdesc->numblends == 3;
+	if( pseqdesc->numblends == 9 )
+	{
+		// 3 x 3 aim grid: the pitch goes down the column (blending[1]),
+		// first row up (+45), last row down (-45)
+		const float b = RI.currententity->angles[PITCH] * 3.0f;
+
+		iBlend = b <= -45.0f ? 255 : b >= 45.0f ? 0 : (int)(( 45.0f - b ) / 90.0f * 255.0f );
+		RI.currententity->angles[PITCH] = 0.0f;
+		RI.currententity->latched.prevangles[PITCH] = 0.0f;
+		RI.currententity->curstate.blending[1] = iBlend;
+		RI.currententity->latched.prevblending[1] = iBlend;
+		RI.currententity->latched.prevseqblending[1] = iBlend;
+	}
+	else
+	{
 	R_StudioPlayerBlend( pseqdesc, &iBlend, &RI.currententity->angles[PITCH] );
 
 	RI.currententity->latched.prevangles[PITCH] = RI.currententity->angles[PITCH];
 	RI.currententity->curstate.blending[0] = iBlend;
 	RI.currententity->latched.prevblending[0] = RI.currententity->curstate.blending[0];
 	RI.currententity->latched.prevseqblending[0] = RI.currententity->curstate.blending[0];
+	}
 	R_StudioEstimateGait( pplayer );
 
 	// calc side to side turning
@@ -3314,6 +3428,25 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 		m_pPlayerInfo->gaityaw = m_pPlayerInfo->gaityaw + 180.0f;
 		m_flGaitMovement = -m_flGaitMovement;
 		flYaw = flYaw + 180.0f;
+	}
+
+	if( grid )
+	{
+		// the row of the grid turns the torso from the legs to the aim:
+		// 90 degrees either way, the middle cell straight ahead
+		float by = ( flYaw / 90.0f ) * 128.0f + 127.0f;
+		int   iy;
+
+		by = bound( 0.0f, by, 255.0f );
+		iy = r_gc_aim_yaw_flip.value ? (int)by : (int)( 255.0f - by );
+		if( pseqdesc->numblends == 3 )
+		{
+			// one row: sandbag and bipod aim, pitch only
+			iy = RI.currententity->curstate.blending[0];
+		}
+		RI.currententity->curstate.blending[0] = iy;
+		RI.currententity->latched.prevblending[0] = iy;
+		RI.currententity->latched.prevseqblending[0] = iy;
 	}
 
 	// adjust torso
@@ -3416,6 +3549,54 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 		vec3_t orig_angles = Vec3( RI.currententity->angles );
 
 		R_StudioProcessGait( pplayer );
+#if XASH_GAMECUBE
+		{
+			/* Aim check: the blend the pitch became (127 = level). */
+			static double next_blend_log[MAX_CLIENTS + 1];
+			const int pi = m_nPlayerIndex + 1;
+
+			if( pi > 0 && pi <= MAX_CLIENTS && gp_host->realtime >= next_blend_log[pi] )
+			{
+				next_blend_log[pi] = gp_host->realtime + 2.0;
+				const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + RI.currententity->curstate.sequence;
+
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio aim player %d pitch in %.1f blend %d seq %d '%s' (blend type %d %.1f..%.1f, %d blends) gait %d\n",
+					pi, orig_angles[PITCH], RI.currententity->curstate.blending[0],
+					RI.currententity->curstate.sequence, sd->label, sd->blendtype[0],
+					sd->blendstart[0], sd->blendend[0], sd->numblends, pplayer->gaitsequence );
+				/* Yaw check: aim yaw, legs yaw, torso controller (127 = no
+				 * twist), and once per body which bone controllers exist. */
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio yaw player %d aim %.1f legs %.1f twist ctl %d %d %d %d gaitmove %.1f\n",
+					pi, orig_angles[YAW], m_pPlayerInfo ? m_pPlayerInfo->gaityaw : -999.0f,
+					RI.currententity->curstate.controller[0], RI.currententity->curstate.controller[1],
+					RI.currententity->curstate.controller[2], RI.currententity->curstate.controller[3],
+					m_flGaitMovement );
+				{
+					static const studiohdr_t *ctl_logged[8];
+					int k, seen = 0;
+
+					for( k = 0; k < 8; k++ )
+						if( ctl_logged[k] == m_pStudioHeader )
+							seen = 1;
+					if( !seen )
+					{
+						const mstudiobonecontroller_t *bc = (const mstudiobonecontroller_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->bonecontrollerindex );
+						const mstudiobone_t *bones = (const mstudiobone_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+						for( k = 0; k < 8 && ctl_logged[k]; k++ );
+						if( k < 8 )
+							ctl_logged[k] = m_pStudioHeader;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: body %s has %d bone controllers\n",
+							m_pStudioHeader->name, m_pStudioHeader->numbonecontrollers );
+						for( k = 0; k < m_pStudioHeader->numbonecontrollers && k < 8; k++ )
+							gEngfuncs.Con_Reportf( "Xash3D GameCube:   controller %d index %d bone %s type 0x%x range %.0f..%.0f\n",
+								k, bc[k].index, ( bc[k].bone >= 0 && bc[k].bone < m_pStudioHeader->numbones ) ? bones[bc[k].bone].name : "?",
+								bc[k].type, bc[k].start, bc[k].end );
+					}
+				}
+			}
+		}
+#endif
 
 		m_pPlayerInfo->gaitsequence = pplayer->gaitsequence;
 		m_pPlayerInfo = NULL;

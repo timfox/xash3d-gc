@@ -1429,6 +1429,136 @@ process frame interpolation etc
 ===============
 */
 #if XASH_GAMECUBE
+#if XASH_GAMECUBE
+/*
+=============
+Remote client static props
+
+The server sends its static props (unnamed env_model / dod_object, no edict)
+in the signon as svc_spawnstatic. The listen host already draws them from
+gc_static_props, so it drops these messages. A remote client fills its own
+gc_static_props from them and links the nearest ones each frame.
+=============
+*/
+#define GC_REMOTE_STATIC_DRAW	16
+
+static qboolean CL_GCStaticPropOnServer( const entity_state_t *state )
+{
+	int i;
+
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+
+		if( sp->modelindex == state->modelindex && VectorCompareEpsilon( sp->origin, state->origin, 0.5f ))
+			return true;
+	}
+	return false;
+}
+
+qboolean CL_GCStaticPropFromSignon( const entity_state_t *state )
+{
+	gc_static_prop_t *sp;
+
+	if( SV_Active( ))
+		return CL_GCStaticPropOnServer( state );
+	if( gc_num_static_props >= GC_STATIC_PROPS_MAX )
+		return true; /* over the cap: drop it rather than spend a cl_entity_t */
+	sp = &gc_static_props[gc_num_static_props++];
+	memset( sp, 0, sizeof( *sp ));
+	VectorCopy( state->origin, sp->origin );
+	VectorCopy( state->angles, sp->angles );
+	sp->scale = state->scale;
+	sp->framerate = state->framerate;
+	sp->modelindex = (short)state->modelindex;
+	sp->sequence = (short)state->sequence;
+	sp->skin = state->skin;
+	sp->body = (short)state->body;
+	sp->rendermode = (byte)state->rendermode;
+	sp->renderamt = (byte)state->renderamt;
+	sp->renderfx = (byte)state->renderfx;
+	sp->rendercolor = state->rendercolor;
+	return true;
+}
+
+void CL_GCClearRemoteStaticProps( void )
+{
+	if( !SV_Active( ))
+		gc_num_static_props = 0;
+}
+
+void CL_GCLinkRemoteStaticProps( void )
+{
+	static cl_entity_t ents[GC_REMOTE_STATIC_DRAW];
+	static int logged_count = -1;
+	int picks[GC_REMOTE_STATIC_DRAW];
+	float dists[GC_REMOTE_STATIC_DRAW];
+	int n = 0, i, j, linked = 0;
+
+	if( SV_Active() || gc_num_static_props <= 0 )
+		return;
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+		vec3_t delta;
+		float d;
+
+		VectorSubtract( sp->origin, refState.vieworg, delta );
+		d = DotProduct( delta, delta );
+		if( d > 12000.0f * 12000.0f )
+			continue;
+		if( n < GC_REMOTE_STATIC_DRAW )
+			n++;
+		else if( d >= dists[n - 1] )
+			continue;
+		for( j = n - 1; j > 0 && dists[j - 1] > d; j-- )
+		{
+			dists[j] = dists[j - 1];
+			picks[j] = picks[j - 1];
+		}
+		dists[j] = d;
+		picks[j] = i;
+	}
+	for( i = 0; i < n; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[picks[i]];
+		cl_entity_t *ent = &ents[linked];
+		model_t *mod = CL_ModelHandle( sp->modelindex );
+
+		if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+			continue;
+		memset( ent, 0, sizeof( *ent ));
+		ent->model = mod;
+		VectorCopy( sp->origin, ent->origin );
+		VectorCopy( sp->angles, ent->angles );
+		VectorCopy( sp->origin, ent->curstate.origin );
+		VectorCopy( sp->angles, ent->curstate.angles );
+		ent->curstate.modelindex = sp->modelindex;
+		ent->curstate.sequence = sp->sequence;
+		ent->curstate.body = sp->body;
+		ent->curstate.skin = sp->skin;
+		ent->curstate.scale = sp->scale > 0.0f ? sp->scale : 1.0f;
+		ent->curstate.framerate = sp->framerate != 0.0f ? sp->framerate : 1.0f;
+		ent->curstate.rendermode = sp->rendermode;
+		ent->curstate.renderamt = sp->renderamt;
+		ent->curstate.renderfx = sp->renderfx;
+		ent->curstate.rendercolor = sp->rendercolor;
+		ent->curstate.entityType = ENTITY_NORMAL;
+		ent->prevstate = ent->curstate;
+		VectorCopy( ent->origin, ent->latched.prevorigin );
+		VectorCopy( ent->angles, ent->latched.prevangles );
+		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+			linked++;
+	}
+	if( logged_count != gc_num_static_props )
+	{
+		logged_count = gc_num_static_props;
+		Con_Reportf( "Xash3D GameCube: remote static props %d, linked %d nearest\n",
+			gc_num_static_props, linked );
+	}
+}
+#endif
+
 /*
 ===============
 CL_GameCubeLeanEmitBrushEntities
@@ -1471,6 +1601,7 @@ static const char *CL_GCLeanDodAimToken( const char *wpath )
 }
 
 extern void GC_ProfMark( const char *name );
+void R_GXStudioInvalidateBindings( void );
 
 /* First sequence of a studio header whose label contains `want`, or -1. */
 static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want );
@@ -1546,6 +1677,84 @@ static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want )
 			return i;
 	}
 	return -1;
+}
+
+/* Keep the nearest `cap` candidates: id is an edict number, or -(prop + 1)
+ * for a static prop. */
+static void CL_GCLeanPick( int *picks, float *dists, int *n, int cap, int id, float dist )
+{
+	int slot, worst = 0;
+
+	if( *n < cap )
+	{
+		picks[*n] = id;
+		dists[*n] = dist;
+		( *n )++;
+		return;
+	}
+	for( slot = 1; slot < *n; slot++ )
+		if( dists[slot] > dists[worst] )
+			worst = slot;
+	if( *n > 0 && dist < dists[worst] )
+	{
+		picks[worst] = id;
+		dists[worst] = dist;
+	}
+}
+
+/* World DL visibility memo keys for static props (edicts use their number). */
+#define GC_STATIC_PROP_KEY0	4096
+
+/* Death pose for a dead player or a body-queue corpse. The server's player
+ * model is a hull stub, so the game cannot always look the sequence up: keep
+ * the game's sequence when it is a valid one-shot of this body, else use the
+ * body's first one-shot death label. */
+static int CL_GCLeanDeathSeq( const studiohdr_t *hdr, int seq )
+{
+	static const char *const labels[] = { "death", "die", "dead" };
+	const mstudioseqdesc_t *sd;
+	int i, k;
+
+	if( !hdr || hdr->numseq <= 0 || hdr->seqindex <= 0 )
+		return seq;
+	sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	if( seq > 0 && seq < hdr->numseq && !FBitSet( sd[seq].flags, STUDIO_LOOPING ))
+		return seq;
+	for( k = 0; k < (int)( sizeof( labels ) / sizeof( labels[0] )); k++ )
+	{
+		for( i = 0; i < hdr->numseq; i++ )
+		{
+			if( Q_stristr( sd[i].label, labels[k] ) && !FBitSet( sd[i].flags, STUDIO_LOOPING ))
+				return i;
+		}
+	}
+	return ( seq >= 0 && seq < hdr->numseq ) ? seq : 0;
+}
+
+/* Team body of player slot e (1-based) from its "model" userinfo, if resident
+ * (loads it once per slot otherwise). */
+static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
+{
+	const char *body;
+	char path[MAX_QPATH];
+	model_t *mod;
+
+	if( e < 1 || e > svs.maxclients || !svs.clients )
+		return NULL;
+	body = Info_ValueForKey( svs.clients[e - 1].userinfo, "model" );
+	if( !body[0] || Q_snprintf( path, sizeof( path ), "models/player/%s/%s.mdl", body, body ) <= 0 )
+		return NULL;
+	mod = Mod_FindName( path, false );
+	if(( !mod || mod->needload != NL_PRESENT ) && tried && !*tried )
+	{
+		*tried = true;
+		mod = Mod_ForName( path, false, false );
+		Con_Reportf( "Xash3D GameCube: lean emit player %d fallback body %s %s\n",
+			e, path, mod && mod->cache.data ? "loaded" : "load failed" );
+	}
+	if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+		return NULL;
+	return mod;
 }
 
 void CL_GameCubeLeanEmitBrushEntities( void )
@@ -1681,8 +1890,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		&& studio_budget > 0 )
 	{
 		int studio_slots = 0;
+		int bodies[4];
+		int n_bodies = 0;
 		int picks[24];
 		float pick_dists[24];
+		/* Leave room for the other players and bots (emitted after). */
+		const int pick_cap = Q_max( 1, studio_budget - Q_max( 0, svs.maxclients - 1 ));
 		int n_picks = 0;
 		int slot;
 
@@ -1693,13 +1906,97 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			vec3_t delta;
 			float dist;
 			qboolean allow;
-			int slot;
 
 			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex )
 				continue;
 			if( FBitSet( ed->v.effects, EF_NODRAW ))
 				continue;
+			/* Body-queue corpse (CopyToBodyQue: renderfx kRenderFxDeadPlayer,
+			 * renderamt = the dead player's slot). Drawn after the players. */
+			if( ed->v.renderfx == kRenderFxDeadPlayer )
+			{
+				if( n_bodies < (int)( sizeof( bodies ) / sizeof( bodies[0] )))
+					bodies[n_bodies++] = e;
+				continue;
+			}
 			mod = SV_ModelHandle( ed->v.modelindex );
+			/* Before the type test: an unloaded handle is not mod_studio yet. */
+			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A map model precached by the game at spawn (DoD control
+				 * point flags) stays a registered, never-loaded handle on this
+				 * route: nothing promotes it the way the static props are.
+				 * Point the handle at a resident copy, or load it (lean mesh,
+				 * ARAM cache later), retrying a failed load every few seconds. */
+				extern qboolean Mod_GCPromoteStudioPath( const char *path );
+				static double next_try[32];
+				static byte fails[32];
+				static int fails_spawn = -1;
+				const int mk = ed->v.modelindex & 31;
+				model_t *found;
+
+				if( fails_spawn != svs.spawncount )
+				{
+					memset( next_try, 0, sizeof( next_try ));
+					memset( fails, 0, sizeof( fails ));
+					fails_spawn = svs.spawncount;
+				}
+				found = Mod_FindName( mod->name, false );
+				if(( !found || found->needload != NL_PRESENT || !found->cache.data )
+					&& fails[mk] < 3 && host.realtime >= next_try[mk] )
+				{
+					if( Mod_GCPromoteStudioPath( mod->name ))
+						found = Mod_FindName( mod->name, false );
+					else
+					{
+						fails[mk]++;
+						next_try[mk] = host.realtime + 5.0;
+					}
+					Con_Reportf( "Xash3D GameCube: lean promote map model %s (index %d) %s\n", mod->name,
+						ed->v.modelindex, found && found->needload == NL_PRESENT && found->cache.data ? "resident" : "not loaded" );
+				}
+				if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+				{
+					if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
+						sv.models[ed->v.modelindex] = found;
+					mod = found;
+				}
+			}
+			if( mod && mod->type == mod_studio && mod->needload == NL_PRESENT && mod->cache.data
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A promoted map model has its lean mesh only; attach its *t
+				 * skin atlas too, or it draws flat grey (ceres 3282517bd).
+				 * Bound skins return at once; stop checking after that. */
+				extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+				static byte skin_state[32];	/* 0..2 fails, 0xff bound */
+				static double skin_next[32];
+				static int skin_spawn = -1;
+				const int sk = ed->v.modelindex & 31;
+
+				if( skin_spawn != svs.spawncount )
+				{
+					memset( skin_state, 0, sizeof( skin_state ));
+					memset( skin_next, 0, sizeof( skin_next ));
+					skin_spawn = svs.spawncount;
+				}
+				if( skin_state[sk] < 3 && host.realtime >= skin_next[sk] )
+				{
+					if( Mod_GCAttachStudioSkins( mod ))
+					{
+						skin_state[sk] = 0xff;
+						R_GXStudioInvalidateBindings();
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' bound\n", mod->name );
+					}
+					else
+					{
+						skin_state[sk]++;
+						skin_next[sk] = host.realtime + 5.0;
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' failed (%d)\n", mod->name, skin_state[sk] );
+					}
+				}
+			}
 			if( !mod || mod->type != mod_studio )
 				continue;
 			/* A weapon a player carries keeps its w_ model at the player's
@@ -1816,33 +2113,74 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 			/* Insert into nearest-N picks. */
-			if( n_picks < studio_budget )
-			{
-				picks[n_picks] = e;
-				pick_dists[n_picks] = dist;
-				n_picks++;
-			}
-			else
-			{
-				int worst = 0;
-				for( slot = 1; slot < n_picks; slot++ )
-				{
-					if( pick_dists[slot] > pick_dists[worst] )
-						worst = slot;
-				}
-				if( dist < pick_dists[worst] )
-				{
-					picks[worst] = e;
-					pick_dists[worst] = dist;
-				}
-			}
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, dist );
+		}
+		/* Static props (unnamed env_model / dod_object, no edict). */
+		for( e = 0; e < gc_num_static_props; e++ )
+		{
+			const gc_static_prop_t *sp = &gc_static_props[e];
+			extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+			model_t *mod = SV_ModelHandle( sp->modelindex );
+			vec3_t delta, bmin, bmax;
+			float dist;
+
+			if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+				continue;
+			VectorSubtract( sp->origin, view_org, delta );
+			dist = VectorLength( delta );
+			if( dist > studio_max_dist )
+				continue;
+			VectorSet( bmin, sp->origin[0] - 48.0f, sp->origin[1] - 48.0f, sp->origin[2] );
+			VectorSet( bmax, sp->origin[0] + 48.0f, sp->origin[1] + 48.0f, sp->origin[2] + 80.0f );
+			if( !R_GXWorldDLEntityVisible( GC_STATIC_PROP_KEY0 + e, bmin, bmax ))
+				continue;
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, -( e + 1 ), dist );
 		}
 		for( slot = 0; slot < n_picks && studio_slots < studio_budget; slot++ )
 		{
-			edict_t *ed = SV_EdictNum( picks[slot] );
-			model_t *mod = SV_ModelHandle( ed->v.modelindex );
+			edict_t *ed;
+			model_t *mod;
 			cl_entity_t *ent = &lean_studio_ents[studio_slots];
 
+			if( picks[slot] < 0 )
+			{
+				const gc_static_prop_t *sp = &gc_static_props[-picks[slot] - 1];
+
+				mod = SV_ModelHandle( sp->modelindex );
+				if( !mod )
+					continue;
+				if( sp->modelindex > 0 && sp->modelindex < MAX_MODELS )
+					cl.models[sp->modelindex] = mod;
+				memset( ent, 0, sizeof( *ent ));
+				ent->index = 0;
+				ent->model = mod;
+				VectorCopy( sp->origin, ent->origin );
+				VectorCopy( sp->angles, ent->angles );
+				VectorCopy( sp->origin, ent->curstate.origin );
+				VectorCopy( sp->angles, ent->curstate.angles );
+				ent->curstate.modelindex = sp->modelindex;
+				ent->curstate.sequence = sp->sequence;
+				ent->curstate.body = sp->body;
+				ent->curstate.skin = sp->skin;
+				ent->curstate.scale = sp->scale > 0.0f ? sp->scale : 1.0f;
+				ent->curstate.framerate = sp->framerate != 0.0f ? sp->framerate : 1.0f;
+				ent->curstate.rendermode = sp->rendermode;
+				ent->curstate.renderamt = sp->renderamt;
+				ent->curstate.renderfx = sp->renderfx;
+				ent->curstate.rendercolor = sp->rendercolor;
+				ent->curstate.entityType = ENTITY_NORMAL;
+				ent->prevstate = ent->curstate;
+				VectorCopy( ent->origin, ent->latched.prevorigin );
+				VectorCopy( ent->angles, ent->latched.prevangles );
+				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					studios++;
+					studio_slots++;
+				}
+				continue;
+			}
+			ed = SV_EdictNum( picks[slot] );
+			mod = SV_ModelHandle( ed->v.modelindex );
 			if( !mod )
 				continue;
 			if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
@@ -1972,6 +2310,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				cl_entity_t *ent;
 				vec3_t delta;
 				int reject = 0;
+				qboolean dead;
 
 				if( e == cl.playernum + 1 )
 					continue;
@@ -1981,8 +2320,6 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					reject = 2;
 				else if( ed->v.iuser1 != 0 )
 					reject = 3;
-				else if( ed->v.deadflag >= DEAD_DEAD )
-					reject = 4;
 				else
 				{
 					if( ed->v.modelindex )
@@ -1994,21 +2331,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						 * resident studio will do as the entity's model: the
 						 * renderer swaps in the team body from the "model"
 						 * userinfo anyway. Load that body once per slot. */
-						const char *body = svs.clients ? Info_ValueForKey( svs.clients[e - 1].userinfo, "model" ) : "";
-						char path[MAX_QPATH];
-
-						mod = NULL;
-						if( body[0] && Q_snprintf( path, sizeof( path ), "models/player/%s/%s.mdl", body, body ) > 0 )
-						{
-							mod = Mod_FindName( path, false );
-							if(( !mod || mod->needload != NL_PRESENT ) && !player_body_tried[e] )
-							{
-								player_body_tried[e] = true;
-								mod = Mod_ForName( path, false, false );
-								Con_Reportf( "Xash3D GameCube: lean emit player %d fallback body %s %s\n",
-									e, path, mod && mod->cache.data ? "loaded" : "load failed" );
-							}
-						}
+						mod = CL_GCLeanPlayerBody( e, &player_body_tried[e] );
 						if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
 							reject = ed->v.modelindex ? 5 : 6;
 					}
@@ -2023,7 +2346,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				{
 					/* Log each slot's reason when it changes, so one run shows
 					 * why a bot is not drawn: 1 invalid/free, 2 nodraw,
-					 * 3 spectator, 4 dead, 5 model not resident, 6 no
+					 * 3 spectator, 5 model not resident, 6 no
 					 * modelindex and no body, 7 out of range. */
 					if( reject != 1 && player_last_reject[e] != reject && player_reject_logs < 32 )
 					{
@@ -2039,6 +2362,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					continue;
 				}
 				player_last_reject[e] = 0;
+				dead = ed->v.deadflag != DEAD_NO;
 				if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS && SV_ModelHandle( ed->v.modelindex ) == mod )
 					cl.models[ed->v.modelindex] = mod;
 				ent = &lean_studio_ents[studio_slots];
@@ -2048,7 +2372,6 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->model = mod;
 				VectorCopy( ed->v.origin, ent->origin );
 				VectorCopy( ed->v.angles, ent->angles );
-				ent->angles[0] = 0.0f;
 				VectorCopy( ent->origin, ent->curstate.origin );
 				VectorCopy( ent->angles, ent->curstate.angles );
 				VectorCopy( ed->v.mins, ent->curstate.mins );
@@ -2078,10 +2401,14 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					static float anim_base[MAX_CLIENTS + 1];
 					static int anim_seq[MAX_CLIENTS + 1];
 
-					if( anim_base[e] <= 0.0f || anim_base[e] > (float)cl.time || anim_seq[e] != ent->curstate.sequence + 1 )
+					/* Dying restarts the clock even when the game's sequence
+					 * number did not change, so the death plays from frame 0. */
+					const int key = ent->curstate.sequence + 1 + ( dead ? 0x10000 : 0 );
+
+					if( anim_base[e] <= 0.0f || anim_base[e] > (float)cl.time || anim_seq[e] != key )
 					{
 						anim_base[e] = (float)cl.time > 0.0f ? (float)cl.time : 0.001f;
-						anim_seq[e] = ent->curstate.sequence + 1;
+						anim_seq[e] = key;
 					}
 					ent->curstate.animtime = anim_base[e];
 					ent->curstate.frame = 0.0f;
@@ -2134,15 +2461,47 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
 						else if( speed > 10.0f )
 							dgait = CL_GCLeanFindSeq( bh, "dod_walk" );
+						else
+						{
+							/* Standing still: idle legs. The HL "idle" lookup
+							 * finds look_idle, sequence 0, which the renderer
+							 * reads as "no gait": the body then ignored the aim
+							 * pitch whenever a bot stood still to shoot. */
+							dgait = CL_GCLeanFindSeq( bh, "dod_idle1" );
+							if( dgait <= 0 )
+								dgait = CL_GCLeanFindSeq( bh, "standing_idle" );
+						}
 						if( aim >= 0 )
 							idle = aim;
 						if( dgait >= 0 )
 							gait = dgait;
 					}
-					if( ed->v.sequence == 0 && idle >= 0 )
-						ent->curstate.sequence = idle;
-					if( ed->v.gaitsequence == 0 && gait >= 0 )
-						ent->curstate.gaitsequence = gait;
+					if( dead )
+					{
+						/* One-shot death on the whole body: no legs overlay, and
+						 * the renderer clamps a non-looping sequence on its last
+						 * frame, so the corpse holds the final pose. */
+						static int death_logs;
+
+						ent->curstate.sequence = CL_GCLeanDeathSeq( bh, ed->v.sequence );
+						ent->curstate.gaitsequence = 0;
+						if( death_logs < 8 )
+						{
+							const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex );
+
+							death_logs++;
+							Con_Reportf( "Xash3D GameCube: lean player %d dead (deadflag %d) game seq %d -> %d '%s'\n",
+								e, (int)ed->v.deadflag, ed->v.sequence, ent->curstate.sequence,
+								( ent->curstate.sequence >= 0 && ent->curstate.sequence < bh->numseq ) ? sd[ent->curstate.sequence].label : "?" );
+						}
+					}
+					else
+					{
+						if( ed->v.sequence == 0 && idle >= 0 )
+							ent->curstate.sequence = idle;
+						if( ed->v.gaitsequence == 0 && gait >= 0 )
+							ent->curstate.gaitsequence = gait;
+					}
 					if( seq_logs < 6 )
 					{
 						const mstudioseqdesc_t *sd = bh ? (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex ) : NULL;
@@ -2158,11 +2517,34 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							speed, bh ? bh->numseq : -1 );
 					}
 				}
+				/* Keep the aim pitch (angles.x = -v_angle.x / 3): with a gait
+				 * sequence the renderer turns it into the aim blend and
+				 * leaves the root yaw-only (R_StudioPlayerBlend), as stock
+				 * GoldSrc does. Decide on the gait this emit chose above:
+				 * DoD's server leaves v.gaitsequence 0, so testing the edict
+				 * zeroed the pitch of every bot (held at the baked mid
+				 * blend, looking slightly up). Without a gait the pitch
+				 * would tilt the whole body, so it stays 0 then. */
+				if( dead || !ent->curstate.gaitsequence )
+					ent->angles[0] = 0.0f;
+				ent->curstate.angles[0] = ent->angles[0];
+				{
+					/* Aim check: what pitch each player hands the renderer. */
+					static double next_aim_log[MAX_CLIENTS + 1];
+
+					if( e <= MAX_CLIENTS && host.realtime >= next_aim_log[e] )
+					{
+						next_aim_log[e] = host.realtime + 2.0;
+						Con_Reportf( "Xash3D GameCube: lean aim player %d v_angle.x %.1f angles.x %.1f gait %d seq %d -> pitch %.1f%s\n",
+							e, ed->v.v_angle[0], ed->v.angles[0], ent->curstate.gaitsequence, ent->curstate.sequence,
+							ent->angles[0], dead ? " (dead)" : "" );
+					}
+				}
 				/* v.weaponmodel is a string_t (the p_ model path); the renderer
 				 * wants a model index (ceres fpa: weaponmodel=28156). Attach it
 				 * only when that model is resident. */
 				ent->curstate.weaponmodel = 0;
-				if( ed->v.weaponmodel )
+				if( ed->v.weaponmodel && !dead )
 				{
 					const char *wpath = SV_GetString( ed->v.weaponmodel );
 					int widx = ( wpath && wpath[0] ) ? SV_ModelIndex( wpath ) : 0;
@@ -2323,6 +2705,74 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 		}
+		/* Body-queue corpses, drawn as their player (body from that slot's
+		 * userinfo) holding the last frame of the death sequence. */
+		for( slot = 0; slot < n_bodies && studio_slots < studio_budget; slot++ )
+		{
+			static qboolean body_tried[MAX_CLIENTS + 1];
+			static int body_logs;
+			edict_t *ed = SV_EdictNum( bodies[slot] );
+			const int owner = (int)ed->v.renderamt;
+			model_t *mod;
+			cl_entity_t *ent;
+			vec3_t delta, bmin, bmax;
+			extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+
+			if( owner < 1 || owner > svs.maxclients || owner > MAX_CLIENTS )
+				continue;
+			VectorSubtract( ed->v.origin, view_org, delta );
+			if( VectorLength( delta ) > studio_max_dist )
+				continue;
+			VectorSet( bmin, ed->v.origin[0] - 48.0f, ed->v.origin[1] - 48.0f, ed->v.origin[2] - 36.0f );
+			VectorSet( bmax, ed->v.origin[0] + 48.0f, ed->v.origin[1] + 48.0f, ed->v.origin[2] + 36.0f );
+			if( !R_GXWorldDLEntityVisible( bodies[slot], bmin, bmax ))
+				continue;
+			mod = CL_GCLeanPlayerBody( owner, &body_tried[owner] );
+			if( !mod )
+				continue;
+			ent = &lean_studio_ents[studio_slots];
+			memset( ent, 0, sizeof( *ent ));
+			ent->index = bodies[slot];
+			ent->player = true;
+			ent->model = mod;
+			VectorCopy( ed->v.origin, ent->origin );
+			VectorCopy( ed->v.angles, ent->angles );
+			ent->angles[0] = 0.0f;
+			VectorCopy( ent->origin, ent->curstate.origin );
+			VectorCopy( ent->angles, ent->curstate.angles );
+			ent->curstate.number = owner;	/* renderer picks the body by slot */
+			ent->curstate.modelindex = ed->v.modelindex;
+			ent->curstate.movetype = MOVETYPE_NONE;
+			ent->curstate.sequence = CL_GCLeanDeathSeq( (const studiohdr_t *)mod->cache.data, ed->v.sequence );
+			ent->curstate.gaitsequence = 0;
+			ent->curstate.frame = 255.0f;
+			ent->curstate.framerate = 0.0f;
+			ent->curstate.animtime = (float)cl.time;
+			ent->curstate.body = ed->v.body;
+			ent->curstate.skin = ed->v.skin;
+			ent->curstate.scale = 1.0f;
+			ent->curstate.rendermode = kRenderNormal;
+			ent->curstate.renderamt = 255;
+			ent->curstate.entityType = ENTITY_NORMAL;
+			ent->curstate.blending[0] = 127;
+			ent->curstate.blending[1] = 127;
+			ent->prevstate = ent->curstate;
+			VectorCopy( ent->origin, ent->latched.prevorigin );
+			VectorCopy( ent->angles, ent->latched.prevangles );
+			ent->latched.prevanimtime = ent->curstate.animtime;
+			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+			{
+				studios++;
+				studio_slots++;
+				if( body_logs < 8 )
+				{
+					body_logs++;
+					Con_Reportf( "Xash3D GameCube: lean corpse %d of player %d %s seq %d at (%.0f %.0f %.0f)\n",
+						bodies[slot], owner, mod->name, ent->curstate.sequence,
+						ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] );
+				}
+			}
+		}
 		GC_ProfMark( "render: lean emit players" );
 		/* Once a player body has been drawn the stub is not needed, and it
 		 * showed as a white plank on the floor near the bot (ceres fld). */
@@ -2474,6 +2924,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		}
 	}
 
+	/* R_ClearScene above dropped the temp entities CL_EmitEntities linked. */
+	CL_GCRelinkTempEnts();
+
 	if( log_n < 4 || ( studios > 0 && log_n < 8 ))
 	{
 		Con_Reportf( "Xash3D GameCube: lean EmitBrush entities=%d studios=%d ents=%d brush=%d studio_seen=%d skip=%d view=(%.0f,%.0f,%.0f)\n",
@@ -2555,6 +3008,7 @@ void CL_EmitEntities( void )
 	CL_LinkPacketEntities ( &cl.frames[cl.parsecountmod] );
 #if XASH_GAMECUBE
 	CL_GCDumpStudioEntities( &cl.frames[cl.parsecountmod] );
+	CL_GCLinkRemoteStaticProps();
 #endif
 
 	// link custom user temp entities

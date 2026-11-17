@@ -17,6 +17,8 @@ can be cut and labelled by map.
 
 #if XASH_GAMECUBE
 
+qboolean SV_GCEntityInSolid( edict_t *ent );
+
 #define GC_CAMPAIGN_MAX_TRIGGERS	16
 #define GC_CAMPAIGN_MAX_VISITED		160
 #define GC_CAMPAIGN_FORCE_AFTER		6.0
@@ -254,23 +256,79 @@ void SV_GCCampaignFrame( void )
 			 * the trigger centre put them deep in the next map's matching
 			 * trigger back (c0a0b -> c0a0c bounced straight back), which a
 			 * real crossing never does. */
-			for( k = 0; k < 3; k++ )
+			/* A doorway trigger is thin along the walking direction.  Cross
+			 * that axis from the player's side, and stay inside the doorway's
+			 * width on the other axis: entering from the side (c1a4 *56 at
+			 * x=-214) put the hull in the corridor wall of c1a4k. */
 			{
-				const float lo = trig->v.absmin[k] - player->v.maxs[k] + 2.0f;
-				const float hi = trig->v.absmax[k] - player->v.mins[k] - 2.0f;
+				const int thin = ( trig->v.absmax[0] - trig->v.absmin[0] )
+					<= ( trig->v.absmax[1] - trig->v.absmin[1] ) ? 0 : 1;
 
-				entry[k] = player->v.origin[k];
-				if( lo <= hi )
-					entry[k] = bound( lo, entry[k], hi );
-				else
-					entry[k] = ( trig->v.absmin[k] + trig->v.absmax[k] ) * 0.5f;
+				for( k = 0; k < 2; k++ )
+				{
+					float lo, hi;
+
+					if( k == thin )
+					{
+						lo = trig->v.absmin[k] - player->v.maxs[k] + 2.0f;
+						hi = trig->v.absmax[k] - player->v.mins[k] - 2.0f;
+					}
+					else
+					{
+						lo = trig->v.absmin[k] - player->v.mins[k] + 1.0f;
+						hi = trig->v.absmax[k] - player->v.maxs[k] - 1.0f;
+					}
+					entry[k] = player->v.origin[k];
+					if( lo <= hi )
+						entry[k] = bound( lo, entry[k], hi );
+					else
+						entry[k] = ( trig->v.absmin[k] + trig->v.absmax[k] ) * 0.5f;
+				}
 			}
-			VectorCopy( entry, player->v.origin );
+			/* Height: feet on the doorway floor, as a player walking through
+			 * it would be.  Clamping the current height let the hull
+			 * overlap the trigger by 2 units from above or below (c2a3 from
+			 * z=1556 entered *56 at the lintel; c1a1 entered *4 with its feet
+			 * 70 units under the floor), and the landmark offset carried that
+			 * into the next map as a stuck arrival. */
+			/* Some triggers start below the floor (c1a1a *15 is 250 units
+			 * tall from under the c1a1atof doorway), so search upward from
+			 * the trigger's bottom for the first height the hull fits:
+			 * that is the doorway floor.  Off-centre spots that never fit
+			 * (inside a wall) retry on the trigger's centre line. */
+			{
+				const float top = trig->v.absmax[2] - player->v.mins[2] - 2.0f;
+				int pass;
+
+				for( pass = 0; pass < 2; pass++ )
+				{
+					if( pass == 1 )
+					{
+						entry[0] = ( trig->v.absmin[0] + trig->v.absmax[0] ) * 0.5f;
+						entry[1] = ( trig->v.absmin[1] + trig->v.absmax[1] ) * 0.5f;
+					}
+					for( entry[2] = trig->v.absmin[2] - player->v.mins[2] + 1.0f;
+						entry[2] <= top; entry[2] += 4.0f )
+					{
+						VectorCopy( entry, player->v.origin );
+						if( !SV_GCEntityInSolid( player ))
+							break;
+					}
+					if( entry[2] <= top )
+						break;
+				}
+				if( pass == 2 ) // nothing fits: fall back to the trigger floor
+				{
+					entry[2] = trig->v.absmin[2] - player->v.mins[2] + 1.0f;
+					VectorCopy( entry, player->v.origin );
+				}
+			}
 			VectorClear( player->v.velocity );
 			SV_LinkEdict( player, true );
 			SV_GCCampaignCenterPrint( va( "AUTOPILOT: step into exit -> %s", t->map ));
-			Con_Printf( "Xash3D GameCube: CAMPAIGN walk-in %s -> %s via %s (landmark %s)\n",
-				sv.name, t->map, t->model, t->landmark[0] ? t->landmark : "-" );
+			Con_Printf( "Xash3D GameCube: CAMPAIGN walk-in %s -> %s via %s (landmark %s) at (%.0f,%.0f,%.0f) stuck=%d\n",
+				sv.name, t->map, t->model, t->landmark[0] ? t->landmark : "-",
+				entry[0], entry[1], entry[2], SV_GCEntityInSolid( player ) ? 1 : 0 );
 		}
 		else
 			Con_Printf( "Xash3D GameCube: CAMPAIGN no trigger edict for %s -> %s\n", sv.name, t->map );
@@ -286,6 +344,7 @@ void SV_GCCampaignFrame( void )
 		float dist;
 
 		VectorAverage( trig->v.absmin, trig->v.absmax, center );
+		center[2] = player->v.origin[2]; // stay on the floor while walking in
 		VectorSubtract( center, player->v.origin, step );
 		dist = VectorLength( step );
 		if( dist > 1.0f )

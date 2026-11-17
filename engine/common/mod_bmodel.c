@@ -239,6 +239,7 @@ qboolean Mod_GCEnsureStaticReserves( void )
  * BSP load let the 384 KiB get fragmented/consumed before CL_LoadProgs
  * (probe 091844: free only rose to 9 KiB and InitInput still hung).
  */
+static model_t *worldmodel; /* defined with the world state below */
 void Mod_GCReleaseUnusedWorldReserves( void )
 {
 	if( gc_static_nodes && !gc_nodes_static_block )
@@ -256,9 +257,24 @@ void Mod_GCReleaseUnusedWorldReserves( void )
 			Q_memprint( sizeof( dmodel_t ) * GC_STATIC_SUBMODEL_CAPACITY ));
 	}
 #if XASH_DODGC_NETWORK
+	/* A world that is already loaded with its leafs somewhere else never
+	 * touches the reserve again (dod_charlie: 347 KiB table in the BSP
+	 * scratch, yet 292 KiB was seized here at client ready and sat idle for
+	 * the whole map). Give it back, or do not take it; the next map load
+	 * retakes it through EnsureStaticReserves. */
+	if( worldmodel && worldmodel->leafs && worldmodel->numleafs > 0 && !gc_leafs_static_block )
+	{
+		if( gc_static_leafs )
+		{
+			free( gc_static_leafs );
+			gc_static_leafs = NULL;
+			Con_Reportf( "Xash3D GameCube: released unused leafs reserve %s\n",
+				Q_memprint( GC_STATIC_LEAFS_BYTES ));
+		}
+	}
 	/* After nodes reserve returns to the tip, seize leafs for FULL avalanche
 	 * (scratch hole fits mnodes only — ava-fullbsp21). */
-	if( !gc_static_leafs && sv.name[0]
+	else if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 32u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
@@ -1016,6 +1032,17 @@ size_t Mod_GCBspScratchFloor( void )
 	if( !gc_bsp_scratch_base || !GC_IsMapLoadBuffer( gc_bsp_scratch_base ))
 		return 0;
 	return gc_bsp_scratch_size + gc_bsp_scratch_carve_high;
+}
+
+/* True while [ptr, ptr+bytes) is still inside the allocated spill (not
+ * rewound by a map change). */
+qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( !p || p < gc_world_array_spill || p >= gc_world_array_spill + GC_WORLD_ARRAY_SPILL_BYTES )
+		return false;
+	return (size_t)( p - gc_world_array_spill ) + bytes <= gc_world_array_spill_used;
 }
 
 size_t Mod_GCWorldArraySpillFree( void )
@@ -4433,6 +4460,16 @@ static void Mod_LoadEntities( model_t *mod, const dbspmodel_t *bmod )
 		 * leafs memalign(202)/seize(208) deferred → LoadLeafs tip-OOM while
 		 * nodes alone took BSP scratch. Prefer malloc(need) so leaf tip-park
 		 * still sees a contiguous hole. Reuse an already-held static block. */
+		/* A lump larger than the reserve never uses it (dod_charlie: 180 KiB
+		 * lump malloc'd beside an idle 128 KiB reserve, heap low 21 KiB).
+		 * Give the reserve back before the exact-size take below. */
+		if( gc_static_entities && need > GC_STATIC_ENTITIES_BYTES )
+		{
+			free( gc_static_entities );
+			gc_static_entities = NULL;
+			Con_Reportf( "Xash3D GameCube: world entities %s exceed the reserve, released %s\n",
+				Q_memprint( need ), Q_memprint( GC_STATIC_ENTITIES_BYTES ));
+		}
 		if( gc_static_entities && need <= GC_STATIC_ENTITIES_BYTES )
 		{
 			mod->entities = gc_static_entities;

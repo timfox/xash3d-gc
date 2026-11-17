@@ -36,6 +36,12 @@ static qboolean sprite_masked;	/* SPR_ALPHTEST: index 255 is the hole */
 static const byte *sprite_pal;	/* the sprite's palette as stored (RGB) */
 static int sprite_pal_count;
 static int sprite_tex_format;
+/* Set by cl_tent.c around effect sprite loads (muzzle flashes, explosions,
+ * smoke, blood). Their frames are drawn small and briefly, but at full size
+ * ten of them took ~70 KiB of MEM1 and starved the crosshair and viewmodel
+ * skins (38 texture OOMs in a charlie match). */
+qboolean gc_sprite_effect_load;
+static int sprite_fx_cap;
 int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
 void R_GXHudHiSetTexnum( int handle, int texnum );
 
@@ -225,6 +231,58 @@ static qboolean Mod_SpriteSearchForTextureReplacement( char *out, size_t size, c
 	return false;
 }
 
+#if XASH_GAMECUBE
+/* Shrink an indexed frame in place by f (a power of two). Each texel covers
+ * an f x f block; in alphatest sprites keep the opaque texel nearest the
+ * block centre when the block holds at least f opaque texels, so thin art
+ * survives. Writes land at or before the block being read. Returns the new
+ * frame header (also written over the old one). */
+static dspriteframe_t Mod_GCSpriteShrinkFrame( const void *pin, dspriteframe_t pinframe, int f )
+{
+	dspriteframe_t small = pinframe;
+	byte *px = (byte *)pin + sizeof( dspriteframe_t );
+	int x, y;
+
+	small.width = pinframe.width / f;
+	small.height = pinframe.height / f;
+	for( y = 0; y < small.height; y++ )
+	{
+		for( x = 0; x < small.width; x++ )
+		{
+			const byte *blk = px + ( y * f ) * pinframe.width + x * f;
+			int bx, by, opaque = 0, best = -1, best_d = 0x7fffffff;
+			byte pick = 255;
+
+			for( by = 0; by < f; by++ )
+			{
+				for( bx = 0; bx < f; bx++ )
+				{
+					const byte c = blk[by * pinframe.width + bx];
+					int d;
+
+					if( c == 255 )
+						continue;
+					opaque++;
+					d = ( 2 * bx + 1 - f ) * ( 2 * bx + 1 - f ) + ( 2 * by + 1 - f ) * ( 2 * by + 1 - f );
+					if( d < best_d )
+					{
+						best_d = d;
+						best = c;
+					}
+				}
+			}
+			if( !sprite_masked )
+				pick = blk[0];
+			else if( best >= 0 && opaque >= f )
+				pick = (byte)best;
+			px[y * small.width + x] = pick;
+		}
+	}
+	memcpy( (void *)pin, &small, sizeof( small ));
+	return small;
+}
+#endif
+
 static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspriteframe_t **ppframe, int num )
 {
 	dspriteframe_t pinframe;
@@ -254,7 +312,11 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 		 * shown at half size anyway: shrink its indexed pixels in place
 		 * (nearest) before the upload. The frame keeps its source size, so
 		 * SPR_DrawHoles rectangles map onto the smaller texture unchanged. */
-		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width > 128 || pinframe.height > 128 ))
+		/* A 128 px sheet (DoD's crosshair) needs 32 KiB of contiguous heap
+		 * mid-match and failed with ~28 KiB free, and again with 130 KiB
+		 * free but in pieces: it always takes the same ARAM full-resolution
+		 * route with a small resident copy. */
+		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width >= 128 || pinframe.height >= 128 ))
 		{
 			/* 128 keeps the art at the size it is drawn, but its texture
 			 * needs contiguous heap: on dod_caen 101 KiB free still could not
@@ -275,57 +337,31 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 				f *= 2;
 			if( f > 1 )
 			{
-				dspriteframe_t small = pinframe;
-				byte *px = (byte *)pin + sizeof( dspriteframe_t );
-				int x, y;
+				const dspriteframe_t small = Mod_GCSpriteShrinkFrame( pin, pinframe, f );
 
-				small.width = pinframe.width / f;
-				small.height = pinframe.height / f;
-				/* Each texel covers an f x f block. Plain nearest picks its
-				 * corner, which drops thin art such as the Lee-Enfield clip
-				 * (index 255 is the hole in alphatest sheets). There, keep the
-				 * opaque texel nearest the block centre when the block holds
-				 * at least f opaque texels (a one-texel line across it).
-				 * Writes land at or before the block being read, so this
-				 * works in place. */
-				for( y = 0; y < small.height; y++ )
-				{
-					for( x = 0; x < small.width; x++ )
-					{
-						const byte *blk = px + ( y * f ) * pinframe.width + x * f;
-						int bx, by, opaque = 0, best = -1, best_d = 0x7fffffff;
-						byte pick = 255;
-
-						for( by = 0; by < f; by++ )
-						{
-							for( bx = 0; bx < f; bx++ )
-							{
-								const byte c = blk[by * pinframe.width + bx];
-								int d;
-
-								if( c == 255 )
-									continue;
-								opaque++;
-								d = ( 2 * bx + 1 - f ) * ( 2 * bx + 1 - f ) + ( 2 * by + 1 - f ) * ( 2 * by + 1 - f );
-								if( d < best_d )
-								{
-									best_d = d;
-									best = c;
-								}
-							}
-						}
-						if( !sprite_masked )
-							pick = blk[0];
-						else if( best >= 0 && opaque >= f )
-							pick = (byte)best;
-						px[y * small.width + x] = pick;
-					}
-				}
-				memcpy( (void *)pin, &small, sizeof( small ));
 				load_bytes = small.width * small.height;
 				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
 					texname, pinframe.width, pinframe.height, small.width, small.height,
 					Q_memprint( GC_MemHeapFreeBytes( )));
+			}
+		}
+		else if( bytes == 1 && sprite_fx_cap > 0 && ( pinframe.width > sprite_fx_cap || pinframe.height > sprite_fx_cap ))
+		{
+			static int fx_logs;
+			int f = 1;
+
+			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
+				&& ( pinframe.width / f > sprite_fx_cap || pinframe.height / f > sprite_fx_cap ))
+				f *= 2;
+			if( f > 1 )
+			{
+				const dspriteframe_t small = Mod_GCSpriteShrinkFrame( pin, pinframe, f );
+
+				load_bytes = small.width * small.height;
+				if( fx_logs++ < 12 )
+					Con_Reportf( "Xash3D GameCube: effect sprite %s %dx%d shrunk to %dx%d (heap %s)\n",
+						texname, pinframe.width, pinframe.height, small.width, small.height,
+						Q_memprint( GC_MemHeapFreeBytes( )));
 			}
 		}
 #endif
@@ -428,6 +464,9 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 	sprite_pal = NULL;
 	sprite_pal_count = 0;
 	sprite_tex_format = psprite->texFormat;
+	/* Few frames (muzzle flash, ricochet): 64 px. Animations (explosions,
+	 * steam): 32 px per frame. */
+	sprite_fx_cap = gc_sprite_effect_load ? ( mod->numframes <= 4 ? 64 : 32 ) : 0;
 #endif
 	Q_strncpy( sprite_name, mod->name, sizeof( sprite_name ));
 	COM_StripExtension( sprite_name );

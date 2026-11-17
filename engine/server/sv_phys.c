@@ -210,6 +210,14 @@ static qboolean SV_TestEntityPosition( edict_t *ent, edict_t *blocker )
 	return trace.startsolid;
 }
 
+#if XASH_GAMECUBE
+/* For the campaign autopilot (sv_gc_campaign.c): is this spot in solid? */
+qboolean SV_GCEntityInSolid( edict_t *ent )
+{
+	return SV_TestEntityPosition( ent, NULL );
+}
+#endif
+
 static qboolean SV_TryThink( edict_t *ent, double frametime, double time )
 {
 	float thinktime = ent->v.nextthink;

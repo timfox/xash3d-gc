@@ -821,6 +821,12 @@ qboolean R_GXTriApiIsActive( void )
 	return r_gx_studio_active || r_gx_effects_tri;
 }
 
+/* The last texture GL_Bind asked for (r_image.c). Sprites bind before
+ * TriBegin opens the effects pipe, so the first sprite of every batch
+ * drew the white texture: take the pending bind when the pipe opens. */
+unsigned r_gx_effects_pending_texnum;
+static int r_gx_effects_mode = -1;
+
 void R_GXEffectsTriBegin( void )
 {
 	extern qboolean GC_IsFrameBudgetProbeActive( void );
@@ -837,8 +843,29 @@ void R_GXEffectsTriBegin( void )
 		/* G291: particles/beams/sprites share studio TriAPI emit, with
 		 * billboard cull + additive blend (PrepareStudioState is opaque). */
 		R_GXPrepareStudioState( false );
+		/* Effects are texture x vertex colour, as in GoldSrc: REPLACE drew
+		 * every particle, spark and blood drop in the white particle
+		 * texture's colour (Tim: sparks and blood looked white). */
+		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
+		r_gx_effects_tri = true;
+		r_gx_effects_tris = 0;
+		r_gx_studio_bound_tex = 0;
+		r_gx_face_mode = GC_GX_FACE_MODE_NONE;
+		r_gx_bound_texnum = 0;
+		r_gx_bound_fmt = 0;
+		r_gx_effects_mode = -1;
+		if( r_gx_effects_pending_texnum )
+			R_GXStudioBindTexnum( r_gx_effects_pending_texnum );
+		GC_MarkGxWorldEfbReady();
+	}
+	/* Each sprite, beam or particle batch sets its own render mode while the
+	 * pipe stays open: a muzzle flash (additive) after a smoke puff
+	 * (blended) took the puff's blend before. */
+	if( vid.rendermode != r_gx_effects_mode )
+	{
+		r_gx_effects_mode = vid.rendermode;
 		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
 		else if( vid.rendermode == kRenderTransTexture
@@ -847,13 +874,6 @@ void R_GXEffectsTriBegin( void )
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
 		else
 			GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
-		r_gx_effects_tri = true;
-		r_gx_effects_tris = 0;
-		r_gx_studio_bound_tex = 0;
-		r_gx_face_mode = GC_GX_FACE_MODE_NONE;
-		r_gx_bound_texnum = 0;
-		r_gx_bound_fmt = 0;
-		GC_MarkGxWorldEfbReady();
 	}
 }
 
@@ -1743,10 +1763,14 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 }
 
 static void R_GXCmprSlotsReset( void );
+/* Counts world changes, for state that hangs off the map (the prop pack). */
+static unsigned r_gx_world_epoch;
 
 static void R_GXTexCacheReset( void )
 {
 	int i;
+
+	r_gx_world_epoch++;
 	const size_t pool_bytes =
 		(size_t)GC_GX_TEX_MAX_DIM * (size_t)GC_GX_TEX_MAX_DIM * sizeof( u16 );
 
@@ -2488,6 +2512,9 @@ static int r_gx_cmpr_big_n;
 static unsigned r_gx_cmpr_big_cap;
 static byte *r_gx_cmpr_big_base;
 static qboolean r_gx_cmpr_use_big;
+/* The big slots belong to prop materials (Lost Coast: the two coast rock
+ * textures at 256x256); world textures keep to the near pool and hot window. */
+static qboolean r_gx_cmpr_big_for_props;
 
 static byte *R_GXCmprSlotPtr( int i )
 {
@@ -2642,6 +2669,11 @@ void R_GXCmprBigAdopt( byte *base, int big_n, unsigned big_cap )
 	r_gx_bound_fmt = 0;
 }
 
+void R_GXCmprBigForProps( qboolean on )
+{
+	r_gx_cmpr_big_for_props = on;
+}
+
 /* Call once after GX init / before map load while MEM1 tip is free. */
 void R_GXPreallocCmprBounce( void )
 {
@@ -2792,7 +2824,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 				int mi;
 
 				r_gx_cmpr_use_big = false;
-				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n
+				if( !r_gx_cmpr_want_far && r_gx_cmpr_big_n && !r_gx_cmpr_big_for_props
 					&& remain > slot_cap && remain <= r_gx_cmpr_big_cap )
 				{
 					slot_cap = r_gx_cmpr_big_cap;
@@ -5774,11 +5806,17 @@ typedef struct
 {
 	u32	dl_ofs, first_bytes;
 	u16	tris;
-	u8	frac, pad;
+	u8	frac;
+	/* Close model (below): its range in units of 8. 0 = none. */
+	u8	close_dist8;
 	/* Far level of detail: about a sixth of the triangles. Same piece
 	 * chain layout; equal to the full chain for tiny models. */
 	u32	far_ofs, far_bytes;
-	u16	far_tris, pad2;
+	u16	far_tris;
+	/* Record + 1 of the close model: Source's LOD 0 of the same prop, drawn
+	 * instead of this one inside close_dist8 (Source's own LOD 0 range).
+	 * The pack keeps every model small, which showed next to the player. */
+	u16	close_model;
 } gc_prop_model_t;
 
 static unsigned gc_prop_aram;
@@ -5810,12 +5848,25 @@ static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
 /* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
 static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+/* Pack v7: per-face prop lighting. Every vertex carries an index into 256
+ * octahedral directions (the table lostcoast-gc tools/bake_lostcoast_props.py
+ * also builds), and every instance three display-space colours taken from
+ * the map's ambient cube and sun at the prop: a base, what the sky adds
+ * along +Z, what the sun adds along its direction. The GX lights add the
+ * last two by N.L, as Source lights a static prop without baked vertex
+ * light. v6 packs (no normals) keep the single colour per instance. */
+static u8 gc_prop_light[GC_PROP_MAX_INST][12];
+static s8 gc_prop_nrm[256][3] __attribute__(( aligned( 32 )));
+static float gc_prop_sun[3];
+static u32 gc_prop_vsize = 10;	/* bytes per vertex: 10 (v6) or 11 (v7) */
+static const u8 *gc_prop_cur_light;	/* the instance being drawn, NULL = flat colour */
 static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligned( 32 )));
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
 static unsigned gc_prop_tex_aram;
 static u16 gc_prop_nmat;
 static u16 gc_prop_mat_w[128], gc_prop_mat_h[128];
 static u8 gc_prop_mat_levels[128];
+static u8 gc_prop_mat_atest[128];	/* Source $alphatest: the texture's 1-bit alpha cuts holes */
 static u32 gc_prop_mat_ofs[128];
 static byte gc_prop_texmem[GC_PROP_TEX_SLOTS * GC_PROP_TEX_BYTES] __attribute__(( aligned( 32 )));
 /* 16 slots are static. A large world lends 48 more from the map arena: the
@@ -5900,23 +5951,102 @@ static qboolean R_GXPropIsWorldPlate( const gc_prop_inst_t *in )
 	return true;
 }
 
+/* Slot each prop material was last found in, per pool ( 0 near, 1 far, 2 big ), + 1. */
+static u8 gc_prop_slot_hint[3][128];
+
+/* The map the pack state belongs to. Lost Coast has one map and one pack;
+ * a Day of Defeat disc has a pack per map (scripts/bake_props_goldsrc.py:
+ * every unnamed env_model / dod_object of the BSP, as instanced display
+ * lists), so the state follows the world model. */
+static char gc_prop_map[64];
+static qboolean gc_prop_map_owned;
+static unsigned gc_prop_epoch;
+static size_t gc_prop_spill_mark;
+
+static void R_GXPropMapCheck( void )
+{
+	const model_t *world = WORLDMODEL;
+	char base[64];
+	int k;
+
+	if( !world || !world->name[0] )
+		return;
+	if( Q_stristr( world->name, "lostcoast" ))
+		Q_strncpy( base, "d2_lostcoast", sizeof( base ));
+	else
+		COM_FileBase( world->name, base, sizeof( base ));
+	if( !Q_stricmp( base, gc_prop_map ))
+	{
+		extern size_t Mod_GCWorldArraySpillUsed( void );
+
+		/* Same map loaded again: the pack in ARAM is still this map's, but
+		 * the spill block of the resident chains went with the old load. */
+		if( gc_prop_map_owned && gc_prop_cache_tried
+			&& ( gc_prop_epoch != r_gx_world_epoch
+			|| ( gc_prop_cache && Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark )))
+		{
+			GX_DrawDone();
+			gc_prop_cache = NULL;
+			gc_prop_cache_size = gc_prop_cache_head = 0;
+			gc_prop_cache_tried = false;
+			for( k = 0; k < GC_PROP_MAX_MODELS; k++ )
+				gc_prop_cache_ofs[k] = -1;
+		}
+		gc_prop_epoch = r_gx_world_epoch;
+		return;
+	}
+	gc_prop_epoch = r_gx_world_epoch;
+	if( gc_prop_map[0] )
+	{
+		/* The GP may still be reading the old pack's lists and textures. */
+		GX_DrawDone();
+		if( gc_prop_map_owned )
+		{
+			if( gc_prop_aram )
+				GC_AramFree( gc_prop_aram );
+			if( gc_prop_tex_aram )
+				GC_AramFree( gc_prop_tex_aram );
+		}
+		R_GXCmprSlotsReset();
+	}
+	gc_prop_aram = 0;
+	gc_prop_tex_aram = 0;
+	gc_prop_nmat = 0;
+	gc_prop_ninst = 0;
+	gc_prop_nmodels = 0;
+	gc_prop_cache = NULL;
+	gc_prop_cache_size = gc_prop_cache_head = 0;
+	gc_prop_cache_tried = false;
+	for( k = 0; k < GC_PROP_MAX_MODELS; k++ )
+		gc_prop_cache_ofs[k] = -1;
+	memset( gc_prop_slot_hint, 0, sizeof( gc_prop_slot_hint ));
+	Q_strncpy( gc_prop_map, base, sizeof( gc_prop_map ));
+	gc_prop_map_owned = Q_stricmp( base, "d2_lostcoast" ) != 0;
+	gc_prop_state = 0;
+}
+
 static void R_GXPropLoad( void )
 {
 	file_t *f;
 	u32 hdr[8];
 	u32 size, off;
 
+	char path[96];
+
 	gc_prop_state = -1;
-	f = gEngfuncs.fsapi->Open( "media/gp_d2_lostcoast.gcp", "rb", false );
+	if( gc_prop_map_owned && gEngfuncs.Sys_CheckParm( "-gcnoproppack" ))
+		return;
+	Q_snprintf( path, sizeof( path ), "media/gp_%s.gcp", gc_prop_map );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
 	if( !f )
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack missing\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack missing (%s)\n", path );
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || ( hdr[1] >> 16 ) != 6 )
+		|| hdr[0] != GC_PROP_MAGIC || (( hdr[1] >> 16 ) != 6 && ( hdr[1] >> 16 ) != 7 ))
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6)\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6 or v7)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
@@ -5941,7 +6071,9 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	gc_prop_far_size = size - gc_prop_far_base;
-	gc_prop_aram = GC_AramReserve( size );
+	/* Lost Coast keeps its pack for the session. Any other map's pack is
+	 * this map's only: its block goes back when the map changes. */
+	gc_prop_aram = gc_prop_map_owned ? GC_AramAllocTagged( size, false, "props" ) : GC_AramReserve( size );
 	if( !gc_prop_aram )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack no ARAM (%u Kb)\n", size / 1024u );
@@ -5969,6 +6101,38 @@ static void R_GXPropLoad( void )
 		u32 i;
 
 		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
+		gc_prop_vsize = 10;
+		if(( hdr[1] >> 16 ) == 7 )
+		{
+			const u32 lbytes = ( 32u + gc_prop_ninst * 12u + 31u ) & ~31u;
+			int q;
+
+			if( lbytes <= sizeof( gc_prop_bounce ))
+			{
+				GC_AramTransfer( gc_prop_aram + 32u + bytes, gc_prop_bounce, lbytes, false );
+				for( q = 0; q < 3; q++ )
+					gc_prop_sun[q] = (float)(( (const s16 *)gc_prop_bounce )[q] ) * ( 1.0f / 32767.0f );
+				memcpy( gc_prop_light, gc_prop_bounce + 32, gc_prop_ninst * 12u );
+			}
+			for( q = 0; q < 256; q++ )
+			{
+				const float u = ( (float)( q & 15 ) + 0.5f ) * ( 2.0f / 16.0f ) - 1.0f;
+				const float v = ( (float)( q >> 4 ) + 0.5f ) * ( 2.0f / 16.0f ) - 1.0f;
+				float x = u, y = v, z = 1.0f - fabsf( u ) - fabsf( v ), l;
+
+				if( z < 0.0f )
+				{
+					x = ( 1.0f - fabsf( v )) * ( u < 0.0f ? -1.0f : 1.0f );
+					y = ( 1.0f - fabsf( u )) * ( v < 0.0f ? -1.0f : 1.0f );
+				}
+				l = 64.0f / sqrtf( x * x + y * y + z * z );
+				gc_prop_nrm[q][0] = (s8)( x * l + ( x < 0.0f ? -0.5f : 0.5f ));
+				gc_prop_nrm[q][1] = (s8)( y * l + ( y < 0.0f ? -0.5f : 0.5f ));
+				gc_prop_nrm[q][2] = (s8)( z * l + ( z < 0.0f ? -0.5f : 0.5f ));
+			}
+			DCFlushRange( gc_prop_nrm, sizeof( gc_prop_nrm ));
+			gc_prop_vsize = 11;
+		}
 		bytes = ( gc_prop_nmodels * (u32)sizeof( gc_prop_model_t ) + 31u ) & ~31u;
 		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
 		gc_prop_ntris = 0;
@@ -5997,8 +6161,8 @@ static void R_GXPropLoad( void )
 		? gc_prop_models[gc_prop_walk_model].tris : 0;
 	gc_prop_state = 1;
 	gEngfuncs.Con_Reportf(
-		"Xash3D GameCube: prop pack v6 inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
-		gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
+		"Xash3D GameCube: prop pack %s v%u inst=%u models=%u tris=%u aram=%u Kb flight=%u walk=%u\n",
+		gc_prop_map, hdr[1] >> 16, gc_prop_ninst, gc_prop_nmodels, gc_prop_ntris, size / 1024u,
 		gc_prop_flight_count, gc_prop_walk_count );
 	R_GXPropLoadTex();
 }
@@ -6017,7 +6181,10 @@ static void R_GXPropLoadTex( void )
 	u32 size, off, data_ofs, i;
 	int s;
 
-	f = gEngfuncs.fsapi->Open( "media/pt_d2_lostcoast.gct", "rb", false );
+	char path[96];
+
+	Q_snprintf( path, sizeof( path ), "media/pt_%s.gct", gc_prop_map );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
 	if( !f )
 		return;
 	if( gEngfuncs.fsapi->Read( f, hdr, 12 ) != 12 || hdr[0] != GC_WT_MAGIC
@@ -6041,12 +6208,13 @@ static void R_GXPropLoadTex( void )
 		gc_prop_mat_w[i] = (u16)(( e[16] << 8 ) | e[17] );
 		gc_prop_mat_h[i] = (u16)(( e[18] << 8 ) | e[19] );
 		gc_prop_mat_levels[i] = e[20] ? e[20] : 1;
+		gc_prop_mat_atest[i] = e[21] & 1;
 		gc_prop_mat_ofs[i] = data_ofs + ((u32)e[24] << 24 | (u32)e[25] << 16 | (u32)e[26] << 8 | e[27] );
 	}
 	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
 	size = (u32)gEngfuncs.fsapi->Tell( f );
 	size = ( size + 31u ) & ~31u;
-	gc_prop_tex_aram = GC_AramReserve( size );
+	gc_prop_tex_aram = gc_prop_map_owned ? GC_AramAllocTagged( size, false, "proptex" ) : GC_AramReserve( size );
 	if( !gc_prop_tex_aram )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tex no ARAM (%u Kb)\n", size / 1024u );
@@ -6077,6 +6245,19 @@ static void R_GXPropLoadTex( void )
 		gc_prop_nmat, size / 1024u );
 }
 
+
+/* True when that pool holds this material's chain and it was bound recently. */
+static qboolean R_GXPropPoolResident( u8 mat, int pool )
+{
+	const int hs = (int)gc_prop_slot_hint[pool][mat & 127] - 1;
+	const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
+
+	return hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
+		&& ( hs >= big_lo ? 2 : hs >= big_lo - r_gx_cmpr_far_n ? 1 : 0 ) == pool
+		&& r_gx_cmpr_slot[hs].aram == gc_prop_tex_aram + gc_prop_mat_ofs[mat]
+		&& r_gx_cmpr_slot[hs].used + 4096u > r_gx_cmpr_clock;
+}
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6101,16 +6282,33 @@ static int R_GXPropBind( u8 mat )
 	 * turned the village atlas into mush. */
 	if( r_gx_cmpr_nslots > 8 )
 	{
-		const unsigned cap = r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
+		/* A small or distant prop asks for the far pool's copy, one mip down
+		 * (64x64). When the full chain of the same material already sits in
+		 * a near slot, because a nearer prop uses it this frame, that copy
+		 * is bound instead: it costs no memory and no read, the mipmaps do
+		 * the minifying, and a rock at middle distance is not drawn from a
+		 * 64-pixel texture while its neighbour's 128 is resident. */
+		const qboolean asked_far = r_gx_cmpr_want_far;
 		const int levels_all = gc_prop_mat_levels[mat];
-		unsigned remain = 0, skip_b = 0;
+		unsigned remain = 0, skip_b = 0, cap;
 		int mi, shift = 0, slot = -1;
+		qboolean use_big, near_resident;
 		byte *data;
 		GXTexObj obj;
 
 		for( mi = 0; mi < levels_all; mi++ )
 			remain += R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> mi ),
 				(u16)Q_max( 1, gc_prop_mat_h[mat] >> mi ));
+		/* A chain too large for a near slot (256x256: the coast rocks) lives
+		 * whole in a big slot: for a near instance always, for a far one
+		 * when it is already there. */
+		use_big = r_gx_cmpr_big_n && r_gx_cmpr_big_for_props
+			&& remain > r_gx_cmpr_bounce_cap && remain <= r_gx_cmpr_big_cap
+			&& ( !asked_far || R_GXPropPoolResident( mat, 2 ));
+		near_resident = !use_big && asked_far && R_GXPropPoolResident( mat, 0 );
+		if( near_resident )
+			R_GXCmprSetFar( false );
+		cap = use_big ? r_gx_cmpr_big_cap : r_gx_cmpr_want_far ? r_gx_cmpr_far_cap : r_gx_cmpr_bounce_cap;
 		while( remain > cap && shift + 1 < levels_all )
 		{
 			const unsigned lb = R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> shift ),
@@ -6128,15 +6326,16 @@ static int R_GXPropBind( u8 mat )
 			 * R_GXCmprSlotFor walks up to 128 slots, and the props bind about
 			 * 500 times a frame over their three passes. */
 			{
-				static u8 hint[2][128];
+				u8 ( *const hint )[128] = gc_prop_slot_hint;
 				const unsigned key = gc_prop_tex_aram + gc_prop_mat_ofs[mat];
-				const int hs = (int)hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] - 1;
+				const int pool = use_big ? 2 : r_gx_cmpr_want_far ? 1 : 0;
+				const int hs = (int)hint[pool][mat & 127] - 1;
+				const int big_lo = r_gx_cmpr_nslots - r_gx_cmpr_big_n;
 
 				if( hs >= 0 && hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
 					&& r_gx_cmpr_slot[hs].aram == key && r_gx_cmpr_slot[hs].skip == skip_b
 					&& r_gx_cmpr_slot[hs].bytes == remain
-					&& hs < r_gx_cmpr_nslots - r_gx_cmpr_big_n
-					&& ( hs >= r_gx_cmpr_nslots - r_gx_cmpr_big_n - r_gx_cmpr_far_n ) == ( r_gx_cmpr_want_far ? 1 : 0 ))
+					&& ( hs >= big_lo ? 2 : hs >= big_lo - r_gx_cmpr_far_n ? 1 : 0 ) == pool )
 				{
 					r_gx_cmpr_slot[hs].used = ++r_gx_cmpr_clock;
 					r_gx_cmpr_hits++;
@@ -6145,9 +6344,11 @@ static int R_GXPropBind( u8 mat )
 				}
 				else
 				{
+					r_gx_cmpr_use_big = use_big;
 					data = R_GXCmprSlotFor( key, skip_b, remain, &slot );
+					r_gx_cmpr_use_big = false;
 					if( slot >= 0 && slot < 255 )
-						hint[r_gx_cmpr_want_far ? 1 : 0][mat & 127] = (u8)( slot + 1 );
+						hint[pool][mat & 127] = (u8)( slot + 1 );
 				}
 			}
 			GX_InitTexObj( &obj, data, (u16)Q_max( 8, gc_prop_mat_w[mat] >> shift ),
@@ -6164,8 +6365,12 @@ static int R_GXPropBind( u8 mat )
 			r_gx_cmpr_cur_slot = slot;
 			r_gx_bound_texnum = 0;
 			r_gx_bound_fmt = 0;
+			if( near_resident )
+				R_GXCmprSetFar( true );
 			return 1;
 		}
+		if( near_resident )
+			R_GXCmprSetFar( true );
 	}
 	/* Only without the shared slot cache: its 96 KB went to far LODs. */
 	if( !gc_prop_texmem_tried && r_gx_cmpr_nslots <= 8 && GC_MapLoadBufferTailPeak() > 0 )
@@ -6259,6 +6464,10 @@ static void R_GXPropSetLitAt( const float *org )
  * Angles are radians, Source order (pitch, yaw, roll). */
 /* Resident copy of a model's full chain, or NULL to stream it this frame. */
 static u32 gc_prop_want_frame[GC_PROP_MAX_MODELS], gc_prop_want_bytes, gc_prop_want_peak;
+/* Last frame's whole demand on the chain cache, and what close models newly
+ * asked for in this one: a close model is only taken while it fits beside
+ * everything else, never by pushing a chain out to be streamed again. */
+static u32 gc_prop_want_prev, gc_prop_close_new;
 
 static byte *R_GXPropCacheGet( unsigned model )
 {
@@ -6269,6 +6478,8 @@ static byte *R_GXPropCacheGet( unsigned model )
 
 	/* A new generation (map load, cap faces rewrite) releases the memory the
 	 * cache lived in. From Codex's prop-coalesce work. */
+	if( generation != gc_prop_cache_generation && gc_prop_map_owned )
+		gc_prop_cache_generation = generation;	/* its block is the spill's: R_GXPropMapCheck drops it */
 	if( generation != gc_prop_cache_generation )
 	{
 		if( gc_prop_cache )
@@ -6291,8 +6502,58 @@ static byte *R_GXPropCacheGet( unsigned model )
 	{
 		u32 try_sz;
 
+		if( gc_prop_cache_tried )
+			return NULL;
+		if( gc_prop_map_owned )
+		{
+			/* A map pack (Day of Defeat): the studio arena belongs to the
+			 * players and the view models, so the chains go in what the
+			 * map left of the world-array spill, and no more than all of
+			 * them need. What does not fit is streamed. */
+			extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+			extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+			extern size_t Mod_GCWorldArraySpillFreeLasting( void );
+			const size_t room = Mod_GCWorldArraySpillFreeLasting();
+			/* The team bodies load into the spill when a player of that
+			 * team first shows up, which is after the first prop is drawn:
+			 * a cache sized to the free spill left us-inf without a body.
+			 * Keep room for both cores (as the world chunk cache does). */
+			static const char *const team_cores[] = { "gc_studio/us-inf.mdl", "gc_studio/axis-inf.mdl" };
+			size_t margin = 48u * 1024u;
+			u32 all = 0;
+			int c;
+
+			for( c = 0; c < 2; c++ )
+			{
+				const fs_offset_t sz = gEngfuncs.fsapi->FileSize( team_cores[c], false );
+
+				if( sz > 0 )
+					margin += (( (size_t)sz + 31u ) & ~(size_t)31u ) + 4096u;
+			}
+
+			gc_prop_cache_tried = true;
+			for( k = 0; k < gc_prop_nmodels; k++ )
+				all += gc_prop_chain_bytes[k];
+			try_sz = room > margin ? (u32)(( room - margin ) & ~31u ) : 0;
+			if( try_sz > all )
+				try_sz = all;
+			if( try_sz >= 8u * 1024u )
+				gc_prop_cache = (byte *)Mod_GCWorldArraySpillTryAlloc( try_sz, "prop chains" );
+			if( gc_prop_cache )
+			{
+				extern size_t Mod_GCWorldArraySpillUsed( void );
+
+				Mod_GCWorldArraySpillPinBase( gc_prop_cache, try_sz );
+				gc_prop_cache_size = try_sz;
+				gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb of %u Kb (spill, %u Kb free)\n",
+				gc_prop_cache_size / 1024u, all / 1024u, (unsigned)( room / 1024u ));
+		}
+		else
+		{
 		/* Only beside the adopted texture cache: that marks a large world. */
-		if( gc_prop_cache_tried || r_gx_cmpr_nslots <= 8 )
+		if( r_gx_cmpr_nslots <= 8 )
 			return NULL;
 		gc_prop_cache_tried = true;
 		/* In 16 KB steps: 640 KB did not fit, the next try was 512 KB, and
@@ -6328,6 +6589,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb (map arena tail)\n",
 				gc_prop_cache_size / 1024u );
+		}
 		}
 		if( !gc_prop_cache )
 			return NULL;
@@ -6399,6 +6661,7 @@ static int gc_prop_pf_frames;
 /* Position scale of the vertex layout in place for the props, -1 = not set.
  * Each prop pass resets it after its own state setup. */
 static int gc_prop_vtx_frac = -1;
+static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 0 flat colour, -1 not set */
 
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
@@ -6413,8 +6676,14 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	const float sy = yaw != 0.0f ? sinf( yaw ) : 0.0f, cy = yaw != 0.0f ? cosf( yaw ) : 1.0f;
 	const float sr = roll != 0.0f ? sinf( roll ) : 0.0f, cr = roll != 0.0f ? cosf( roll ) : 1.0f;
 
+	const qboolean far_tex = far_lod;
+
 	if( model >= gc_prop_nmodels )
 		return 0;
+	/* A map pack has no far chains: its models are a few hundred triangles
+	 * and the resident copy is the full one. Only the texture goes far. */
+	if( gc_prop_map_owned )
+		far_lod = false;
 	m = &gc_prop_models[model];
 	mm[0][0] = cp * cy; mm[0][1] = sr * sp * cy - cr * sy; mm[0][2] = cr * sp * cy + sr * sy; mm[0][3] = org[0];
 	mm[1][0] = cp * sy; mm[1][1] = sr * sp * sy + cr * cy; mm[1][2] = cr * sp * sy - sr * cy; mm[1][3] = org[1];
@@ -6433,16 +6702,61 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	 * descriptor and format registers before each one. */
 	if( gc_prop_vtx_frac != (int)m->frac )
 	{
-		GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
-			GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
 		GX_ClearVtxDesc();
 		GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+		if( gc_prop_vsize == 11 )
+		{
+			GX_SetVtxDesc( GX_VA_NRM, GX_INDEX8 );
+			GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
+			GX_SetArray( GX_VA_NRM, gc_prop_nrm, 3 );
+		}
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
 		gc_prop_vtx_frac = (int)m->frac;
+		gc_prop_lit_mode = -1;
 	}
-	GX_SetChanMatColor( GX_COLOR0A0, col );
+	if( gc_prop_vsize == 11 && gc_prop_cur_light )
+	{
+		const u8 *lt = gc_prop_cur_light;
+		const GXColor base = { lt[0], lt[1], lt[2], 255 };
+		const GXColor sky = { lt[3], lt[4], lt[5], 255 };
+		const GXColor sun = { lt[6], lt[7], lt[8], 255 };
+		const GXColor white = { 255, 255, 255, 255 };
+		GXLightObj lo;
+
+		/* Normals through the instance's rotation and the view; the two
+		 * directions are in view space, a long way off. */
+		GX_LoadNrmMtxImm( out, GX_PNMTX0 );
+		GX_InitLightColor( &lo, sky );
+		GX_InitLightPos( &lo, mv[0][2] * 1.0e6f, mv[1][2] * 1.0e6f, mv[2][2] * 1.0e6f );
+		GX_LoadLightObj( &lo, GX_LIGHT0 );
+		GX_InitLightColor( &lo, sun );
+		GX_InitLightPos( &lo,
+			( mv[0][0] * gc_prop_sun[0] + mv[0][1] * gc_prop_sun[1] + mv[0][2] * gc_prop_sun[2] ) * 1.0e6f,
+			( mv[1][0] * gc_prop_sun[0] + mv[1][1] * gc_prop_sun[1] + mv[1][2] * gc_prop_sun[2] ) * 1.0e6f,
+			( mv[2][0] * gc_prop_sun[0] + mv[2][1] * gc_prop_sun[1] + mv[2][2] * gc_prop_sun[2] ) * 1.0e6f );
+		GX_LoadLightObj( &lo, GX_LIGHT1 );
+		if( gc_prop_lit_mode != 1 )
+		{
+			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+				GX_LIGHT0 | GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE );
+			GX_SetChanMatColor( GX_COLOR0A0, white );
+			gc_prop_lit_mode = 1;
+		}
+		GX_SetChanAmbColor( GX_COLOR0A0, base );
+		col = white;
+	}
+	else
+	{
+		if( gc_prop_lit_mode != 0 )
+		{
+			GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
+				GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+			gc_prop_lit_mode = 0;
+		}
+		GX_SetChanMatColor( GX_COLOR0A0, col );
+	}
 	if( far_lod && !gc_prop_far_mem && !gc_prop_far_tried && gc_prop_far_size
 		&& GC_MapLoadBufferTailPeak() > 0 )
 	{
@@ -6456,7 +6770,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 				gc_prop_far_size / 1024u );
 		}
 	}
-	R_GXCmprSetFar( far_lod || gc_prop_tex_far );
+	R_GXCmprSetFar( far_tex || gc_prop_tex_far );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
 	if( far_lod && gc_prop_far_mem )
@@ -6476,6 +6790,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		const u16 *p;
 		u32 nverts, body, next, n;
 		qboolean additive;
+		qboolean atest;
 
 		if( resident )
 		{
@@ -6497,7 +6812,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		nverts = *(const u16 *)( hdr + 2 );
 		body = *(const u32 *)( hdr + 4 );
 		next = *(const u32 *)( hdr + 8 );
-		if( !nverts || nverts * 10u + 3u > body || body + 32u != bytes )
+		if( !nverts || nverts * gc_prop_vsize + 3u > body || body + 32u != bytes )
 			break;
 		{
 			u64 t0 = gettime();
@@ -6511,6 +6826,19 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		 * solid white sheets, and edge-on a white hook hanging in the
 		 * air. Add them faintly over the scene, without writing depth. */
 		additive = ( hdr[0] & 0x80 ) != 0;
+		/* Source $alphatest (chain-link fence, crab pots, crates): the
+		 * bake put the cut-out in the CMPR alpha bit at the material's
+		 * own reference. The test must run before the depth write, or
+		 * the holes still hide what is behind them. */
+		atest = !additive && gc_prop_mat_atest[hdr[0] & 0x7f];
+		if( atest )
+		{
+			/* The prop stage passes the vertex alpha; the cut-out is in
+			 * the texture's. */
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+			GX_SetAlphaCompare( GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_FALSE );
+		}
 		if( additive )
 		{
 			const GXColor dim = { 70, 66, 54, 255 };
@@ -6547,6 +6875,12 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			GX_End();
 			gc_prop_pf[2] += gettime() - t0;
 			gc_prop_pf_cnt[2] += *(const u16 *)( hdr + 12 );
+		}
+		if( atest )
+		{
+			GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA );
+			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_TRUE );
 		}
 		if( additive )
 		{
@@ -6604,8 +6938,39 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		int drawn;
 
 		gc_prop_tex_far = cover2 < 0.30f * 0.30f;
-		drawn = R_GXPropEmitModel( in->model, org, (float)in->ang[0] * k,
+		gc_prop_cur_light = gc_prop_light[in - gc_prop_inst];
+		unsigned model = in->model;
+		const gc_prop_model_t *bm = &gc_prop_models[model];
+
+		/* Inside Source's LOD 0 range, and only while the prop fills the
+		 * view (its sphere wider than about 45 degrees): Source's whole
+		 * range put a dozen full models on screen at once in the harbor,
+		 * which the frame does not have. Never in the water mirror. */
+		if( bm->close_model && bm->close_model <= gc_prop_nmodels && !r_gx_mirror
+			&& cover2 > 0.40f * 0.40f )
+		{
+			const float cd = (float)bm->close_dist8 * 8.0f;
+
+			if( d2 < cd * cd )
+			{
+				const unsigned cm = bm->close_model - 1u;
+				const u32 cb = gc_prop_chain_bytes[cm];
+				const qboolean held = gc_prop_want_frame[cm] == gc_prop_cache_frame
+					|| gc_prop_want_frame[cm] == gc_prop_cache_frame + 1u;
+
+				if( held )
+					model = cm;
+				else if( gc_prop_cache_size
+					&& gc_prop_want_prev + gc_prop_close_new + cb + 32u * 1024u <= gc_prop_cache_size )
+				{
+					gc_prop_close_new += cb;
+					model = cm;
+				}
+			}
+		}
+		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < 0.12f * 0.12f );
+		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
 		return drawn;
 	}
@@ -6803,6 +7168,8 @@ void R_GXPropDrawHorizon( const float *org )
 
 	if( gc_prop_want_bytes > gc_prop_want_peak )
 		gc_prop_want_peak = gc_prop_want_bytes;
+	gc_prop_want_prev = gc_prop_want_bytes;
+	gc_prop_close_new = 0;
 	gc_prop_want_bytes = 0;
 	gc_prop_cache_frame++;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
@@ -6824,6 +7191,7 @@ void R_GXPropDrawHorizon( const float *org )
 	u16 tmp;
 	float ftmp;
 
+	R_GXPropMapCheck();
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
@@ -6915,6 +7283,7 @@ static void R_GXPropDraw( const float *org )
 	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	int i, drawn = 0, near = 0;
 
+	R_GXPropMapCheck();
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
@@ -10190,6 +10559,10 @@ static void R_GXEnsureTriApiLayout( void )
 	else
 	{
 		R_GXPrepareStudioState( false );
+		/* Effects are texture x vertex colour, as in GoldSrc: REPLACE drew
+		 * every particle, spark and blood drop in the white particle
+		 * texture's colour (Tim: sparks and blood looked white). */
+		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
 		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
@@ -11370,6 +11743,7 @@ qboolean R_GXStudioVmDirectReady( void ) { return false; }
 void R_GXStudioVmPushVerts( vec3_t *verts, int n ) { (void)verts; (void)n; }
 qboolean R_GXTriApiIsActive( void ) { return false; }
 void R_GXEffectsTriBegin( void ) {}
+unsigned r_gx_effects_pending_texnum;
 void R_GXEffectsTriEnd( void ) {}
 int R_GXDrawBrushModel( cl_entity_t *e ) { (void)e; return 0; }
 int R_GXDrawTramBaked( const float *origin, const float *angles )

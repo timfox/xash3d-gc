@@ -911,6 +911,34 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				return NULL;
 			}
 			previous_bump = gc_studio_bss_bump;
+			/* Map props reloaded from ARAM go back to the world-array spill,
+			 * like the disc read below. In the studio BSS, the flags merge
+			 * grew into the room the team viewmodel's skins need, and the
+			 * rifle drew with a rainbow skin (ceres rfL, DoD charlie). */
+			if(( Mod_GCStudioPrefersSpill( model_path )
+				|| Mod_GCViewModelNeedsSpill( model_path, (size_t)cached ))
+				&& Mod_GCMapModelSpillAfterWorldDL())
+			{
+				extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+				extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+
+				slot = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)cached, "mapmodel-studio" );
+				if( slot && GC_AssetCacheRead( mirror, slot, cached ))
+				{
+					Mod_GCWorldArraySpillPinBase( slot, (size_t)cached );
+					*length = (fs_offset_t)cached;
+					if( from_bss )
+						*from_bss = true;
+					Con_Reportf( "Xash3D GameCube: mapmodel spill from ARAM '%s' (%s)\n",
+						model_path, Q_memprint( (size_t)cached ));
+					return slot;
+				}
+				if( slot )
+					Mod_GCWorldArraySpillRewind( slot, (size_t)cached );
+				Con_Reportf( "Xash3D GameCube: mapmodel spill from ARAM miss '%s' (%s), studio arena\n",
+					model_path, Q_memprint( (size_t)cached ));
+				slot = NULL;
+			}
 			slot = Mod_GCIsViewModelPath( model_path ) ? Mod_GCVMSlotAlloc( (size_t)cached ) : NULL;
 			/* Oversized viewmodels belong in the spill (disc path below),
 			 * not in the studio arena the skins share. */
@@ -930,9 +958,19 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 		}
 	}
 
-	if( FS_FileExists( mirror, false ))
+	/* Every studio file takes the read-into-slot path below (studio arena,
+	 * viewmodel slot or map spill): the gc_studio/ mirror when the disc has
+	 * one, otherwise models/<name>.mdl itself.  Only mirrored models used to,
+	 * so barnacle/bullsquid/hgrunt/... went through a whole-file heap malloc
+	 * that fragmented MEM1 refused thousands of times per sweep and the
+	 * monsters spawned without their model.  The ARAM cache stays keyed by
+	 * the mirror name either way. */
+	const char *src = FS_FileExists( mirror, false ) ? mirror
+		: ( FS_FileExists( model_path, false ) ? model_path : NULL );
+
+	if( src )
 	{
-		f = FS_Open( mirror, "rb", false );
+		f = FS_Open( src, "rb", false );
 		if( f )
 		{
 			flen = FS_FileLength( f );
@@ -981,11 +1019,11 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 						if( from_bss )
 							*from_bss = true;
 						Con_Reportf( "Xash3D GameCube: mapmodel spill read '%s' via %s (%s)\n",
-							model_path, mirror, Q_memprint( (size_t)flen ));
+							model_path, src, Q_memprint( (size_t)flen ));
 						return slot;
 					}
 					Con_Reportf( "Xash3D GameCube: mapmodel spill short '%s' read=%li want=%li\n",
-						mirror, (long)total, (long)flen );
+						src, (long)total, (long)flen );
 					slot = NULL;
 				}
 			}
@@ -1015,12 +1053,12 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 					if( from_bss )
 						*from_bss = true;
 					Con_Reportf( "Xash3D GameCube: G289 studio BSS read '%s' via %s (%s) bump=%s\n",
-						model_path, mirror, Q_memprint( (size_t)flen ),
+						model_path, src, Q_memprint( (size_t)flen ),
 						Q_memprint( gc_studio_bss_bump ));
 					return slot;
 				}
 				Con_Reportf( "Xash3D GameCube: G289 studio BSS short '%s' read=%li want=%li\n",
-					mirror, (long)total, (long)flen );
+					src, (long)total, (long)flen );
 				/* Only release the last allocation: another owner may have
 				 * acquired a later slice while the file was being read. */
 				Mod_GCStudioBssRollbackLast( slot, (size_t)flen, previous_bump );
@@ -1030,7 +1068,7 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				FS_Close( f );
 				if( flen > (fs_offset_t)GC_STUDIO_MODEL_LIMIT )
 					Con_Reportf( "Xash3D GameCube: G289 studio too large for BSS '%s' (%s)\n",
-						mirror, Q_memprint( (size_t)flen ));
+						src, Q_memprint( (size_t)flen ));
 				/* Map props: WorldDL listen leaves spill headroom (chunk cache
 				 * capped at 192 KiB). Stream lean mesh there — tip heap is dead.
 				 * Gate on WorldDL Active so props cannot starve the cache. */
@@ -1046,9 +1084,9 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 					extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 					extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 
-					f = FS_Open( mirror, "rb", false );
+					f = FS_Open( src, "rb", false );
 					if( !f )
-						f = FS_Open( mirror, "rb", true );
+						f = FS_Open( src, "rb", true );
 					if( f )
 					{
 						slot = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)flen, "mapmodel-studio" );
@@ -1072,17 +1110,17 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 								if( from_bss )
 									*from_bss = true; /* don't free — spill-backed */
 								Con_Reportf( "Xash3D GameCube: mapmodel spill read '%s' via %s (%s)\n",
-									model_path, mirror, Q_memprint( (size_t)flen ));
+									model_path, src, Q_memprint( (size_t)flen ));
 								return slot;
 							}
 							Con_Reportf( "Xash3D GameCube: mapmodel spill short '%s' read=%li want=%li\n",
-								mirror, (long)total, (long)flen );
+								src, (long)total, (long)flen );
 						}
 						else
 						{
 							FS_Close( f );
 							Con_Reportf( "Xash3D GameCube: mapmodel spill alloc miss '%s' (%s, spill free %s)\n",
-								mirror, Q_memprint( (size_t)flen ), Q_memprint( Mod_GCWorldArraySpillFree()));
+								src, Q_memprint( (size_t)flen ), Q_memprint( Mod_GCWorldArraySpillFree()));
 						}
 					}
 				}
