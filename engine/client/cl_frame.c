@@ -1429,6 +1429,136 @@ process frame interpolation etc
 ===============
 */
 #if XASH_GAMECUBE
+#if XASH_GAMECUBE
+/*
+=============
+Remote client static props
+
+The server sends its static props (unnamed env_model / dod_object, no edict)
+in the signon as svc_spawnstatic. The listen host already draws them from
+gc_static_props, so it drops these messages. A remote client fills its own
+gc_static_props from them and links the nearest ones each frame.
+=============
+*/
+#define GC_REMOTE_STATIC_DRAW	16
+
+static qboolean CL_GCStaticPropOnServer( const entity_state_t *state )
+{
+	int i;
+
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+
+		if( sp->modelindex == state->modelindex && VectorCompareEpsilon( sp->origin, state->origin, 0.5f ))
+			return true;
+	}
+	return false;
+}
+
+qboolean CL_GCStaticPropFromSignon( const entity_state_t *state )
+{
+	gc_static_prop_t *sp;
+
+	if( SV_Active( ))
+		return CL_GCStaticPropOnServer( state );
+	if( gc_num_static_props >= GC_STATIC_PROPS_MAX )
+		return true; /* over the cap: drop it rather than spend a cl_entity_t */
+	sp = &gc_static_props[gc_num_static_props++];
+	memset( sp, 0, sizeof( *sp ));
+	VectorCopy( state->origin, sp->origin );
+	VectorCopy( state->angles, sp->angles );
+	sp->scale = state->scale;
+	sp->framerate = state->framerate;
+	sp->modelindex = (short)state->modelindex;
+	sp->sequence = (short)state->sequence;
+	sp->skin = state->skin;
+	sp->body = (short)state->body;
+	sp->rendermode = (byte)state->rendermode;
+	sp->renderamt = (byte)state->renderamt;
+	sp->renderfx = (byte)state->renderfx;
+	sp->rendercolor = state->rendercolor;
+	return true;
+}
+
+void CL_GCClearRemoteStaticProps( void )
+{
+	if( !SV_Active( ))
+		gc_num_static_props = 0;
+}
+
+void CL_GCLinkRemoteStaticProps( void )
+{
+	static cl_entity_t ents[GC_REMOTE_STATIC_DRAW];
+	static int logged_count = -1;
+	int picks[GC_REMOTE_STATIC_DRAW];
+	float dists[GC_REMOTE_STATIC_DRAW];
+	int n = 0, i, j, linked = 0;
+
+	if( SV_Active() || gc_num_static_props <= 0 )
+		return;
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+		vec3_t delta;
+		float d;
+
+		VectorSubtract( sp->origin, refState.vieworg, delta );
+		d = DotProduct( delta, delta );
+		if( d > 12000.0f * 12000.0f )
+			continue;
+		if( n < GC_REMOTE_STATIC_DRAW )
+			n++;
+		else if( d >= dists[n - 1] )
+			continue;
+		for( j = n - 1; j > 0 && dists[j - 1] > d; j-- )
+		{
+			dists[j] = dists[j - 1];
+			picks[j] = picks[j - 1];
+		}
+		dists[j] = d;
+		picks[j] = i;
+	}
+	for( i = 0; i < n; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[picks[i]];
+		cl_entity_t *ent = &ents[linked];
+		model_t *mod = CL_ModelHandle( sp->modelindex );
+
+		if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+			continue;
+		memset( ent, 0, sizeof( *ent ));
+		ent->model = mod;
+		VectorCopy( sp->origin, ent->origin );
+		VectorCopy( sp->angles, ent->angles );
+		VectorCopy( sp->origin, ent->curstate.origin );
+		VectorCopy( sp->angles, ent->curstate.angles );
+		ent->curstate.modelindex = sp->modelindex;
+		ent->curstate.sequence = sp->sequence;
+		ent->curstate.body = sp->body;
+		ent->curstate.skin = sp->skin;
+		ent->curstate.scale = sp->scale > 0.0f ? sp->scale : 1.0f;
+		ent->curstate.framerate = sp->framerate != 0.0f ? sp->framerate : 1.0f;
+		ent->curstate.rendermode = sp->rendermode;
+		ent->curstate.renderamt = sp->renderamt;
+		ent->curstate.renderfx = sp->renderfx;
+		ent->curstate.rendercolor = sp->rendercolor;
+		ent->curstate.entityType = ENTITY_NORMAL;
+		ent->prevstate = ent->curstate;
+		VectorCopy( ent->origin, ent->latched.prevorigin );
+		VectorCopy( ent->angles, ent->latched.prevangles );
+		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+			linked++;
+	}
+	if( logged_count != gc_num_static_props )
+	{
+		logged_count = gc_num_static_props;
+		Con_Reportf( "Xash3D GameCube: remote static props %d, linked %d nearest\n",
+			gc_num_static_props, linked );
+	}
+}
+#endif
+
 /*
 ===============
 CL_GameCubeLeanEmitBrushEntities
@@ -2843,6 +2973,7 @@ void CL_EmitEntities( void )
 	CL_LinkPacketEntities ( &cl.frames[cl.parsecountmod] );
 #if XASH_GAMECUBE
 	CL_GCDumpStudioEntities( &cl.frames[cl.parsecountmod] );
+	CL_GCLinkRemoteStaticProps();
 #endif
 
 	// link custom user temp entities
