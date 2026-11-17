@@ -68,25 +68,48 @@ Replies now carry `gc_dod=1` and the client drops replies without it, so only
 DoD GC servers are listed. The IPv6 multicast leg is skipped on GameCube
 (IPv4-only stack).
 
-**Internet tab** runs `internetservers`, which sends a UDP scan request to every
-entry of the master list (`NET_MasterQuery`). The stock list is empty on
-GameCube: the HTTP static master (`xash.su/server-list`) is deliberately skipped
-(no TLS/DNS heap) and `xashcomm.lst` is empty. Master hostnames resolve through
-the UDP resolver in `net_gamecube.c` (`gc_net_dns`, then gateway, then
-1.1.1.1/8.8.8.8, 1.5 s timeout each, 8-entry cache). It runs on the main thread,
-so a dead DNS server stalls a frame; an IP literal avoids DNS entirely.
+**Internet tab** runs `internetservers`. On GameCube the stock UDP master list
+and the HTTPS server list are empty or skipped (no TLS heap), so the Internet tab
+uses the DoD GC REST master below. Hostnames resolve through the UDP resolver in
+`net_gamecube.c` (`gc_net_dns`, then gateway, then 1.1.1.1/8.8.8.8, 1.5 s timeout
+each, 8-entry cache); an IP literal avoids DNS entirely.
 
-**WAN master.** `dodgc_master "host[:27010]"` (archived cvar, or
-`-dodgcmaster host`) adds one UDP master. While it is set, listen servers with
-`maxclients > 1` send heartbeats without needing `public 1` (a Cube has no
-console), and the scan request carries `gamedir` and `gc_dod`. Run the master
-on any reachable host:
+**WAN master (REST).** Set the archived cvar `dodgc_master` (or `-dodgcmaster`) to the
+base URL of a master, for example `http://master.example.com:8080` (`host:port` alone
+means `http://`). Plain HTTP on purpose: the console has no TLS, and nothing the
+master says is trusted. Put it behind a TLS proxy if you want HTTPS for browsers.
+
+| Call | Who | What |
+| --- | --- | --- |
+| `GET /v1/servers?gamedir=dod` | Find servers | `{"servers":[{"ip","port","gamedir","map","players","max","name"}]}` |
+| `POST /v1/servers` | hosting game, every 5 min and on map change | `{"port","gamedir","map","players","max","name"}` |
+| `DELETE /v1/servers/<port>` | hosting game on shutdown | unregister |
+| `GET /healthz` | you | `{"ok":true}` |
+
+The client uses the engine's non-blocking HTTP client with a 2 KiB buffer (no 64 KiB
+allocation, nothing from the world arrays), starts it only after the network is up,
+and reads **only** `ip` and `port` from each entry with a bounded parser
+(`engine/common/dodgc_master_http.h`: no escapes, no nesting, at most 64 entries,
+8 KiB reply, loopback/multicast/reserved addresses dropped). Each address is then
+sent a normal `info` query, so everything shown in the list comes from the server
+itself (and still needs `gc_dod=1`). While `dodgc_master` is set, listen servers with
+`maxclients > 1` send heartbeats without needing `public 1`.
+
+The master (`scripts/dodgc_master.py`, standard library only) takes the server address
+from the TCP connection, never from the payload, and validates every field: exact key
+set, integer ranges, `[a-z0-9_]` gamedir, map `[A-Za-z0-9_-]`, 32 characters of
+plain-ASCII name, 512 byte body. It rejects non-public addresses, rate limits per address
+(burst 20, then 1 request per 2 s), caps 4 servers per address and 1000 overall, expires
+entries after 11 minutes without a heartbeat, and never echoes request text back.
 
 ```bash
-scripts/dodgc_master.py --port 27010        # UDP 27010
-python3 scripts/test_dodgc_master.py        # protocol tests
+python3 scripts/dodgc_master.py --port 8080                  # run it
+docker build -f scripts/Dockerfile.master -t dodgc-master .  # or a container
+docker run -p 8080:8080 dodgc-master
+python3 -m unittest tests.test_dodgc_master_rest tests.test_dodgc_master_http
 ```
 
-Hosts behind a home router must forward UDP 27015 to the Cube; the master
-registers the heartbeat's source address. Servers expire after 11 minutes
-without a heartbeat (engine interval: 5 min, 1 min with `sv_nat`).
+Behind nginx/Caddy/Cloudflare add `--trust-proxy` so the registered address is the last
+`X-Forwarded-For` hop (only do this when the proxy sets that header itself). Use
+`--allow-private` only for a LAN test master. Hosts behind a home router must forward
+UDP 27015 to the Cube, since the console connects to the address the master saw.
