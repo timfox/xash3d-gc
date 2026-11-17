@@ -1084,13 +1084,9 @@ static void R_GXBuildWorldProjection( Mtx44 out )
 }
 
 /* Near plane of the viewmodel pass. The world's 4 units is too far for a
- * gun held at the eye: the hands, forearms and the stock sit 1 to 4 units
- * out, and every vertex nearer than the plane is pushed onto it (see
- * R_GXStudioPushVmVert). Pushed vertices all share one depth, so those
- * parts drew in submission order and the far side showed through the near
- * side (Tim: "polys rendered out of order" on arms, hands and guns). The
- * pass has its own slice of the depth range, so a closer plane costs the
- * world nothing. */
+ * gun held at the eye: a fifth of the Garand's vertices (hands, forearms,
+ * stock) are nearer than that. The pass has its own slice of the depth
+ * range, so a closer plane costs the world nothing. */
 #define R_GX_VM_NEAR 1.0f
 
 /* Viewmodel: world FOV (CapFaces authoring), near plane as the CPU gate. */
@@ -10513,38 +10509,13 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 G155: Flipper studio / viewmodel overlay (TriAPI → EFB)
 ================
 */
-static float R_GXStudioEyeDepth( float x, float y, float z )
-{
-	vec3_t delta;
-
-	delta[0] = x - r_gx_vm_eye[0];
-	delta[1] = y - r_gx_vm_eye[1];
-	delta[2] = z - r_gx_vm_eye[2];
-	return DotProduct( r_gx_vm_forward, delta );
-}
-
-/* Push a viewmodel vert onto the near plane along the eye ray so strips
- * with a behind-near knuckle stay continuous (dropping tris punched
- * jagged hand holes — ava-play99-95 ghosting). */
-static void R_GXStudioPushVmVert( float *x, float *y, float *z )
-{
-	float d;
-	vec3_t delta;
-
-	delta[0] = *x - r_gx_vm_eye[0];
-	delta[1] = *y - r_gx_vm_eye[1];
-	delta[2] = *z - r_gx_vm_eye[2];
-	d = DotProduct( r_gx_vm_forward, delta );
-	if( d >= R_GX_VM_NEAR || d <= 0.05f )
-		return;
-	{
-		const float s = R_GX_VM_NEAR / d;
-
-		*x = r_gx_vm_eye[0] + delta[0] * s;
-		*y = r_gx_vm_eye[1] + delta[1] * s;
-		*z = r_gx_vm_eye[2] + delta[2] * s;
-	}
-}
+/* Viewmodel triangles that cross the near plane go to the GP as they are and
+ * it clips them. Two CPU stand-ins used to sit here. One dropped any
+ * triangle with a vertex behind the plane, which punched holes in the
+ * hands. The other moved such vertices onto the plane along the eye ray:
+ * a fifth of the Garand's vertices then shared one depth, their triangles
+ * carried wrong depth across the screen, and arms, hands and stock drew
+ * through each other (Tim: "polys rendered out of order"). */
 
 /* The viewmodel can take the direct tricmd emit once its one-time probes
  * (G157/G164, fed by the strip path) have logged. */
@@ -10555,20 +10526,9 @@ qboolean R_GXStudioVmDirectReady( void )
 
 void R_GXStudioVmPushVerts( vec3_t *verts, int n )
 {
-	int i;
-
-	for( i = 0; i < n; i++ )
-		R_GXStudioPushVmVert( &verts[i][0], &verts[i][1], &verts[i][2] );
-}
-
-static qboolean R_GXStudioVmTriInFront(
-	float x0, float y0, float z0,
-	float x1, float y1, float z1,
-	float x2, float y2, float z2 )
-{
-	return R_GXStudioEyeDepth( x0, y0, z0 ) >= R_GX_VM_NEAR
-		&& R_GXStudioEyeDepth( x1, y1, z1 ) >= R_GX_VM_NEAR
-		&& R_GXStudioEyeDepth( x2, y2, z2 ) >= R_GX_VM_NEAR;
+	/* Nothing to do: the GP clips at the near plane (see above). */
+	(void)verts;
+	(void)n;
 }
 
 static void R_GXStudioNoteNdcVert( float x, float y, float z )
@@ -11027,9 +10987,6 @@ void R_GXStudioEmitTriC(
 {
 	if( !r_gx_studio_active && !r_gx_effects_tri )
 		return;
-	if( r_gx_studio_viewmodel
-		&& !R_GXStudioVmTriInFront( x0, y0, z0, x1, y1, z1, x2, y2, z2 ))
-		return;
 	R_GXEnsureTriApiLayout();
 
 	if( r_gx_studio_bound_tex == 0 )
@@ -11078,36 +11035,12 @@ void R_GXStudioEmitTri(
 void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip )
 {
 	int i;
-	gx_tri_vertex_t local[64];
 	const gx_tri_vertex_t *draw = verts;
 
 	if( !verts || count < 3 || ( !r_gx_studio_active && !r_gx_effects_tri ))
 		return;
-	/* Viewmodel: push behind-near verts onto zNear and keep the strip —
-	 * per-tri drops left jagged hand holes (ava-play99-95). */
 	if( r_gx_studio_viewmodel )
 	{
-		int need_push = 0;
-
-		if( count > 64 )
-			count = 64;
-		for( i = 0; i < count; i++ )
-		{
-			if( R_GXStudioEyeDepth( verts[i].x, verts[i].y, verts[i].z ) < R_GX_VM_NEAR )
-			{
-				need_push = 1;
-				break;
-			}
-		}
-		if( need_push )
-		{
-			for( i = 0; i < count; i++ )
-			{
-				local[i] = verts[i];
-				R_GXStudioPushVmVert( &local[i].x, &local[i].y, &local[i].z );
-			}
-			draw = local;
-		}
 		/* G157/G164 probes log once, on the first viewmodel pass. */
 		if( !r_gx_studio_vm_logged )
 		{
@@ -11182,12 +11115,6 @@ void R_GXStudioEmitTrianglesC( const gx_tri_vertex_t *verts, int count )
 	if( r_gx_studio_bound_tex == 0 ) R_GXStudioBindTexnum( (unsigned)tr.whiteTexture );
 	for( i = 0; i + 2 < count; i += 3 )
 	{
-		if( r_gx_studio_viewmodel
-			&& !R_GXStudioVmTriInFront(
-				verts[i].x, verts[i].y, verts[i].z,
-				verts[i + 1].x, verts[i + 1].y, verts[i + 1].z,
-				verts[i + 2].x, verts[i + 2].y, verts[i + 2].z ))
-			continue;
 		R_GXStudioNoteNdcVert( verts[i].x, verts[i].y, verts[i].z );
 		R_GXStudioNoteNdcVert( verts[i + 1].x, verts[i + 1].y, verts[i + 1].z );
 		R_GXStudioNoteNdcVert( verts[i + 2].x, verts[i + 2].y, verts[i + 2].z );
