@@ -1721,6 +1721,48 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				continue;
 			}
 			scan_studio++;
+			if(( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A map model precached by the game at spawn (DoD control
+				 * point flags) stays a registered, never-loaded handle on this
+				 * route: nothing promotes it the way the static props are.
+				 * Point the handle at a resident copy, or load it (lean mesh,
+				 * ARAM cache later), retrying a failed load every few seconds. */
+				extern qboolean Mod_GCPromoteStudioPath( const char *path );
+				static double next_try[32];
+				static byte fails[32];
+				static int fails_spawn = -1;
+				const int mk = ed->v.modelindex & 31;
+				model_t *found;
+
+				if( fails_spawn != svs.spawncount )
+				{
+					memset( next_try, 0, sizeof( next_try ));
+					memset( fails, 0, sizeof( fails ));
+					fails_spawn = svs.spawncount;
+				}
+				found = Mod_FindName( mod->name, false );
+				if(( !found || found->needload != NL_PRESENT || !found->cache.data )
+					&& fails[mk] < 3 && host.realtime >= next_try[mk] )
+				{
+					if( Mod_GCPromoteStudioPath( mod->name ))
+						found = Mod_FindName( mod->name, false );
+					else
+					{
+						fails[mk]++;
+						next_try[mk] = host.realtime + 5.0;
+					}
+					Con_Reportf( "Xash3D GameCube: lean promote map model %s (index %d) %s\n", mod->name,
+						ed->v.modelindex, found && found->needload == NL_PRESENT && found->cache.data ? "resident" : "not loaded" );
+				}
+				if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+				{
+					if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
+						sv.models[ed->v.modelindex] = found;
+					mod = found;
+				}
+			}
 			if( mod->needload != NL_PRESENT || !mod->name[0] || !mod->cache.data )
 			{
 				scan_studio_skip++;
