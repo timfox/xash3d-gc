@@ -6232,7 +6232,8 @@ static qboolean SV_GCTryStaticProp( char **pfile )
 	qboolean is_prop = false, named = false;
 	gc_static_prop_t prop;
 
-	if( !Sys_CheckParm( "-gcworldrender" ) || !p )
+	/* -gcnostaticprops: spawn them as edicts again (A/B testing). */
+	if( !Sys_CheckParm( "-gcworldrender" ) || Sys_CheckParm( "-gcnostaticprops" ) || !p )
 		return false;
 	memset( &prop, 0, sizeof( prop ));
 	prop.scale = 1.0f;
@@ -6349,7 +6350,7 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		if( !classname[0] || !Q_strcmp( classname, "worldspawn" ))
 			continue;
 		total++;
-		if( SV_GCStaticPropClass( classname ) && !named )
+		if( SV_GCStaticPropClass( classname ) && !named && !Sys_CheckParm( "-gcnostaticprops" ))
 		{
 			statics++;
 			continue;
@@ -6369,8 +6370,8 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	}
 	must = total - parity - optional - nofunc - statics;
 	gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
-	if( gc_parity_budget < 0 )
-		gc_parity_budget = 0;
+	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
+		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
 	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d static-props=%d (edicts %d)\n",
 		mapname, total, must, parity, gc_parity_budget, optional, nofunc, statics, GI->max_edicts );
 	SV_GCCensusReport( mapname, "always", census_must, n_must );
