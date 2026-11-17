@@ -6074,6 +6074,8 @@ static char gc_prop_map[64];
 static qboolean gc_prop_map_owned;
 static unsigned gc_prop_epoch;
 static size_t gc_prop_spill_mark;
+static unsigned gc_prop_spill_gen;
+extern unsigned Mod_GCWorldArraySpillGeneration( void );
 
 static void R_GXPropMapCheck( void )
 {
@@ -6092,10 +6094,14 @@ static void R_GXPropMapCheck( void )
 		extern size_t Mod_GCWorldArraySpillUsed( void );
 
 		/* Same map loaded again: the pack in ARAM is still this map's, but
-		 * the spill block of the resident chains went with the old load. */
+		 * the spill block of the resident chains went with the old load.
+		 * The spill level cannot show that once the new load has refilled
+		 * the spill past the old mark: the stale block then overlapped the
+		 * new world DL chunk cache and chain loads wrote over its chunks. */
 		if( gc_prop_map_owned && gc_prop_cache_tried
 			&& ( gc_prop_epoch != r_gx_world_epoch
-			|| ( gc_prop_cache && Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark )))
+			|| ( gc_prop_cache && ( Mod_GCWorldArraySpillGeneration() != gc_prop_spill_gen
+				|| Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark ))))
 		{
 			GX_DrawDone();
 			gc_prop_cache = NULL;
@@ -6658,6 +6664,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 				Mod_GCWorldArraySpillPinBase( gc_prop_cache, try_sz );
 				gc_prop_cache_size = try_sz;
 				gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
+				gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb of %u Kb (spill, %u Kb free)\n",
 				gc_prop_cache_size / 1024u, all / 1024u, (unsigned)( room / 1024u ));
