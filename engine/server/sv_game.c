@@ -6055,12 +6055,39 @@ static qboolean SV_GCParityEntity( const char *classname )
  * ones late in the lump (doors, capture areas, round logic) still fit. */
 static int gc_parity_budget = 0x7fffffff;
 static int gc_parity_kept;
+/* Parity tiers, kept in this order when the budget is short: 0 brush walls
+ * players collide with, 1 map logic (target chains), 2 switchable lights. */
+#define GC_PARITY_TIERS 3
+static int gc_parity_tier_budget[GC_PARITY_TIERS] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
+static int gc_parity_tier_kept[GC_PARITY_TIERS];
+/* Slots left free for run-time entities (weapons, grenades, weapon boxes,
+ * temp ents). DoD builds have five client slots; four bots and a player
+ * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
+#define GC_PARITY_RUNTIME_RESERVE 32
+
+static int SV_GCParityTier( const char *classname )
+{
+	if( !Q_strcmp( classname, "func_wall" ) || !Q_strcmp( classname, "func_wall_toggle" )
+		|| !Q_strcmp( classname, "func_illusionary" ))
+		return 0;
+	if( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" ))
+		return 2;
+	return 1;
+}
 
 static qboolean SV_GCEntityPressure( void )
 {
 	return GC_MemHeapFreeBytes() < 16u * 1024u
 		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
-		|| svgame.numEntities >= GI->max_edicts - 64;
+		|| svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+}
+
+/* An unnamed func_illusionary is non-solid decoration nothing can target:
+ * the CapFaces world bake already draws its faces, so an edict for it would
+ * only cost a networked entity per frame (dod_charlie has 95). */
+static qboolean SV_GCBakedIllusionary( const char *classname, qboolean named )
+{
+	return !named && !Q_strcmp( classname, "func_illusionary" );
 }
 
 /* GoldSrc's CLight removes itself unless it has a targetname; a named light
@@ -6075,13 +6102,20 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 {
 	if( COM_StringEmpty( classname ))
 		return false;
+	if( ent && SV_GCBakedIllusionary( classname, ent->v.targetname != 0 ))
+		return true;
 	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
 	{
 		static int kept, skipped;
-		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget;
+		const int tier = SV_GCParityTier( classname );
+		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget
+			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
 
 		if( !skip )
+		{
 			gc_parity_kept++;
+			gc_parity_tier_kept[tier]++;
+		}
 
 		if( skip ) skipped++; else kept++;
 		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
@@ -6129,6 +6163,189 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 	return false;
 }
 
+/* Per-class entity census for the edict budget log (top classes first). */
+#define GC_CENSUS_MAX 64
+typedef struct { char name[32]; int count; } gc_census_t;
+
+static void SV_GCCensusAdd( gc_census_t *c, int *n, const char *classname )
+{
+	int i;
+
+	for( i = 0; i < *n; i++ )
+	{
+		if( !Q_strncmp( c[i].name, classname, sizeof( c[i].name ) - 1 ))
+		{
+			c[i].count++;
+			return;
+		}
+	}
+	if( *n >= GC_CENSUS_MAX )
+		return;
+	Q_strncpy( c[*n].name, classname, sizeof( c[*n].name ));
+	c[*n].count = 1;
+	( *n )++;
+}
+
+static void SV_GCCensusReport( const char *mapname, const char *what, gc_census_t *c, int n )
+{
+	char line[256];
+	int i, j, len = 0;
+
+	/* Insertion sort, most entities first. */
+	for( i = 1; i < n; i++ )
+	{
+		gc_census_t t = c[i];
+
+		for( j = i; j > 0 && c[j - 1].count < t.count; j-- )
+			c[j] = c[j - 1];
+		c[j] = t;
+	}
+	line[0] = '\0';
+	for( i = 0; i < n; i++ )
+	{
+		len += Q_snprintf( line + len, sizeof( line ) - len, " %s=%d", c[i].name, c[i].count );
+		if( len > 180 || i == n - 1 )
+		{
+			Con_Reportf( "Xash3D GameCube: %s census %s:%s\n", mapname, what, line );
+			line[0] = '\0';
+			len = 0;
+		}
+	}
+}
+
+/*
+ * Static props: retail DoD maps place most of their decoration as env_model /
+ * dod_object (dod_charlie: 177 of 904 entities). An unnamed one can never be
+ * targeted, so nothing in the map can change it; it is only a model at a
+ * place. Those skip the edict table (they used 150+ of charlie's 460 slots,
+ * leaving none for its walls and map logic) and go into this compact list,
+ * which the lean emit draws like the props it draws from edicts.
+ */
+gc_static_prop_t gc_static_props[GC_STATIC_PROPS_MAX];
+int gc_num_static_props;
+static char gc_static_prop_models[GC_STATIC_PROP_MODELS][64];
+static int gc_static_prop_nmodels, gc_static_prop_deferred;
+
+static qboolean SV_GCStaticPropClass( const char *classname )
+{
+	return !Q_strcmp( classname, "env_model" ) || !Q_strcmp( classname, "dod_object" );
+}
+
+static void SV_GCStaticPropsReset( void )
+{
+	gc_num_static_props = 0;
+	gc_static_prop_nmodels = 0;
+	gc_static_prop_deferred = 0;
+}
+
+/* Model index for a static prop. Unique paths are capped like the game's own
+ * env_model cap (each lean studio costs MEM1); props past it stay unloaded,
+ * as they were when the game deferred them. */
+static int SV_GCStaticPropModel( const char *path )
+{
+	int i;
+
+	for( i = 0; i < gc_static_prop_nmodels; i++ )
+		if( !Q_stricmp( gc_static_prop_models[i], path ))
+			return SV_ModelIndex( path );
+	if( gc_static_prop_nmodels >= GC_STATIC_PROP_MODELS )
+		return 0;
+	i = pfnPrecacheModel( path );
+	if( i > 0 )
+		Q_strncpy( gc_static_prop_models[gc_static_prop_nmodels++], path, sizeof( gc_static_prop_models[0] ));
+	return i;
+}
+
+/* If the entity block at *pfile (just after its '{') is an unnamed env_model
+ * or dod_object, consume it into the static prop list and return true.
+ * Otherwise leave *pfile where it was. */
+static qboolean SV_GCTryStaticProp( char **pfile )
+{
+	char key[256], value[256], model[64];
+	char *p = *pfile;
+	qboolean is_prop = false, named = false;
+	gc_static_prop_t prop;
+
+	/* -gcnostaticprops: spawn them as edicts again (A/B testing). */
+	if( !Sys_CheckParm( "-gcworldrender" ) || Sys_CheckParm( "-gcnostaticprops" ) || !p )
+		return false;
+	memset( &prop, 0, sizeof( prop ));
+	prop.scale = 1.0f;
+	prop.framerate = 1.0f;
+	prop.renderamt = 255;
+	model[0] = '\0';
+	for( ;; )
+	{
+		if(( p = COM_ParseFile( p, key, sizeof( key ))) == NULL )
+			return false;
+		if( key[0] == '}' && key[1] == '\0' )
+			break;
+		if(( p = COM_ParseFile( p, value, sizeof( value ))) == NULL )
+			return false;
+		if( !Q_strcmp( key, "classname" ))
+		{
+			if( !SV_GCStaticPropClass( value ))
+				return false;
+			is_prop = true;
+		}
+		else if( !Q_strcmp( key, "targetname" ) && value[0] )
+			named = true;
+		else if( !Q_strcmp( key, "model" ))
+			Q_strncpy( model, value, sizeof( model ));
+		else if( !Q_strcmp( key, "origin" ))
+			sscanf( value, "%f %f %f", &prop.origin[0], &prop.origin[1], &prop.origin[2] );
+		else if( !Q_strcmp( key, "angles" ))
+			sscanf( value, "%f %f %f", &prop.angles[0], &prop.angles[1], &prop.angles[2] );
+		else if( !Q_strcmp( key, "angle" ))
+		{
+			/* GoldSrc's "angle": yaw, with -1 up and -2 down. */
+			const float a = Q_atof( value );
+
+			if( a == -1.0f ) prop.angles[0] = -90.0f;
+			else if( a == -2.0f ) prop.angles[0] = 90.0f;
+			else prop.angles[1] = a;
+		}
+		else if( !Q_strcmp( key, "scale" ) && Q_atof( value ) > 0.0f )
+			prop.scale = Q_atof( value );
+		else if( !Q_strcmp( key, "framerate" ))
+			prop.framerate = Q_atof( value );
+		else if( !Q_strcmp( key, "sequence" ))
+			prop.sequence = (short)Q_atoi( value );
+		else if( !Q_strcmp( key, "skin" ))
+			prop.skin = (short)Q_atoi( value );
+		else if( !Q_strcmp( key, "body" ))
+			prop.body = (short)Q_atoi( value );
+		else if( !Q_strcmp( key, "rendermode" ))
+			prop.rendermode = (byte)Q_atoi( value );
+		else if( !Q_strcmp( key, "renderamt" ))
+			prop.renderamt = (byte)Q_atoi( value );
+		else if( !Q_strcmp( key, "renderfx" ))
+			prop.renderfx = (byte)Q_atoi( value );
+		else if( !Q_strcmp( key, "rendercolor" ))
+		{
+			int r = 0, g = 0, b = 0;
+
+			sscanf( value, "%d %d %d", &r, &g, &b );
+			prop.rendercolor.r = (byte)r;
+			prop.rendercolor.g = (byte)g;
+			prop.rendercolor.b = (byte)b;
+		}
+	}
+	if( !is_prop || named || gc_num_static_props >= GC_STATIC_PROPS_MAX )
+		return false;
+
+	*pfile = p;
+	if( model[0] )
+		prop.modelindex = (short)SV_GCStaticPropModel( model );
+	if( prop.modelindex <= 0 )
+	{
+		gc_static_prop_deferred++;
+		return true;	/* no model (or past the cap): nothing to draw */
+	}
+	gc_static_props[gc_num_static_props++] = prop;
+	return true;
+}
+
 /* Pre-scan the entity lump: count the entities that always take an edict
  * (everything but the soft-skipped decoration, classes the game DLL has no
  * spawn function for, and the parity set), and give the parity set what the
@@ -6136,11 +6353,20 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 {
 	char key[2048], value[2048], classname[64];
-	int total = 0, parity = 0, optional = 0, nofunc = 0, must;
+	int total = 0, parity = 0, optional = 0, nofunc = 0, statics = 0, must;
+	static gc_census_t census_must[GC_CENSUS_MAX], census_parity[GC_CENSUS_MAX];
+	int n_must = 0, n_parity = 0;
 	qboolean named;
+
+	int tier_count[GC_PARITY_TIERS] = { 0, 0, 0 }, baked = 0, t, left;
 
 	gc_parity_kept = 0;
 	gc_parity_budget = 0x7fffffff;
+	for( t = 0; t < GC_PARITY_TIERS; t++ )
+	{
+		gc_parity_tier_kept[t] = 0;
+		gc_parity_tier_budget[t] = 0x7fffffff;
+	}
 	if( !entities || !Sys_CheckParm( "-gcworldrender" ))
 		return;
 	while(( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
@@ -6165,20 +6391,47 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		if( !classname[0] || !Q_strcmp( classname, "worldspawn" ))
 			continue;
 		total++;
+		if( SV_GCStaticPropClass( classname ) && !named && !Sys_CheckParm( "-gcnostaticprops" ))
+		{
+			statics++;
+			continue;
+		}
+		if( SV_GCBakedIllusionary( classname, named ))
+		{
+			baked++;
+			continue;
+		}
 		if( SV_GCParityEntity( classname )
 			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
+		{
 			parity++;
+			tier_count[SV_GCParityTier( classname )]++;
+			SV_GCCensusAdd( census_parity, &n_parity, classname );
+		}
 		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
 			optional++;
 		else if( !SV_GetEntityClass( classname ))
 			nofunc++;
+		else
+			SV_GCCensusAdd( census_must, &n_must, classname );
 	}
-	must = total - parity - optional - nofunc;
-	gc_parity_budget = GI->max_edicts - 64 - ( svs.maxclients + 1 ) - must;
-	if( gc_parity_budget < 0 )
-		gc_parity_budget = 0;
-	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d (edicts %d)\n",
-		mapname, total, must, parity, gc_parity_budget, optional, nofunc, GI->max_edicts );
+	must = total - parity - optional - nofunc - statics - baked;
+	gc_parity_budget = GI->max_edicts - GC_PARITY_RUNTIME_RESERVE - ( svs.maxclients + 1 ) - must;
+	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
+		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
+	/* Walls first, then map logic, then lights. */
+	for( t = 0, left = gc_parity_budget; t < GC_PARITY_TIERS; t++ )
+	{
+		gc_parity_tier_budget[t] = Q_min( tier_count[t], left );
+		left -= gc_parity_tier_budget[t];
+	}
+	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d static-props=%d (edicts %d)\n",
+		mapname, total, must, parity, gc_parity_budget, optional, nofunc, statics, GI->max_edicts );
+	Con_Reportf( "Xash3D GameCube: %s parity tiers walls %d/%d logic %d/%d lights %d/%d, baked illusionary %d\n",
+		mapname, gc_parity_tier_budget[0], tier_count[0], gc_parity_tier_budget[1], tier_count[1],
+		gc_parity_tier_budget[2], tier_count[2], baked );
+	SV_GCCensusReport( mapname, "always", census_must, n_must );
+	SV_GCCensusReport( mapname, "parity", census_parity, n_parity );
 }
 
 /* Consume one `{ ... }` entity block without allocating an edict. */
@@ -6603,6 +6856,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_ent_priv_slab_hits = 0;
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;
+	SV_GCStaticPropsReset();
 	SV_GCBudgetParityEntities( mapname, entities );
 #endif
 
@@ -6635,6 +6889,13 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 				create_world = false;
 				ent = SV_EdictNum( 0 ); // already initialized
 			}
+#if XASH_GAMECUBE
+			else if( SV_GCTryStaticProp( &entities ))
+			{
+				entity_index++;
+				continue;
+			}
+#endif
 			else ent = SV_AllocEdict();
 #if XASH_GAMECUBE
 			/* CapFaces tip: no free edict — skip remaining brace blocks. */
@@ -6846,6 +7107,8 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			}
 		}
 		Con_Reportf( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
+		Con_Reportf( "Xash3D GameCube: static props %d drawn from %d models, %d without a model; edicts in use %d\n",
+			gc_num_static_props, gc_static_prop_nmodels, gc_static_prop_deferred, svgame.numEntities );
 		SYS_Report( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 #endif
 	}
