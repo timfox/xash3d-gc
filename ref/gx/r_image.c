@@ -664,6 +664,65 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 #endif
 
 #if XASH_GAMECUBE
+	/* Effect sprite frames (explosions, smoke, blood, flashes) as GX CMPR: a
+	 * quarter of the RGB565 residency, which pays for frames at twice the
+	 * size in the effect block above (cl_sprite.c caps them at 64 px, was 32).
+	 * At 32x16 DoD's explosion burst was a shapeless haze. Only frames without
+	 * real alpha: opaque (additive sprites) or cut-out (alphatest). */
+	if( gc_sprite_effect_load && tex->name[0] == '#' && Q_stristr( tex->name, "sprites/" )
+		&& pic->type == PF_RGBA_32 && pic->width >= 8 && pic->height >= 8 && pic->depth <= 1
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprsprites" ))
+	{
+		const int n = pic->width * pic->height;
+		qboolean masked = false, soft = false;
+		int i;
+
+		for( i = 0; i < n; i++ )
+		{
+			const byte a = buf[i * 4 + 3];
+
+			if( a == 0 )
+				masked = true;
+			else if( a != 255 )
+			{
+				soft = true;
+				break;
+			}
+		}
+		if( !soft )
+		{
+			int cw, ch;
+			size_t bytes;
+			byte *dst;
+
+			R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
+			bytes = R_GXCmprBytes( cw, ch );
+			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+			if( dst )
+			{
+				static int fx_cmpr_logged;
+
+				tex->width = cw;
+				tex->height = ch;
+				tex->depth = 1;
+				tex->alpha_pixels = NULL;
+				ClearBits( tex->flags, TF_HAS_ALPHA );
+				tex->gc_gx_native_alpha = R_GXEncodeCmprSkin( buf, pic->width, pic->height, cw, ch, masked, dst ) ? 1 : 0;
+				tex->pixels[0] = (pixel_t *)dst;
+				tex->gc_gx_native = true;
+				tex->gc_gx_cmpr = 1;
+				tex->numMips = 1;
+				tex->size = bytes;
+				if( fx_cmpr_logged++ < 6 )
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR effect sprite %s %dx%d -> %dx%d masked=%d (%s)\n",
+						tex->name, pic->width, pic->height, cw, ch, masked ? 1 : 0, Q_memprint( bytes ));
+				return true;
+			}
+		}
+	}
+#endif
+
+#if XASH_GAMECUBE
 	/* (Studio skins carry TF_FONT on GameCube to skip resampling, so it is
 	 * not a test here: the "#models/" name already excludes fonts.)
 	 * Character skins as GX CMPR: a quarter of the RGB565 residency, so a

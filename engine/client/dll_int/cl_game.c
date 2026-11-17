@@ -1754,7 +1754,7 @@ static byte *CL_GCLoadEffectSpriteShrunk( const char *path, fs_offset_t *sizeptr
 		FS_Seek( f, (fs_offset_t)w * h, SEEK_CUR );
 	}
 	/* the rule of Mod_SpriteLoadFrame (cl_sprite.c) */
-	cap = numframes <= 4 ? 64 : 32;
+	cap = ( numframes <= 4 || LittleLong( hdr.texFormat ) != SPR_INDEXALPHA ) ? 64 : 32;
 	while( maxw / ( fac * 2 ) >= 1 && maxh / ( fac * 2 ) >= 1 && ( maxw / fac > cap || maxh / fac > cap ))
 		fac *= 2;
 	if( fac < 2 || minw < fac || minh < fac )

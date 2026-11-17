@@ -1886,8 +1886,12 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 			|| r_gx_native_bound_pixels != img->pixels[0] )
 		{
 			r_gx_native_bound_pixels = img->pixels[0];
+			/* Sprite frames are whole pictures: wrapped, the linear filter
+			 * pulled the opposite edge in as a thin line. */
+			const u8 wrap = Q_stristr( img->name, "sprites/" ) ? GX_CLAMP : GX_REPEAT;
+
 			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
-				GX_TF_CMPR, GX_REPEAT, GX_REPEAT, GX_FALSE );
+				GX_TF_CMPR, wrap, wrap, GX_FALSE );
 			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
 			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
 			t->texnum = texnum;

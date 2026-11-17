@@ -477,9 +477,12 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 	sprite_pal = NULL;
 	sprite_pal_count = 0;
 	sprite_tex_format = psprite->texFormat;
-	/* Few frames (muzzle flash, ricochet): 64 px. Animations (explosions,
-	 * steam): 32 px per frame. */
-	sprite_fx_cap = gc_sprite_effect_load ? ( mod->numframes <= 4 ? 64 : 32 ) : 0;
+	/* 64 px per frame: the renderer stores opaque and cut-out frames as CMPR
+	 * (ref/gx/r_image.c). Animations with a real alpha channel (indexalpha
+	 * smoke) stay RGB565 and keep 32 px. CL_GCLoadEffectSpriteShrunk
+	 * (cl_game.c) follows the same rule. */
+	sprite_fx_cap = gc_sprite_effect_load
+		? (( mod->numframes <= 4 || psprite->texFormat != SPR_INDEXALPHA ) ? 64 : 32 ) : 0;
 #endif
 	Q_strncpy( sprite_name, mod->name, sizeof( sprite_name ));
 	COM_StripExtension( sprite_name );
