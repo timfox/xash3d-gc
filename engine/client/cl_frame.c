@@ -2391,6 +2391,10 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( held && held->type == mod_studio && held->cache.data
 				&& clgame.viewent.model != held )
 			{
+				/* A gun the server precache already made resident skipped
+				 * the ensure call above, so it never got its *t skins (flat
+				 * pink v_enfield) or became the protected held slot. */
+				Mod_GCEnsureLandmarkViewModel( vpath );
 				clgame.viewent.model = held;
 				clgame.viewent.curstate.modelindex = vmi;
 				clgame.viewent.curstate.animtime = (float)cl.time;
