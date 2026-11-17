@@ -34,7 +34,7 @@ GNU General Public License for more details.
  * on first use: sprites load as client sprites, studio models come from the
  * server's resident handle. A failed index is retried after 10 s.
  * Sprites load with smaller frames (gc_sprite_effect_load, cl_sprite.c) and
- * only while 48 KiB of MEM1 stays free, so effects never take the memory
+ * only while 80 KiB of MEM1 stays free, so effects never take the memory
  * the HUD and the view model skins need.
  */
 extern qboolean gc_sprite_effect_load;
@@ -43,7 +43,9 @@ static model_t *CL_GCLoadEffectSprite( const char *name )
 {
 	model_t *mod;
 
-	if( GC_MemHeapFreeBytes() < 48 * 1024 )
+	/* Leave room for HUD sheets that load mid-match (the 128x128
+	 * crosshair needs 32 KiB). */
+	if( GC_MemHeapFreeBytes() < 80 * 1024 )
 		return NULL;
 	gc_sprite_effect_load = true;
 	mod = CL_LoadClientSprite( name );
@@ -419,19 +421,19 @@ void CL_GCEnsureTempEntPool( void )
 	if( host.realtime < next_try )
 		return;
 	next_try = host.realtime + 5.0;
-	if( GC_MemHeapFreeBytes() > bytes + 64 * 1024 )
-		cl_tempents = Mem_Calloc( cls.mempool, bytes );
-	if( !cl_tempents )
+	/* World spill first: 27 KiB of heap for the pool left the view model
+	 * and the crosshair without texture memory (dark rifle, crosshair OOM
+	 * on charlie). The heap only when it is plentiful. */
+	cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
+	if( cl_tempents )
 	{
-		cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
-		if( cl_tempents )
-		{
-			memset( cl_tempents, 0, bytes );
-			Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
-			gc_tempents_in_spill = true;
-			where = "spill";
-		}
+		memset( cl_tempents, 0, bytes );
+		Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
+		gc_tempents_in_spill = true;
+		where = "spill";
 	}
+	else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
+		cl_tempents = Mem_Calloc( cls.mempool, bytes );
 	if( !cl_tempents )
 	{
 		static int fail_logs;
@@ -686,9 +688,37 @@ events and the update here. Returns how many were linked.
 int CL_GCRelinkTempEnts( void )
 {
 	static int logs;
+	static convar_t *gc_fxtest;
+	static double next_fxtest;
 	int i, ran = 0;
 
 	CL_GCEnsureTempEntPool();
+	/* gc_fxtest 1: a muzzle flash sprite 64 units in front of the view every
+	 * second, living a second, so a capture can prove the sprite path draws
+	 * without having to catch a 0.1 s flash. */
+	if( !gc_fxtest )
+		gc_fxtest = Cvar_Get( "gc_fxtest", "0", 0, "GameCube test: 1 shows a muzzle flash sprite in front of the view every second" );
+	if( gc_fxtest && gc_fxtest->value && cl_tempents && cl_sprite_muzzleflash[0] && host.realtime >= next_fxtest )
+	{
+		static int fx_logs;
+		vec3_t forward, org;
+		TEMPENTITY *t;
+
+		next_fxtest = host.realtime + 1.0;
+		AngleVectors( cl.viewangles, forward, NULL, NULL );
+		VectorMA( refState.vieworg, 64.0f, forward, org );
+		t = CL_TempEntAlloc( org, cl_sprite_muzzleflash[0] );
+		if( t )
+		{
+			t->entity.curstate.rendermode = kRenderTransAdd;
+			t->entity.curstate.renderamt = 255;
+			t->entity.curstate.scale = 0.5f;
+			t->die = cl.time + 1.0f;
+		}
+		if( fx_logs++ < 4 )
+			Con_Reportf( "Xash3D GameCube: fx test sprite %s at (%.0f %.0f %.0f)\n",
+				t ? "spawned" : "refused", org[0], org[1], org[2] );
+	}
 	if( gc_tent_update_frame != (int)host.framecount )
 	{
 		CL_FireEvents();
