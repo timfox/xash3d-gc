@@ -177,12 +177,22 @@ CL_ClearTempEnts
 
 ================
 */
+#if XASH_GAMECUBE
+/* Entries actually allocated in cl_tempents (CL_InitTempEnts caps the pool
+ * below GI->max_tents). Linking GI->max_tents entries wrote free-list
+ * pointers past the end of a 4-entry allocation. */
+static int cl_tempents_count;
+unsigned gc_fx_tent_alloc, gc_fx_tent_overflow, gc_fx_tent_nomodel, gc_fx_te_parsed;
+#endif
+
 static void CL_ClearTempEnts( void )
 {
 	int max_tents = GI->max_tents;
 #if XASH_GAMECUBE
 	if( Sys_CheckParm( "-gcmap" ))
 		max_tents = Q_min( max_tents, 4 );
+	if( cl_tempents_count > 0 )
+		max_tents = Q_min( max_tents, cl_tempents_count );
 #endif
 
 	if( !cl_tempents ) return;
@@ -218,6 +228,9 @@ void CL_InitTempEnts( void )
 #endif
 
 	cl_tempents = Mem_Calloc( cls.mempool, sizeof( TEMPENTITY ) * max_tents );
+#if XASH_GAMECUBE
+	cl_tempents_count = cl_tempents ? max_tents : 0;
+#endif
 	CL_ClearTempEnts();
 
 	// load tempent sprites (glowshell, muzzleflashes etc)
@@ -472,6 +485,32 @@ int CL_GCRelinkTempEnts( void )
 		for( i = 0; i < gc_tent_linked_n; i++ )
 			CL_AddVisibleEntity( gc_tent_linked[i], ET_TEMPENTITY );
 	}
+	{
+		/* Every 5 s: why effects do or do not show on this route. */
+		extern unsigned gc_fx_particles_alloc, gc_fx_particles_noframe, gc_fx_events_fired;
+		static double next_diag;
+		TEMPENTITY *t;
+		int active = 0, nomodel = 0;
+
+		if( host.realtime >= next_diag )
+		{
+			next_diag = host.realtime + 5.0;
+			for( t = cl_active_tents; t && active < 1024; t = t->next )
+			{
+				active++;
+				if( !t->entity.model )
+					nomodel++;
+			}
+			Con_Reportf( "Xash3D GameCube: fx diag cl.time=%.3f dt=%.4f pool=%d active=%d (no model %d) linked=%d %s; "
+				"tents alloc=%u overflow=%u nomodel=%u; TE=%u events=%u; particles alloc=%u refused(dt=0)=%u; muzzle sprite=%s\n",
+				cl.time, cl.time - cl.oldtime, cl_tempents_count, active, nomodel, gc_tent_linked_n,
+				ran ? "updated here" : "relinked", gc_fx_tent_alloc, gc_fx_tent_overflow, gc_fx_tent_nomodel,
+				gc_fx_te_parsed, gc_fx_events_fired, gc_fx_particles_alloc, gc_fx_particles_noframe,
+				cl_sprite_muzzleflash[0] ? "loaded" : "missing" );
+			gc_fx_tent_alloc = gc_fx_tent_overflow = gc_fx_tent_nomodel = gc_fx_te_parsed = 0;
+			gc_fx_events_fired = gc_fx_particles_alloc = gc_fx_particles_noframe = 0;
+		}
+	}
 	if( gc_tent_linked_n > 0 && logs < 6 )
 	{
 		logs++;
@@ -530,6 +569,9 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 
 	if( !cl_free_tents )
 	{
+#if XASH_GAMECUBE
+		gc_fx_tent_overflow++;
+#endif
 		if( cl_lasttimewarn < host.realtime )
 		{
 			Con_DPrintf( "Overflow %d temporary ents!\n", GI->max_tents );
@@ -542,6 +584,11 @@ TEMPENTITY *CL_TempEntAlloc( const vec3_t org, model_t *pmodel )
 	cl_free_tents = pTemp->next;
 
 	CL_PrepareTEnt( pTemp, pmodel );
+#if XASH_GAMECUBE
+	gc_fx_tent_alloc++;
+	if( !pmodel )
+		gc_fx_tent_nomodel++;
+#endif
 
 	pTemp->priority = TENTPRIORITY_LOW;
 	if( org ) VectorCopy( org, pTemp->entity.origin );
@@ -1963,6 +2010,9 @@ void CL_ParseTempEntity( sizebuf_t *msg, connprotocol_t proto )
 	sound_t	hSound;
 	const char *name;
 
+#if XASH_GAMECUBE
+	gc_fx_te_parsed++;
+#endif
 	if( proto != PROTO_GOLDSRC )
 	{
 		int iSize = MSG_ReadWord( msg );

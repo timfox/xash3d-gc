@@ -175,6 +175,10 @@ particle_t *CL_AllocParticleFast( void )
 	return p;
 }
 
+#if XASH_GAMECUBE
+unsigned gc_fx_particles_alloc, gc_fx_particles_noframe;
+#endif
+
 /*
 ================
 R_AllocParticle
@@ -190,7 +194,15 @@ particle_t * GAME_EXPORT R_AllocParticle( void (*callback)( particle_t*, float )
 		return NULL;
 
 	// never alloc particles when we not in game
+#if XASH_GAMECUBE
+	if( cl_clientframetime() == 0.0 )
+	{
+		gc_fx_particles_noframe++;
+		return NULL;
+	}
+#else
 	if( cl_clientframetime() == 0.0 ) return NULL;
+#endif
 
 	if( !cl_free_particles )
 	{
@@ -207,6 +219,9 @@ particle_t * GAME_EXPORT R_AllocParticle( void (*callback)( particle_t*, float )
 	cl_free_particles = p->next;
 	p->next = cl_active_particles;
 	cl_active_particles = p;
+#if XASH_GAMECUBE
+	gc_fx_particles_alloc++;
+#endif
 
 	// clear old particle
 	p->type = pt_static;
