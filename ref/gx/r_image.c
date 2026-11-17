@@ -71,10 +71,81 @@ static qboolean R_GCIsStudioSkinOverflow( const void *ptr )
 	return Mod_GCIsStudioSkin( ptr );
 }
 
+/* Effect sprites (explosion, steam, blood, smoke) get their pixels from a
+ * block of their own. In the shared heap they always lost: a DoD match uses
+ * every free byte (view models, resident textures), so the sprites either
+ * failed their free-heap gate or, when let in first, starved the grenade
+ * view model skins. The block is filled while gc_sprite_effect_load is set
+ * (engine/client/cl_sprite.c). */
+/* 208 KiB: exactly the BSS this build gave up elsewhere (the Half-Life
+ * changelevel entity fallback and the unused pool chain slots). Freed BSS that
+ * went to the heap instead was taken at once by a third resident view model
+ * and left the grenade hands without skins. */
+#define GC_FX_PIXELS_BYTES ( 208u * 1024u )
+#define GC_FX_PIXELS_ALLOCS 256
+extern qboolean gc_sprite_effect_load;
+static byte gc_fx_pixels[GC_FX_PIXELS_BYTES] __attribute__((aligned(32)));
+static size_t gc_fx_pixels_used;
+/* Offsets of the live allocations in address order; bit 31 marks one that was
+ * freed while a later one is still live. The top rewinds over freed entries,
+ * so the transient copies a sprite upload makes do not stay charged. */
+static uint gc_fx_pixels_at[GC_FX_PIXELS_ALLOCS];
+static int gc_fx_pixels_count;
+
+static qboolean R_GCIsFxPixels( const void *ptr )
+{
+	return (const byte *)ptr >= gc_fx_pixels && (const byte *)ptr < gc_fx_pixels + GC_FX_PIXELS_BYTES;
+}
+
+static byte *R_GCAllocFxPixels( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+	byte *out;
+
+	if( !gc_sprite_effect_load || bytes == 0 || gc_fx_pixels_count >= GC_FX_PIXELS_ALLOCS
+		|| gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+		return NULL;
+	out = gc_fx_pixels + gc_fx_pixels_used;
+	gc_fx_pixels_at[gc_fx_pixels_count++] = (uint)gc_fx_pixels_used;
+	gc_fx_pixels_used += need;
+	memset( out, 0, need );
+	return out;
+}
+
+static void R_GCFreeFxPixels( const void *ptr )
+{
+	const uint at = (uint)((const byte *)ptr - gc_fx_pixels );
+	int i;
+
+	for( i = gc_fx_pixels_count - 1; i >= 0; i-- )
+	{
+		if( gc_fx_pixels_at[i] == at )
+		{
+			gc_fx_pixels_at[i] |= 0x80000000u;
+			break;
+		}
+	}
+	while( gc_fx_pixels_count > 0 && ( gc_fx_pixels_at[gc_fx_pixels_count - 1] & 0x80000000u ))
+		gc_fx_pixels_used = gc_fx_pixels_at[--gc_fx_pixels_count] & 0x7fffffffu;
+}
+
+size_t R_GCFxPixelsFree( void )
+{
+	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used;
+}
+
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
  * use it as a texture in place (R_GXNativeTexture in r_gx_world.c). */
 static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 {
+	byte *fx = R_GCAllocFxPixels( bytes );
+
+	if( fx )
+	{
+		if( level == 0 )
+			tex->gc_pixels_base = fx;
+		return (pixel_t *)fx;
+	}
 	byte *base = (byte *)Mem_TryCalloc( r_temppool, bytes + ( level == 0 ? 31 : 0 ));
 	if( !base && level == 0 && bytes <= sizeof( gc_tiny_pixels[0] ))
 	{
@@ -101,6 +172,15 @@ static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 
 void R_GCFreeMip( image_t *tex, uint level )
 {
+	const void *fx = level == 0 && tex->gc_pixels_base ? (void *)tex->gc_pixels_base : (void *)tex->pixels[level];
+
+	if( R_GCIsFxPixels( fx ))
+	{
+		R_GCFreeFxPixels( fx );
+		if( level == 0 )
+			tex->gc_pixels_base = NULL;
+		return;
+	}
 	if( level == 0 && tex->gc_pixels_base )
 	{
 		for( unsigned i = 0; i < ARRAYSIZE( gc_tiny_pixels ); i++ )

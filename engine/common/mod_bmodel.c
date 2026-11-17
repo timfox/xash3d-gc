@@ -118,8 +118,12 @@ static qboolean gc_entities_static_block;
 /* Tip-safe HL1 changelevel: dense dest entity lumps miss fragmented tip
  * (c3a2a≈75 KiB, c4a3≈98 KiB). DoD listen CapFaces needs that tip back
  * (tip-donner OOM when BSS was linked) — valve builds omit LIBBBA, so
- * gate the BSS on that. Call site already requires BYTES > 0. */
-#if !defined(XASH_GAMECUBE_HAVE_LIBBBA) || !XASH_GAMECUBE_HAVE_LIBBBA
+ * gate the BSS on that. Call site already requires BYTES > 0.
+ * The LIBBBA define does not reach this file in the DoD build (the link
+ * map still showed the 112 KiB block), so the DoD build is excluded by its
+ * own define too: it never passes -gcchangelevel. */
+#if ( !defined(XASH_GAMECUBE_HAVE_LIBBBA) || !XASH_GAMECUBE_HAVE_LIBBBA ) \
+	&& !( defined(XASH_DODGC_NETWORK) && XASH_DODGC_NETWORK )
 #define GC_CHANGELEVEL_ENTITIES_FALLBACK_BYTES ( 112u * 1024u )
 static char gc_changelevel_entities_fallback_bss[GC_CHANGELEVEL_ENTITIES_FALLBACK_BYTES];
 static char *gc_changelevel_entities_fallback = gc_changelevel_entities_fallback_bss;

@@ -1697,6 +1697,114 @@ static void CL_GCReleaseHudSpriteBss( byte *buf )
 		Image_GCReleaseMdlDecode();
 	}
 }
+
+/*
+ * An effect sprite whose file does not fit the free heap (DoD's
+ * zerogxplode.spr: 24 frames of 128x64, 198 KiB, against ~90 KiB free in a
+ * match) is read from disc a row at a time into a small copy whose frames are
+ * already at the size the effect loader would shrink them to. The copy is a
+ * valid sprite file, little-endian like the original; *prescale is the factor
+ * the frames were shrunk by, so the loader can keep their drawn size.
+ */
+extern qboolean gc_sprite_effect_load;
+extern int gc_sprite_fx_prescale;
+
+static byte *CL_GCLoadEffectSpriteShrunk( const char *path, fs_offset_t *sizeptr, int *prescale )
+{
+	dsprite_hl_t hdr;
+	dframetype_t ftype;
+	dspriteframe_t fr;
+	byte row[1024];
+	file_t *f;
+	byte *out = NULL, *o;
+	short numi_le;
+	int numi, numframes, i, x, y, w, h, cap, fac = 1;
+	int maxw = 0, maxh = 0, minw = 0x7fffffff, minh = 0x7fffffff;
+	size_t head, pixels = 0, out_bytes;
+
+	f = FS_Open( path, "rb", false );
+	if( !f )
+		return NULL;
+	if( FS_Read( f, &hdr, sizeof( hdr )) != (fs_offset_t)sizeof( hdr )
+		|| FS_Read( f, &numi_le, sizeof( numi_le )) != (fs_offset_t)sizeof( numi_le )
+		|| LittleLong( hdr.version ) != SPRITE_VERSION_HL )
+		goto fail;
+	numi = LittleShort( numi_le );
+	numframes = LittleLong( hdr.numframes );
+	if( numi < 1 || numi > 256 || numframes < 1 || numframes > 256 )
+		goto fail;
+	head = sizeof( hdr ) + sizeof( numi_le ) + (size_t)numi * 3;
+
+	FS_Seek( f, (fs_offset_t)head, SEEK_SET );
+	for( i = 0; i < numframes; i++ )
+	{
+		if( FS_Read( f, &ftype, sizeof( ftype )) != (fs_offset_t)sizeof( ftype )
+			|| FS_Read( f, &fr, sizeof( fr )) != (fs_offset_t)sizeof( fr )
+			|| LittleLong( ftype.type ) != FRAME_SINGLE )
+			goto fail;
+		w = LittleLong( fr.width );
+		h = LittleLong( fr.height );
+		if( w < 1 || h < 1 || w > (int)sizeof( row ) || h > 1024 )
+			goto fail;
+		if( w > maxw ) maxw = w;
+		if( h > maxh ) maxh = h;
+		if( w < minw ) minw = w;
+		if( h < minh ) minh = h;
+		pixels += (size_t)w * h;
+		FS_Seek( f, (fs_offset_t)w * h, SEEK_CUR );
+	}
+	/* the rule of Mod_SpriteLoadFrame (cl_sprite.c) */
+	cap = numframes <= 4 ? 64 : 32;
+	while( maxw / ( fac * 2 ) >= 1 && maxh / ( fac * 2 ) >= 1 && ( maxw / fac > cap || maxh / fac > cap ))
+		fac *= 2;
+	if( fac < 2 || minw < fac || minh < fac )
+		goto fail;
+
+	out_bytes = head + (size_t)numframes * ( sizeof( ftype ) + sizeof( fr )) + pixels / ( (size_t)fac * fac );
+	out = (byte *)malloc( out_bytes );
+	if( !out )
+		goto fail;
+	FS_Seek( f, 0, SEEK_SET );
+	if( FS_Read( f, out, (fs_offset_t)head ) != (fs_offset_t)head )
+		goto fail;
+	o = out + head;
+	for( i = 0; i < numframes; i++ )
+	{
+		if( FS_Read( f, &ftype, sizeof( ftype )) != (fs_offset_t)sizeof( ftype )
+			|| FS_Read( f, &fr, sizeof( fr )) != (fs_offset_t)sizeof( fr ))
+			goto fail;
+		w = LittleLong( fr.width );
+		h = LittleLong( fr.height );
+		fr.width = LittleLong( w / fac );
+		fr.height = LittleLong( h / fac );
+		memcpy( o, &ftype, sizeof( ftype ));
+		o += sizeof( ftype );
+		memcpy( o, &fr, sizeof( fr ));
+		o += sizeof( fr );
+		for( y = 0; y < h / fac; y++ )
+		{
+			if( FS_Read( f, row, w ) != w )
+				goto fail;
+			for( x = 0; x < w / fac; x++ )
+				*o++ = row[x * fac];
+			FS_Seek( f, (fs_offset_t)( fac - 1 ) * w, SEEK_CUR );
+		}
+		FS_Seek( f, (fs_offset_t)( h % fac ) * w, SEEK_CUR );
+	}
+	FS_Close( f );
+	if( (size_t)( o - out ) > out_bytes )
+		Host_Error( "%s: %s overran its copy\n", __func__, path );
+	*sizeptr = (fs_offset_t)( o - out );
+	*prescale = fac;
+	Con_Reportf( "Xash3D GameCube: effect sprite %s read shrunk by %d from disc (%d frames, copy %s)\n",
+		path, fac, numframes, Q_memprint( (size_t)( o - out )));
+	return out;
+fail:
+	FS_Close( f );
+	if( out )
+		free( out );
+	return NULL;
+}
 #endif
 
 /*
@@ -1855,6 +1963,11 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 				Image_GCPurgeDecodeScratch();
 				buf = CL_GCLoadHudSpriteBss( loadname, &size );
 			}
+			if( buf == NULL && gc_sprite_effect_load && type == SPR_CLIENT )
+			{
+				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
+				used_sys = buf != NULL;
+			}
 			if( buf == NULL )
 			{
 				return false;
@@ -1868,6 +1981,7 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 				ref.dllFuncs.Mod_ProcessRenderData( m_pSprite, true, buf, size );
 			}
 
+			gc_sprite_fx_prescale = 1;
 			if( buf == gc_hud_spr_bss || Image_GCIsMdlDecode( buf ))
 				CL_GCReleaseHudSpriteBss( buf );
 			else if( used_sys )

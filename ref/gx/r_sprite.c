@@ -28,6 +28,12 @@ R_CullSpriteModel
 Cull sprite model by bbox
 ================
 */
+#if XASH_GAMECUBE
+/* Set while a sprite must darken the frame instead of blending over it
+ * (read by R_GXEffectsTriBegin, r_gx_world.c). */
+qboolean r_gx_effects_darken;
+#endif
+
 static qboolean R_CullSpriteModel( cl_entity_t *e, vec3_t origin )
 {
 	vec3_t sprite_mins, sprite_maxs;
@@ -163,12 +169,16 @@ void R_DrawSpriteModel( cl_entity_t *e )
 	float original_blend = tr.blend;
 	int vis = GC_GetVisualQuality();
 	qboolean low_quality_skip_occlusion = ( vis == 0 );
+	/* Not on Day of Defeat: at half brightness its pale explosion burst
+	 * (zerogxplode.spr, renderamt 180) was a faint tan haze. */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
 	if( low_quality_skip_occlusion && ( e->curstate.rendermode == kRenderGlow ||
 	                                    e->curstate.rendermode == kRenderTransAdd ))
 	{
 		// Reduce brightness for glow/additive sprites in low-memory mode
 		tr.blend *= 0.5f;
 	}
+#endif
 #endif
 
 	mspriteframe_t *frame = NULL;
@@ -220,6 +230,15 @@ void R_DrawSpriteModel( cl_entity_t *e )
 		R_AllowFog( false );
 
 	GL_SetRenderMode( e->curstate.rendermode );
+#if XASH_GAMECUBE
+	/* An additive-format sprite has no alpha: brightness is its coverage.
+	 * Drawn solid or alpha-blended its black background was an opaque box
+	 * (DoD's steam1.spr as grenade smoke: R_Sprite_Smoke, kRenderTransAlpha,
+	 * dark tint, scale 12). GoldSrc shows dark translucent puffs there, so
+	 * the texture darkens what is behind it (r_gx_world.c). */
+	r_gx_effects_darken = psprite->texFormat == SPR_ADDITIVE
+		&& ( e->curstate.rendermode == kRenderNormal || e->curstate.rendermode == kRenderTransAlpha );
+#endif
 
 	// NOTE: never pass sprites with rendercolor '0 0 0' it's a stupid Valve Hammer Editor bug
 	if( e->curstate.rendercolor.r || e->curstate.rendercolor.g || e->curstate.rendercolor.b )
@@ -260,6 +279,7 @@ void R_DrawSpriteModel( cl_entity_t *e )
 		if(( dot > 0.999848f ) || ( dot < -0.999848f )) // cos(1 degree) = 0.999848
 		{
 #if XASH_GAMECUBE
+			r_gx_effects_darken = false;
 			tr.blend = original_blend;
 #endif
 			return; // invisible
@@ -288,11 +308,17 @@ void R_DrawSpriteModel( cl_entity_t *e )
 	// GL_Cull( GL_NONE );
 
 	// draw the single non-lerped frame
+#if XASH_GAMECUBE
+	if( r_gx_effects_darken )
+		_TriColor4f( tr.blend, tr.blend, tr.blend, 1.0f );
+	else
+#endif
 	_TriColor4f( color[0], color[1], color[2], tr.blend );
 	GL_Bind( XASH_TEXTURE0, frame->gl_texturenum );
 	R_DrawSpriteQuad( frame, origin, v_right, v_up, scale );
 
 #if XASH_GAMECUBE
+	r_gx_effects_darken = false;
 	tr.blend = original_blend;
 #endif
 }

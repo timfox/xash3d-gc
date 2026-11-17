@@ -151,7 +151,15 @@ static size_t poolcount = 0;
  * but no contiguous block for realloc(). Keep a bounded table reserve so
  * creating late sprite/model pools does not become a false OOM. Handles are
  * indices, so relocating the table is safe after copying live entries. */
+/* DoD never has more than 32 pools live (18 at map active on dod_charlie);
+ * the reserve was never touched there, and at 1024 entries of 112 bytes it
+ * kept 112 KiB of MEM1 out of the heap. 160 entries leave five times the
+ * measured peak. */
+#if defined(XASH_DODGC_NETWORK) && XASH_DODGC_NETWORK
+#define GC_POOLCHAIN_RESERVE 160
+#else
 #define GC_POOLCHAIN_RESERVE 1024
+#endif
 static mempool_t gc_poolchain_reserve[GC_POOLCHAIN_RESERVE];
 static qboolean gc_poolchain_static;
 #endif
