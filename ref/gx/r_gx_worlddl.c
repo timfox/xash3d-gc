@@ -2709,8 +2709,27 @@ int R_GXWorldDLDraw( void )
 					keys[bq] = kv;
 				}
 			}
+			/* The tower test and the far-pool test only need the box and the
+			 * distance just computed. Both go in the spare top bits of the
+			 * order entry (chunk ids stay under 8192), so the draw passes do
+			 * not redo the distance, the span and two tower tests per chunk:
+			 * about fifty int-to-float conversions each, the slow kind on
+			 * the Gekko. */
 			for( a = 0; a < norder; a++ )
-				order[a] = (u16)( keys[a] & 0xffffu );
+			{
+				const u32 ci = (u32)( keys[a] & 0xffffu );
+				union { float f; u32 u; } d;
+				const float dx = gc_wd_chunk_maxs[ci * 3] - gc_wd_chunk_mins[ci * 3];
+				const float dy = gc_wd_chunk_maxs[ci * 3 + 1] - gc_wd_chunk_mins[ci * 3 + 1];
+				const float dz = gc_wd_chunk_maxs[ci * 3 + 2] - gc_wd_chunk_mins[ci * 3 + 2];
+				const float span = Q_max( dx, Q_max( dy, dz ));
+
+				d.u = (u32)( keys[a] >> 16 );
+				order[a] = (u16)( ci
+					| ( R_GXWorldDLIsTower( ci ) ? 0x8000u : 0u )
+					| (( gc_wd_tex_overflow && d.f > 1400.0f * 1400.0f
+						&& span * span < d.f * 0.015625f ) ? 0x4000u : 0u ));
+			}
 			if( gc_wd_pf_on > 0 )
 			{
 				gc_wd_pf[0] += gettime() - pf_t;
@@ -2744,23 +2763,16 @@ int R_GXWorldDLDraw( void )
 			qboolean chunk_far = false;
 			int lm_slot = 0;	/* lightmap store slot + 1, 0 = unlit */
 
-			i = order[oi];
-			if( R_GXWorldDLIsTower( i ) != want_tower )
+			i = order[oi] & 0x1fffu;
+			if((( order[oi] & 0x8000u ) != 0 ) != want_tower )
 				continue;
 			/* Past 1400 units a 128x128 texture is already on its 64x64
 			 * mip; bind it from the small-slot pool. */
 			/* Only when the pack has more textures than full-size slots. */
-			{
-				const float d2 = R_GXWorldDLChunkD2( (u16)i );
-				const float dx = gc_wd_chunk_maxs[i * 3] - gc_wd_chunk_mins[i * 3];
-				const float dy = gc_wd_chunk_maxs[i * 3 + 1] - gc_wd_chunk_mins[i * 3 + 1];
-				const float dz = gc_wd_chunk_maxs[i * 3 + 2] - gc_wd_chunk_mins[i * 3 + 2];
-				const float span = Q_max( dx, Q_max( dy, dz ));
-				/* A large cliff can cover much of the view even at a distance. */
-				chunk_far = gc_wd_tex_overflow && d2 > 1400.0f * 1400.0f
-					&& span * span < d2 * 0.015625f;
-				R_GXCmprSetFar( chunk_far );
-			}
+			/* A large cliff can cover much of the view even at a distance
+			 * (decided with the sort, above). */
+			chunk_far = ( order[oi] & 0x4000u ) != 0;
+			R_GXCmprSetFar( chunk_far );
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
 			{
