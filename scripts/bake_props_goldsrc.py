@@ -670,9 +670,12 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 				c = floor.at((0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), maxs[2]))
 		if c is None:
 			c = (150, 150, 150)
-		c = [max(28, v) for v in c]
-		base = [int(v * 0.6) for v in c]
-		direct = [int(v * 0.4) for v in c]
+		# Props read darker than the lightmapped walls beside them at 0.6 +
+		# 0.4 (Dolphin, charlie beach): the shaded side keeps 0.75 and the
+		# lit side may reach 1.2, which GX clamps per channel.
+		c = [max(40, v) for v in c]
+		base = [int(v * 0.75) for v in c]
+		direct = [min(255, int(v * 0.45)) for v in c]
 		light_blob += bytes(base + [0, 0, 0] + direct + [0, 0, 0])
 		inst_blob += struct.pack(
 			">HH3h3h3h3hI",
