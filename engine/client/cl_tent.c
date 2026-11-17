@@ -97,9 +97,10 @@ static model_t *CL_GCTentModelHandle( int modelindex )
  * free at spawn, 22 KiB a little later), so explosion, steam and blood
  * sprites failed the 80 KiB gate above for the whole map. Load the server's
  * precached sprites right after the map goes active instead, one per frame,
- * while 64 KiB stays free. (A 128 KiB floor loaded nothing: charlie has
- * 126 KiB free when the client goes active. Large HUD sheets no longer need
- * heap here; they stream from ARAM.)
+ * while 96 KiB stays free. Measured on charlie, which has 126 KiB free
+ * when the client goes active: a 128 KiB floor loaded nothing; a 64 KiB
+ * floor loaded four sprites (68 KiB) but the grenade view model skins then
+ * failed to allocate.
  */
 static void CL_GCPrewarmEffectSprites( void )
 {
@@ -127,7 +128,7 @@ static void CL_GCPrewarmEffectSprites( void )
 			break;
 		if( cl.models[next] || !Q_stristr( name, ".spr" ))
 			continue;
-		if( GC_MemHeapFreeBytes() < 64 * 1024 )
+		if( GC_MemHeapFreeBytes() < 96 * 1024 )
 		{
 			done = true;
 			Con_Reportf( "Xash3D GameCube: effect sprites prewarmed %d, stopped at %s (heap %s)\n",
