@@ -90,6 +90,8 @@ static size_t gc_fx_pixels_used;
  * freed while a later one is still live. The top rewinds over freed entries,
  * so the transient copies a sprite upload makes do not stay charged. */
 static uint gc_fx_pixels_at[GC_FX_PIXELS_ALLOCS];
+/* Bytes at the end of the block lent out as scratch (R_GCFxScratchAlloc). */
+static size_t gc_fx_scratch;
 static int gc_fx_pixels_count;
 
 static qboolean R_GCIsFxPixels( const void *ptr )
@@ -103,7 +105,7 @@ static byte *R_GCAllocFxPixels( size_t bytes )
 	byte *out;
 
 	if( !gc_sprite_effect_load || bytes == 0 || gc_fx_pixels_count >= GC_FX_PIXELS_ALLOCS
-		|| gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+		|| gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES - gc_fx_scratch )
 		return NULL;
 	out = gc_fx_pixels + gc_fx_pixels_used;
 	gc_fx_pixels_at[gc_fx_pixels_count++] = (uint)gc_fx_pixels_used;
@@ -131,7 +133,26 @@ static void R_GCFreeFxPixels( const void *ptr )
 
 size_t R_GCFxPixelsFree( void )
 {
-	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used;
+	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used - gc_fx_scratch;
+}
+
+/* The unused end of the block as scratch for one sprite load: the shrunk copy
+ * of a large sprite file (cl_game.c) is 50 KiB in one piece, which the
+ * fragmented heap of a match cannot give. One loan at a time; frames keep
+ * filling the block from the start meanwhile. */
+byte *R_GCFxScratchAlloc( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+
+	if( gc_fx_scratch || bytes == 0 || gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+		return NULL;
+	gc_fx_scratch = need;
+	return gc_fx_pixels + GC_FX_PIXELS_BYTES - need;
+}
+
+void R_GCFxScratchFree( void )
+{
+	gc_fx_scratch = 0;
 }
 
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
@@ -659,6 +680,65 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			resampleHeight = Q_min( resampleHeight, cap );
 			tex->width = resampleWidth;
 			tex->height = resampleHeight;
+		}
+	}
+#endif
+
+#if XASH_GAMECUBE
+	/* Effect sprite frames (explosions, smoke, blood, flashes) as GX CMPR: a
+	 * quarter of the RGB565 residency, which pays for frames at twice the
+	 * size in the effect block above (cl_sprite.c caps them at 64 px, was 32).
+	 * At 32x16 DoD's explosion burst was a shapeless haze. Only frames without
+	 * real alpha: opaque (additive sprites) or cut-out (alphatest). */
+	if( gc_sprite_effect_load && tex->name[0] == '#' && Q_stristr( tex->name, "sprites/" )
+		&& pic->type == PF_RGBA_32 && pic->width >= 8 && pic->height >= 8 && pic->depth <= 1
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprsprites" ))
+	{
+		const int n = pic->width * pic->height;
+		qboolean masked = false, soft = false;
+		int i;
+
+		for( i = 0; i < n; i++ )
+		{
+			const byte a = buf[i * 4 + 3];
+
+			if( a == 0 )
+				masked = true;
+			else if( a != 255 )
+			{
+				soft = true;
+				break;
+			}
+		}
+		if( !soft )
+		{
+			int cw, ch;
+			size_t bytes;
+			byte *dst;
+
+			R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
+			bytes = R_GXCmprBytes( cw, ch );
+			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+			if( dst )
+			{
+				static int fx_cmpr_logged;
+
+				tex->width = cw;
+				tex->height = ch;
+				tex->depth = 1;
+				tex->alpha_pixels = NULL;
+				ClearBits( tex->flags, TF_HAS_ALPHA );
+				tex->gc_gx_native_alpha = R_GXEncodeCmprSkin( buf, pic->width, pic->height, cw, ch, masked, dst ) ? 1 : 0;
+				tex->pixels[0] = (pixel_t *)dst;
+				tex->gc_gx_native = true;
+				tex->gc_gx_cmpr = 1;
+				tex->numMips = 1;
+				tex->size = bytes;
+				if( fx_cmpr_logged++ < 6 )
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR effect sprite %s %dx%d -> %dx%d masked=%d (%s)\n",
+						tex->name, pic->width, pic->height, cw, ch, masked ? 1 : 0, Q_memprint( bytes ));
+				return true;
+			}
 		}
 	}
 #endif
