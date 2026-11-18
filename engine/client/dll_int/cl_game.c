@@ -1968,6 +1968,14 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 						loadname, Q_memprint( (size_t)size ));
 				}
 			}
+			/* Stage the file in the BSS / decode buffer before the FileSystem pool is asked
+			 * for it. When malloc already missed, the pool request fails too (65-193 KiB on
+			 * every DoD map: "mem FAIL FileSystem Pool io.c:56") and the failure trims
+			 * resident texture mips for nothing; the staging below is what ends up serving
+			 * the sheet anyway. Falls through to the old ladder when the file does not fit. */
+			if( buf == NULL && GC_MapLoadMemoryOpt()
+				&& ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
+				buf = CL_GCLoadHudSpriteBss( loadname, &size );
 			if( buf == NULL )
 				buf = FS_LoadFile( loadname, &size, false );
 			if( buf == NULL && GC_MapLoadMemoryOpt()
