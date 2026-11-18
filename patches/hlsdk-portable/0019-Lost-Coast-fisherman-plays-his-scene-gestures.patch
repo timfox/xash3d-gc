@@ -1,0 +1,104 @@
+From 0ce977f86ac070728330c5cc7d80788338e9a3dd Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Tue, 17 Nov 2026 22:14:10 -0800
+Subject: [PATCH] Lost Coast: fisherman plays his scene gestures
+
+Each gesture event of a scene goes to the engine's gesture table when it
+starts, with its timing tags, and the renderer layers it over his pose.
+Voice paths up to 48 characters no longer lose their end (arg was 44).
+---
+ dlls/lostcoast_npcs.cpp | 42 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index ea0a117d..8c5b8664 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -310,7 +310,9 @@ typedef struct
+ 	char	started;
+ 	float	t0, t1;
+ 	float	a, b;		// speak: volume, attenuation; moveto: distance
+-	char	arg[44];
++	char	arg[52];	// the longest voice path is 48 characters
++	unsigned char	ntags;	// gesture: timing tags, (event, sequence) fractions * 255
++	unsigned char	tags[8];
+ } lc_event_t;
+ 
+ typedef struct
+@@ -394,8 +396,19 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 			ev->type = LCE_FACE;
+ 		else if( !strcmp( kind, "moveto" ) && sscanf( line, "%*s %f %f %63s %f", &t0, &t1, arg, &a ) >= 3 )
+ 			ev->type = LCE_MOVETO;
+-		else if( !strcmp( kind, "gesture" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 3 )
++		else if( !strcmp( kind, "gesture" ))
++		{
++			float tg[8];
++			int got = sscanf( line, "%*s %f %f %63s %f %f %f %f %f %f %f %f", &t0, &t1, arg,
++				&tg[0], &tg[1], &tg[2], &tg[3], &tg[4], &tg[5], &tg[6], &tg[7] );
++
++			if( got < 3 )
++				continue;
+ 			ev->type = LCE_GESTURE;
++			ev->ntags = ( got - 3 ) / 2;
++			for( int k = 0; k < ev->ntags * 2; k++ )
++				ev->tags[k] = (unsigned char)( LC_Clamp( tg[k], 0.0f, 1.0f ) * 255.0f + 0.5f );
++		}
+ 		else
+ 			continue;
+ 		ev->t0 = t0;
+@@ -564,6 +577,7 @@ private:
+ 	CBaseEntity *Player( void );
+ 	Vector PlayerPos( void );
+ 	void StartScene( lc_scene_t *sc );
++	void PlayGesture( lc_event_t *ev, float sceneStart );
+ 	void RunScene( float interval );
+ 	void RunLead( float interval );
+ 	BOOL WalkTo( const Vector &goal, float interval, float stopdist, BOOL follow_z = TRUE );
+@@ -744,6 +758,24 @@ Vector CLCFisherman::PlayerPos( void )
+ 	return pl ? pl->pev->origin : pev->origin;
+ }
+ 
++#if XASH_GAMECUBE
++// The game code and the renderer are one binary on GameCube: gestures go
++// straight to the engine's table (engine/platform/gamecube/actor_gesture.c),
++// which the renderer reads when it poses him.
++extern "C" void GC_ActorGesture( int ent, const char *name, float start, float end, int ntags, const float *tags );
++#endif
++
++void CLCFisherman::PlayGesture( lc_event_t *ev, float sceneStart )
++{
++#if XASH_GAMECUBE
++	float tags[8];
++
++	for( int k = 0; k < ev->ntags * 2; k++ )
++		tags[k] = ev->tags[k] / 255.0f;
++	GC_ActorGesture( ENTINDEX( edict()), ev->arg, sceneStart + ev->t0, sceneStart + ev->t1, ev->ntags, tags );
++#endif
++}
++
+ void CLCFisherman::StartScene( lc_scene_t *sc )
+ {
+ 	if( !sc )
+@@ -900,6 +932,10 @@ void CLCFisherman::RunScene( float interval )
+ 			if( t <= ev->t1 )
+ 				m_bFace = TRUE;
+ 			break;
++		case LCE_GESTURE:
++			if( !ev->started )
++				PlayGesture( ev, m_flSceneStart );
++			break;
+ 		case LCE_MOVETO:
+ 			// walks on past the event's end until he gets there
+ 			if(( pl || m_flTest != 0.0f ) && ev->started != 2 )
+@@ -1047,6 +1083,8 @@ void CLCFisherman::FishThink( void )
+ 					if( t >= ev->t0 && !ev->started )
+ 					{
+ 						ev->started = 1;
++						if( ev->type == LCE_GESTURE )
++							PlayGesture( ev, m_flSceneStart );
+ 						if( ev->type == LCE_SPEAK )
+ 							EMIT_SOUND_DYN( ENT( pev ), CHAN_VOICE, ev->arg, ev->a > 0 ? ev->a : 1.0f,
+ 								ev->b > 0 ? ev->b : ATTN_NORM, 0, PITCH_NORM );
+-- 
+2.53.0
+
