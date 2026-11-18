@@ -1417,7 +1417,10 @@ qboolean R_GXWorldDLEntityBoxVisible( const vec3_t mins, const vec3_t maxs )
 
 /* Chunks resident in the cache, sorted by offset, and this frame's smallest
  * request that found no room (anything as large fails without a search). */
-#define GC_WD_RES_MAX	2048
+/* 2048 was under most DoD packs (falaise 2269, kraftstoff 2437, caen 2981,
+ * zalec 3117): past it no chunk ever became resident and the whole world
+ * stayed undrawn, props floating over the sky. */
+#define GC_WD_RES_MAX	4096
 static u16 gc_wd_res[GC_WD_RES_MAX];
 static u32 gc_wd_res_n, gc_wd_res_fail;
 static int gc_wd_res_fail_frame = -1;
@@ -1430,7 +1433,19 @@ static byte *R_GXWorldDLResident( u32 i, u32 *budget )
 
 	if( gc_wd_slots[i].cache_ofs >= 0 )
 		return gc_wd_cache + gc_wd_slots[i].cache_ofs;
-	if( bytes > *budget || bytes > gc_wd_cache_size || bytes == 0 || gc_wd_hdr.n_chunks > GC_WD_RES_MAX )
+	if( gc_wd_hdr.n_chunks > GC_WD_RES_MAX )
+	{
+		static qboolean res_max_logged;
+
+		if( !res_max_logged )
+		{
+			res_max_logged = true;
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: world DL pack has %u chunks, resident list holds %u: world not drawn\n",
+				(uint)gc_wd_hdr.n_chunks, (uint)GC_WD_RES_MAX );
+		}
+		return NULL;
+	}
+	if( bytes > *budget || bytes > gc_wd_cache_size || bytes == 0 )
 		return NULL;
 	if( gc_wd_res_fail_frame == gc_wd_frame && bytes >= gc_wd_res_fail )
 		return NULL;
