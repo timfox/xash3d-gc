@@ -1766,6 +1766,22 @@ static void CL_Connect_f( void )
 
 	Q_strncpy( server, Cmd_Argv( 1 ), sizeof( server ));
 
+#if XASH_GAMECUBE
+	/* Without a working network link the connect attempt used to run into the socket layer and crash
+	 * the console. The link is brought up on first use; if that does not give an address, say so. */
+	{
+		extern int GC_NetEnsureReady( void );
+
+		if( !GC_NetEnsureReady( ))
+		{
+			Con_Printf( S_ERROR "Network is not available, not connecting to %s\n", server );
+			if( !UI_ShowMessageBox( "Network is not available.\nCheck the Broadband Adapter and the Network page in Options." ))
+				Con_Printf( "Network is not available (see Options > Network)\n" );
+			return;
+		}
+	}
+#endif
+
 	// if running a local server, kill it and reissue
 	if( SV_Active( ))
 		SV_Shutdown( "Server was killed due to connection to remote server\n" );
