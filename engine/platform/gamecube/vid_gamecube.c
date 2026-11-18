@@ -338,7 +338,7 @@ static GXRModeObj *GC_NetworkVideoMode( GXRModeObj *preferred )
 	gc_network_video_mode = *preferred;
 	/* VI scales the 320-pixel XFB to the mode's existing 640-pixel output.
 	 * Preserve its scanline count and television timing (480i/480p/PAL). */
-	gc_network_video_mode.fbWidth = 320;
+	gc_network_video_mode.fbWidth = 640;
 	return &gc_network_video_mode;
 }
 #endif
@@ -8642,6 +8642,14 @@ static void GC_PresentBufferViaGX( void )
 	GX_TexCoord2f32( 0.0f, 1.0f );
 	GX_End();
 
+	{
+		extern qboolean GC_HiTextFlush( float fb_w, float fb_h );
+
+		// menu text at 640x480: the flush rewrites the GX pipe, so the next present rebuilds it
+		if( GC_HiTextFlush( fb_w, fb_h ))
+			gc_gx_present_pipe_ready = false;
+	}
+
 	GC_GXDrawDoneTimed( "soft present" );
 	/* G191: keep soft RGB565 on EFB during dump latch — Dolphin DumpFramesAsImages
 	 * after changelevel tracks EFB; CopyDisp clear left flat sky in dumps. */
@@ -9091,6 +9099,12 @@ static void GC_PresentBuffer( void )
 			 * (probe 093557 hung after G197, no timeout/watchdog). Flush is
 			 * enough for the first denser presents; fence later once EXI/GP
 			 * have settled. */
+			{
+				extern qboolean GC_HiTextFlush( float fb_w, float fb_h );
+
+				if( GC_HiTextFlush( fb_w, fb_h ))
+					gc_gx_present_pipe_ready = false;
+			}
 			if( skip_drawdone )
 				GX_Flush();
 			else

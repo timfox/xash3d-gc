@@ -23,3 +23,16 @@ the full one cannot be allocated. Measured in Dolphin: boots to the menu and int
   in hardware; the cost is the software RGB565 2D buffer, 600 KiB instead of 150 KiB) or drawing text as GX quads
   from a 640-sized atlas instead of into the soft buffer.
 - The keyboard font is exact at 320x240 but only 5x8; a larger bitmap (8x14) at 2x would need 640 output.
+
+## Hi-res menu text (phase 1, implemented)
+- `scripts/bake-hitext.py` bakes `scripts/gc_hitext.bin`: ASCII 32..126 from **Noto Sans Regular** (SIL Open Font
+  License 1.1, free to ship; the licence text must accompany the font data) into a 512x256 I4 atlas (64 KiB) with
+  glyph metrics. The disc builder stores it as `gfx/gc_hitext.bin`.
+- `engine/platform/gamecube/hitext_gamecube.c`: mainui glyphs (`pfnDrawCharacter`, hFont 0) are queued and drawn as
+  GX quads at the EFB resolution after the soft frame, right before `CopyDisp` (soft present and Flipper present).
+  A filled box drawn after text (`pfnFillRGBA`, alpha >= 160) drops the glyphs under it (dialogs). The queue and the
+  atlas are not used while the on-screen keyboard is open, in a match (the atlas is freed once `ca_active`), or when
+  `gc_hitext 0`. The main menu draws its labels the old way (mainui sets `gc_hitext_pause` around its `Draw`).
+- The network-build video mode used a 320-wide XFB (`GC_NetworkVideoMode`), so the EFB was 320x480 and quads could not
+  be sharper than the soft buffer. It is now 640 wide. **Cost:** each XFB goes from 300 KiB to 600 KiB (two XFBs).
+  A dod_charlie match still loads without `mem FAIL` in Dolphin; hardware memory headroom is NOT verified.
