@@ -9189,7 +9189,17 @@ static void GC_PresentBuffer( void )
 		 * need every CopyDisp to encode (Null/OGL starvation otherwise). */
 		{
 		extern int R_GXEfbDumpHoldLeft( void );
-		if( GC_IsCaptureDiagnostics()
+		/* A disc that parks a free-look eye (dumpeye, no ride or replay) is
+		 * play, not capture: every frame swaps and waits for the retrace.
+		 * Without the wait frames finish every ~13ms against a 16.7ms field,
+		 * so the display takes them unevenly and steady motion (the water
+		 * ripples) visibly hops every few seconds. */
+		static int g194_play = -1;
+
+		if( g194_play < 0 )
+			g194_play = ( Sys_CheckParm( "-gcdumpeye" ) && !Sys_CheckParm( "-gcvst" )
+				&& !Sys_CheckParm( "-gctas" )) ? 1 : 0;
+		if( !g194_play && GC_IsCaptureDiagnostics()
 			&& ( Sys_CheckParm( "-gcdumpframes" ) || Sys_CheckParm( "-gcdump" ))
 			&& R_GXEfbDumpHoldLeft() <= 0 )
 		{
