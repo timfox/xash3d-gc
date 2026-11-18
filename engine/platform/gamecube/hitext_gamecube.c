@@ -46,6 +46,7 @@ static int ht_count;
 
 static CVAR_DEFINE_AUTO( gc_hitext, "1", FCVAR_ARCHIVE, "draw menu text at 640x480 with GX quads (0 = soft 320x240 text)" );
 // set by the main menu while it draws: its labels keep the original text
+static CVAR_DEFINE_AUTO( gc_hitext_ingame, "0", FCVAR_ARCHIVE, "also draw HUD/chat/console text at hardware resolution during a match (keeps the 64 KiB atlas resident)" );
 static CVAR_DEFINE_AUTO( gc_hitext_pause, "0", FCVAR_GAMEUIDLL, "main menu draws its own text" );
 
 static unsigned short HT_U16( const byte *p ) { return (unsigned short)(( p[0] << 8 ) | p[1] ); }
@@ -55,6 +56,7 @@ void GC_HiTextInit( void )
 {
 	Cvar_RegisterVariable( &gc_hitext );
 	Cvar_RegisterVariable( &gc_hitext_pause );
+	Cvar_RegisterVariable( &gc_hitext_ingame );
 }
 
 static qboolean HT_Load( void )
@@ -128,7 +130,7 @@ void GC_HiTextRelease( void )
 
 qboolean GC_HiTextActive( void )
 {
-	if( cls.state == ca_active )
+	if( cls.state == ca_active && !gc_hitext_ingame.value )
 	{
 		if( ht.tex )
 			GC_HiTextRelease();
