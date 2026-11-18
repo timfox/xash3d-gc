@@ -141,7 +141,7 @@ qboolean CL_GCLoadLeanHudFont( cl_font_t *font, float scale, convar_t *rendermod
 	 * leave too little contiguous MEM1 for it on real GameCube hardware.  Use
 	 * the pre-baked atlas by default; an explicit future high-memory profile
 	 * can clear this gate without changing the font metrics path. */
-	static qboolean force_lean = true;
+	static qboolean force_lean = false;
 	file_t *f;
 	fs_offset_t flen, total, got;
 	qfont_t src;
