@@ -3452,6 +3452,8 @@ def write_smoke_overrides(
 		lines.append("nativetex")
 	(output / "gamecube.cfg").write_text("\n".join(lines) + "\n", encoding="ascii")
 	media = output / "media"
+	if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+		lines.append("heapcensus")
 	media.mkdir(exist_ok=True)
 	(media / "StartupVids.txt").write_text("", encoding="ascii")
 
@@ -3524,6 +3526,8 @@ def write_probe_newgame_override(
 		lines.append("nativetex")
 	(output / "gamecube.cfg").write_text("\n".join(lines) + "\n", encoding="ascii")
 
+	if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+		lines.append("heapcensus")
 
 def write_probe_phasetest_override(output: Path, phase: str) -> None:
 	"""Menu/retail boot with an intentional G82 phase fault (no map/newgame)."""
@@ -5013,6 +5017,8 @@ def main() -> None:
 				if os.environ.get("XASH_GC_PROBE_NOTEXPACKS") == "1":
 					menu_lines.append("notexpacks")
 				(staged_data / "gamecube.cfg").write_text(
+				if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+					menu_lines.append("heapcensus")
 					"\n".join(menu_lines) + "\n", encoding="ascii"
 				)
 			elif args.probe_phasetest:
