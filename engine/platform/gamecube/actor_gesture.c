@@ -165,6 +165,72 @@ const char *GC_ActorFaceAt( int ent, float time, float *seconds )
 	return gc_face.path;
 }
 
+/* Headcrab canisters in flight (the monastery gun shelling the town). Game
+ * code launches one; the renderer asks where each is.
+ * CEnv_HeadcrabCanisterShared, launched from within the world: constant
+ * horizontal speed over the flight time, and a vertical speed that goes
+ * evenly from its launch value to the impact value (the impact direction's
+ * z times the flight speed), so the path is a parabola that ends on the
+ * impact point at the impact angle. */
+#define GC_CANISTER_MAX	2
+
+static struct
+{
+	float	t0, time;	/* client time of launch, seconds of flight; time 0 = free */
+	float	launch[3], impact[3];
+	float	vz0, vzf;
+} gc_canister[GC_CANISTER_MAX];
+
+void GC_CanisterLaunch( const float *launch, const float *impact, float pitch, float yaw, float flightTime, float flightSpeed )
+{
+	int i, slot = 0;
+
+	(void)yaw;
+	if( !launch || !impact || flightTime <= 0.0f )
+		return;
+	for( i = 0; i < GC_CANISTER_MAX; i++ )
+	{
+		if( gc_canister[i].time <= 0.0f || (float)cl.time >= gc_canister[i].t0 + gc_canister[i].time )
+		{
+			slot = i;
+			break;
+		}
+	}
+	gc_canister[slot].t0 = (float)cl.time;
+	gc_canister[slot].time = flightTime;
+	VectorCopy( launch, gc_canister[slot].launch );
+	VectorCopy( impact, gc_canister[slot].impact );
+	/* the canister comes in along the reverse of its resting forward */
+	gc_canister[slot].vzf = sinf( pitch * ( M_PI_F / 180.0f )) * flightSpeed;
+	gc_canister[slot].vz0 = ( 2.0f * ( impact[2] - launch[2] ) - flightTime * gc_canister[slot].vzf ) / flightTime;
+}
+
+/* Canisters in the air at client time: position and velocity of each. */
+int GC_CanisterFlights( float time, float pos[][3], float vel[][3], int max )
+{
+	int i, n = 0;
+
+	for( i = 0; i < GC_CANISTER_MAX && n < max; i++ )
+	{
+		const float T = gc_canister[i].time;
+		const float t = time - gc_canister[i].t0;
+		float u, accel;
+
+		if( T <= 0.0f || t < 0.0f || t >= T )
+			continue;
+		u = t / T;
+		accel = ( gc_canister[i].vzf - gc_canister[i].vz0 ) / T;
+		pos[n][0] = gc_canister[i].launch[0] + ( gc_canister[i].impact[0] - gc_canister[i].launch[0] ) * u;
+		pos[n][1] = gc_canister[i].launch[1] + ( gc_canister[i].impact[1] - gc_canister[i].launch[1] ) * u;
+		pos[n][2] = gc_canister[i].launch[2] + gc_canister[i].vz0 * t + 0.5f * accel * t * t;
+		vel[n][0] = ( gc_canister[i].impact[0] - gc_canister[i].launch[0] ) / T;
+		vel[n][1] = ( gc_canister[i].impact[1] - gc_canister[i].launch[1] ) / T;
+		vel[n][2] = gc_canister[i].vz0 + accel * t;
+		n++;
+	}
+	return n;
+}
+
 void GC_ActorGestureClear( int ent )
 {
 	int i;
