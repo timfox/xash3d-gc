@@ -38,10 +38,10 @@ side of each playing gesture are held in MEM1.
 
 extern int GC_ActorGesturesAt( int ent, float time, const char **names, float *cycles, float *weights, int max );
 
-#define GST_MAX		16	/* gestures in a file */
+#define GST_MAX		24	/* gestures and look poses in a file */
 #define GST_BONES	64	/* bones named by a file */
 #define GST_ROT		48	/* bones one gesture turns */
-#define GST_SLOTS	6	/* gestures playing at once */
+#define GST_SLOTS	10	/* gestures and look poses playing at once */
 
 typedef struct
 {

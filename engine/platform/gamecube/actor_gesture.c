@@ -43,6 +43,62 @@ typedef struct
 
 static gc_gesture_t gc_gestures[GC_GESTURE_MAX];
 
+/* A pose the game code holds on an actor (Source pose parameters: where the
+ * head, spine and body are turned). The game sets it at think rate; the value
+ * eases to each new setting so the turn is smooth between thinks. */
+#define GC_POSE_MAX	8
+#define GC_POSE_EASE	0.1f
+
+typedef struct
+{
+	int	ent;
+	char	name[28];
+	float	from, to, time;
+} gc_pose_t;
+
+static gc_pose_t gc_poses[GC_POSE_MAX];
+
+static float GC_ActorPoseValue( const gc_pose_t *p, float time )
+{
+	const float t = bound( 0.0f, ( time - p->time ) / GC_POSE_EASE, 1.0f );
+
+	return p->from + ( p->to - p->from ) * t;
+}
+
+/* cycle 0..1 across the pose's range, 0.5 at rest */
+void GC_ActorPose( int ent, const char *name, float cycle )
+{
+	gc_pose_t *p = NULL;
+	int i;
+
+	if( ent <= 0 || !name || !name[0] )
+		return;
+	for( i = 0; i < GC_POSE_MAX; i++ )
+	{
+		if( gc_poses[i].ent == ent && !Q_strcmp( gc_poses[i].name, name ))
+		{
+			p = &gc_poses[i];
+			break;
+		}
+		if( !p && !gc_poses[i].ent )
+			p = &gc_poses[i];
+	}
+	if( !p )
+		return;
+	cycle = bound( 0.0f, cycle, 1.0f );
+	if( p->ent != ent )
+	{
+		p->ent = ent;
+		Q_strncpy( p->name, name, sizeof( p->name ));
+		p->from = p->to = 0.5f;
+	}
+	if( cycle == p->to )
+		return;
+	p->from = GC_ActorPoseValue( p, (float)cl.time );
+	p->to = cycle;
+	p->time = (float)cl.time;
+}
+
 /* start and end are server times; tags are ntags pairs of (event fraction,
  * sequence fraction), in order. */
 void GC_ActorGesture( int ent, const char *name, float start, float end, int ntags, const float *tags )
@@ -87,6 +143,11 @@ void GC_ActorGestureClear( int ent )
 		if( !ent || gc_gestures[i].ent == ent )
 			gc_gestures[i].ent = 0;
 	}
+	for( i = 0; i < GC_POSE_MAX; i++ )
+	{
+		if( !ent || gc_poses[i].ent == ent )
+			gc_poses[i].ent = 0;
+	}
 }
 
 /* What plays on ent at client time: sequence cycle (0..1) and weight of each. */
@@ -94,6 +155,22 @@ int GC_ActorGesturesAt( int ent, float time, const char **names, float *cycles, 
 {
 	int i, k, n = 0;
 
+	/* held poses first: Source turns the body before it layers gestures */
+	for( i = 0; i < GC_POSE_MAX && n < max; i++ )
+	{
+		const gc_pose_t *p = &gc_poses[i];
+		float v;
+
+		if( p->ent != ent )
+			continue;
+		v = GC_ActorPoseValue( p, time );
+		if( v > 0.495f && v < 0.505f )
+			continue;	/* at rest: the middle frame is no turn */
+		names[n] = p->name;
+		cycles[n] = v;
+		weights[n] = 1.0f;
+		n++;
+	}
 	for( i = 0; i < GC_GESTURE_MAX && n < max; i++ )
 	{
 		const gc_gesture_t *g = &gc_gestures[i];
