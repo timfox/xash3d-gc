@@ -1,0 +1,35 @@
+From 717316c3a80ec2e2184bef2de3cae327859f18c0 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Tue, 17 Nov 2026 21:50:39 -0800
+Subject: [PATCH] Lost Coast: fisherman idle animates from spawn
+
+The map spawns him already on the idle sequence, so SetSeq saw no change,
+never called ResetSequenceInfo and left the frame rate at zero: he stood
+frozen on frame 0 until the intro scene first made him walk.
+---
+ dlls/lostcoast_npcs.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 35ac6e4f..ea0a117d 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -695,7 +695,14 @@ void CLCFisherman::Spawn( void )
+ 		m_flRetrieveDist = 96;
+ 	if( !FStringNull( m_iszNodes ))
+ 		LC_LoadNodes( STRING( m_iszNodes ));
+-	SetSeq( "idle" );
++	// The map spawns him already on "idle", so SetSeq would see no change
++	// and leave the frame rate at zero: he stood frozen on frame 0.
++	pev->sequence = LookupSequence( "idle" );
++	if( pev->sequence < 0 )
++		pev->sequence = 0;
++	pev->frame = 0;
++	pev->framerate = 1.0f;
++	ResetSequenceInfo();
+ 	InitBoneControllers();
+ 	m_flTest = LC_BootSwitch( "lcscenetest" ) ? gpGlobals->time + 3.0f : 0.0f;
+ 	SetThink( &CLCFisherman::FishThink );
+-- 
+2.53.0
+

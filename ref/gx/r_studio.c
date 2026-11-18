@@ -1298,6 +1298,15 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		e->latched.prevframe = f;
 	}
 
+#if XASH_GAMECUBE
+	{
+		/* scene gestures (hat adjust, shrug, head tilts) over the base pose */
+		extern void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, float time );
+
+		R_GXGestureApply( e, m_pStudioHeader, q, (float)g_studio.time );
+	}
+#endif
+
 	pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
 
 	// calc gait animation

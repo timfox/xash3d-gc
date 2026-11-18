@@ -36,3 +36,28 @@ the full one cannot be allocated. Measured in Dolphin: boots to the menu and int
 - The network-build video mode used a 320-wide XFB (`GC_NetworkVideoMode`), so the EFB was 320x480 and quads could not
   be sharper than the soft buffer. It is now 640 wide. **Cost:** each XFB goes from 300 KiB to 600 KiB (two XFBs).
   A dod_charlie match still loads without `mem FAIL` in Dolphin; hardware memory headroom is NOT verified.
+## Hi-res text: what the code says (read from vid_gamecube.c / ref_gx)
+
+- The hardware frame is already native 640x480 (`TVNtsc480Prog`, EFB/XFB 640x480). Only the **soft 2D buffer** is
+  320x240 (`-width 320 -height 240` in `sys_gamecube.c`: "Tip-safe soft/internal FB. Flipper EFB/XFB stay native
+  640x480 via VI").
+- 3D (pure-GX world frames) is drawn by GX into the 640x480 EFB and copied to the XFB (`CopyDisp`).
+- Everything 2D (menu, HUD sprites, text) is rasterised by the software path in `ref/gx/r_draw.c` into the 320x240
+  RGB565 buffer, and `GC_PresentBuffer` converts and upscales that to the XFB with the CPU (menu screens), or the HUD is
+  drawn over a held GX EFB (match frames). So all text is soft 320x240 text, doubled.
+- Real sharp text therefore means moving **text** (not the whole 2D layer) to GX quads at 640x480: a 640-sized glyph
+  atlas in a GX texture and a quad per glyph, drawn after the soft layer.
+
+## Plan (phases; each needs Dolphin proof and a frame-time check)
+1. Menu screens: present the soft 320x240 buffer as one GX textured quad into the EFB (instead of the CPU
+   upscale/YUY2 convert; also bilinear), then text quads, then `CopyDisp`. Cost: a 153 KiB RGB565 texture upload per
+   frame, no extra RAM (the XFBs already exist). This path also removes the CPU convert from the menu frame.
+2. Glyph atlas: bake a 640-scale atlas offline (TTF -> IA4 texture + metrics, shipped in the disc archive), ~128-256 KiB
+   in GX/ARAM-backed memory; the credits atlas stays as the fallback.
+3. Route `pfnDrawCharacter(0, ...)` (mainui), `Con_DrawString`/`DrawHudString` (HUD, chat, kill feed, scoreboard) and the
+   on-screen keyboard to the quad path; text that is overdrawn by later soft content (dialogs over text) needs an
+   ordering rule (queue text with the soft layer's draw order and flush after the soft blit, clipping by the dialog rects).
+4. Match frames: text quads after the HUD blit over the held EFB; measure 60 FPS and heap after a dod_charlie load.
+
+Not implemented yet: phases 1-4. Phase 1 changes the present path (`GC_PresentBuffer`, many diagnostic modes) and
+should be done and verified in Dolphin before anything depends on it.
