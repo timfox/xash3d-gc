@@ -385,6 +385,13 @@ qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x
 	for( li = h->nlod - 1; li > 0 && metric < h->switchpt[li]; li-- )
 		;
 	lod = (const gca_lod_t *)( data + h->lod_ofs[li] );
+	if( li == 0 )
+	{
+		/* lip sync: the mouth vertices follow the phoneme being spoken */
+		extern void R_GXFaceApply( const cl_entity_t *e, const model_t *mod, s16 *pos, int nverts );
+
+		R_GXFaceApply( e, mod, (s16 *)( data + lod->pos_ofs ), lod->nverts );
+	}
 
 	R_GXStudioForceBegin( false );
 	R_GXActorView( view );

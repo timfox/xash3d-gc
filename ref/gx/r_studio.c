@@ -1301,9 +1301,9 @@ static void R_StudioSetupBones( cl_entity_t *e )
 #if XASH_GAMECUBE
 	{
 		/* scene gestures (hat adjust, shrug, head tilts) over the base pose */
-		extern void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, float time );
+		extern void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, vec3_t *pos, float time );
 
-		R_GXGestureApply( e, m_pStudioHeader, q, (float)g_studio.time );
+		R_GXGestureApply( e, m_pStudioHeader, q, pos, (float)g_studio.time );
 	}
 #endif
 

@@ -70,7 +70,14 @@ static entity_state_t gc_singleplayer_packet_entities[SINGLEPLAYER_BACKUP * NUM_
  * on clients[0] (dod_donner probe 121415). Paired with mapload_pad cut. */
 /* 2 full slots as before; with slim slots GC_SV_MAX_SLOTS (people in the first
  * two, bots in the rest). */
+#if XASH_GC_LOSTCOAST
+/* Lost Coast is one player: the second slot was 91 KB the heap needs (the
+ * fisherman's voice could not open its file). A listen server asking for
+ * more falls through to the heap, as any table over the BSS size does. */
+#define GC_LISTEN_CLIENTS_BSS 1
+#else
 #define GC_LISTEN_CLIENTS_BSS GC_SV_MAX_SLOTS
+#endif
 static sv_client_t gc_listen_clients[GC_LISTEN_CLIENTS_BSS] __attribute__((aligned( 32 )));
 
 qboolean SV_IsStaticPacketEntities( const entity_state_t *ents )

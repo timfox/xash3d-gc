@@ -26,6 +26,7 @@ buffer, placed by the speaker's position like any other entity sound.
 #include "client.h"
 #include "server.h"
 #include "sound.h"
+#include "platform/gamecube/mem_gamecube.h"
 
 #if XASH_GAMECUBE
 
@@ -37,7 +38,8 @@ static struct
 {
 	file_t		*f;
 	uint32_t	left;		/* samples still in the file */
-	int16_t		buf[GC_VS_BLOCK];
+	uint32_t	total, rate;
+	int16_t		*buf;		/* GC_VS_BLOCK samples, map-load arena tail */
 	int		have, pos;
 	uint32_t	frac, step;	/* 16.16 source samples per output sample */
 	int		s0, s1;
@@ -45,11 +47,43 @@ static struct
 	float		vol, dist_mult;
 } gc_vs;
 
+/* The line's phonemes ("GCLP" chunk, lostcoast-gc bake_lostcoast_actors.py):
+ * what the mouth should be saying at each moment of the wave. */
+#define GC_VS_LIP_MAX	192
+
+static struct
+{
+	int		n;
+	uint16_t	*code, *t0, *t1;	/* GC_VS_LIP_MAX each, ms; arena tail */
+} gc_vs_lip;
+
+/* MEM1's heap is down to a few KB on Lost Coast: the sample block and the
+ * phoneme list live in what the map-load arena has left over. */
+static int16_t *gc_vs_mem;
+
+static qboolean GC_VoiceStreamMem( void )
+{
+	if( !gc_vs_mem && GC_MapLoadBufferTailPeak() != 0 )
+	{
+		gc_vs_mem = (int16_t *)GC_MapLoadBufferTailAlloc( Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()),
+			( GC_VS_BLOCK + GC_VS_LIP_MAX * 3 ) * sizeof( int16_t ));
+		if( gc_vs_mem )
+		{
+			gc_vs_lip.code = (uint16_t *)( gc_vs_mem + GC_VS_BLOCK );
+			gc_vs_lip.t0 = gc_vs_lip.code + GC_VS_LIP_MAX;
+			gc_vs_lip.t1 = gc_vs_lip.t0 + GC_VS_LIP_MAX;
+		}
+	}
+	return gc_vs_mem != NULL;
+}
+
 static void GC_VoiceStreamStop( void )
 {
 	if( gc_vs.f )
 		FS_Close( gc_vs.f );
 	memset( &gc_vs, 0, sizeof( gc_vs ));
+	gc_vs.buf = gc_vs_mem;
+	gc_vs_lip.n = 0;
 }
 
 /* An entity sound on the voice channel: stream it. False = not ours. */
@@ -61,6 +95,8 @@ qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn
 	file_t *f;
 
 	if( !sample || !sample[0] || sample[0] == '!' || sample[0] == '*' )
+		return false;
+	if( !GC_VoiceStreamMem( ))
 		return false;
 	Q_snprintf( path, sizeof( path ), "sound/%s", sample );
 	/* small disc reads from here to the return: the header is 44 bytes */
@@ -89,6 +125,29 @@ qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn
 			rate = fmt[4] | ( fmt[5] << 8 ) | ( fmt[6] << 16 );
 			size -= 16;
 		}
+		else if( !memcmp( ck, "GCLP", 4 ) && size >= 2 )
+		{
+			byte ev[6];
+			int i, n;
+
+			if( FS_Read( f, ev, 2 ) != 2 )
+				goto bad;
+			n = ( ev[0] << 8 ) | ev[1];
+			size -= 2;
+			gc_vs_lip.n = 0;
+			for( i = 0; i < n && size >= 6; i++, size -= 6 )
+			{
+				if( FS_Read( f, ev, 6 ) != 6 )
+					goto bad;
+				if( i < GC_VS_LIP_MAX )
+				{
+					gc_vs_lip.code[i] = (uint16_t)(( ev[0] << 8 ) | ev[1] );
+					gc_vs_lip.t0[i] = (uint16_t)(( ev[2] << 8 ) | ev[3] );
+					gc_vs_lip.t1[i] = (uint16_t)(( ev[4] << 8 ) | ev[5] );
+					gc_vs_lip.n = i + 1;
+				}
+			}
+		}
 		else if( !memcmp( ck, "data", 4 ))
 			break;
 		if( size )
@@ -97,7 +156,8 @@ qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn
 	if( !rate || size < 2 )
 		goto bad;
 	gc_vs.f = f;
-	gc_vs.left = size / 2;
+	gc_vs.left = gc_vs.total = size / 2;
+	gc_vs.rate = rate;
 	gc_vs.step = (uint32_t)( 65536.0f * (float)rate / (float)SOUND_DMA_SPEED );
 	gc_vs.ent = ent;
 	gc_vs.vol = bound( 0.0f, vol, 1.0f );
@@ -108,6 +168,56 @@ bad:
 	gc_iso9660_small_reads = 0;
 	FS_Close( f );
 	return false;
+}
+
+/* What ent's mouth is saying now: the phoneme being spoken (code_a), the one
+ * it is moving toward (code_b) and how far along (0..1). A code of 0 is the
+ * mouth at rest. False when ent is not speaking. Source blends a phoneme
+ * into the one that follows it across its own length when the two touch
+ * (c_baseflex.cpp AddVisemesForSentence); a phoneme with silence on either
+ * side eases from or to rest over GC_VS_LIP_EASE ms. */
+#define GC_VS_LIP_EASE	50
+
+qboolean GC_VoiceLip( int ent, int *code_a, int *code_b, float *frac )
+{
+	uint32_t played, ms;
+	int i;
+
+	*code_a = *code_b = 0;
+	*frac = 0.0f;
+	if( !gc_vs.f || gc_vs.ent != ent || !gc_vs.rate )
+		return false;
+	played = gc_vs.total - gc_vs.left - (uint32_t)( gc_vs.have - gc_vs.pos );
+	ms = (uint32_t)(( (uint64_t)played * 1000u ) / gc_vs.rate );
+	for( i = 0; i < gc_vs_lip.n; i++ )
+	{
+		const uint32_t t0 = gc_vs_lip.t0[i], t1 = gc_vs_lip.t1[i];
+
+		if( ms < t0 || ms >= t1 || t1 <= t0 )
+			continue;
+		if( i + 1 < gc_vs_lip.n && gc_vs_lip.t0[i + 1] <= t1 + 2 )
+		{
+			*code_a = gc_vs_lip.code[i];
+			*code_b = gc_vs_lip.code[i + 1];
+			*frac = (float)( ms - t0 ) / (float)( t1 - t0 );
+		}
+		else if( t1 - ms < GC_VS_LIP_EASE )
+		{
+			*code_a = gc_vs_lip.code[i];
+			*frac = 1.0f - (float)( t1 - ms ) / (float)GC_VS_LIP_EASE;
+		}
+		else
+			*code_a = gc_vs_lip.code[i];
+		if(( i == 0 || gc_vs_lip.t1[i - 1] + 2 < t0 ) && ms - t0 < GC_VS_LIP_EASE && !*code_b )
+		{
+			/* out of silence: from rest into this phoneme */
+			*code_b = gc_vs_lip.code[i];
+			*code_a = 0;
+			*frac = (float)( ms - t0 ) / (float)GC_VS_LIP_EASE;
+		}
+		break;
+	}
+	return true;
 }
 
 /* Add the line to `count` stereo frames of the paint buffer. */
