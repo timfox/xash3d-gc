@@ -613,6 +613,34 @@ void OSK_ChatDraw( void )
 	}
 }
 
+extern const char *g_buildcommit, *g_buildmainui, *g_buildmainui_pin;
+
+/*
+=============
+OSK_DrawBuildStamp
+
+A small build stamp in the lower right corner while the menu is up: the engine commit and the
+mainui commit that was built. A disc that shows an old stamp carries old UI. A mainui that is not
+the commit the engine pins, or has local changes, is marked with a red "!".
+=============
+*/
+void OSK_DrawBuildStamp( void )
+{
+	static const rgba_t dim = { 255, 176, 0, 170 };
+	static const rgba_t bad = { 255, 60, 40, 255 };
+	const float sx = refState.width / 640.0f, sy = refState.height / 480.0f;
+	const qboolean mismatch = Q_strcmp( g_buildmainui, g_buildmainui_pin ) != 0;
+	char text[64];
+	int w;
+
+	if( cls.key_dest != key_menu )
+		return;
+
+	Q_snprintf( text, sizeof( text ), "E %.10s  UI %s%s", g_buildcommit, g_buildmainui, mismatch ? " !" : "" );
+	w = OSK_TextWidthFp( text, 2 );
+	OSK_TextFp( sx, sy, 640 - w - 8, 480 - 20, text, mismatch ? bad : dim, 2 );
+}
+
 void OSK_Init( void )
 {
 	Cvar_RegisterVariable( &osk_enable );
