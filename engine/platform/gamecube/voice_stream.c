@@ -32,7 +32,12 @@ buffer, placed by the speaker's position like any other entity sound.
 
 #define GC_VS_BLOCK	1024	/* samples read at once: one 2 KB disc sector, 64 ms */
 
+#if defined( XASH_GAMECUBE_LIBOGC2 ) && XASH_GAMECUBE_LIBOGC2
+/* iso9660_gamecube.c is not built against libogc2 (which has its own disc path), so own the flag here. */
+int gc_iso9660_small_reads;
+#else
 extern int gc_iso9660_small_reads;
+#endif
 
 static struct
 {
