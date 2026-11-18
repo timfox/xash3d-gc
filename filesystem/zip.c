@@ -119,6 +119,30 @@ enum
 #define ZIP_NAME_MAX MAX_SYSPATH
 #endif
 
+#if XASH_GAMECUBE
+/* Compact index: names live packed at their real length in a string table
+ * after the entries (zip_s.names), offsets are 32-bit (a GameCube disc is
+ * under 4 GiB).  The fixed 64-byte name plus three 64-bit offsets was ~96
+ * bytes an entry: 48 KiB of the 1.2 MiB heap for the 498 bootstrap+extras
+ * entries, where a level change runs out of heap. */
+typedef struct zipfile_s
+{
+	uint32_t	name_off; // into zip_s.names
+	uint32_t	offset; // offset of local file header
+	uint32_t	size; //original file size
+	uint32_t	compressed_size; // compressed file size
+	uint16_t flags;
+} zipfile_t;
+
+struct zip_s
+{
+	file_t *handle;
+	int		numfiles;
+	const char	*names; // packed NUL-terminated names, after files[]
+	zipfile_t files[]; // flexible
+};
+#define ZIP_FILE_NAME( zip, f ) ( (zip)->names + (f)->name_off )
+#else
 typedef struct zipfile_s
 {
 	char		name[ZIP_NAME_MAX];
@@ -134,6 +158,8 @@ struct zip_s
 	int		numfiles;
 	zipfile_t files[]; // flexible
 };
+#define ZIP_FILE_NAME( zip, f ) ( (f)->name )
+#endif
 
 // #define ENABLE_CRC_CHECK // known to be buggy because of possible libpublic crc32 bug, disabled
 
@@ -165,9 +191,12 @@ static void FS_Close_ZIP( searchpath_t *search )
 FS_SortZip
 ============
 */
+static const zip_t *fs_sortzip; // qsort has no context argument
+
 static int FS_SortZip( const void *a, const void *b )
 {
-	return Q_stricmp(((zipfile_t *)a )->name, ((zipfile_t *)b )->name );
+	return Q_stricmp( ZIP_FILE_NAME( fs_sortzip, (const zipfile_t *)a ),
+		ZIP_FILE_NAME( fs_sortzip, (const zipfile_t *)b ));
 }
 
 /*
@@ -306,7 +335,14 @@ static zip_t *FS_LoadZip( const char *zipfile, int *error )
 	 * soft-NULL keeps the prior open handle out of a fatal. */
 	{
 		const size_t zip_bytes = sizeof( *zip )
-			+ sizeof( *info ) * header_eocd.total_central_directory_record;
+			+ sizeof( *info ) * header_eocd.total_central_directory_record
+#if XASH_GAMECUBE
+			/* Names come from the central directory: its size bounds them
+			 * (each record also carries a 46-byte header, room for the NULs).
+			 * Shrunk to what is used once the table is filled. */
+			+ header_eocd.size_of_central_directory
+#endif
+			;
 		file_t *zh = zip->handle;
 #if XASH_GAMECUBE
 		zip_t *grown;
@@ -329,8 +365,14 @@ static zip_t *FS_LoadZip( const char *zipfile, int *error )
 		zip = (zip_t *)Mem_Realloc( fs_mempool, zip, zip_bytes );
 #endif
 		info = zip->files;
+#if XASH_GAMECUBE
+		zip->names = (const char *)&zip->files[header_eocd.total_central_directory_record];
+#endif
 	}
 
+#if XASH_GAMECUBE
+	size_t names_used = 0;
+#endif
 	for( int i = 0; i < header_eocd.total_central_directory_record; i++ )
 	{
 		c = FS_Read( zip->handle, &header_cdf, sizeof( header_cdf ));
@@ -380,7 +422,26 @@ static zip_t *FS_LoadZip( const char *zipfile, int *error )
 				return NULL;
 			}
 
+#if XASH_GAMECUBE
+			{
+				char *names = (char *)zip->names;
+				const size_t len = Q_strlen( filename_buffer ) + 1;
+
+				if( names_used + len > header_eocd.size_of_central_directory )
+				{
+					Con_Reportf( S_ERROR "names overflow the central directory in %s. Zip file corrupted.\n", zipfile );
+					if( error )
+						*error = ZIP_LOAD_CORRUPTED;
+					FS_CloseZIP( zip );
+					return NULL;
+				}
+				memcpy( names + names_used, filename_buffer, len );
+				info[numpackfiles].name_off = (uint32_t)names_used;
+				names_used += len;
+			}
+#else
 			Q_strncpy( info[numpackfiles].name, filename_buffer, sizeof( info[numpackfiles].name ));
+#endif
 			info[numpackfiles].size = header_cdf.uncompressed_size;
 			info[numpackfiles].compressed_size = header_cdf.compressed_size;
 			info[numpackfiles].offset = header_cdf.local_header_offset;
@@ -396,6 +457,21 @@ static zip_t *FS_LoadZip( const char *zipfile, int *error )
 			FS_Seek( zip->handle, header_cdf.file_commentary_len, SEEK_CUR );
 	}
 
+#if XASH_GAMECUBE
+	/* Give back the central-directory bound reserved for names. */
+	if( numpackfiles > 0 )
+	{
+		const size_t used = sizeof( *zip ) + sizeof( *info ) * header_eocd.total_central_directory_record + names_used;
+		zip_t *shrunk = (zip_t *)Mem_Realloc( fs_mempool, zip, used );
+
+		if( shrunk )
+		{
+			zip = shrunk;
+			info = zip->files;
+			zip->names = (const char *)&zip->files[header_eocd.total_central_directory_record];
+		}
+	}
+#endif
 	// refuse to load empty files again
 	if( numpackfiles == 0 )
 	{
@@ -443,7 +519,14 @@ static zip_t *FS_LoadZip( const char *zipfile, int *error )
 	}
 
 	zip->numfiles = numpackfiles;
+	fs_sortzip = zip;
 	qsort( zip->files, zip->numfiles, sizeof( *zip->files ), FS_SortZip );
+	fs_sortzip = NULL;
+#if XASH_GAMECUBE
+	Con_Reportf( "Xash3D GameCube: zip index %s files=%d names=%zu bytes table=%zu bytes\n",
+		zipfile, numpackfiles, names_used,
+		sizeof( *zip ) + sizeof( *info ) * header_eocd.total_central_directory_record + names_used );
+#endif
 
 	if( error )
 		*error = ZIP_LOAD_OK;
@@ -595,7 +678,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 
 	if( header.signature != ZIP_HEADER_LF )
 	{
-		Con_Reportf( S_ERROR "%s: %s signature error\n", __func__, file->name );
+		Con_Reportf( S_ERROR "%s: %s signature error\n", __func__, ZIP_FILE_NAME( search->zip, file ) );
 		return NULL;
 	}*/
 
@@ -663,7 +746,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 			Con_Reportf( "Xash3D GameCube: zip stored read short %s read=%li expected=%li\n",
 				path, (long)c, (long)file->size );
 #endif
-			Con_Reportf( S_ERROR "%s: %s size doesn't match\n", __func__, file->name );
+			Con_Reportf( S_ERROR "%s: %s size doesn't match\n", __func__, ZIP_FILE_NAME( search->zip, file ) );
 			return NULL;
 		}
 #if XASH_GAMECUBE
@@ -680,7 +763,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 
 		if( final_crc != file->crc32 )
 		{
-			Con_Reportf( S_ERROR "%s: %s file crc32 mismatch\n", __func__, file->name );
+			Con_Reportf( S_ERROR "%s: %s file crc32 mismatch\n", __func__, ZIP_FILE_NAME( search->zip, file ) );
 			pfnFree( decompressed_buffer );
 			return NULL;
 		}
@@ -699,7 +782,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 		if( unlikely( !compressed_buffer ))
 		{
 			Con_Reportf( S_ERROR "%s: can't alloc %li compressed bytes for %s\n",
-				__func__, (long)file->compressed_size + 1, file->name );
+				__func__, (long)file->compressed_size + 1, ZIP_FILE_NAME( search->zip, file ) );
 			pfnFree( decompressed_buffer );
 			return NULL;
 		}
@@ -707,7 +790,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 		c = FS_Read( search->zip->handle, compressed_buffer, file->compressed_size );
 		if( c != file->compressed_size )
 		{
-			Con_Reportf( S_ERROR "%s: %s compressed size doesn't match\n", __func__, file->name );
+			Con_Reportf( S_ERROR "%s: %s compressed size doesn't match\n", __func__, ZIP_FILE_NAME( search->zip, file ) );
 			Mem_Free( compressed_buffer );
 			pfnFree( decompressed_buffer );
 			return NULL;
@@ -735,7 +818,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 		if( zinit != Z_OK )
 		{
 			Con_Printf( S_ERROR "%s: inflateInit2 failed (%d) file=%s size=%li csize=%li\n",
-				__func__, zinit, file->name, (long)file->size, (long)file->compressed_size );
+				__func__, zinit, ZIP_FILE_NAME( search->zip, file ), (long)file->size, (long)file->compressed_size );
 			Mem_Free( compressed_buffer );
 			pfnFree( decompressed_buffer );
 			return NULL;
@@ -755,7 +838,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 
 			if( final_crc != file->crc32 )
 			{
-				Con_Reportf( S_ERROR "%s: %s file crc32 mismatch\n", __func__, file->name );
+				Con_Reportf( S_ERROR "%s: %s file crc32 mismatch\n", __func__, ZIP_FILE_NAME( search->zip, file ) );
 				pfnFree( decompressed_buffer );
 				return NULL;
 			}
@@ -766,7 +849,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 		}
 		else
 		{
-			Con_Reportf( S_ERROR "%s: %s: error while file decompressing. Zlib return code %d.\n", __func__, file->name, zlib_result );
+			Con_Reportf( S_ERROR "%s: %s: error while file decompressing. Zlib return code %d.\n", __func__, ZIP_FILE_NAME( search->zip, file ), zlib_result );
 			Mem_Free( compressed_buffer );
 			pfnFree( decompressed_buffer );
 			return NULL;
@@ -775,7 +858,7 @@ static byte *FS_LoadZIPFile( searchpath_t *search, const char *path, int pack_in
 	}
 	else
 	{
-		Con_Reportf( S_ERROR "%s: %s: file compressed with unknown algorithm.\n", __func__, file->name );
+		Con_Reportf( S_ERROR "%s: %s: file compressed with unknown algorithm.\n", __func__, ZIP_FILE_NAME( search->zip, file ) );
 		pfnFree( decompressed_buffer );
 		return NULL;
 	}
@@ -822,13 +905,13 @@ static int FS_FindFile_ZIP( searchpath_t *search, const char *path, char *fixedn
 	while( left <= right )
 	{
 		int middle = (left + right) / 2;
-		int diff = Q_stricmp( search->zip->files[middle].name, path );
+		int diff = Q_stricmp( ZIP_FILE_NAME( search->zip, &search->zip->files[middle] ), path );
 
 		// Found it
 		if( !diff )
 		{
 			if( fixedname )
-				Q_strncpy( fixedname, search->zip->files[middle].name, len );
+				Q_strncpy( fixedname, ZIP_FILE_NAME( search->zip, &search->zip->files[middle] ), len );
 			return middle;
 		}
 
@@ -844,10 +927,10 @@ static int FS_FindFile_ZIP( searchpath_t *search, const char *path, char *fixedn
 	// precache moving instead of failing startup on valid archive members.
 	for( int i = 0; i < search->zip->numfiles; i++ )
 	{
-		if( !Q_stricmp( search->zip->files[i].name, path ))
+		if( !Q_stricmp( ZIP_FILE_NAME( search->zip, &search->zip->files[i] ), path ))
 		{
 			if( fixedname )
-				Q_strncpy( fixedname, search->zip->files[i].name, len );
+				Q_strncpy( fixedname, ZIP_FILE_NAME( search->zip, &search->zip->files[i] ), len );
 			return i;
 		}
 	}
@@ -868,7 +951,7 @@ static void FS_Search_ZIP( searchpath_t *search, stringlist_t *list, const char 
 
 	for( int i = 0; i < search->zip->numfiles; i++ )
 	{
-		Q_strncpy( temp, search->zip->files[i].name, sizeof( temp ));
+		Q_strncpy( temp, ZIP_FILE_NAME( search->zip, &search->zip->files[i] ), sizeof( temp ));
 		while( temp[0] )
 		{
 			const char *slash, *backslash, *colon, *separator;
