@@ -641,7 +641,17 @@ void OSK_DrawBuildStamp( void )
 	OSK_TextFp( sx, sy, 640 - w - 8, 480 - 20, text, mismatch ? bad : dim, 2 );
 }
 
+qboolean OSK_IsOpen( void )
+{
+	return osk.enable && osk_enable.value;
+}
+
 void OSK_Init( void )
 {
+#if XASH_GAMECUBE
+	extern void GC_HiTextInit( void );
+
+	GC_HiTextInit();
+#endif
 	Cvar_RegisterVariable( &osk_enable );
 }

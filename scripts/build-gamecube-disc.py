@@ -3251,6 +3251,11 @@ def inject_gc_font_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int
 		full = bytes(blob[filepos : filepos + disksize])
 		archive.writestr("gfx/gc_creditsfont256.fnt", full, compress_type=zipfile.ZIP_STORED)
 		print(f"  full font CREDITSFONT: → gfx/gc_creditsfont256.fnt ({len(full)} bytes, 256x{src_h})")
+		# Hardware resolution menu text atlas (scripts/bake-hitext.py, Noto Sans, SIL OFL 1.1).
+		hitext = Path(__file__).with_name("gc_hitext.bin")
+		if hitext.is_file():
+			archive.writestr("gfx/gc_hitext.bin", hitext.read_bytes(), compress_type=zipfile.ZIP_STORED)
+			print(f"  hi-res text atlas: → gfx/gc_hitext.bin ({hitext.stat().st_size} bytes)")
 		return 1
 	return 0
 
