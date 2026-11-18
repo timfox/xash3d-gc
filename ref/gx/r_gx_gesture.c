@@ -278,6 +278,14 @@ void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, 
 	}
 }
 
+/* Load the model's gestures now (the first frame of a level), not when the
+ * first one plays. */
+void R_GXGestureWarm( const model_t *mod, const studiohdr_t *hdr )
+{
+	if( mod && hdr && gst.state == 0 )
+		R_GXGestureLoad( mod, hdr );
+}
+
 void R_GXGestureReset( void )
 {
 	memset( &gst, 0, sizeof( gst ));	/* the arena block goes with the map */
