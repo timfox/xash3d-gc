@@ -800,6 +800,74 @@ static u16 GC_ProbeSyntheticHeldButtons( void )
 		Con_Reportf( "Xash3D GameCube: probe menu ready gate open\n" );
 	}
 
+	/* With -gcstartmap (Lost Coast title→map), dwell on the retail main menu
+	 * so the title plate is visible, then confirm New Game and force play-start
+	 * — same end state as -gcmenuplaystart, without skipping UI_Main_Menu. */
+	if( Sys_CheckParm( "-gcstartmap" ))
+	{
+		if( !gc_probe_action_logged )
+		{
+			gc_probe_action_logged = true;
+			gc_probe_action_stage = 0;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			gc_probe_action_diag_time = host.realtime;
+			Con_Reportf( "Xash3D GameCube: probe menuauto New Game dwell begin delay=%.2f\n",
+				GC_PROBE_MENU_NEWGAME_DWELL );
+			return 0;
+		}
+		if( gc_probe_action_stage == 0 )
+		{
+			if( host.realtime - gc_probe_action_time < GC_PROBE_MENU_NEWGAME_DWELL )
+				return 0;
+			gc_probe_action_stage = 1;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			Con_Reportf( "Xash3D GameCube: probe menuauto New Game confirm\n" );
+			return PAD_BUTTON_A;
+		}
+		if( gc_probe_action_stage == 1
+			&& GC_ProbeMenuStageReady( GC_PROBE_MENU_STEP_DELAY, GC_PROBE_MENU_STEP_FRAMES ))
+		{
+			gc_probe_action_stage = 2;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			Con_Reportf( "Xash3D GameCube: probe menuauto difficulty release\n" );
+			return 0;
+		}
+		if( gc_probe_action_stage == 2
+			&& host.realtime - gc_probe_action_time < 2.0 )
+			return 0;
+		if( gc_probe_action_stage == 2
+			&& GC_ProbeMenuStageReady( GC_PROBE_MENU_STEP_DELAY, GC_PROBE_MENU_STEP_FRAMES ))
+		{
+			gc_probe_action_stage = 3;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			Con_Reportf( "Xash3D GameCube: probe menuauto difficulty confirm\n" );
+			return PAD_BUTTON_A;
+		}
+		if( gc_probe_action_stage == 3
+			&& GC_ProbeMenuStageReady( GC_PROBE_MENU_STEP_DELAY, GC_PROBE_MENU_STEP_FRAMES ))
+		{
+			gc_probe_action_stage = 4;
+			gc_probe_action_time = host.realtime;
+			Con_Reportf( "Xash3D GameCube: probe menuauto difficulty final release\n" );
+			return 0;
+		}
+		if( gc_probe_action_stage == 4
+			&& host.realtime - gc_probe_action_time >= 0.75 )
+		{
+			gc_probe_action_stage = 7;
+			if( !CL_Active() && !SV_Active() )
+			{
+				Con_Reportf( "Xash3D GameCube: probe menuauto New Game force gc_playstart\n" );
+				Cbuf_AddText( "gc_playstart\n" );
+			}
+		}
+		return 0;
+	}
+
 	if( !gc_probe_action_logged )
 	{
 		gc_probe_action_logged = true;
