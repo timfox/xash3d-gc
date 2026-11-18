@@ -270,6 +270,16 @@ class DropToFloorTests(unittest.TestCase):
 		props = self.props.static_props(ents)
 		self.assertEqual([p["drop"] for p in props], [True, False])
 
+	def test_footprint_light_ignores_a_dark_texel_under_the_origin(self):
+		light = self.props.FloorLight.__new__(self.props.FloorLight)
+		# Dark under the origin, lit ground to the east, no floor to the west.
+		light.at = lambda p: None if p[0] < -1 else ((17, 16, 15) if p[0] < 1 else (140, 120, 110))
+		self.assertEqual(light.footprint((0.0, 0.0, 8.0), 32.0), (140, 120, 110))
+		light.at = lambda p: (17, 16, 15)
+		self.assertEqual(light.footprint((0.0, 0.0, 8.0), 32.0), (17, 16, 15))
+		light.at = lambda p: None
+		self.assertIsNone(light.footprint((0.0, 0.0, 8.0), 32.0))
+
 	def test_drop_lands_on_the_first_solid_below(self):
 		z = self.floor().drop((10.0, 20.0, 4.0))
 		self.assertAlmostEqual(z, -40.0, delta=0.01)

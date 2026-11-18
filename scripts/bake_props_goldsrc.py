@@ -503,6 +503,24 @@ class FloorLight:
 		f, ti0, ti1, flags, pts, hit = best
 		return self.wd.light_at(self.bsp, f, ti0, ti1, flags, pts, hit)
 
+	def footprint(self, p, radius: float):
+		"""The floor light under a prop's footprint: the mean of the brighter
+		half of a 5x5 grid of samples. One sample under the origin lands on
+		a single lightmap texel, and under a tree trunk that texel is often
+		a dark patch (dod_caen: 17 where the ground 30 units away is 140),
+		which drew the whole tree black."""
+		got = []
+		for iy in range(-2, 3):
+			for ix in range(-2, 3):
+				c = self.at((p[0] + ix * radius * 0.5, p[1] + iy * radius * 0.5, p[2]))
+				if c is not None:
+					got.append(c)
+		if not got:
+			return None
+		got.sort(key=lambda c: c[0] * 30 + c[1] * 59 + c[2] * 11, reverse=True)
+		top = got[:max(1, (len(got) + 1) // 2)]
+		return tuple(int(round(sum(c[a] for c in top) / len(top))) for a in range(3))
+
 
 # ---- textures -----------------------------------------------------------
 
@@ -764,9 +782,11 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		# part on every face and the rest by N.L.
 		c = None
 		if floor is not None:
-			c = floor.at((prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0))
+			# Half the footprint's shorter side, between 16 and 48 units.
+			reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
+			c = floor.footprint((prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0), reach)
 			if c is None:
-				c = floor.at((0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), maxs[2]))
+				c = floor.footprint((0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), maxs[2]), reach)
 		if c is None:
 			c = (150, 150, 150)
 		# Props read darker than the lightmapped walls beside them at 0.6 +
