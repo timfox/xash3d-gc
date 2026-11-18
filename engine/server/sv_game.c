@@ -2902,6 +2902,15 @@ void GAME_EXPORT SV_StartSound( edict_t *ent, int chan, const char *sample, floa
 				gc_intro_snd_log++;
 			}
 		}
+		/* Entities are drawn from their edicts on the world-render route and
+		 * no client reads this message: a voice line is streamed instead. */
+		if( chan == CHAN_VOICE && sample && Sys_CheckParm( "-gcworldrender" )
+			&& !FBitSet( flags, SND_STOP|SND_CHANGE_VOL|SND_CHANGE_PITCH ))
+		{
+			extern qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn );
+
+			GC_VoiceStreamStart( NUM_FOR_EDICT( ent ), sample, vol, attn );
+		}
 #endif
 		SV_Multicast( msg_dest, origin, NULL, false, filter );
 	}
