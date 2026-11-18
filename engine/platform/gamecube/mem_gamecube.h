@@ -79,6 +79,7 @@ qboolean GC_IsMapLoadBufferAddress( const void *ptr );
 size_t GC_MapLoadBufferCapacity( void );
 /* Unused bytes after a borrowed BSP image inside the static map-load arena. */
 void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need );
+void *GC_MapLoadBufferTailEnd( void );
 size_t GC_MapLoadBufferTailHighwater( void );
 size_t GC_MapLoadBufferTailPeak( void );
 const byte *GC_MapLoadBufferBase( void );
@@ -217,6 +218,7 @@ static inline void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need 
 }
 static inline size_t GC_MapLoadBufferTailHighwater( void ) { return 0; }
 static inline size_t GC_MapLoadBufferTailPeak( void ) { return 0; }
+static inline void *GC_MapLoadBufferTailEnd( void ) { return NULL; }
 static inline const byte *GC_MapLoadBufferBase( void ) { return NULL; }
 static inline size_t GC_MapArenaFind( size_t bytes ) { (void)bytes; return (size_t)-1; }
 static inline size_t GC_MapArenaLargestGap( void ) { return 0; }

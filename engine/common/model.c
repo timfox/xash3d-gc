@@ -479,13 +479,108 @@ static void Mod_GCVMSlotTouch( const model_t *mod )
 			gc_vm_slot[i].used = ++gc_vm_clock;
 }
 
-qboolean Mod_GCIsStudioBssCache( const void *ptr )
+/* Inside the fixed BSS array: offsets from gc_studio_bss are meaningful. */
+static qboolean Mod_GCInStudioBssArray( const void *ptr )
 {
 	const byte *p = (const byte *)ptr;
 
-	if( !ptr )
-		return false;
-	return ( p >= gc_studio_bss && p < gc_studio_bss + GC_STUDIO_MODEL_LIMIT );
+	return ptr && p >= gc_studio_bss && p < gc_studio_bss + GC_STUDIO_MODEL_LIMIT;
+}
+
+/*
+ * Studio overflow into the map's leftover memory.
+ *
+ * The fixed studio arena filled on monster-heavy maps (c2a4: houndeye, hgrunt,
+ * bullsquid, islave skipped, so they spawned without hitboxes or animation)
+ * while about 1 MiB of the map-load arena was never carved.  Once the client
+ * is in game every map-load-time carve (world arrays, entity tables, packet
+ * ring) has been made, so what remains is this map's leftover; studio slices
+ * are carved from it on demand.  They live exactly as long as the map: the
+ * pre-spawn release forgets them before the old world's arena is discarded.
+ * In-place grow/trim/rollback stay BSS-only (the overflow is a plain carve).
+ */
+#define GC_STUDIO_OVERFLOW_MAX 64
+static struct { byte *base; size_t size; } gc_studio_overflow[GC_STUDIO_OVERFLOW_MAX];
+static int gc_studio_overflow_count;
+static size_t gc_studio_overflow_bytes;
+
+static qboolean Mod_GCInStudioOverflow( const void *ptr )
+{
+	const byte *p = (const byte *)ptr;
+	int i;
+
+	for( i = 0; ptr && i < gc_studio_overflow_count; i++ )
+		if( p >= gc_studio_overflow[i].base && p < gc_studio_overflow[i].base + gc_studio_overflow[i].size )
+			return true;
+	return false;
+}
+
+static byte *Mod_GCStudioOverflowAlloc( size_t size )
+{
+	size_t at;
+	byte *slot;
+
+	extern void Mod_GCWorldCanaryCheck( const char *when );
+
+	if( gc_studio_overflow_count >= GC_STUDIO_OVERFLOW_MAX || !CL_IsInGame( ))
+		return NULL;
+	Mod_GCWorldCanaryCheck( "before studio overflow slice" ); // covers earlier slices' writes
+	size = ( size + 31u ) & ~(size_t)31u; // keep the next carve contiguous for GrowLast
+	/* Free gaps only: a lean load keeps world arrays above the tail too
+	 * (leafs/nodes high slot, clipnode spill); carving at the highwater
+	 * landed on c2a4's clipnodes (DSI in PM_HullPointContents). */
+	at = GC_MapArenaFind( size );
+	if( at == (size_t)-1 )
+		return NULL;
+	slot = (byte *)GC_MapLoadBufferTailAlloc( at, size );
+	if( !slot )
+		return NULL;
+	gc_studio_overflow[gc_studio_overflow_count].base = slot;
+	gc_studio_overflow[gc_studio_overflow_count].size = size;
+	gc_studio_overflow_count++;
+	gc_studio_overflow_bytes += size;
+	Con_Reportf( "Xash3D GameCube: studio overflow slice %s in map leftover (total %s, %d slices)\n",
+		Q_memprint( size ), Q_memprint( gc_studio_overflow_bytes ), gc_studio_overflow_count );
+	return slot;
+}
+
+/* Grow the newest overflow slice in place when nothing was carved after it
+ * (the T.mdl texture-header merge after a mesh read). */
+static byte *Mod_GCStudioOverflowGrowLast( void *ptr, size_t new_size )
+{
+	const int last = gc_studio_overflow_count - 1;
+	byte *end, *more;
+	size_t extra;
+
+	if( last < 0 || ptr != gc_studio_overflow[last].base )
+		return NULL;
+	if( new_size <= gc_studio_overflow[last].size )
+		return (byte *)ptr;
+	end = gc_studio_overflow[last].base + gc_studio_overflow[last].size;
+	if( GC_MapLoadBufferTailEnd() != end || GC_MapLoadBufferTailPeak() > GC_MapLoadBufferTailHighwater( ))
+		return NULL; // something was carved after this slice
+	extra = ( new_size - gc_studio_overflow[last].size + 31u ) & ~(size_t)31u;
+	{
+		extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+		const size_t off = (size_t)( end - GC_MapLoadBufferBase( ));
+		size_t gap_end = 0;
+
+		/* The extension must be free arena too, not a world array above. */
+		if( Mod_GCArenaGap( off, &gap_end ) != off || off + extra > gap_end )
+			return NULL;
+	}
+	more = (byte *)GC_MapLoadBufferTailAlloc( GC_MapLoadBufferTailHighwater(), extra );
+	if( more != end )
+		return NULL; // cannot happen when the tail ended at the slice
+	gc_studio_overflow[last].size += extra;
+	gc_studio_overflow_bytes += extra;
+	return (byte *)ptr;
+}
+
+/* Model-owned studio memory (BSS array or a map-leftover slice): never free(). */
+qboolean Mod_GCIsStudioBssCache( const void *ptr )
+{
+	return Mod_GCInStudioBssArray( ptr ) || Mod_GCInStudioOverflow( ptr );
 }
 
 /* Studio skins from the top of the shared region (see GC_STUDIO_BSS_BYTES).
@@ -537,11 +632,11 @@ byte *Mod_GCStudioBssAlloc( size_t size )
 {
 	size_t align_off;
 
-	if( size == 0 || size > GC_STUDIO_MODEL_LIMIT )
+	if( size == 0 )
 		return NULL;
 	align_off = ( gc_studio_bss_bump + 31u ) & ~31u;
-	if( align_off + size > GC_STUDIO_MODEL_LIMIT )
-		return NULL;
+	if( size > GC_STUDIO_MODEL_LIMIT || align_off + size > GC_STUDIO_MODEL_LIMIT )
+		return Mod_GCStudioOverflowAlloc( size );
 	gc_studio_bss_bump = align_off + size;
 	gc_studio_bss_owners++;
 	if( Sys_CheckParm( "-gcmodeltrace" ))
@@ -558,7 +653,7 @@ static void Mod_GCStudioBssRollbackLast( byte *slot, size_t size, size_t previou
 {
 	size_t offset;
 
-	if( !Mod_GCIsStudioBssCache( slot ) || gc_studio_bss_owners <= 0 )
+	if( !Mod_GCInStudioBssArray( slot ) || gc_studio_bss_owners <= 0 )
 		return;
 	offset = (size_t)( slot - gc_studio_bss );
 	if( size > GC_STUDIO_BSS_BYTES - offset || previous_bump > offset )
@@ -606,8 +701,8 @@ byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size )
 
 	if( !ptr || old_size == 0 || new_size < old_size || new_size > GC_STUDIO_MODEL_LIMIT )
 		return NULL;
-	if( !Mod_GCIsStudioBssCache( ptr ))
-		return NULL;
+	if( !Mod_GCInStudioBssArray( ptr ))
+		return Mod_GCInStudioOverflow( ptr ) ? Mod_GCStudioOverflowGrowLast( ptr, new_size ) : NULL;
 	off = (size_t)( p - gc_studio_bss );
 	old_end = off + old_size;
 	if( off + new_size > GC_STUDIO_MODEL_LIMIT )
@@ -638,7 +733,7 @@ void Mod_GCStudioBssTrimLast( void *ptr, size_t kept )
 	byte *p = (byte *)ptr;
 	size_t off, new_bump;
 
-	if( !ptr || kept == 0 || !Mod_GCIsStudioBssCache( ptr ))
+	if( !ptr || kept == 0 || !Mod_GCInStudioBssArray( ptr ))
 		return;
 	off = (size_t)( p - gc_studio_bss );
 	if( off >= gc_studio_bss_bump || off + kept > gc_studio_bss_bump )
@@ -2851,6 +2946,16 @@ void Mod_GCReleaseStudioArena( void )
 	gc_deferred_studio_attempts = 0;
 	gc_studio_bss_owners = 0;
 	gc_studio_bss_bump = 0;
+	if( gc_studio_overflow_count )
+	{
+		extern void Mod_GCWorldCanaryCheck( const char *when );
+		Mod_GCWorldCanaryCheck( "studio overflow release" );
+	}
+	if( gc_studio_overflow_count )
+		Con_Reportf( "Xash3D GameCube: studio overflow released slices=%d bytes=%s\n",
+			gc_studio_overflow_count, Q_memprint( gc_studio_overflow_bytes ));
+	gc_studio_overflow_count = 0;
+	gc_studio_overflow_bytes = 0;
 	/* The animation slots are in the arena too: a slot kept across this reset
 	 * wrote the next animation file over the new map's skins. Two are placed
 	 * first, so a full arena still has animations; the others come on demand. */

@@ -8610,6 +8610,55 @@ free_submodels:
 		Q_memprint( GC_MemHeapFreeBytes() ) );
 }
 
+/*
+ * Per-map budget: move the world's entity text (32-104 KiB) off the heap
+ * once the map is ready.  During the load the arena still holds live lumps
+ * (which is why the load itself never uses the tail for it), but by MAP_READY
+ * spawning is done and the leftover gaps are known.  The text keeps living as
+ * long as the map; FreeMallocSurfaces drops the pointer without free().
+ */
+void Mod_GCWorldCanaryCheck( const char *when );
+
+void Mod_GCMoveWorldEntitiesToArena( void )
+{
+	model_t *mod = worldmodel;
+	size_t need, at;
+	char *dst;
+
+	if( !mod || mod->type != mod_brush || !mod->entities )
+		return;
+	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
+	{
+		static const model_t *said;
+
+		if( said != mod )
+		{
+			said = mod;
+			Con_Reportf( "Xash3D GameCube: budget entity text not on heap (%s%s%s)\n",
+				gc_entities_static_block ? "static reserve" : "",
+				gc_entities_arena_tail ? "arena" : "",
+				!gc_entities_static_block && !gc_entities_arena_tail ? "other" : "" );
+		}
+		return;
+	}
+	need = Q_strlen( mod->entities ) + 1;
+	at = GC_MapArenaFind( need );
+	if( at == (size_t)-1 || !( dst = (char *)GC_MapLoadBufferTailAlloc( at, need )))
+	{
+		Con_Reportf( "Xash3D GameCube: budget keeps entity text on heap (%s, largest gap %s)\n",
+			Q_memprint( need ), Q_memprint( GC_MapArenaLargestGap()));
+		return;
+	}
+	memcpy( dst, mod->entities, need );
+	mod->entities = dst;
+	free( gc_entities_malloc_block );
+	gc_entities_malloc_block = NULL;
+	gc_entities_arena_tail = true;
+	Con_Reportf( "Xash3D GameCube: budget moved entity text to map leftover (%s), heap free %s\n",
+		Q_memprint( need ), Q_memprint( GC_MemHeapFreeBytes()));
+	Mod_GCWorldCanaryCheck( "after entity text move" );
+}
+
 static void Mod_GCRestoreDeferredMarkfaces( dbspmodel_t *bmod )
 {
 	if( !gc_bsp_deferred.markfaces )
@@ -12954,47 +13003,87 @@ size_t Mod_GCArenaGap( size_t from, size_t *gap_end )
 static uint32_t gc_world_canary_crc;
 static const model_t *gc_world_canary_mod;
 
-static uint32_t Mod_GCWorldCanary( const model_t *mod )
+/* Per-component CRCs, so a change names what was overwritten. */
+enum { GC_CANARY_PLANES, GC_CANARY_LIGHT, GC_CANARY_VIS, GC_CANARY_NODES, GC_CANARY_CLIP, GC_CANARY_COUNT };
+static const char *gc_canary_names[GC_CANARY_COUNT] = { "planes", "lighting", "pvs", "nodes", "clipnodes" };
+static uint32_t gc_world_canary_parts[GC_CANARY_COUNT];
+
+static uint32_t Mod_GCWorldCanary( const model_t *mod, uint32_t *parts )
 {
-	uint32_t crc;
+	uint32_t crc, all;
 	int i;
 
-	CRC32_Init( &crc );
+	for( i = 0; i < GC_CANARY_COUNT; i++ )
+		parts[i] = 0;
 	if( mod->planes )
+	{
+		CRC32_Init( &crc );
 		CRC32_ProcessBuffer( &crc, mod->planes, mod->numplanes * sizeof( mplane_t ));
+		parts[GC_CANARY_PLANES] = CRC32_Final( crc );
+	}
 	if( mod->lightdata && gc_world_lightdata_bytes )
+	{
+		CRC32_Init( &crc );
 		CRC32_ProcessBuffer( &crc, mod->lightdata, gc_world_lightdata_bytes );
+		parts[GC_CANARY_LIGHT] = CRC32_Final( crc );
+	}
 	if( mod->visdata && gc_world_visdata_bytes )
+	{
+		CRC32_Init( &crc );
 		CRC32_ProcessBuffer( &crc, mod->visdata, gc_world_visdata_bytes );
+		parts[GC_CANARY_VIS] = CRC32_Final( crc );
+	}
+	CRC32_Init( &crc );
 	for( i = 0; mod->nodes && i < mod->numnodes; i++ )
 	{
 		CRC32_ProcessBuffer( &crc, &mod->nodes[i].plane, sizeof( mod->nodes[i].plane ));
 		CRC32_ProcessBuffer( &crc, &mod->nodes[i].contents, sizeof( mod->nodes[i].contents ));
 	}
-	return CRC32_Final( crc );
+	parts[GC_CANARY_NODES] = CRC32_Final( crc );
+	/* Collision hulls: a claim over them shows up as garbage in
+	 * PM_HullPointContents, not as a bad picture. */
+	if( mod->clipnodes16 && mod->numclipnodes > 0 )
+	{
+		CRC32_Init( &crc );
+		CRC32_ProcessBuffer( &crc, mod->clipnodes16, mod->numclipnodes
+			* ( world.version == QBSP2_VERSION ? sizeof( mclipnode32_t ) : sizeof( mclipnode16_t )));
+		parts[GC_CANARY_CLIP] = CRC32_Final( crc );
+	}
+	CRC32_Init( &all );
+	CRC32_ProcessBuffer( &all, parts, sizeof( parts[0] ) * GC_CANARY_COUNT );
+	return CRC32_Final( all );
 }
 
 void Mod_GCWorldCanaryCheck( const char *when )
 {
 	const model_t *mod = worldmodel;
+	uint32_t parts[GC_CANARY_COUNT];
 	uint32_t crc;
+	char what[96];
+	int i;
 
 	if( !mod || mod->type != mod_brush )
 		return;
-	crc = Mod_GCWorldCanary( mod );
+	crc = Mod_GCWorldCanary( mod, parts );
 	/* The world model reuses slot 0 across maps: (re)arm at every load. */
 	if( gc_world_canary_mod != mod || !Q_strncmp( when, "after load", 10 ))
 	{
 		gc_world_canary_mod = mod;
 		gc_world_canary_crc = crc;
+		memcpy( gc_world_canary_parts, parts, sizeof( parts ));
 		Con_Reportf( "Xash3D GameCube: world canary armed %s crc=%08x (%s)\n", mod->name, crc, when );
 		return;
 	}
 	if( crc != gc_world_canary_crc )
 	{
-		Con_Reportf( S_ERROR "Xash3D GameCube: WORLD CANARY CHANGED %s crc %08x -> %08x (%s): arena claim overwrote world data\n",
-			mod->name, gc_world_canary_crc, crc, when );
+		what[0] = 0;
+		for( i = 0; i < GC_CANARY_COUNT; i++ )
+			if( parts[i] != gc_world_canary_parts[i] )
+				Q_strncat( what, va( "%s%s", what[0] ? "," : "", gc_canary_names[i] ), sizeof( what ));
+		Con_Reportf( S_ERROR "Xash3D GameCube: WORLD CANARY CHANGED %s crc %08x -> %08x parts=%s (%s): arena claim overwrote world data\n",
+			mod->name, gc_world_canary_crc, crc, what, when );
 		gc_world_canary_crc = crc;
+		memcpy( gc_world_canary_parts, parts, sizeof( parts ));
 	}
 }
 #endif
