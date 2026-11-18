@@ -2842,7 +2842,14 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		GC_ProfMark( "render: lean emit players" );
 		/* Once a player body has been drawn the stub is not needed, and it
 		 * showed as a white plank on the floor near the bot (ceres fld). */
+#if XASH_GC_LOSTCOAST
+		/* Not on Lost Coast: with no character in view (the monastery stairs,
+		 * the church) the stub sat 48 units in front of the eye, a crowbar
+		 * that looked ten times too large. */
+		if( 0 )
+#else
 		if( studios == 0 && !lean_player_seen )
+#endif
 		{
 			/* Prefer tiny lean w_crowbar stub — v_crowbar hung Flipper
 			 * (probe 20260807-171034: studios=1 then silence). */
@@ -2952,9 +2959,17 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		/* Landmark viewmodel for Flipper G155 gun pass (G105 crowbar).
 		 * Bind even when no world NPC studios made the lean list — tip-safe
 		 * c0a0 often has studios=0 while crowbar is already G105-ready. */
+#if XASH_GC_LOSTCOAST
+		/* Lost Coast has no view models baked yet. The HL1 crowbar this
+		 * fallback binds is not on its disc as a usable model: it was bound
+		 * again every frame and drew as a white mesh ten times too large in
+		 * the world (the monastery stairs, the church). */
+		if( 0 )
+#else
 		if( !clgame.viewent.model
 			|| clgame.viewent.model->type != mod_studio
 			|| !clgame.viewent.model->cache.data )
+#endif
 		{
 			const char *vpath = Mod_GCLandmarkViewModelPath();
 			model_t *vm = NULL;
@@ -2975,6 +2990,14 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				Con_Reportf( "Xash3D GameCube: lean EmitBrush bind viewmodel %s\n", vpath );
 			}
 		}
+
+#if XASH_GC_LOSTCOAST
+		/* However it got bound (the fallback above, or the weapon the HL1
+		 * player code holds), Lost Coast draws no view model: none is baked
+		 * for it, and the HL1 crowbar showed as a huge white mesh. */
+		clgame.viewent.model = NULL;
+		clgame.viewent.curstate.modelindex = 0;
+#endif
 
 		/* Early G291 seed (present 0/2) dies before studio admit (present≥16).
 		 * Reseed tip-safe particles once so lean EFX can emit. */

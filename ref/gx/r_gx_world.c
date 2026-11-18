@@ -7328,52 +7328,32 @@ static void R_GXFishermanWalkDraw( const float *org )
 	}
 }
 
-/* CapFaces demo: headcrab canister arcs from the monastery gun into the
- * church courtyard, looping so DumpFrames / still eyes catch mid-flight. */
+/* Headcrab canisters the monastery gun has in the air (game code launches
+ * them on the map's own timer: engine/platform/gamecube/actor_gesture.c). */
 static void R_GXCanisterFlightDraw( const float *org )
 {
-	/* target_gun → church courtyard (expl_gun near ambient_music). */
-	static const float launch[3] = { 1106.0f, 3352.0f, 3523.0f };
-	static const float impact[3] = { 1408.0f, 3776.0f, 2680.0f };
-	float t, omt, pos[3], peak_z, d2;
-	int ox, oy, oz;
+	extern int GC_CanisterFlights( float time, float pos[][3], float vel[][3], int max );
+	float pos[2][3], vel[2][3];
 	static qboolean logged;
+	int i, n;
 
 	if( gc_prop_state != 1 || !gc_prop_flight_count || !org )
 		return;
-	/* Only when the eye can see the monastery flight corridor. */
-	d2 = ( org[0] - impact[0] ) * ( org[0] - impact[0] )
-		+ ( org[1] - impact[1] ) * ( org[1] - impact[1] )
-		+ ( org[2] - impact[2] ) * ( org[2] - impact[2] );
-	if( d2 > ( 3500.0f * 3500.0f ))
-		return;
+	n = GC_CanisterFlights( gp_cl ? (float)gp_cl->time : 0.0f, pos, vel, 2 );
+	for( i = 0; i < n; i++ )
 	{
-		float sec = gp_cl ? (float)gp_cl->time : 0.0f;
-		static u32 flight_frames;
+		const float hv = sqrtf( vel[i][0] * vel[i][0] + vel[i][1] * vel[i][1] );
 
-		flight_frames++;
-		/* Prefer client time; DumpFrames still advances a phase if time stalls. */
-		t = (float)fmod( (double)sec + (double)flight_frames * ( 1.0 / 60.0 ), 5.0 );
-	}
-	if( t < 0.0f )
-		t = 0.0f;
-	t *= 0.2f; /* 0..1 over 5 seconds */
-	omt = 1.0f - t;
-	peak_z = ( launch[2] > impact[2] ? launch[2] : impact[2] ) + 900.0f;
-	pos[0] = omt * launch[0] + t * impact[0];
-	pos[1] = omt * launch[1] + t * impact[1];
-	pos[2] = omt * omt * launch[2] + 2.0f * omt * t * peak_z + t * t * impact[2];
-	ox = (int)( pos[0] + ( pos[0] >= 0.0f ? 0.5f : -0.5f ));
-	oy = (int)( pos[1] + ( pos[1] >= 0.0f ? 0.5f : -0.5f ));
-	oz = (int)( pos[2] + ( pos[2] >= 0.0f ? 0.5f : -0.5f ));
-	R_GXPropSetLitAt( pos );
-	gc_prop_vtx_frac = -1;
-	R_GXPropEmitModel( gc_prop_flight_model, pos, 0.0f, 0.0f, 0.0f, false );
-	if( !logged )
-	{
-		logged = true;
-		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: canister flight tris=%u\n", gc_prop_flight_count );
+		R_GXPropSetLitAt( pos[i] );
+		gc_prop_vtx_frac = -1;
+		/* nose along the flight */
+		R_GXPropEmitModel( gc_prop_flight_model, pos[i], -atan2f( vel[i][2], hv ), atan2f( vel[i][1], vel[i][0] ), 0.0f, false );
+		if( !logged )
+		{
+			logged = true;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: canister flight tris=%u at %d %d %d\n", gc_prop_flight_count,
+				(int)pos[i][0], (int)pos[i][1], (int)pos[i][2] );
+		}
 	}
 }
 

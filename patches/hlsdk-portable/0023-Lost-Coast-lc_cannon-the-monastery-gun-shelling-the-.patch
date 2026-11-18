@@ -1,0 +1,190 @@
+From 7d79c4afeb2f38d56e8cf0e375c3d1df6b5b811a Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Wed, 18 Nov 2026 01:52:02 -0800
+Subject: [PATCH] Lost Coast: lc_cannon, the monastery gun shelling the town
+
+The map's chain (a trigger in the monastery enables logic_timer
+cannon_fire_timer and fires one shot; each tick a logic_case picks one of
+the canister relays; a later trigger stops the timer) as one entity with
+baked keys. Each shot is handed to the engine, which flies it.
+---
+ dlls/lostcoast_npcs.cpp | 166 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 166 insertions(+)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 53ccc612..99427b37 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -1151,3 +1151,169 @@ void CLCFisherman::FishThink( void )
+ 		}
+ 	}
+ }
++
++//=========================================================
++// lc_cannon: the monastery gun shelling the town. The map's
++// chain (trigger_once -> logic_timer cannon_fire_timer ->
++// logic_case -> relay -> point_template -> env_headcrabcanister)
++// flattened by lostcoast-gc bake_lostcoast_studio.py:
++//  - quiet until the player walks into the trigger in the
++//    monastery, which fires one shot at once
++//  - then one of the shots at random every lo..hi seconds
++//  - until the player reaches the trigger that stops the timer
++// A shot is launch position, impact position, impact pitch and
++// yaw, flight time and flight speed; the engine flies it.
++//=========================================================
++#if XASH_GAMECUBE
++extern "C" void GC_CanisterLaunch( const float *launch, const float *impact, float pitch, float yaw,
++	float flightTime, float flightSpeed ) __attribute__(( weak ));
++#endif
++
++#define LC_CANNON_SHOTS	8
++
++class CLCCannon : public CBaseEntity
++{
++public:
++	void Spawn( void );
++	void KeyValue( KeyValueData *pkvd );
++	void EXPORT CannonThink( void );
++	void Fire( int shot );
++	BOOL PlayerIn( const float *box );
++
++	float	m_start[6], m_stop[6];
++	BOOL	m_bHaveStart, m_bHaveStop;
++	float	m_lo, m_hi;
++	float	m_shot[LC_CANNON_SHOTS][10];
++	BOOL	m_bShot[LC_CANNON_SHOTS];
++	int	m_first;
++	BOOL	m_bOn, m_bDone;
++	float	m_flNext;
++};
++
++LINK_ENTITY_TO_CLASS( lc_cannon, CLCCannon )
++
++void CLCCannon::KeyValue( KeyValueData *pkvd )
++{
++	if( FStrEq( pkvd->szKeyName, "lc_start" ))
++	{
++		m_bHaveStart = sscanf( pkvd->szValue, "%f %f %f %f %f %f", &m_start[0], &m_start[1], &m_start[2],
++			&m_start[3], &m_start[4], &m_start[5] ) == 6;
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_stop" ))
++	{
++		m_bHaveStop = sscanf( pkvd->szValue, "%f %f %f %f %f %f", &m_stop[0], &m_stop[1], &m_stop[2],
++			&m_stop[3], &m_stop[4], &m_stop[5] ) == 6;
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_interval" ))
++	{
++		sscanf( pkvd->szValue, "%f %f", &m_lo, &m_hi );
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_first" ))
++	{
++		m_first = atoi( pkvd->szValue );
++		pkvd->fHandled = TRUE;
++	}
++	else if( !strncmp( pkvd->szKeyName, "lc_shot", 7 ))
++	{
++		int n = atoi( pkvd->szKeyName + 7 ) - 1;
++
++		if( n >= 0 && n < LC_CANNON_SHOTS )
++		{
++			float *v = m_shot[n];
++
++			m_bShot[n] = sscanf( pkvd->szValue, "%f %f %f %f %f %f %f %f %f %f", v, v + 1, v + 2, v + 3, v + 4,
++				v + 5, v + 6, v + 7, v + 8, v + 9 ) == 10;
++		}
++		pkvd->fHandled = TRUE;
++	}
++	else
++		CBaseEntity::KeyValue( pkvd );
++}
++
++void CLCCannon::Spawn( void )
++{
++	pev->solid = SOLID_NOT;
++	pev->movetype = MOVETYPE_NONE;
++	pev->effects |= EF_NODRAW;
++	if( m_hi < m_lo )
++		m_hi = m_lo;
++	if( m_lo <= 0 )
++	{
++		m_lo = 30;
++		m_hi = 60;
++	}
++	// a probe with nobody at the controls: start firing, and often
++	if( LC_BootSwitch( "lccannontest" ))
++	{
++		m_bOn = TRUE;
++		m_lo = 6;
++		m_hi = 8;
++		m_flNext = gpGlobals->time + 4.0f;
++	}
++	SetThink( &CLCCannon::CannonThink );
++	pev->nextthink = gpGlobals->time + 0.5f;
++}
++
++BOOL CLCCannon::PlayerIn( const float *box )
++{
++	CBaseEntity *pl = UTIL_PlayerByIndex( 1 );
++
++	if( !pl )
++		return FALSE;
++	const Vector &o = pl->pev->origin;
++
++	return o.x >= box[0] && o.y >= box[1] && o.z >= box[2] - 36 && o.x <= box[3] && o.y <= box[4] && o.z <= box[5] + 36;
++}
++
++void CLCCannon::Fire( int shot )
++{
++	if( shot < 0 || shot >= LC_CANNON_SHOTS || !m_bShot[shot] )
++		return;
++#if XASH_GAMECUBE
++	if( GC_CanisterLaunch )
++		GC_CanisterLaunch( &m_shot[shot][0], &m_shot[shot][3], m_shot[shot][6], m_shot[shot][7], m_shot[shot][8], m_shot[shot][9] );
++#endif
++	ALERT( at_console, "Lost Coast: cannon fires canister %d\n", shot + 1 );
++}
++
++void CLCCannon::CannonThink( void )
++{
++	pev->nextthink = gpGlobals->time + 0.2f;
++	if( m_bDone )
++		return;
++	if( !m_bOn )
++	{
++		if( m_bHaveStart && PlayerIn( m_start ))
++		{
++			m_bOn = TRUE;
++			Fire( m_first - 1 );
++			m_flNext = gpGlobals->time + RANDOM_FLOAT( m_lo, m_hi );
++		}
++		return;
++	}
++	if( m_bHaveStop && PlayerIn( m_stop ))
++	{
++		m_bDone = TRUE;
++		return;
++	}
++	if( gpGlobals->time >= m_flNext )
++	{
++		int tries;
++
++		// logic_case PickRandom: any of the cases
++		for( tries = 0; tries < 16; tries++ )
++		{
++			int n = RANDOM_LONG( 0, LC_CANNON_SHOTS - 1 );
++
++			if( m_bShot[n] )
++			{
++				Fire( n );
++				break;
++			}
++		}
++		m_flNext = gpGlobals->time + RANDOM_FLOAT( m_lo, m_hi );
++	}
++}
+-- 
+2.53.0
+
