@@ -173,8 +173,14 @@ static int __read(MOUNT_DESCR *mdescr, void *ptr, u64 offset, size_t len)
 	u32 end_sector = (offset + len - 1) / SECTOR_SIZE;
 	u32 sectors = MIN(BUFFER_SIZE / SECTOR_SIZE, end_sector - sector + 1);
 	u32 sector_offset = offset % SECTOR_SIZE;
-	u32 fetch = gc_iso9660_small_reads ? sectors : BUFFER_SIZE / SECTOR_SIZE;
+	/* Always fetch only touched sectors. Under current Dolphin DVD DMA,
+	 * the upstream 16-sector (32 KiB) prefetch often returns a 0x20-byte
+	 * pattern that corrupts path tables, directory sizes, and zip reads.
+	 * GCube_DVDReadSectors already splits to one sector; keep the request
+	 * size minimal so we never cache poisoned neighbors. */
+	u32 fetch = sectors;
 	const DISC_INTERFACE *disc = mdescr->disc_interface;
+	(void)gc_iso9660_small_reads;
 
 	len = MIN(BUFFER_SIZE - sector_offset, len);
 	if (mdescr->cache_sectors && sector >= mdescr->cache_start && (sector + sectors) <= (mdescr->cache_start + mdescr->cache_sectors))
@@ -319,31 +325,62 @@ static s32 read_direntry(MOUNT_DESCR *mdescr, DIR_ENTRY *entry, u8 *buf)
 	return *buf;
 }
 
+static bool sector_looks_poisoned_20( const u8 *buf, u32 nbytes )
+{
+	u32 i, hits = 0;
+	u32 n = nbytes < 64u ? nbytes : 64u;
+	if( n < 8u )
+		return false;
+	for( i = 0; i < n; i++ )
+		if( buf[i] == 0x20 )
+			hits++;
+	return hits >= ( n - ( n / 8u ));
+}
+
 static bool read_directory(MOUNT_DESCR *mdescr, DIR_ENTRY *dir_entry, PATH_ENTRY *path_entry)
 {
 	u32 sector = path_entry->table_entry.sector;
 	u32 remaining = 0;
 	u32 sector_offset = 0;
+	u32 guard = 0;
 
 	do
 	{
-		if (__read(mdescr, mdescr->cluster_buffer, (u64) sector * SECTOR_SIZE + sector_offset, (SECTOR_SIZE - sector_offset)) != (SECTOR_SIZE - sector_offset))
-			return false;
-		int offset = read_direntry(mdescr, dir_entry, mdescr->cluster_buffer);
-		if (offset == -1)
+		int attempt;
+		int offset = -1;
+		for( attempt = 0; attempt < 4; attempt++ )
+		{
+			mdescr->cache_sectors = 0;
+			if (__read(mdescr, mdescr->cluster_buffer, (u64) sector * SECTOR_SIZE + sector_offset, (SECTOR_SIZE - sector_offset)) != (SECTOR_SIZE - sector_offset))
+				continue;
+			if( sector_looks_poisoned_20( mdescr->cluster_buffer, SECTOR_SIZE - sector_offset ))
+				continue;
+			offset = read_direntry(mdescr, dir_entry, mdescr->cluster_buffer);
+			if (offset == -1)
+				return false;
+			break;
+		}
+		if (offset <= 0)
 			return false;
 		if (!remaining)
 		{
 			remaining = dir_entry->size;
 			dir_entry->path_entry = path_entry;
+			/* Reject 0x20-fill / absurd sizes that would spin for minutes. */
+			if (remaining == 0 || remaining > 16u * 1024u * 1024u)
+				return false;
 		}
 		sector_offset += offset;
 		if (sector_offset >= SECTOR_SIZE || !mdescr->cluster_buffer[offset])
 		{
+			if (remaining <= SECTOR_SIZE)
+				break;
 			remaining -= SECTOR_SIZE;
 			sector_offset = 0;
 			sector++;
 		}
+		if (++guard > 65536u)
+			return false;
 	} while (remaining > 0);
 
 	return true;
@@ -989,10 +1026,15 @@ static struct pvd_s* read_volume_descriptor(MOUNT_DESCR *mdescr, u8 descriptor)
 
 static bool read_directories(MOUNT_DESCR *mdescr)
 {
+	/* Prefer Joliet for long names (matches pre-regression Dolphin boots).
+	 * Path-table walk uses BE unpack + single-extent fetches + a warm-up
+	 * read — without those, Dolphin returned 0x20-fill and mount failed. */
 	struct pvd_s *volume = read_volume_descriptor(mdescr, 2);
 	if (volume)
 		mdescr->iso_unicode = true;
-	else if (!(volume = read_volume_descriptor(mdescr, 1)))
+	else if ((volume = read_volume_descriptor(mdescr, 1)))
+		mdescr->iso_unicode = false;
+	else
 		return false;
 
 	if (!(mdescr->iso_rootentry = malloc(sizeof(PATH_ENTRY))))
@@ -1014,11 +1056,53 @@ static bool read_directories(MOUNT_DESCR *mdescr)
 	u16 i = 1;
 	u64 offset = sizeof(PATHTABLE_ENTRY) - ISO_MAXPATHLEN + 2;
 	PATH_ENTRY *parent = mdescr->iso_rootentry;
+	/* Dolphin DVD: a cold 16-sector prefetch after the PVD scan can return
+	 * 0x20-fill. Prime the path-table sector with single-extent reads and
+	 * verify the root entry (namelen==1) before the walk. */
+	{
+		u8 warm[8];
+		int attempt;
+		int saved_small = gc_iso9660_small_reads;
+		gc_iso9660_small_reads = 1;
+		mdescr->cache_sectors = 0;
+		warm[0] = 0;
+		for( attempt = 0; attempt < 8; attempt++ )
+		{
+			if( __read( mdescr, warm, (u64)path_table * SECTOR_SIZE, sizeof( warm )) != (int)sizeof( warm ))
+			{
+				mdescr->cache_sectors = 0;
+				continue;
+			}
+			if( warm[0] == 1 )
+				break;
+			mdescr->cache_sectors = 0;
+		}
+		gc_iso9660_small_reads = saved_small;
+		mdescr->cache_sectors = 0;
+		if( warm[0] != 1 )
+			return false;
+	}
 	while (i < 0xffff && offset < path_table_len)
 	{
 		PATHTABLE_ENTRY entry;
-		if (__read(mdescr, &entry, (u64) path_table * SECTOR_SIZE + offset, sizeof(PATHTABLE_ENTRY)) != sizeof(PATHTABLE_ENTRY))
-			return false; // kinda dodgy - could be reading too far
+		u8 raw[8];
+		u8 namelen;
+		/* Read the fixed 8-byte header only. Full PATHTABLE_ENTRY sizeof
+		 * includes ISO_MAXPATHLEN and is not required for the walk. */
+		if (__read(mdescr, raw, (u64) path_table * SECTOR_SIZE + offset, sizeof(raw)) != (int)sizeof(raw))
+			return false;
+		memset(&entry, 0, sizeof(entry));
+		namelen = raw[0];
+		entry.name_length = namelen;
+		entry.extended_sectors = raw[1];
+		/* Type-M path table is big-endian (GameCube native). */
+		entry.sector = ((u32)raw[2] << 24) | ((u32)raw[3] << 16) | ((u32)raw[4] << 8) | (u32)raw[5];
+		entry.parent = ((u16)raw[6] << 8) | (u16)raw[7];
+		if (namelen >= ISO_MAXPATHLEN)
+			return false;
+		if (namelen > 0
+			&& __read(mdescr, entry.name, (u64) path_table * SECTOR_SIZE + offset + 8, namelen) != (int)namelen)
+			return false;
 		if (parent->index != entry.parent)
 			parent = entry_from_index(mdescr->iso_rootentry, entry.parent);
 		if (!parent)
@@ -1027,22 +1111,23 @@ static bool read_directories(MOUNT_DESCR *mdescr)
 		if (!child)
 			return false;
 		memcpy(&child->table_entry, &entry, sizeof(PATHTABLE_ENTRY));
-		offset += sizeof(PATHTABLE_ENTRY) - ISO_MAXPATHLEN + child->table_entry.name_length;
-		if (child->table_entry.name_length % 2)
+		/* Advance using on-disc name byte length before unicode fold. */
+		offset += 8 + namelen;
+		if (namelen % 2)
 			offset++;
 		child->index = ++i;
 
 		if (mdescr->iso_unicode)
 		{
-			u32 i;
-			for (i = 0; i < (child->table_entry.name_length / 2); i++)
-				child->table_entry.name[i] = entry.name[i * 2 + 1];
-			child->table_entry.name[i] = '\x00';
-			child->table_entry.name_length = i;
+			u32 n;
+			for (n = 0; n < (namelen / 2); n++)
+				child->table_entry.name[n] = entry.name[n * 2 + 1];
+			child->table_entry.name[n] = '\x00';
+			child->table_entry.name_length = n;
 		}
 		else
 		{
-			child->table_entry.name[child->table_entry.name_length] = '\x00';
+			child->table_entry.name[namelen] = '\x00';
 		}
 
 	}

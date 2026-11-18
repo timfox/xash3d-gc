@@ -98,10 +98,17 @@ static qboolean GCube_FatHasGameData( void );
 /* Declared later; used when logging multi-game detection onto FAT. */
 void GCube_AppendSwissEvidence( const char *fmt, ... );
 
+static qboolean gc_dvd_mount_failed;
+
 static qboolean GCube_MountDisc( void )
 {
 	if( gc_dvd_mounted )
 		return true;
+	/* A failed first mount can hang on DVD_Init/ISO9660 retry under Dolphin.
+	 * Skip remount so Platform_Init can continue (cfg reinject still needs a
+	 * successful first mount — diagnostics land on that attempt). */
+	if( gc_dvd_mount_failed )
+		return false;
 
 	SYS_Report( "Xash3D GameCube: DVD mount begin\n" );
 	DVD_Init();
@@ -119,6 +126,7 @@ static qboolean GCube_MountDisc( void )
 	{
 		SYS_Report( "Xash3D GameCube: mounting DVD filesystem failed\n" );
 		gc_dvd_mounted = false;
+		gc_dvd_mount_failed = true;
 		return false;
 	}
 
@@ -1992,6 +2000,16 @@ static void GCube_ReinjectMissingBootArgv( void )
 	}
 	if( gc_dumpframes_configured && !Sys_CheckParm( "-gcdumpframes" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcdumpframes";
+	/* LCG-7: GetArgv often misses gamecube.cfg before DVD/chdir is ready.
+	 * CapFaces reinject covers smoke; retail title menu needs the same for
+	 * menuauto + startmap so New Game still reaches d2_lostcoast. */
+	if( gc_menuauto_configured && !Sys_CheckParm( "-gcmenuauto" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcmenuauto";
+	if( gc_startmap_configured && !Sys_CheckParm( "-gcstartmap" ) && n + 2 < cap )
+	{
+		gc_argv[n++] = "-gcstartmap";
+		gc_argv[n++] = gc_startmap;
+	}
 
 	if( n != host.argc )
 	{
