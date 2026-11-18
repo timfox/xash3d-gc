@@ -632,6 +632,15 @@ def configure(conf):
 			conf.define('XASH_DODGC_NETWORK', 1)
 			conf.define('DEFAULT_MAX_EDICTS', 460)
 			conf.define('GC_SP_EDICT_CAP', 460)
+			# playermove_t array caps (two static copies, ~0.5 KiB per physent+visent+touch).
+			# Unset keeps the stock 600/64. dod-gc patches the SDK's pm_defs.h with the same
+			# numbers (scripts/integrate-dod-gameplay.py); both sides must agree.
+			pm_phys = os.environ.get('XASH_GC_PM_MAX_PHYSENTS', '')
+			pm_move = os.environ.get('XASH_GC_PM_MAX_MOVEENTS', '')
+			if pm_phys.isdigit():
+				conf.define('GC_PM_MAX_PHYSENTS', int(pm_phys))
+			if pm_move.isdigit():
+				conf.define('GC_PM_MAX_MOVEENTS', int(pm_move))
 		# Slim server client slots: more than two listen-server slots (bots), real
 		# clients still limited to two; see server.h. DoD builds default to on
 		# with 5 slots (the player and four bots). Measured on dod_charlie in Dolphin

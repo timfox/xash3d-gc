@@ -16,8 +16,19 @@
 #ifndef PM_DEFS_H
 #define PM_DEFS_H
 
+/* GameCube DoD builds may lower these (wscript: XASH_GC_PM_MAX_PHYSENTS / _MOVEENTS). The
+ * game DLL is built against its own copy of this header, so both sides must get the same
+ * values; the DoD build patches the SDK copy with the same numbers. Default is unchanged. */
+#ifdef GC_PM_MAX_PHYSENTS
+#define MAX_PHYSENTS	GC_PM_MAX_PHYSENTS
+#else
 #define MAX_PHYSENTS	600		// Must have room for all entities in the world.
+#endif
+#ifdef GC_PM_MAX_MOVEENTS
+#define MAX_MOVEENTS	GC_PM_MAX_MOVEENTS
+#else
 #define MAX_MOVEENTS	64
+#endif
 #define MAX_CLIP_PLANES	5
 
 #define PM_NORMAL		0x00000000
