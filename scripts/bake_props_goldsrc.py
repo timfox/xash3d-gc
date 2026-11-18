@@ -792,11 +792,13 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 			got = [g for g in (
 				floor.footprint((prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0), reach),
 				floor.footprint(mid, reach),
+				# A vehicle stands on its own collision brush: the ground
+				# under that brush is unlit and only the brush's top,
+				# near the top of the bounds, sees the sky.
+				floor.footprint((mid[0], mid[1], maxs[2]), reach),
 			) if g is not None]
 			if got:
 				c = max(got, key=lambda g: g[0] * 30 + g[1] * 59 + g[2] * 11)
-			else:
-				c = floor.footprint((mid[0], mid[1], maxs[2]), reach)
 		if c is None:
 			c = (150, 150, 150)
 		# Props read darker than the lightmapped walls beside them at 0.6 +
