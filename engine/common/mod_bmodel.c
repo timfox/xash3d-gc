@@ -5621,6 +5621,9 @@ typedef struct
 
 static gc_wt_stored_t gc_wt_store[GC_WT_ARAM_ENTRIES];
 static uint32_t gc_wt_store_base, gc_wt_store_head, gc_wt_store_next;
+/* Ring size. Lost Coast (-gccapfacessmoke) has one map and no changelevel,
+ * so its ring is sized to that map's pack instead of holding 6 MB of ARAM. */
+static uint32_t gc_wt_store_bytes = GC_WT_ARAM_BYTES;
 static byte gc_wt_stage[16 * 1024] __attribute__((aligned(32)));
 
 /* When the remaining tail can accommodate both world trees, share it between
@@ -5696,9 +5699,9 @@ static const gc_wt_stored_t *Mod_GCWorldStorePut( const gc_wt_entry_t *e, byte *
 	gc_wt_stored_t *s;
 	int i;
 
-	if( size > GC_WT_ARAM_BYTES )
+	if( size > gc_wt_store_bytes )
 		return NULL;
-	if( gc_wt_store_head + size > GC_WT_ARAM_BYTES )
+	if( gc_wt_store_head + size > gc_wt_store_bytes )
 		gc_wt_store_head = 0;
 	for( i = 0; i < GC_WT_ARAM_ENTRIES; i++ )
 	{
@@ -5723,8 +5726,8 @@ static const gc_wt_stored_t *Mod_GCWorldStorePutFile( const gc_wt_entry_t *e, fi
 	gc_wt_stored_t *s;
 	uint32_t done = 0;
 	int i;
-	if( size > GC_WT_ARAM_BYTES ) return NULL;
-	if( gc_wt_store_head + size > GC_WT_ARAM_BYTES ) gc_wt_store_head = 0;
+	if( size > gc_wt_store_bytes ) return NULL;
+	if( gc_wt_store_head + size > gc_wt_store_bytes ) gc_wt_store_head = 0;
 	for( i = 0; i < GC_WT_ARAM_ENTRIES; i++ )
 	{
 		s = &gc_wt_store[i];
@@ -5799,11 +5802,15 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 	start = Sys_DoubleTime( );
 	size = FS_FileLength( f );
 	if( !gc_wt_store_base )
-		gc_wt_store_base = GC_AramReserveTagged( GC_WT_ARAM_BYTES, "wtstore" );
+	{
+		if( Sys_CheckParm( "-gccapfacessmoke" ) && size > 0 && (uint32_t)size < GC_WT_ARAM_BYTES )
+			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
+		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+	}
 	if( !gc_wt_store_base )
 	{
 		Con_Reportf( S_ERROR "Xash3D GameCube: world texture pack %s needs %u bytes of ARAM\n",
-			path, (unsigned)GC_WT_ARAM_BYTES );
+			path, (unsigned)gc_wt_store_bytes );
 		FS_Close( f );
 		return;
 	}
