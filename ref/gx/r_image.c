@@ -102,6 +102,15 @@ static uint gc_fx_pixels_at[GC_FX_PIXELS_ALLOCS];
 /* Bytes at the end of the block lent out as scratch (R_GCFxScratchAlloc). */
 static size_t gc_fx_scratch;
 static int gc_fx_pixels_count;
+/* View model skins borrow the idle end of the block, filled from the top down
+ * (R_GCAllocFxPixelsTop). Effects keep filling from the start, so a level
+ * change that frees and reloads the effect sprites rewinds below the skins
+ * instead of leaving holes under them. */
+#define GC_FX_TOP_ALLOCS 64
+#define GC_FX_TOP_RESERVE ( 64u * 1024u )	/* always left for effect sprites */
+static size_t gc_fx_top_used;
+static uint gc_fx_top_at[GC_FX_TOP_ALLOCS];
+static int gc_fx_top_count;
 
 static qboolean R_GCIsFxPixels( const void *ptr )
 {
@@ -114,11 +123,31 @@ static byte *R_GCAllocFxPixels( size_t bytes )
 	byte *out;
 
 	if( !gc_sprite_effect_load || bytes == 0 || gc_fx_pixels_count >= GC_FX_PIXELS_ALLOCS
-		|| gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES - gc_fx_scratch )
+		|| gc_fx_pixels_used + need + gc_fx_scratch + gc_fx_top_used > GC_FX_PIXELS_BYTES )
 		return NULL;
 	out = gc_fx_pixels + gc_fx_pixels_used;
 	gc_fx_pixels_at[gc_fx_pixels_count++] = (uint)gc_fx_pixels_used;
 	gc_fx_pixels_used += need;
+	memset( out, 0, need );
+	return out;
+}
+
+/* A view model skin in the bytes the effect sprites leave idle. The studio
+ * skin window is full in a DoD match (448 bytes left) and the heap has no
+ * 8 KiB in one piece, so half the view model skins fell to a 2x2 flat colour:
+ * a black Thompson, a green MP40. The block has about 130 KiB idle after the
+ * effects are warmed; GC_FX_TOP_RESERVE of it stays for effects. */
+static __attribute__((unused)) byte *R_GCAllocFxPixelsTop( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+	byte *out;
+
+	if( bytes == 0 || gc_fx_scratch || gc_fx_top_count >= GC_FX_TOP_ALLOCS
+		|| gc_fx_pixels_used + gc_fx_top_used + need + GC_FX_TOP_RESERVE > GC_FX_PIXELS_BYTES )
+		return NULL;
+	gc_fx_top_used += need;
+	gc_fx_top_at[gc_fx_top_count++] = (uint)( GC_FX_PIXELS_BYTES - gc_fx_top_used );
+	out = gc_fx_pixels + GC_FX_PIXELS_BYTES - gc_fx_top_used;
 	memset( out, 0, need );
 	return out;
 }
@@ -128,6 +157,22 @@ static void R_GCFreeFxPixels( const void *ptr )
 	const uint at = (uint)((const byte *)ptr - gc_fx_pixels );
 	int i;
 
+	if( gc_fx_top_used && at >= GC_FX_PIXELS_BYTES - gc_fx_top_used )
+	{
+		for( i = gc_fx_top_count - 1; i >= 0; i-- )
+		{
+			if( gc_fx_top_at[i] == at )
+			{
+				gc_fx_top_at[i] |= 0x80000000u;
+				break;
+			}
+		}
+		while( gc_fx_top_count > 0 && ( gc_fx_top_at[gc_fx_top_count - 1] & 0x80000000u ))
+			gc_fx_top_count--;
+		gc_fx_top_used = gc_fx_top_count > 0
+			? GC_FX_PIXELS_BYTES - ( gc_fx_top_at[gc_fx_top_count - 1] & 0x7fffffffu ) : 0;
+		return;
+	}
 	for( i = gc_fx_pixels_count - 1; i >= 0; i-- )
 	{
 		if( gc_fx_pixels_at[i] == at )
@@ -142,7 +187,7 @@ static void R_GCFreeFxPixels( const void *ptr )
 
 size_t R_GCFxPixelsFree( void )
 {
-	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used - gc_fx_scratch;
+	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used - gc_fx_scratch - gc_fx_top_used;
 }
 
 /* The unused end of the block as scratch for one sprite load: the shrunk copy
@@ -153,10 +198,10 @@ byte *R_GCFxScratchAlloc( size_t bytes )
 {
 	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
 
-	if( gc_fx_scratch || bytes == 0 || gc_fx_pixels_used + need > GC_FX_PIXELS_BYTES )
+	if( gc_fx_scratch || bytes == 0 || gc_fx_pixels_used + need + gc_fx_top_used > GC_FX_PIXELS_BYTES )
 		return NULL;
 	gc_fx_scratch = need;
-	return gc_fx_pixels + GC_FX_PIXELS_BYTES - need;
+	return gc_fx_pixels + GC_FX_PIXELS_BYTES - gc_fx_top_used - need;
 }
 
 void R_GCFxScratchFree( void )
@@ -864,6 +909,8 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		bytes = R_GXCmprBytes( cw, ch );
 		if( r_gc_studio_skins_in_arena )
 			dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+		if( !dst && ( dst = R_GCAllocFxPixelsTop( bytes )) != NULL )
+			tex->gc_pixels_base = dst;
 		if( !dst )
 			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
 		if( dst && !((uintptr_t)dst & 31 ))
@@ -893,8 +940,9 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			static int vm_cmpr_fail_logged;
 
 			if( vm_cmpr_fail_logged++ < 4 )
-				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR view model skin %s no room (%s), RGB565 low mip\n",
-					tex->name, Q_memprint( bytes ));
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR view model skin %s no room (%s, window left %s, effect block %s)\n",
+					tex->name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )),
+					Q_memprint( R_GCFxPixelsFree( )));
 		}
 	}
 #endif
