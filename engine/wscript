@@ -199,6 +199,13 @@ def build(bld):
 		gamecube_defines += ['XASH_GAMECUBE_ENABLE_GCMAP_PROBES=1']
 		Logs.info('GameCube gcmap world-render probes enabled')
 
+	# Labelled boot malloc trace (platform/gamecube/malloc_trace.c): debug only, off by default.
+	gc_malloc_trace = bld.env.DEST_OS == 'gamecube' and \
+		os.environ.get('XASH_GC_MALLOC_TRACE', '').lower() in ('1', 'yes', 'true', 'on')
+	if gc_malloc_trace:
+		gamecube_defines += ['XASH_GC_MALLOC_TRACE=1']
+		Logs.info('GameCube boot malloc trace enabled (-Wl,--wrap=malloc...)')
+
 	# basic build: dedicated only
 	source = bld.path.ant_glob(['common/*.c', 'common/imagelib/*.c', 'common/soundlib/*.c', 'server/*.c', 'common/http/*.c'])
 
@@ -298,6 +305,9 @@ def build(bld):
 		ogc = resolve_ogc_stack()
 		Logs.info('GameCube engine link stack: %s' % format_summary(ogc))
 		bld.env.LDFLAGS += engine_extra_ldflags(ogc)
+		if gc_malloc_trace:
+			bld.env.LDFLAGS += ['-Wl,--wrap=malloc', '-Wl,--wrap=calloc',
+				'-Wl,--wrap=memalign', '-Wl,--wrap=realloc']
 		if ogc.get('stack') == 'libogc2' and bld.env.GAMEDIR == 'dod':
 			bld.env.LDFLAGS += ['-Wl,--wrap=__lwp_wkspace_init']
 		if has_hlsdk_server:
