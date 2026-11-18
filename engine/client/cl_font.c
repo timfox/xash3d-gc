@@ -453,6 +453,19 @@ int CL_DrawCharacter( float x, float y, int number, const rgba_t color, cl_font_
 	if( FBitSet( flags, FONT_DRAW_HUD ))
 		SPR_AdjustSize( &x, &y, &w, &h );
 
+#if XASH_GAMECUBE
+	/* hardware resolution text in a match (gc_hitext_ingame 1): queue the glyph for the GX layer instead of the soft quad */
+	{
+		extern qboolean GC_HiTextActive( void );
+		extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
+
+		if( cls.state == ca_active && color && GC_HiTextActive( )
+			&& GC_HiTextGlyph( number, x, y, (float)font->charWidths[number] * font->scale, (float)font->charHeight * font->scale,
+				( color[3] << 24 ) | ( color[0] << 16 ) | ( color[1] << 8 ) | color[2] ))
+			return font->charWidths[number];
+	}
+#endif
+
 	if( !FBitSet( flags, FONT_DRAW_NORENDERMODE ))
 		CL_SetFontRendermode( font );
 
