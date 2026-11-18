@@ -28,6 +28,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
 #define GC_WD_FLAG_LIGHT_X1	0x0001	/* GoldSrc lighting: lightmap pages at x1 */
+#define GC_WD_FLAG_NO_NRM	0x0002	/* v2 vertices without the normal (never read): 12 bytes */
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
 #define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
@@ -2265,11 +2266,13 @@ static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc( GX_VA_POS, GX_INDEX16 );
 	GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_POS, GX_POS_XYZ, GX_S16, 0 );
-	GX_SetVtxDesc( GX_VA_NRM, GX_DIRECT );
+	if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
+		GX_SetVtxDesc( GX_VA_NRM, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_TEX1, GX_DIRECT );
-	GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
+	if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
+		GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
 	GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_TEX0, GX_TEX_ST, GX_S16, GC_WD_ST_FRAC );
 	GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_TEX1, GX_TEX_ST, GX_U8, 8 );
@@ -2754,12 +2757,16 @@ int R_GXWorldDLDraw( void )
 	if( gc_wd_hdr.version == 2 )
 	{
 		/* Lost Coast bake: POS index, NRM s8 frac 6, CLR0 RGBA8,
-		 * TEX0 s16 frac 9, TEX1 lightmap u8 frac 8. 15 bytes. */
-		GX_SetVtxDesc( GX_VA_NRM, GX_DIRECT );
+		 * TEX0 s16 frac 9, TEX1 lightmap u8 frac 8. 15 bytes, or 12 when
+		 * the bake leaves the normal out (nothing reads it: no normal
+		 * texgen, lighting channels off). */
+		if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
+			GX_SetVtxDesc( GX_VA_NRM, GX_DIRECT );
 		GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxDesc( GX_VA_TEX1, GX_DIRECT );
-		GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
+		if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
+			GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
 		GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
 		GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_TEX0, GX_TEX_ST, GX_S16, GC_WD_ST_FRAC );
 		GX_SetVtxAttrFmt( GX_VTXFMT6, GX_VA_TEX1, GX_TEX_ST, GX_U8, 8 );
