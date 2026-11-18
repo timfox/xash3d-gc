@@ -784,9 +784,19 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		if floor is not None:
 			# Half the footprint's shorter side, between 16 and 48 units.
 			reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
-			c = floor.footprint((prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0), reach)
-			if c is None:
-				c = floor.footprint((0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), maxs[2]), reach)
+			# From just above the origin and from the middle of the bounds,
+			# whichever is brighter: a prop whose origin sits under the
+			# terrain (dod_caen's King Tiger) only finds a buried, unlit
+			# face from the origin and drew black.
+			mid = (0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), 0.5 * (mins[2] + maxs[2]))
+			got = [g for g in (
+				floor.footprint((prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0), reach),
+				floor.footprint(mid, reach),
+			) if g is not None]
+			if got:
+				c = max(got, key=lambda g: g[0] * 30 + g[1] * 59 + g[2] * 11)
+			else:
+				c = floor.footprint((mid[0], mid[1], maxs[2]), reach)
 		if c is None:
 			c = (150, 150, 150)
 		# Props read darker than the lightmapped walls beside them at 0.6 +
