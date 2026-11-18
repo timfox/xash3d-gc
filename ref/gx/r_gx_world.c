@@ -6013,7 +6013,9 @@ static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32
 static u8 gc_prop_light[GC_PROP_MAX_INST][12];
 static s8 gc_prop_nrm[256][3] __attribute__(( aligned( 32 )));
 static float gc_prop_sun[3];
-static u32 gc_prop_vsize = 10;	/* bytes per vertex: 10 (v6) or 11 (v7) */
+static u32 gc_prop_vsize = 10;	/* bytes per vertex: 10 (v6) or 11 (v7, v8) */
+/* v8: commands with opcode bit 0 set use GX_VTXFMT1, u8 S/T, 9 bytes a vertex. */
+static qboolean gc_prop_uv8;
 static const u8 *gc_prop_cur_light;	/* the instance being drawn, NULL = flat colour */
 static gc_prop_model_t gc_prop_models[GC_PROP_MAX_MODELS] __attribute__(( aligned( 32 )));
 static byte gc_prop_bounce[16 * 1024] __attribute__(( aligned( 32 )));
@@ -6205,7 +6207,7 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || (( hdr[1] >> 16 ) != 6 && ( hdr[1] >> 16 ) != 7 ))
+		|| hdr[0] != GC_PROP_MAGIC || (( hdr[1] >> 16 ) < 6 || ( hdr[1] >> 16 ) > 8 ))
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6 or v7)\n" );
 		gEngfuncs.fsapi->Close( f );
@@ -6263,7 +6265,8 @@ static void R_GXPropLoad( void )
 
 		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
 		gc_prop_vsize = 10;
-		if(( hdr[1] >> 16 ) == 7 )
+		gc_prop_uv8 = ( hdr[1] >> 16 ) == 8;
+		if(( hdr[1] >> 16 ) >= 7 )
 		{
 			const u32 lbytes = ( 32u + gc_prop_ninst * 12u + 31u ) & ~31u;
 			int q;
@@ -6877,6 +6880,12 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
 		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
+		if( gc_prop_uv8 )
+		{
+			GX_SetVtxAttrFmt( GX_VTXFMT1, GX_VA_POS, GX_POS_XYZ, GX_S16, m->frac );
+			GX_SetVtxAttrFmt( GX_VTXFMT1, GX_VA_NRM, GX_NRM_XYZ, GX_S8, 6 );
+			GX_SetVtxAttrFmt( GX_VTXFMT1, GX_VA_TEX0, GX_TEX_ST, GX_U8, 8 );
+		}
 		gc_prop_vtx_frac = (int)m->frac;
 		gc_prop_lit_mode = -1;
 	}
@@ -6990,7 +6999,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		nverts = *(const u16 *)( hdr + 2 );
 		body = *(const u32 *)( hdr + 4 );
 		next = *(const u32 *)( hdr + 8 );
-		if( !nverts || nverts * gc_prop_vsize + 3u > body || body + 32u != bytes )
+		if( !nverts || nverts * ( gc_prop_uv8 ? 9u : gc_prop_vsize ) + 3u > body || body + 32u != bytes )
 			break;
 		{
 			u64 t0 = gettime();
@@ -7042,7 +7051,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			u64 t0 = gettime();
 
 			(void)p;
-			GX_Begin( hdr[32] & 0xf8, GX_VTXFMT0, *(const u16 *)( hdr + 33 ));
+			GX_Begin( hdr[32] & 0xf8, hdr[32] & 7u, *(const u16 *)( hdr + 33 ));	/* v8: fmt 1 = u8 S/T */
 			for( n = ( body - 3u ) >> 2; n; n-- )
 			{
 				wgPipe->U32 = *(const u32 *)( q );
