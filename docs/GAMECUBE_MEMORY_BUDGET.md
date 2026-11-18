@@ -113,12 +113,45 @@ avalanche 168 KiB / 0; caen 159 KiB / 56 KiB; zalec 143 KiB / 0.
 These logs predate the current master image, which is 0.69 MB larger than the
 build they came from, so re-measure after any change.
 
-### ARAM owners (D from ARAM_STREAMING_DESIGN, M from log reserve lines)
+### ARAM in a DoD match (M from the dod_caen / avalanche / zalec / charlie logs, D where marked)
 
-16 MiB pool at 0x4000, cache ceiling 4 MiB. Logged reserves on charlie: audio
-1 MiB, prefetch 1.03 MiB, wtstore 6 MiB, props 188 KiB, proptex 303 KiB; streams:
-worlddl 2.5 MiB, lightfaces 1.9 MiB, waddir (many small), animpack (refused).
-Free after those: about 1.5 MiB on charlie, 1.25 MiB on caen.
+16 MiB pool (15.98 MiB usable above the DSP's 16 KiB). Session reserves are carved from
+the bottom, streams from the top; the free gap in the middle is what `largest=` reports.
+
+| Owner | Class | avalanche | caen | zalec | Idle in a match? |
+|---|---|--:|--:|--:|---|
+| `audio` | session | 1.00 MiB | 1.00 | 1.00 | no |
+| `prefetch` | session | 1.03 MiB | 1.03 | 1.03 | **yes**: the menu-idle first-map prefetch, filled before the match |
+| `wtstore` | session | 6.00 MiB | 6.00 | 6.00 | **mostly**: a ring sized 6 MiB, but the whole map pack is 1.39 (charlie), 2.23 (chemille), 2.34 (avalanche), 2.73 (anzio), 3.22 MiB (caen) (M, `media/wt_*.gct`) |
+| `worlddl` | stream | 1.50 MiB | 3.00 | none logged | no |
+| `lightfaces` | stream | 2.10 MiB | 3.01 | none logged | no |
+| `props` + `proptex` | session | 0.12 MiB | 0.27 | n/a | no |
+| `animpack` mesh packs (.gcm) | stream | 0.35 MiB | 0.27 | 0.29 | no |
+| `animpack` animation packs (.gca) | stream | **refused x2** | **refused x2** | 1 of 2 | |
+| free after the above | | 2.32 MiB | 1.17 | 2.48 | |
+
+`saves` (4 MiB, changelevel transition mode), `sfx` and `lstyles` do **not** appear as
+reserves in any DoD log, so they are not holding ARAM in a match. `prefetch` and
+`wtstore` are the reserves that are held but largely unused.
+
+**Animation packs.** Each player animation pack is 3.55 MiB, 345 sequences, one per
+team class (`models/player/anim_<hash>.gca`), and a match with both teams needs two:
+**7.1 MiB** to hold both in ARAM. A refused pack is not an error: sequences are read from
+disc through the 256 KiB MEM1 ring (`Mod_GCAnimPackFetch`), about 10 KiB per sequence on
+average (3.55 MiB / 345), so the cost is one disc seek and read the first time each bot
+body shows a sequence that is not already in the ring (D: 24 sequences fit the ring; a
+real-disc seek is tens of milliseconds, Dolphin's is much less). Measured: on avalanche
+and caen both packs stream from disc; on zalec one fits in ARAM and one streams.
+
+**Cheapest hole (D, not applied).** `wtstore` is a ring that evicts the oldest entries,
+so shrinking it costs only more re-streaming for a pack larger than the ring. Every DoD
+pack measured fits in 3.5 MiB, which would free **2.5 MiB**; dropping `prefetch` once
+the match starts would free another **1.0 MiB**. Together that is about 3.5 MiB of
+contiguous gap, enough for one more 3.55 MiB animation pack (both only if the layout also
+shrinks `worlddl`/`lightfaces`). A change needs the ring sized once per session
+(`gc_wt_store_bytes`, `mod_bmodel.c`, already sized per map for Lost Coast) with a bound
+that covers the largest pack plus slack, and a Dolphin run on caen to check for restreaming.
+This changes the ARAM layout, so it has not been made.
 
 ### Known refusals (M, every map in the logs)
 
