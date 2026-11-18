@@ -87,4 +87,11 @@ msurface_t *PM_RecursiveSurfCheck( model_t *model, mnode_t *node, vec3_t p1, vec
 msurface_t *PM_TraceSurface( physent_t *pe, vec3_t start, vec3_t end );
 int PM_TestLineExt( playermove_t *pmove, physent_t *ents, int numents, const vec3_t start, const vec3_t end, int flags );
 
+
+/* Playermove array high-water (pm_trace.c): logs when a count passes its previous
+ * maximum, so the physent/visent/moveent/touch caps can be chosen from measured use. */
+#if XASH_GAMECUBE
+void PM_NoteHighWater( const char *who, const playermove_t *pm, int *hw );
+#endif
+
 #endif//PM_LOCAL_H
