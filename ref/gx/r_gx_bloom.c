@@ -65,10 +65,9 @@ qboolean R_GXBloomEnabled( void )
  * (media/tm_d2_lostcoast.bin, lostcoast-gc tools/bake_lostcoast_tonemap.py).
  *
  * The lighting is baked at one exposure. Source moves a tonemap scale every
- * frame: it finds the luminance that only 2 % of the frame exceeds and aims
- * to put it at 60 % of white, never letting the median fall under 3 %
- * (mat_tonemap_percent_bright_pixels / _percent_target / _min_avglum), then
- * clamps the scale to [min, max]. The map's env_tonemap_controller takes
+ * frame. For Lost Coast that is Valve's original rule (see the measurement
+ * below): a constant over the frame's average luminance, clamped to
+ * [min, max]. The map's env_tonemap_controller takes
  * those limits from trigger volumes: 0.5 to 2 at the start, up to 10 inside
  * the monastery. The camera stands in for the player.
  *
@@ -83,11 +82,9 @@ qboolean R_GXBloomEnabled( void )
  * scale, which is why it blows out white behind dark cliffs and goes deep
  * blue over a sunlit yard.
  *
- * Samples at full white are left out of the histogram, as in Source, whose
- * luminance buckets end at 1: what is already blown out has no say. Without
- * that the sun's glare alone holds the scale at its minimum.
  */
 #define GC_EXPO_MAX_VOLUMES 16
+#define GC_EXPO_TARGET 0.33f
 
 typedef struct
 {
@@ -166,20 +163,7 @@ static qboolean R_GXExposureSegBox( const float *a, const float *b, const gc_exp
 }
 
 /* Returns the display gain for this frame. buf is last frame's luma copy. */
-/* Which histogram samples are sky. The retail still of the cove has the sky
- * at tonemap scale 1.55 with half the frame brighter than 60 % of white, which
- * the 2 % rule would never allow if the sky had a vote: the world sets the
- * exposure and the sky follows it. Sky = depth still at the far plane. A
- * second half-res copy takes the low byte of Z (the other half of the idle
- * soft Z buffer the luma copy borrows): 0xff there for the far plane, any
- * value for geometry. */
-static const u8 *gc_expo_zbuf;
-/* The copied region in half-res texels: origin and size (8 x 4 tiles). */
-#define GC_EXPO_ZX 16
-#define GC_EXPO_ZY 18
-#define GC_EXPO_ZW 288
-#define GC_EXPO_ZH 204
-static int gc_expo_dbg[4];	/* samples counted, bright bin, median bin, sky samples: for the log */
+static int gc_expo_dbg[2];	/* samples, average luminance x 1000: for the log */
 
 static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 {
@@ -221,13 +205,43 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 	goal = gc_expo.scale;
 	if( buf && gc_expo.frames >= 4 )
 	{
-		/* Histogram of a 20 x 12 grid over the centre 90 % x 85 % of the frame
-		 * (mat_exposure_center_region). I8 texels sit in 8 x 4 tiles. */
-		u16 hist[32];
-		int gx, gy, n = 0, acc, hi = 31, med = 0, nsky = 0;
-		float lum_hi, lum_med, t1, t2;
+		/* A 20 x 12 grid over the centre 90 % x 85 % of the frame
+		 * (mat_exposure_center_region). I8 texels sit in 8 x 4 tiles.
+		 *
+		 * Lost Coast's rule is Valve's original one: viewpostprocess.cpp
+		 * forces mat_tonemap_algorithm 0 for the gamedirs dod, cstrike and
+		 * lostcoast. Thirty log-spaced luminance buckets over 0..1 (anything
+		 * over 1 counts as 1), the average is each bucket's share times its
+		 * middle, and the target scale is a constant over that average. The
+		 * sky has its vote like any other pixel. */
+		static float mid[256];
+		static qboolean mid_ready;
+		int gx, gy, n = 0, dark = 0;
+		float avg = 0.0f;
 
-		memset( hist, 0, sizeof( hist ));
+		if( !mid_ready )
+		{
+			int v, b;
+
+			for( v = 0; v < 256; v++ )
+			{
+				const float lin = powf( (float)v * ( 1.0f / 255.0f ), 2.2f );
+
+				mid[v] = 1.0f;
+				for( b = 0; b < 30; b++ )
+				{
+					const float lo = -0.01f + expf( logf( 0.01f ) + ( logf( 1.01f ) - logf( 0.01f )) * (float)b / 30.0f );
+					const float hi = -0.01f + expf( logf( 0.01f ) + ( logf( 1.01f ) - logf( 0.01f )) * (float)( b + 1 ) / 30.0f );
+
+					if( lin < hi || b == 29 )
+					{
+						mid[v] = 0.5f * ( lo + hi );
+						break;
+					}
+				}
+			}
+			mid_ready = true;
+		}
 		for( gy = 0; gy < 12; gy++ )
 		{
 			const int y = (int)(( 0.075f + 0.85f * ( (float)gy + 0.5f ) / 12.0f ) * (float)bh );
@@ -235,54 +249,25 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 			for( gx = 0; gx < 20; gx++ )
 			{
 				const int x = (int)(( 0.05f + 0.9f * ( (float)gx + 0.5f ) / 20.0f ) * (float)bw );
-
 				const u8 l = buf[(( y >> 2 ) * ( bw >> 3 ) + ( x >> 3 )) * 32 + ( y & 3 ) * 8 + ( x & 7 )];
 
-				if( gc_expo.sky_baked > 0.0f )
-				{
-					const int zx = x - GC_EXPO_ZX, zy = y - GC_EXPO_ZY;
-
-					if( gc_expo_zbuf && bw == 320 && zx >= 0 && zy >= 0 && zx < GC_EXPO_ZW && zy < GC_EXPO_ZH
-						&& gc_expo_zbuf[(( zy >> 2 ) * ( GC_EXPO_ZW >> 3 ) + ( zx >> 3 )) * 32 + ( zy & 3 ) * 8 + ( zx & 7 )] == 0xff )
-					{
-						nsky++;
-						continue;	/* sky */
-					}
-					if( l >= 250 )
-						continue;	/* blown out: above the top bucket */
-				}
-				hist[l >> 3]++;
+				avg += mid[l];
+				dark += l < 8;
 				n++;
 			}
 		}
-		/* The level 2 % of the samples exceed, and the median. */
-		for( acc = 0, hi = 31; hi > 0; hi-- )
-		{
-			acc += hist[hi];
-			if( acc * 50 >= n )
-				break;
-		}
-		for( acc = 0, med = 0; med < 31; med++ )
-		{
-			acc += hist[med];
-			if( acc * 2 >= n )
-				break;
-		}
+		avg /= (float)n;
+		gc_expo_dbg[0] = n; gc_expo_dbg[1] = (int)( avg * 1000.0f );
 		/* A copy that reads back all black is no measurement: Dolphin only
 		 * writes EFB copies to memory with "Store EFB Copies to Texture Only"
-		 * off, and the Null backend never does. Hold the scale then. */
-		gc_expo_dbg[0] = n; gc_expo_dbg[1] = hi; gc_expo_dbg[2] = med; gc_expo_dbg[3] = nsky;
-		if( hist[0] == n || n < 24 )
-			hi = -1;	/* also when nearly every sample is blown out */
-		/* Bin centres back to linear light, as shares of white. */
-		if( hi >= 0 )
-		{
-			lum_hi = powf(( (float)hi + 0.5f ) * ( 1.0f / 32.0f ), 2.2f );
-			lum_med = powf(( (float)med + 0.5f ) * ( 1.0f / 32.0f ), 2.2f );
-			t1 = 0.60f / ( lum_hi > 0.0001f ? lum_hi : 0.0001f );
-			t2 = 0.03f / ( lum_med > 0.0001f ? lum_med : 0.0001f );
-			goal = gc_expo.scale * ( t2 > t1 ? t2 : t1 );
-		}
+		 * off, and the Null backend never does. Hold the scale then.
+		 *
+		 * Valve's constant is 0.005 in the units of its HDR buffer, which the
+		 * public source does not give. GC_EXPO_TARGET is the same constant in
+		 * ours: the retail still of the cove, measured this way, averages
+		 * 0.213 with the sky at scale 1.55 (0.213 x 1.55). */
+		if( dark != n )
+			goal = GC_EXPO_TARGET / ( avg > 0.0001f ? avg : 0.0001f );
 	}
 	if( goal > gc_expo.lim_max ) goal = gc_expo.lim_max;
 	if( goal < gc_expo.lim_min ) goal = gc_expo.lim_min;
@@ -296,8 +281,8 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 	}
 	gc_expo.frames++;
 	if(( gc_expo.frames & 255 ) == 1 )
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: exposure scale=%.2f goal=%.2f limits %.2f..%.2f counted=%d sky=%d hi=%d med=%d\n",
-			gc_expo.scale, goal, gc_expo.lim_min, gc_expo.lim_max, gc_expo_dbg[0], gc_expo_dbg[3], gc_expo_dbg[1], gc_expo_dbg[2] );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: exposure scale=%.2f goal=%.2f limits %.2f..%.2f average=%.3f\n",
+			gc_expo.scale, goal, gc_expo.lim_min, gc_expo.lim_max, (float)gc_expo_dbg[1] * 0.001f );
 	return powf( gc_expo.scale / gc_expo.baked, 1.0f / 2.2f );
 }
 
@@ -414,25 +399,6 @@ qboolean R_GXBloomApply( void *rmode_ptr )
 	GX_SetTexCopySrc( 0, 0, efb_w, efb_h );
 	GX_SetTexCopyDst( bw, bh, GX_TF_I8, GX_TRUE );
 	DCInvalidateRange( gc_bloom_buf, (u32)bw * bh );
-	if( gc_expo.state > 0 && gc_expo.sky_baked > 0.0f )
-	{
-		/* Low byte of Z for the same picture: next frame's sky mask. */
-		/* Only the part of the frame the histogram samples (the centre
-		 * 90 % x 85 %): the whole frame does not fit the borrowed half. */
-		u8 *zb = ( efb_w == 640 && efb_h == 480 )
-			? (u8 *)R_GcmapBorrowSoftZ( (u32)bw * bh, GC_EXPO_ZW * GC_EXPO_ZH ) : NULL;
-
-		if( zb )
-		{
-			GX_SetTexCopySrc( GC_EXPO_ZX * 2, GC_EXPO_ZY * 2, GC_EXPO_ZW * 2, GC_EXPO_ZH * 2 );
-			GX_SetTexCopyDst( GC_EXPO_ZW, GC_EXPO_ZH, GX_CTF_Z8L, GX_TRUE );
-			DCInvalidateRange( zb, GC_EXPO_ZW * GC_EXPO_ZH );
-			GX_CopyTex( zb, GX_FALSE );
-			GX_SetTexCopySrc( 0, 0, efb_w, efb_h );
-			GX_SetTexCopyDst( bw, bh, GX_TF_I8, GX_TRUE );
-		}
-		gc_expo_zbuf = zb;
-	}
 	GX_CopyTex( gc_bloom_buf, GX_FALSE );
 	GX_PixModeSync();
 	GX_InitTexObj( &gc_bloom_tex, gc_bloom_buf, bw, bh, GX_TF_I8,
