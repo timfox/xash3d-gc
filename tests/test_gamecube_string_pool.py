@@ -177,9 +177,10 @@ static size_t gc_mapload_buf_size, gc_mapload_tail_highwater, gc_mapload_tail_pe
 static int gc_mapload_buf_in_use, entity_reserved;
 typedef int qboolean;
 static qboolean gc_mapload_world_settled;
-size_t Mod_GCArenaGap(size_t from, size_t *gap_end) { *gap_end = gc_mapload_buf_size; return from; }
 static int SV_GCPrivateOverflowPinsMapArena(void) { return entity_reserved; }
 static void Con_Reportf(const char *format, ...) { (void)format; }
+/* The world is not settled here: carves go where they are asked to. */
+size_t Mod_GCArenaGap(size_t from, size_t *gap_end) { (void)from; (void)gap_end; return (size_t)-1; }
 '''
         fixture += "void *GC_MapLoadBufferTailAlloc(" + function
         fixture += r'''
