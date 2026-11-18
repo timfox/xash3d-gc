@@ -1001,6 +1001,7 @@ static void CL_RunUsercmd( local_state_t *from, local_state_t *to, usercmd_t *u,
 #endif
 		clgame.dllFuncs.pfnPlayerMove( clgame.pmove, false );
 #if XASH_GAMECUBE
+		{ static int hw[4]; PM_NoteHighWater( "client", clgame.pmove, hw ); }
 		if( gc_menu_step_frames > 0 )
 			SYS_Report( "Xash3D GameCube: STEP pm_move ready\n" );
 		if( gc_trace_prediction )

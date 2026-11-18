@@ -991,3 +991,17 @@ void PM_StuckTouch( playermove_t *pmove, int hitent, pmtrace_t *tr )
 
 	pmove->touchindex[pmove->numtouch++] = *tr;
 }
+
+#if XASH_GAMECUBE
+void PM_NoteHighWater( const char *who, const playermove_t *pm, int *hw )
+{
+	if( pm->numphysent <= hw[0] && pm->numvisent <= hw[1] && pm->nummoveent <= hw[2] && pm->numtouch <= hw[3] )
+		return;
+	hw[0] = Q_max( hw[0], pm->numphysent );
+	hw[1] = Q_max( hw[1], pm->numvisent );
+	hw[2] = Q_max( hw[2], pm->nummoveent );
+	hw[3] = Q_max( hw[3], pm->numtouch );
+	Con_Reportf( "Xash3D GameCube: pmove high-water %s physents=%d/%d visents=%d/%d moveents=%d/%d touch=%d/%d\n",
+		who, hw[0], MAX_PHYSENTS, hw[1], MAX_PHYSENTS, hw[2], MAX_MOVEENTS, hw[3], MAX_PHYSENTS );
+}
+#endif

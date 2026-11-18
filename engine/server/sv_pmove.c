@@ -1196,6 +1196,9 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 		VectorCopy( clent->v.origin, gc_network_before );
 #endif
 		svgame.dllFuncs.pfnPM_Move( svgame.pmove, true );
+#if XASH_GAMECUBE
+		{ static int hw[4]; PM_NoteHighWater( "server", svgame.pmove, hw ); }
+#endif
 
 		// copy results back to client
 		SV_FinishPMove( svgame.pmove, cl );
