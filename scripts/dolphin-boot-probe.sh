@@ -576,7 +576,6 @@ if [[ "${DOLPHIN_EXECUTABLE:-}" == flatpak:* ]]; then
 	append_guest_args DOLPHIN_CMD
 	DOLPHIN_IS_FLATPAK=1
 elif [[ -n "${DOLPHIN_EXECUTABLE:-}" ]]; then
-	# Sibling DoD tooling pkill -f dolphin-emu; rewrite sticky env to the alias.
 	if [[ "$(basename "$DOLPHIN_EXECUTABLE")" == "dolphin-emu" \
 		&& -x "$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin" ]]; then
 		DOLPHIN_EXECUTABLE="$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin"

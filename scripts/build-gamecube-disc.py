@@ -5016,9 +5016,9 @@ def main() -> None:
 					menu_lines.append("nonativetex")
 				if os.environ.get("XASH_GC_PROBE_NOTEXPACKS") == "1":
 					menu_lines.append("notexpacks")
-				(staged_data / "gamecube.cfg").write_text(
 				if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
 					menu_lines.append("heapcensus")
+				(staged_data / "gamecube.cfg").write_text(
 					"\n".join(menu_lines) + "\n", encoding="ascii"
 				)
 			elif args.probe_phasetest:
