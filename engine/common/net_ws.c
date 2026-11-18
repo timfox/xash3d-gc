@@ -1964,6 +1964,7 @@ static void NET_DetermineLocalAddress( void )
 		return;
 	}
 
+	hostname[0] = 0; // a platform without gethostname leaves the buffer alone
 	gethostname( hostname, sizeof( hostname ));
 	hostname[sizeof(hostname) - 1] = 0;
 
