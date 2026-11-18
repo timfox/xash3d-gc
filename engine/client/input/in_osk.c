@@ -607,7 +607,7 @@ void OSK_ChatDraw( void )
 		if( host.realtime - osk_chat.time[i] > OSK_CHAT_SECONDS )
 			continue;
 
-		y = 40 + shown++ * ( OSK_GLYPH_H * OSK_FP + 4 );
+		y = 290 + shown++ * ( OSK_GLYPH_H * OSK_FP + 4 ); // left, mid-lower: the top has the objective bar, timer and kill feed
 		OSK_Fill( sx, sy, 12, y - 2, OSK_TextWidth( osk_chat.text[i] ) + 8, OSK_GLYPH_H * OSK_FP + 4, 0, 0, 0, 150 );
 		OSK_Text( sx, sy, 16, y, osk_chat.text[i], white );
 	}
