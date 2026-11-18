@@ -60,6 +60,75 @@ The checked-in interpretation is intentionally conservative:
 - Largest failed allocation: **taken from the largest parsed failure marker**;
   if no marker exists, it is `UNAVAILABLE`, not zero.
 
+
+## Day of Defeat network build: measured budget
+
+Build measured: engine master `d23b9c58a`, dod-gc `7bf7420`, libogc stack,
+`XASH_GC_DEFAULT_SLOTS=3`, `XASH_GAMECUBE_LINK_BBA=1`, devkitPPC 16.1.0.
+**M** = measured from the ELF or a Dolphin log; **D** = derived.
+Regenerate the symbol tables with `scripts/gamecube-symbol-owners.py OUT/bin/xash-dod`
+(the build emits no linker map; this reads DWARF line info through `nm -S -l`).
+
+### MEM1 static image (M)
+
+| Region | Range | Size |
+|---|---|--:|
+| .init + .text | 0x80003100 - 0x805d2440 | 5.81 MiB |
+| .rodata, .eh_frame, .data | 0x805d2440 - 0x806eb1a0 | 1.10 MiB |
+| .sbss + .bss | 0x806eb1a0 - 0x81659920 | 15.43 MiB |
+| **Static image end** | 0x81659920 | **22.35 MiB** |
+| Tail to MEM1 top (D) | 0x81659920 - 0x81800000 | 1.65 MiB |
+
+The tail holds the malloc heap, the XFB (one 320x480 buffer, 300 KiB; dual XFB is
+unavailable under BBA) and the stack. Runtime Arena1Lo/Hi are logged only with
+`XASH_GC_MEMWATCH_DEBUG`, so the exact arena bounds are **D**, not **M**.
+
+### BSS by owner (M, top entries; 16.18 MB section, 15.43 MiB in named symbols)
+
+| Owner | Size | Note |
+|---|--:|---|
+| `vid` (ref/gx/r_context.c) | 3.69 MiB | map-load arena (colormap, alphamap 1.5 MB, pad 1.2 MB) |
+| `gc_world_array_spill` | 900 KiB | |
+| `gc_gcmap_bootstrap_entities` | 744 KiB | |
+| `gc_studio_bss` | 648 KiB | |
+| `cl` | 638 KiB | |
+| `sv_` | 623 KiB | |
+| `gc_singleplayer_edicts` | 361 KiB | |
+| `r_images` | 352 KiB | |
+| `gpMove` x2 (cl_game.c, sv_game.c) | 635 KiB | 317 KiB each |
+| `gx_fifo`, `gc_static_clipnodes` | 256 KiB each | |
+| lwip `memp_memory` + `ram`, `gc_sv_netbuf` | 538 KiB | network build only |
+
+### Tail and heap by stage (M, log of dod_charlie)
+
+| Stage | heap_used | heap_free | unclaimed |
+|---|--:|--:|--:|
+| pre-Con_Init | 376 KiB | 35 KiB | 1.83 MiB |
+| post-Platform_Init | 458 KiB | 49 KiB | 1.73 MiB |
+| pre-SV_Init (boot reserve release) | 830 KiB | 293 KiB | 1.13 MiB |
+| map active | 1.83-2.01 MiB | 219-365 KiB | 8-48 KiB |
+
+Per map at "map active" (M): charlie heap_free 219 KiB / unclaimed 8 KiB;
+avalanche 168 KiB / 0; caen 159 KiB / 56 KiB; zalec 143 KiB / 0.
+These logs predate the current master image, which is 0.69 MB larger than the
+build they came from, so re-measure after any change.
+
+### ARAM owners (D from ARAM_STREAMING_DESIGN, M from log reserve lines)
+
+16 MiB pool at 0x4000, cache ceiling 4 MiB. Logged reserves on charlie: audio
+1 MiB, prefetch 1.03 MiB, wtstore 6 MiB, props 188 KiB, proptex 303 KiB; streams:
+worlddl 2.5 MiB, lightfaces 1.9 MiB, waddir (many small), animpack (refused).
+Free after those: about 1.5 MiB on charlie, 1.25 MiB on caen.
+
+### Known refusals (M, every map in the logs)
+
+- `mem FAIL subsystem=FileSystem Pool at=../filesystem/io.c:56`, 65-193 KiB:
+  charlie 5, avalanche 1, caen 4, zalec 8.
+- `ARAM animpack refused stream need=3.55 Mb`, largest free chunk 1.1-2.3 MiB.
+- `CMPR slots skipped: budget 0 < 8 slots` (avalanche).
+- The `ARAM <stage> session= stream= free=` report line is not in these logs;
+  the build that produced them predates it.
+
 ## Runtime markers currently consumed
 
 The existing MEM1 telemetry is useful and is consumed without changing its
