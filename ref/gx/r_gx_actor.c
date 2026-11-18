@@ -390,6 +390,12 @@ qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x
 		/* lip sync: the mouth vertices follow the phoneme being spoken */
 		extern void R_GXFaceApply( const cl_entity_t *e, const model_t *mod, s16 *pos, int nverts );
 
+		extern void R_GXFaceWarm( const model_t *mod );
+		extern void R_GXGestureWarm( const model_t *mod, const studiohdr_t *hdr );
+
+		/* (both read their files once, on the level's first frame) */
+		R_GXFaceWarm( mod );
+		R_GXGestureWarm( mod, hdr );
 		R_GXFaceApply( e, mod, (s16 *)( data + lod->pos_ofs ), lod->nverts );
 	}
 

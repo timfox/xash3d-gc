@@ -86,27 +86,44 @@ static void GC_VoiceStreamStop( void )
 	gc_vs_lip.n = 0;
 }
 
+/* A line is brought in over three frames so no frame pays for all of it:
+ * the file is opened in one, its header read in the next, and the first
+ * samples in the one after (each is a seek and a sector or two). */
+static struct
+{
+	int	stage;	/* 0 none, 1 to open, 2 opened: read the header */
+	char	path[96];
+	file_t	*f;
+	int	ent;
+	float	vol, attn;
+} gc_vs_next;
+
 /* An entity sound on the voice channel: stream it. False = not ours. */
 qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn )
 {
-	char path[96];
-	byte hdr[12], ck[8], fmt[16];
-	uint32_t rate = 0, size;
-	file_t *f;
-
 	if( !sample || !sample[0] || sample[0] == '!' || sample[0] == '*' )
 		return false;
 	if( !GC_VoiceStreamMem( ))
 		return false;
-	Q_snprintf( path, sizeof( path ), "sound/%s", sample );
+	if( gc_vs_next.f )
+		FS_Close( gc_vs_next.f );
+	gc_vs_next.f = NULL;
+	Q_snprintf( gc_vs_next.path, sizeof( gc_vs_next.path ), "sound/%s", sample );
+	gc_vs_next.ent = ent;
+	gc_vs_next.vol = vol;
+	gc_vs_next.attn = attn;
+	gc_vs_next.stage = 1;
+	return true;
+}
+
+/* The header of the opened file; the line then plays. */
+static qboolean GC_VoiceStreamBegin( file_t *f, int ent, float vol, float attn )
+{
+	byte hdr[12], ck[8], fmt[16];
+	uint32_t rate = 0, size;
+
 	/* small disc reads from here to the return: the header is 44 bytes */
 	gc_iso9660_small_reads = 1;
-	f = FS_Open( path, "rb", false );
-	if( !f )
-	{
-		gc_iso9660_small_reads = 0;
-		return false;
-	}
 	GC_VoiceStreamStop();
 	if( FS_Read( f, hdr, 12 ) != 12 || memcmp( hdr, "RIFF", 4 ) || memcmp( hdr + 8, "WAVE", 4 ))
 		goto bad;
@@ -226,6 +243,22 @@ void GC_VoiceStreamMix( int *paint, int count, int gain )
 	float lscale = 1.0f, rscale = 1.0f;
 	int n, gl, gr;
 
+	if( gc_vs_next.stage == 1 )
+	{
+		gc_iso9660_small_reads = 1;
+		gc_vs_next.f = FS_Open( gc_vs_next.path, "rb", false );
+		gc_iso9660_small_reads = 0;
+		gc_vs_next.stage = gc_vs_next.f ? 2 : 0;
+	}
+	else if( gc_vs_next.stage == 2 )
+	{
+		file_t *f = gc_vs_next.f;
+
+		gc_vs_next.f = NULL;
+		gc_vs_next.stage = 0;
+		GC_VoiceStreamBegin( f, gc_vs_next.ent, gc_vs_next.vol, gc_vs_next.attn );
+		return;	/* the first samples next frame */
+	}
 	if( !gc_vs.f )
 		return;
 	/* S_SpatializeChannel, from where the speaker stands now */

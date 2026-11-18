@@ -134,6 +134,37 @@ void GC_ActorGesture( int ent, const char *name, float start, float end, int nta
 	}
 }
 
+/* A scene's facial track playing on an actor (brows, eyelids, cheeks): a
+ * baked file of face-shape weights over time. One actor speaks at a time. */
+static struct
+{
+	int	ent;
+	char	path[64];
+	float	t0, t1;	/* client time */
+} gc_face;
+
+/* start and end are server times */
+void GC_ActorFace( int ent, const char *track, float start, float end )
+{
+	const float shift = (float)( cl.time - sv.time );
+
+	if( ent <= 0 || !track || !track[0] || end <= start )
+		return;
+	gc_face.ent = ent;
+	Q_strncpy( gc_face.path, track, sizeof( gc_face.path ));
+	gc_face.t0 = start + shift;
+	gc_face.t1 = end + shift;
+}
+
+/* The track on ent at client time and how far into it, or NULL. */
+const char *GC_ActorFaceAt( int ent, float time, float *seconds )
+{
+	if( gc_face.ent != ent || time < gc_face.t0 || time >= gc_face.t1 )
+		return NULL;
+	*seconds = time - gc_face.t0;
+	return gc_face.path;
+}
+
 void GC_ActorGestureClear( int ent )
 {
 	int i;
