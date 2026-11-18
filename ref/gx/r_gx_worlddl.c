@@ -138,16 +138,19 @@ extern void R_GXMirrorClipSet( qboolean on );
 #define GX_SetBlendMode		R_GXWrapBlendMode
 #define GX_SetZCompLoc		R_GXWrapZCompLoc
 
-/* Bump relief and detail live in media/tevmat.gcm (I8 mod2x tiles). Sand
- * uses the real normal map: IndTex warps the sun disc, then the alpha mask
- * punches the wet glints (retail $normalmapalphaenvmapmask). */
+/* Detail (I8 mod2x) and cliff emboss heights (I8) live in media/tevmat.gcm.
+ * Sand uses the real normal map: IndTex warps the sun disc, then the alpha
+ * mask punches the wet glints (retail $normalmapalphaenvmapmask). */
 #define GC_TEV_MAX		96
 #define GC_TEV_DETAIL		5440
 #define GC_TEV_ENVMASK		2048
+#define GC_TEV_EMBOSS		4096
 #define GC_TEV_MAX_ENVMASK	8
+#define GC_TEV_MAX_EMBOSS	16
 #define GC_TEV_F_ENVMASK	0x04
+#define GC_TEV_F_EMBOSS		0x20
 static u8 gc_tev_rec[GC_TEV_MAX][8];
-static u8 gc_tev_nmat, gc_tev_ndet, gc_tev_nmask;
+static u8 gc_tev_nmat, gc_tev_ndet, gc_tev_nmask, gc_tev_nemboss;
 static s8 gc_tev_bound = -1;
 /* Detail tiles stay in MEM1. The map ARAM window is the world pack; a
  * second reserve returns that same base and would wipe the BSP tree. */
@@ -156,6 +159,13 @@ static GXTexObj gc_tev_obj;
 static u8 gc_tev_envmask[GC_TEV_MAX_ENVMASK * GC_TEV_ENVMASK] __attribute__(( aligned( 32 )));
 static GXTexObj gc_tev_envmask_obj;
 static s8 gc_tev_envmask_bound = -1;
+static u8 gc_tev_emboss[GC_TEV_MAX_EMBOSS * GC_TEV_EMBOSS] __attribute__(( aligned( 32 )));
+static GXTexObj gc_tev_emboss_obj;
+static s8 gc_tev_emboss_bound = -1;
+/* d2_lostcoast env_sun → UV emboss offset (bake_tevmat.SUN_TANGENT x/y). */
+#define GC_TEV_EMBOSS_EPS	(4.0f / 64.0f)
+static const float gc_tev_emboss_ds = -0.7206f * GC_TEV_EMBOSS_EPS;
+static const float gc_tev_emboss_dt = -0.6716f * GC_TEV_EMBOSS_EPS;
 static byte *gc_wd_force;
 static u32 gc_wd_force_size;
 static int gc_wd_tev_gens = 1;
@@ -206,6 +216,22 @@ static void R_GXTevBindEnvMask( u8 idx )
 	GX_LoadTexObj( &gc_tev_envmask_obj, GX_TEXMAP5 );
 }
 
+static void R_GXTevBindEmboss( u8 idx )
+{
+	if( idx >= gc_tev_nemboss )
+		return;
+	if( gc_tev_emboss_bound != (s8)idx )
+	{
+		GX_InitTexObj( &gc_tev_emboss_obj,
+			gc_tev_emboss + (u32)idx * GC_TEV_EMBOSS,
+			64, 64, GX_TF_I8, GX_REPEAT, GX_REPEAT, GX_FALSE );
+		GX_InitTexObjFilterMode( &gc_tev_emboss_obj, GX_LINEAR, GX_LINEAR );
+		gc_tev_emboss_bound = (s8)idx;
+	}
+	/* TEXMAP3: soft-decal alpha is mutually exclusive with emboss mats. */
+	GX_LoadTexObj( &gc_tev_emboss_obj, GX_TEXMAP3 );
+}
+
 static int R_GXTevMatFlags( int id )
 {
 	if( id < 1 || id > (int)gc_tev_nmat )
@@ -222,6 +248,24 @@ static int R_GXTevMatEnvMask( int id )
 	if( gc_tev_rec[id - 1][5] >= gc_tev_nmask )
 		return -1;
 	return gc_tev_rec[id - 1][5];
+}
+
+static int R_GXTevMatEmboss( int id )
+{
+	u8 flags, idx;
+
+	if( id < 1 || id > (int)gc_tev_nmat )
+		return -1;
+	flags = gc_tev_rec[id - 1][0];
+	if( !( flags & GC_TEV_F_EMBOSS ))
+		return -1;
+	/* Height index lives in the envmask byte, or in the detail byte when
+	 * the material also carries an envmask (shared 8-byte record). */
+	idx = ( flags & GC_TEV_F_ENVMASK ) ? gc_tev_rec[id - 1][1]
+					   : gc_tev_rec[id - 1][5];
+	if( idx >= gc_tev_nemboss )
+		return -1;
+	return idx;
 }
 
 /*
@@ -390,8 +434,8 @@ static void R_GXWorldDLSetupLit( int lightmap )
 	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 }
 
-/* id 0 restores the lit diffuse stage. A detail id adds the sun-lit
- * bump relief (or authored detail) as mod2x on top. */
+/* id 0 restores the lit diffuse stage. Authored $detail adds mod2x (unlit
+ * chunks only). $bumpmap without $envmap adds emboss on lit colour. */
 static void R_GXTevMatAppend( int id, int a, int b )
 {
 	u8 flags, didx, aref;
@@ -399,6 +443,10 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	float scale;
 	Mtx tm;
 	int base_stages;
+	int stages;
+	int ntex;
+	int eidx;
+	u8 tc0, tc1, st;
 
 	(void)a;
 	(void)b;
@@ -409,6 +457,8 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
 	gc_wd_tev_key = ( id << 1 ) | ( gc_wd_chunk_lm ? 1 : 0 );
 	base_stages = gc_wd_chunk_lm ? 2 : 1;
+	stages = base_stages;
+	ntex = gc_wd_tev_gens > 1 ? 2 : 1;
 	if( !id )
 		return;
 	flags = gc_tev_rec[id - 1][0];
@@ -416,7 +466,7 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	scale_fp = (u16)( ( gc_tev_rec[id - 1][2] << 8 ) | gc_tev_rec[id - 1][3] );
 	aref = gc_tev_rec[id - 1][4];
 	/* Detail mod2x on top of Source LM punched white voids into harbor
-	 * cliffs. Keep relief only when there is no lightmap page. */
+	 * cliffs. Keep authored detail only when there is no lightmap page. */
 	if( !gc_wd_chunk_lm && ( flags & 0x01 ) && scale_fp && didx < gc_tev_ndet )
 	{
 		scale = (float)scale_fp / 256.0f;
@@ -425,14 +475,74 @@ static void R_GXTevMatAppend( int id, int a, int b )
 		tm[1][0] = 0.0f; tm[1][1] = scale; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
 		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 1.0f; tm[2][3] = 0.0f;
 		GX_LoadTexMtxImm( tm, GX_TEXMTX0, GX_MTX2x4 );
-		GX_SetNumTexGens( gc_wd_tev_gens > 1 ? 3 : 2 );
+		ntex = gc_wd_tev_gens > 1 ? 3 : 2;
+		GX_SetNumTexGens( (u8)ntex );
 		GX_SetTexCoordGen( GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0 );
-		GX_SetNumTevStages( base_stages + 1 );
+		stages = base_stages + 1;
+		GX_SetNumTevStages( (u8)stages );
 		GX_SetTevOrder( GX_TEVSTAGE0 + base_stages, GX_TEXCOORD2, GX_TEXMAP1, GX_COLORNULL );
 		GX_SetTevColorIn( GX_TEVSTAGE0 + base_stages, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
 		GX_SetTevColorOp( GX_TEVSTAGE0 + base_stages, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
 		GX_SetTevAlphaIn( GX_TEVSTAGE0 + base_stages, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
 		GX_SetTevAlphaOp( GX_TEVSTAGE0 + base_stages, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	}
+	/* Cliff / rock emboss: lit × (0.5 + h(uv) − h(uv+d)) × 2. Works on
+	 * lightmapped chunks (the old mod2x bump relief did not). */
+	eidx = R_GXTevMatEmboss( id );
+	if( eidx >= 0 && !( flags & 0x10 ))
+	{
+		R_GXTevBindEmboss( (u8)eidx );
+		/* TEXCOORD for h(uv) and h(uv+d): identity scale, sun offset in mtx1. */
+		tm[0][0] = 1.0f; tm[0][1] = 0.0f; tm[0][2] = 0.0f; tm[0][3] = 0.0f;
+		tm[1][0] = 0.0f; tm[1][1] = 1.0f; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
+		tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 1.0f; tm[2][3] = 0.0f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX1, GX_MTX2x4 );
+		tm[0][3] = gc_tev_emboss_ds;
+		tm[1][3] = gc_tev_emboss_dt;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX2, GX_MTX2x4 );
+		tc0 = (u8)( GX_TEXCOORD0 + ntex );
+		tc1 = (u8)( tc0 + 1 );
+		GX_SetTexCoordGen( tc0, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX1 );
+		GX_SetTexCoordGen( tc1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX2 );
+		ntex += 2;
+		GX_SetNumTexGens( (u8)ntex );
+
+		st = (u8)( GX_TEVSTAGE0 + stages );
+		/* Save lit colour. HALF+h overflows 8-bit at mid-grey, so compute
+		 * factor as h0 − h1 + ½ via TB_ADDHALF instead. */
+		GX_SetTevDirect( st );
+		GX_SetTevOrder( st, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+		GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0 );
+		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		st++;
+		/* h(uv) */
+		GX_SetTevDirect( st );
+		GX_SetTevOrder( st, tc0, GX_TEXMAP3, GX_COLORNULL );
+		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+		GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		st++;
+		/* h0 − h(uv+d) + 0.5 */
+		GX_SetTevDirect( st );
+		GX_SetTevOrder( st, tc1, GX_TEXMAP3, GX_COLORNULL );
+		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_CPREV );
+		GX_SetTevColorOp( st, GX_TEV_SUB, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		st++;
+		/* lit × factor × 2 */
+		GX_SetTevDirect( st );
+		GX_SetTevOrder( st, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_CPREV, GX_CC_C0, GX_CC_ZERO );
+		GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		st++;
+		stages = (int)( st - GX_TEVSTAGE0 );
+		GX_SetNumTevStages( (u8)stages );
 	}
 	/* Source $alphatest, $translucent and $decal: the alpha is the shape of
 	 * the grate, rail or decal, so it cuts out on lightmapped chunks as well
@@ -453,16 +563,16 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	 * against a decal a unit off its wall. */
 	if(( flags & 0x10 ) && R_GXWorldDLDecalAlpha())
 	{
-		const u8 st = (u8)( GX_TEVSTAGE0 + base_stages );
+		const u8 soft = (u8)( GX_TEVSTAGE0 + base_stages );
 
 		GX_LoadTexObj( &gc_wd_dalpha_obj, GX_TEXMAP3 );
 		GX_SetNumTevStages( (u8)( base_stages + 1 ));
-		GX_SetTevDirect( st );
-		GX_SetTevOrder( st, GX_TEXCOORD0, GX_TEXMAP3, GX_COLORNULL );
-		GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
-		GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
-		GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
-		GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevDirect( soft );
+		GX_SetTevOrder( soft, GX_TEXCOORD0, GX_TEXMAP3, GX_COLORNULL );
+		GX_SetTevColorIn( soft, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV );
+		GX_SetTevColorOp( soft, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( soft, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+		GX_SetTevAlphaOp( soft, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 		GX_SetAlphaCompare( GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 		GX_SetZCompLoc( GX_FALSE );
 		GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
@@ -573,8 +683,10 @@ static void R_GXMatPackLoad( void )
 	gc_tev_nmat = 0;
 	gc_tev_ndet = 0;
 	gc_tev_nmask = 0;
+	gc_tev_nemboss = 0;
 	gc_tev_bound = -1;
 	gc_tev_envmask_bound = -1;
+	gc_tev_emboss_bound = -1;
 	f = gEngfuncs.fsapi->Open( "media/tevmat.gcm", "rb", false );
 	if( f && gEngfuncs.fsapi->Read( f, hdr, 8 ) == 8
 		&& hdr[0] == 'G' && hdr[1] == 'C' && hdr[2] == 'm' && hdr[3] == 't'
@@ -595,19 +707,33 @@ static void R_GXMatPackLoad( void )
 				if( gc_tev_ndet )
 					DCFlushRange( gc_tev_store, bytes );
 				gc_tev_nmat = (u8)nmat;
-				/* Optional GCem trailer: $basealphaenvmapmask I4 tiles. */
-				if( gEngfuncs.fsapi->Read( f, trail, 8 ) == 8
-					&& trail[0] == 'G' && trail[1] == 'C'
-					&& trail[2] == 'e' && trail[3] == 'm'
-					&& trail[4] > 0 && trail[4] <= GC_TEV_MAX_ENVMASK )
+				/* Optional trailers after detail tiles: GCem then GCeh. */
+				while( gEngfuncs.fsapi->Read( f, trail, 8 ) == 8
+					&& trail[0] == 'G' && trail[1] == 'C' )
 				{
-					u32 mbytes = (u32)trail[4] * GC_TEV_ENVMASK;
-
-					if( gEngfuncs.fsapi->Read( f, gc_tev_envmask, mbytes ) == (fs_offset_t)mbytes )
+					if( trail[2] == 'e' && trail[3] == 'm'
+						&& trail[4] > 0 && trail[4] <= GC_TEV_MAX_ENVMASK )
 					{
+						u32 mbytes = (u32)trail[4] * GC_TEV_ENVMASK;
+
+						if( gEngfuncs.fsapi->Read( f, gc_tev_envmask, mbytes ) != (fs_offset_t)mbytes )
+							break;
 						DCFlushRange( gc_tev_envmask, mbytes );
 						gc_tev_nmask = trail[4];
+						continue;
 					}
+					if( trail[2] == 'e' && trail[3] == 'h'
+						&& trail[4] > 0 && trail[4] <= GC_TEV_MAX_EMBOSS )
+					{
+						u32 hbytes = (u32)trail[4] * GC_TEV_EMBOSS;
+
+						if( gEngfuncs.fsapi->Read( f, gc_tev_emboss, hbytes ) != (fs_offset_t)hbytes )
+							break;
+						DCFlushRange( gc_tev_emboss, hbytes );
+						gc_tev_nemboss = trail[4];
+						continue;
+					}
+					break;
 				}
 			}
 			else
@@ -621,8 +747,9 @@ static void R_GXMatPackLoad( void )
 	{
 		logged = true;
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: tevmat mats=%u details=%u envmasks=%u\n",
-			(unsigned)gc_tev_nmat, (unsigned)gc_tev_ndet, (unsigned)gc_tev_nmask );
+			"Xash3D GameCube: tevmat mats=%u details=%u envmasks=%u emboss=%u\n",
+			(unsigned)gc_tev_nmat, (unsigned)gc_tev_ndet,
+			(unsigned)gc_tev_nmask, (unsigned)gc_tev_nemboss );
 	}
 }
 
