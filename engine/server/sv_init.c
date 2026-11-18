@@ -1427,6 +1427,11 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 {
 	int		i;
 
+#if XASH_GAMECUBE
+	/* The old map's arena and spill are about to be reset: no more claims
+	 * against them, and the world canary stops comparing. */
+	GC_MapLoadBufferWorldSettled( false );
+#endif
 	SV_SetupClients();
 
 	if( !SV_InitGame( false ))

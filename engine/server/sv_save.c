@@ -2514,6 +2514,12 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
 	SAVERESTOREDATA	*pSaveData = NULL;
 #if XASH_GAMECUBE
 	qboolean	lean_landmark = false;
+
+	/* Level change begins: the old map's memory is no longer settled. */
+	{
+		extern void GC_MapLoadBufferWorldSettled( qboolean settled );
+		GC_MapLoadBufferWorldSettled( false );
+	}
 #endif
 
 	if( sv.state != ss_active )

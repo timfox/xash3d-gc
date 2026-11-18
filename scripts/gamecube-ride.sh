@@ -34,6 +34,18 @@ sed -i -e "s/^CPUCore = .*/CPUCore = ${RIDE_CPU_CORE:-1}/" \
 # that config wrote 20 GB of stills and filled the disk.  Rides record video
 # through playtest-record.py instead.
 sed -i -e "s/^DumpFrames = .*/DumpFrames = False/" "$out/dolphin-user/Config/Dolphin.ini"
+# RIDE_GPU_LOG=1: Dolphin's own GPU log channels (command processor, graphics
+# pipe, pixel engine, processor interface, video) for FIFO/GPU hangs.
+if [[ "${RIDE_GPU_LOG:-0}" == "1" && -f "$out/dolphin-user/Config/Logger.ini" ]]; then
+	sed -i -e 's/^CP = .*/CP = True/' -e 's/^GP = .*/GP = True/' -e 's/^PE = .*/PE = True/' \
+		-e 's/^PI = .*/PI = True/' -e 's/^Video = .*/Video = True/' "$out/dolphin-user/Config/Logger.ini"
+fi
+# RIDE_HEAP_CENSUS=1: Dolphin maps 64 MiB of MEM1 (RAM override) so the heap
+# census table above 24 MiB (mem_gamecube.c, disc "heapcensus") is real
+# memory; libogc's heap still ends at 24 MiB, so the guest layout is retail.
+if [[ "${RIDE_HEAP_CENSUS:-0}" == "1" ]]; then
+	sed -i -e 's/^\[Core\]$/[Core]\nRAMOverrideEnable = True\nMEM1Size = 67108864/' "$out/dolphin-user/Config/Dolphin.ini"
+fi
 # Rides are muted unless RIDE_MUTE_AUDIO=0 (host volume only; guest audio still runs).
 if [[ "${RIDE_MUTE_AUDIO:-1}" != "0" ]]; then
 	if grep -q '^Volume = ' "$out/dolphin-user/Config/Dolphin.ini"; then

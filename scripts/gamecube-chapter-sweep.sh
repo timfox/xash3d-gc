@@ -14,6 +14,9 @@
 #   SWEEP_AUTOCAMPAIGN=25 seconds per map before the autopilot walks on
 #   SWEEP_RECORD=1        record video (last frame saved for crash screens)
 #   SWEEP_GDB=0           1: attach gdb and dump PC/backtrace when a run stalls
+#   SWEEP_EVIDENCE=0      1: keep clean runs' video in .ai/evidence/ (load-test label)
+#   SWEEP_GPU_LOG=0       1: enable Dolphin CP/GP/PE/PI/Video logging (GPU/FIFO hangs)
+#   SWEEP_HEAP_CENSUS=0   1: heap census by caller (disc "heapcensus"; Dolphin only, no heap cost)
 #   SWEEP_OUT=.ai/sweeps/<stamp>
 #   GC_PROBE_TAG=sweep    probe/ride dir suffix; also honours XASH_GC_OUT,
 #                         XASH_GC_WAF_OUT, HLSDK_GAMECUBE_DESTDIR and
@@ -59,7 +62,9 @@ for map in "${MAPS[@]}"; do
 		fi
 		probe_log="$OUT/probe-$map-$run.log"
 		touch "$OUT/.run-start"
-		KEEP_ISO=1 XASH_GC_PROBE_STARTMAP="$map" XASH_GC_PROBE_AUTOCAMPAIGN="$AUTOCAMPAIGN" \
+		census_cflags=; [[ "${SWEEP_HEAP_CENSUS:-0}" == "1" ]] && census_cflags="${CFLAGS:-} -DXASH_GC_HEAP_CENSUS_BOOT=1"
+		CFLAGS="${census_cflags:-${CFLAGS:-}}" \
+		KEEP_ISO=1 XASH_GC_PROBE_HEAPCENSUS="${SWEEP_HEAP_CENSUS:-0}" XASH_GC_PROBE_STARTMAP="$map" XASH_GC_PROBE_AUTOCAMPAIGN="$AUTOCAMPAIGN" \
 			DOLPHIN_PROBE_LOCK_WAIT=7200 DOLPHIN_RETAIL=1 DOLPHIN_MENU_NEWGAME=1 \
 			DOLPHIN_RECORD=0 DOLPHIN_VIDEO=Null DOLPHIN_TIMEOUT=240 \
 			scripts/dolphin-boot-probe.sh > "$probe_log" 2>&1
@@ -70,7 +75,7 @@ for map in "${MAPS[@]}"; do
 			continue
 		fi
 		rm -rf "$probe_dir/dolphin-user/Dump"
-		RIDE_RECORD="$RECORD" RIDE_VIDEO=OGL RIDE_STALL_SEC="$STALL" RIDE_GDB="${SWEEP_GDB:-0}" \
+		RIDE_RECORD="$RECORD" RIDE_VIDEO=OGL RIDE_STALL_SEC="$STALL" RIDE_GDB="${SWEEP_GDB:-0}" RIDE_GPU_LOG="${SWEEP_GPU_LOG:-0}" RIDE_HEAP_CENSUS="${SWEEP_HEAP_CENSUS:-0}" \
 			scripts/gamecube-ride.sh "$iso" "$probe_dir" "" "$MINUTES" > "$OUT/ride-$map-$run.log" 2>&1
 		rm -f "$iso"
 		ride=$(find .ai/logs -maxdepth 1 -name "ride-*-$GC_PROBE_TAG" -newer "$OUT/.run-start" 2>/dev/null | sort | tail -1)
@@ -100,7 +105,7 @@ for map in "${MAPS[@]}"; do
 			if [[ -n "$mp4" && -f "$mp4" ]]; then
 				frame="$OUT/last-$map-$run.png"
 				ffmpeg -v error -y -sseof -3 -i "$mp4" -frames:v 1 "$frame" 2>/dev/null || frame=""
-				rm -f "$mp4"	# the last frame is what a crash screen needs
+				evidence_mp4="$mp4"
 			fi
 		fi
 		# libogc's exception screen (DSI/ISI/...) is a dark-red frame; a silent
@@ -115,7 +120,29 @@ PY
 		then
 			fatal="exception screen (see last frame)"
 			freeze=no
+			# Keep this build's symbols with the crash: OUT/bin/xash is
+			# rebuilt by the next run, and the screen's addresses need it.
+			cp -f OUT/bin/xash "$OUT/xash-$map-$run.elf" 2>/dev/null
 		fi
+		# SWEEP_EVIDENCE=1: a run with no fatal and no freeze keeps its video
+		# (Dolphin's render window, x11grab, muted) under .ai/evidence/ with
+		# the start map and commit in the name, labelled as a load test.
+		if [[ -n "${evidence_mp4:-}" && -f "$evidence_mp4" ]]; then
+			if [[ "${SWEEP_EVIDENCE:-0}" == "1" && -z "$fatal" && -z "$host_error" && "$freeze" == no ]]; then
+				commit=$(git rev-parse --short HEAD)
+				dirty=$(git diff --quiet -- engine ref common filesystem 2>/dev/null || echo -dirty)
+				ev=".ai/evidence/${map}-${commit}${dirty}-loadtest-$(date +%Y%m%d-%H%M).mp4"
+				mkdir -p .ai/evidence && mv -f "$evidence_mp4" "$ev"
+				{
+					echo "LOAD TEST, not a playthrough: campaign autopilot from forced start map $map."
+					echo "commit=${commit}${dirty} maps=$maps alloc_failures=${alloc:-0} canary_changes=${canary:-0}"
+					echo "video: Dolphin render window (ffmpeg x11grab), audio muted; ride=$ride"
+				} > "${ev%.mp4}.txt"
+			else
+				rm -f "$evidence_mp4"	# the last frame is what a crash screen needs
+			fi
+		fi
+		evidence_mp4=
 		{
 			printf '%s,%s,%s,' "$map" "$run" "$(git rev-parse --short HEAD)"
 			csvq "$maps"; printf ','

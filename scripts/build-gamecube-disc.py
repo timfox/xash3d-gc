@@ -2273,7 +2273,7 @@ def build_prop_packs(
 			continue
 		st = bsp.stat()
 		gcp, gct, stamp = cache / f"gp_{stem}.gcp", cache / f"pt_{stem}.gct", cache / f"gp_{stem}.stamp"
-		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-6"
+		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-8"
 		if not (stamp.is_file() and stamp.read_text() == key):
 			for stale in (gcp, gct):
 				stale.unlink(missing_ok=True)
@@ -3452,6 +3452,8 @@ def write_smoke_overrides(
 		lines.append("nativetex")
 	(output / "gamecube.cfg").write_text("\n".join(lines) + "\n", encoding="ascii")
 	media = output / "media"
+	if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+		lines.append("heapcensus")
 	media.mkdir(exist_ok=True)
 	(media / "StartupVids.txt").write_text("", encoding="ascii")
 
@@ -3524,6 +3526,8 @@ def write_probe_newgame_override(
 		lines.append("nativetex")
 	(output / "gamecube.cfg").write_text("\n".join(lines) + "\n", encoding="ascii")
 
+	if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+		lines.append("heapcensus")
 
 def write_probe_phasetest_override(output: Path, phase: str) -> None:
 	"""Menu/retail boot with an intentional G82 phase fault (no map/newgame)."""
@@ -5012,6 +5016,8 @@ def main() -> None:
 					menu_lines.append("nonativetex")
 				if os.environ.get("XASH_GC_PROBE_NOTEXPACKS") == "1":
 					menu_lines.append("notexpacks")
+				if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+					menu_lines.append("heapcensus")
 				(staged_data / "gamecube.cfg").write_text(
 					"\n".join(menu_lines) + "\n", encoding="ascii"
 				)

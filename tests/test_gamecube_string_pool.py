@@ -69,6 +69,13 @@ static unsigned gc_studio_skin_live;
 static int gc_studio_bss_owners;
 static int Sys_CheckParm(const char *s) { (void)s; return 0; }
 static void Con_Reportf(const char *s, ...) { (void)s; }
+/* The map-leftover overflow slices live outside this slice of model.c. */
+static qboolean Mod_GCInStudioBssArray(const void *ptr) {
+    const byte *p = (const byte *)ptr;
+    return p >= gc_studio_bss && p < gc_studio_bss + GC_STUDIO_BSS_BYTES;
+}
+static qboolean Mod_GCInStudioOverflow(const void *ptr) { (void)ptr; return false; }
+static byte *Mod_GCStudioOverflowAlloc(size_t size) { (void)size; return NULL; }
 '''
         fixture += "qboolean Mod_GCIsStudioBssCache(" + functions
         fixture += r'''

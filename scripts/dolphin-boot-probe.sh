@@ -132,6 +132,7 @@ else
 fi
 cat > "$USER_DIR/Config/Dolphin.ini" <<EOF
 [Core]
+$( [[ "${XASH_GC_PROBE_HEAPCENSUS:-0}" == "1" ]] && printf 'RAMOverrideEnable = True\nMEM1Size = 67108864' )
 CPUCore = ${DOLPHIN_CPU_CORE}
 CPUThread = ${DOLPHIN_CPU_THREAD}
 DSPHLE = True
@@ -575,7 +576,6 @@ if [[ "${DOLPHIN_EXECUTABLE:-}" == flatpak:* ]]; then
 	append_guest_args DOLPHIN_CMD
 	DOLPHIN_IS_FLATPAK=1
 elif [[ -n "${DOLPHIN_EXECUTABLE:-}" ]]; then
-	# Sibling DoD tooling pkill -f dolphin-emu; rewrite sticky env to the alias.
 	if [[ "$(basename "$DOLPHIN_EXECUTABLE")" == "dolphin-emu" \
 		&& -x "$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin" ]]; then
 		DOLPHIN_EXECUTABLE="$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin"

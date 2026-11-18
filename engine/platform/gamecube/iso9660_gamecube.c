@@ -126,7 +126,11 @@ typedef struct iso9660mount_s
 {
 	const DISC_INTERFACE *disc_interface;
 	u8 read_buffer[BUFFER_SIZE] __attribute__((aligned(32)));
-	u8 cluster_buffer[BUFFER_SIZE] __attribute__((aligned(32)));
+	/* Directory records are read one sector at a time (read_directory,
+	 * find_file_in_directory: at most SECTOR_SIZE - sector_offset bytes), so
+	 * one sector is enough.  It was BUFFER_SIZE (32 KiB) in the 1.2 MiB heap:
+	 * 30 KiB of MEM1 that a level change needs (heap census, c2a4d). */
+	u8 cluster_buffer[SECTOR_SIZE + 32] __attribute__((aligned(32)));
 	u32 cache_start;
 	u32 cache_sectors;
 	bool iso_unicode;

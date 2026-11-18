@@ -1287,6 +1287,15 @@ static void GCube_LoadDiscBootOverrides( void )
 			SYS_Report( "Xash3D GameCube: disc boot override modeltrace\n" );
 			continue;
 		}
+		if( !Q_strnicmp( cursor, "heapcensus", 10 ))
+		{
+			/* Diagnostic probe builds only: the census table lives above
+			 * 24 MiB, which Dolphin backs and real hardware does not. */
+			extern void GC_HeapCensusEnable( void );
+			GC_HeapCensusEnable();
+			SYS_Report( "Xash3D GameCube: disc boot override heapcensus (Dolphin only)\n" );
+			continue;
+		}
 		if( !Q_strnicmp( cursor, "autocampaign", 12 ))
 		{
 			const char *arg = cursor + 12;
