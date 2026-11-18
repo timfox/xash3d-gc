@@ -314,10 +314,7 @@ static void GC_ApplyDefaultBindings( void )
 
 		/* Always: a config.cfg from an older layout must not leave A on
 		 * back or attack. gamecube_pad.cfg (below) is the place to rebind. */
-		/* DoD has no flashlight: Y opens chat, as the retail "Y" say key does. */
-		if( bind->key == K_Y_BUTTON && !Q_stricmp( GI->gamefolder, "dod" ))
-			Key_SetBinding( bind->key, "messagemode" );
-		else Key_SetBinding( bind->key, bind->binding );
+		Key_SetBinding( bind->key, bind->binding );
 		applied++;
 	}
 
@@ -350,6 +347,12 @@ static void GC_UpdateButtons( u16 held )
 			if( Sys_CheckParm( "-gcprofile" ))
 				Con_Reportf( "Xash3D GameCube: pad press %s -> %s key_dest=%d\n",
 					btn->gc_name, Key_KeynumToString( btn->key ), cls.key_dest );
+			/* Z held + Y opens chat. Y alone stays impulse 100: the DoD voice menu. */
+			if( btn->key == K_Y_BUTTON && ( held & PAD_TRIGGER_Z ) && cls.key_dest == key_game )
+			{
+				Cbuf_AddText( "messagemode\n" );
+				continue;
+			}
 			Key_Event( btn->key, true );
 		}
 
