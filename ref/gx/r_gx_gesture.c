@@ -20,13 +20,14 @@ bone, the local rotation it adds over the actor's talking pose, at 10 Hz:
 scripts/lc/<model>.gst. The file lives in ARAM; only the two frames either
 side of each playing gesture are held in MEM1.
 
-  0   "GCGS", u16 version (1), u16 ngest
+  0   "GCGS", u16 version (2), u16 ngest
   8   u16 nbones, u16 0, u32 names_ofs, u32 dir_ofs
   names: nbones x char[32]
-  dir:   ngest x 48: char name[28], u16 nframes, u8 nrot, u8 0, f32 seconds,
-         u32 bones_ofs, u32 frames_ofs, u32 0
-  bones: nrot x u8 (index into names)
-  frames: nframes x nrot x 3 x s16 (quat x, y, z * 32767, w >= 0)
+  dir:   ngest x 48: char name[28], u16 nframes, u8 nrot, u8 npos,
+         f32 seconds, u32 bones_ofs, u32 frames_ofs, u32 0
+  bones: nrot x u8, then npos x u8 (indices into names)
+  frames: nframes x ( nrot x 3 x s16 (quat x, y, z * 32767, w >= 0),
+          npos x 3 x s16 (translation * 256, in the parent's space) )
 */
 
 #include "r_local.h"
@@ -41,34 +42,29 @@ extern int GC_ActorGesturesAt( int ent, float time, const char **names, float *c
 #define GST_MAX		24	/* gestures and look poses in a file */
 #define GST_BONES	64	/* bones named by a file */
 #define GST_ROT		48	/* bones one gesture turns */
+#define GST_POS		8	/* bones one gesture also moves */
 #define GST_SLOTS	10	/* gestures and look poses playing at once */
 
 typedef struct
 {
 	char	name[28];
 	u16	nframes;
-	u8	nrot;
+	u8	nrot, npos;
 	u32	frames_ofs;
-	u8	bone[GST_ROT];	/* studio bone, 0xff = not in this model */
+	u8	bone[GST_ROT + GST_POS];	/* studio bone, 0xff = not in this model; turned, then moved */
 } gst_gesture_t;
 
-typedef struct
-{
-	s8	gest;		/* -1 = empty */
-	s16	frame;
-	u32	used;
-	s16	q[2][GST_ROT][3];
-} gst_slot_t;
-
+/* MEM1 is down to a few KB of heap on Lost Coast, so nothing here is static
+ * data: the directory sits in what the map-load arena has left over, and
+ * the two frames a playing gesture needs are read from ARAM onto the stack
+ * each time (a few hundred bytes a gesture). */
 static struct
 {
 	int		state;	/* 0 untried, 1 ready, -1 failed */
 	const model_t	*model;
 	int		asset;
 	int		ngest;
-	u32		clock;
-	gst_gesture_t	gest[GST_MAX];
-	gst_slot_t	slot[GST_SLOTS];
+	gst_gesture_t	*gest;	/* GST_MAX, map-load arena tail */
 } gst;
 
 static u32 GstU32( const byte *p ) { return ((u32)p[0] << 24 ) | ((u32)p[1] << 16 ) | ((u32)p[2] << 8 ) | p[3]; }
@@ -89,12 +85,17 @@ static qboolean R_GXGestureLoad( const model_t *mod, const studiohdr_t *hdr )
 	gst.model = mod;
 	if( !cache )
 		return false;
+	if( !gst.gest && GC_MapLoadBufferTailPeak() != 0 )
+		gst.gest = (gst_gesture_t *)GC_MapLoadBufferTailAlloc(
+			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), sizeof( gst_gesture_t ) * GST_MAX );
+	if( !gst.gest )
+		return false;
 	COM_FileBase( mod->name, base, sizeof( base ));
 	Q_snprintf( path, sizeof( path ), "scripts/lc/%s.gst", base );
 	f = gEngfuncs.fsapi->Open( path, "rb", false );
 	if( !f )
 		return false;
-	if( gEngfuncs.fsapi->Read( f, buf, 32 ) != 32 || memcmp( buf, "GCGS", 4 ) || GstU16( buf + 4 ) != 1 )
+	if( gEngfuncs.fsapi->Read( f, buf, 32 ) != 32 || memcmp( buf, "GCGS", 4 ) || GstU16( buf + 4 ) != 2 )
 		goto fail;
 	gst.ngest = GstU16( buf + 6 );
 	nbones = GstU16( buf + 8 );
@@ -130,14 +131,15 @@ static qboolean R_GXGestureLoad( const model_t *mod, const studiohdr_t *hdr )
 		g->name[sizeof( g->name ) - 1] = 0;
 		g->nframes = GstU16( buf + 28 );
 		g->nrot = buf[30];
+		g->npos = buf[31];
 		bones_ofs = GstU32( buf + 36 );
 		g->frames_ofs = GstU32( buf + 40 );
-		if( g->nrot > GST_ROT || g->nframes < 1 )
+		if( g->nrot > GST_ROT || g->npos > GST_POS || g->nframes < 1 )
 			goto fail;
 		gEngfuncs.fsapi->Seek( f, bones_ofs, SEEK_SET );
-		if( gEngfuncs.fsapi->Read( f, buf, g->nrot ) != g->nrot )
+		if( gEngfuncs.fsapi->Read( f, buf, g->nrot + g->npos ) != g->nrot + g->npos )
 			goto fail;
-		for( j = 0; j < g->nrot; j++ )
+		for( j = 0; j < g->nrot + g->npos; j++ )
 			g->bone[j] = buf[j] < nbones ? bonemap[buf[j]] : 0xff;
 	}
 	/* the whole file to ARAM, a block at a time */
@@ -167,8 +169,6 @@ static qboolean R_GXGestureLoad( const model_t *mod, const studiohdr_t *hdr )
 	GC_AramCachePin( cache, index );
 	gEngfuncs.fsapi->Close( f );
 	gst.asset = index;
-	for( i = 0; i < GST_SLOTS; i++ )
-		gst.slot[i].gest = -1;
 	gst.state = 1;
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: gestures %s: %d gestures, %u bytes in ARAM\n", path, gst.ngest, (unsigned)size );
 	return true;
@@ -178,44 +178,20 @@ fail:
 	return false;
 }
 
-/* The two frames either side of a gesture's cycle. */
-static const gst_slot_t *R_GXGestureFrames( int gi, int frame )
+/* The two frames either side of a gesture's cycle, into q. */
+static qboolean R_GXGestureFrames( int gi, int frame, s16 q[2][GST_ROT + GST_POS][3] )
 {
 	const gst_gesture_t *g = &gst.gest[gi];
-	gst_slot_t *s = &gst.slot[0];
-	const u32 stride = (u32)g->nrot * 6;
+	const u32 stride = (u32)( g->nrot + g->npos ) * 6;
 	const int nread = frame + 1 < g->nframes ? 2 : 1;
-	int i;
 
-	for( i = 0; i < GST_SLOTS; i++ )
-	{
-		gst_slot_t *c = &gst.slot[i];
-
-		if( c->gest == gi && c->frame == frame )
-		{
-			c->used = ++gst.clock;
-			return c;
-		}
-	}
-	/* an empty slot, else the one used longest ago */
-	for( i = 1; i < GST_SLOTS && s->gest >= 0; i++ )
-	{
-		gst_slot_t *c = &gst.slot[i];
-
-		if( c->gest < 0 || c->used < s->used )
-			s = c;
-	}
-	s->gest = -1;
-	if( !GC_AramCacheRead( GC_AramAssetCacheGet(), gst.asset, g->frames_ofs + (u32)frame * stride, s->q[0], stride * nread ))
-		return NULL;
+	if( !GC_AramCacheRead( GC_AramAssetCacheGet(), gst.asset, g->frames_ofs + (u32)frame * stride, q[0], stride * nread ))
+		return false;
 	if( nread == 1 )
-		memcpy( s->q[1], s->q[0], stride );
-	else if( g->nrot < GST_ROT )
-		memmove( s->q[1], (byte *)s->q[0] + stride, stride );
-	s->gest = (s8)gi;
-	s->frame = (s16)frame;
-	s->used = ++gst.clock;
-	return s;
+		memcpy( q[1], q[0], stride );
+	else if( g->nrot + g->npos < GST_ROT + GST_POS )
+		memmove( q[1], (byte *)q[0] + stride, stride );
+	return true;
 }
 
 /* q = q * d, both (x, y, z, w) */
@@ -231,7 +207,7 @@ static void GstQuatMul( float *q, const float *d )
 
 /* Turn the bones of e by every gesture playing on it. q is the studio pose
  * (local rotations) before the bone matrices are built. */
-void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, float time )
+void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, vec3_t *pos, float time )
 {
 	const char *names[GST_SLOTS];
 	float cycles[GST_SLOTS], weights[GST_SLOTS];
@@ -249,7 +225,7 @@ void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, 
 	for( i = 0; i < n; i++ )
 	{
 		const gst_gesture_t *g = NULL;
-		const gst_slot_t *s;
+		s16 fq[2][GST_ROT + GST_POS][3];
 		float f, t, w = weights[i];
 		int gi, frame;
 
@@ -266,8 +242,7 @@ void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, 
 		f = bound( 0.0f, cycles[i], 1.0f ) * ( g->nframes - 1 );
 		frame = Q_min( (int)f, g->nframes - 1 );
 		t = f - frame;
-		s = R_GXGestureFrames( gi, frame );
-		if( !s )
+		if( !R_GXGestureFrames( gi, frame, fq ))
 			continue;
 		for( j = 0; j < g->nrot; j++ )
 		{
@@ -276,9 +251,9 @@ void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, 
 
 			if( b == 0xff || b >= hdr->numbones )
 				continue;
-			d[0] = ( s->q[0][j][0] + ( s->q[1][j][0] - s->q[0][j][0] ) * t ) * ( w / 32767.0f );
-			d[1] = ( s->q[0][j][1] + ( s->q[1][j][1] - s->q[0][j][1] ) * t ) * ( w / 32767.0f );
-			d[2] = ( s->q[0][j][2] + ( s->q[1][j][2] - s->q[0][j][2] ) * t ) * ( w / 32767.0f );
+			d[0] = ( fq[0][j][0] + ( fq[1][j][0] - fq[0][j][0] ) * t ) * ( w / 32767.0f );
+			d[1] = ( fq[0][j][1] + ( fq[1][j][1] - fq[0][j][1] ) * t ) * ( w / 32767.0f );
+			d[2] = ( fq[0][j][2] + ( fq[1][j][2] - fq[0][j][2] ) * t ) * ( w / 32767.0f );
 			/* w of the unit delta, then eased toward identity by the weight */
 			ww = 1.0f - ( d[0] * d[0] + d[1] * d[1] + d[2] * d[2] ) / ( w * w );
 			ww = ww > 0.0f ? sqrtf( ww ) : 0.0f;
@@ -289,12 +264,23 @@ void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, 
 			d[0] /= len; d[1] /= len; d[2] /= len; d[3] /= len;
 			GstQuatMul( q[b], d );
 		}
+		/* and the bones it moves: the hat off the head, the hips in a shift */
+		for( j = g->nrot; j < g->nrot + g->npos; j++ )
+		{
+			const int b = g->bone[j];
+			int k;
+
+			if( b == 0xff || b >= hdr->numbones )
+				continue;
+			for( k = 0; k < 3; k++ )
+				pos[b][k] += ( fq[0][j][k] + ( fq[1][j][k] - fq[0][j][k] ) * t ) * ( w / 256.0f );
+		}
 	}
 }
 
 void R_GXGestureReset( void )
 {
-	memset( &gst, 0, sizeof( gst ));
+	memset( &gst, 0, sizeof( gst ));	/* the arena block goes with the map */
 }
 
 #endif // XASH_GAMECUBE

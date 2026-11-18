@@ -636,7 +636,23 @@ Netchan_AllocFragbuf
 */
 static fragbuf_t *Netchan_AllocFragbuf( int fragment_size )
 {
+#if XASH_GAMECUBE
+	/* On the world-render route (Lost Coast) the heap has a few tens of KB
+	 * free at best. A 32 KB fragment from the pool used to fail there and
+	 * land in the BSS slots below; once other savings left 32 KB free it
+	 * succeeded instead and took the heap down to 2 KB, so the first file
+	 * opened in play (a voice line) failed. Those slots are already paid
+	 * for: use them first there. */
+	static int bss_first = -1;
+	fragbuf_t *buf;
+
+	if( bss_first < 0 )
+		bss_first = Sys_CheckParm( "-gcworldrender" ) ? 1 : 0;
+	buf = ( bss_first && fragment_size <= NETCHAN_GC_EMERGENCY_PAYLOAD ) ? NULL
+		: (fragbuf_t *)Mem_Calloc( net_mempool, sizeof( fragbuf_t ) + fragment_size );
+#else
 	fragbuf_t *buf = (fragbuf_t *)Mem_Calloc( net_mempool, sizeof( fragbuf_t ) + fragment_size );
+#endif
 #if XASH_GAMECUBE
 	/* Prefer Network Pool; on tip soft-NULL fall back to BSS so changelevel
 	 * restore messages are never dropped (probe 20261105-041454). */
@@ -661,6 +677,8 @@ static fragbuf_t *Netchan_AllocFragbuf( int fragment_size )
 				i, fragment_size );
 			break;
 		}
+		if( !buf && bss_first )
+			buf = (fragbuf_t *)Mem_Calloc( net_mempool, sizeof( fragbuf_t ) + fragment_size );
 		if( !buf )
 			return NULL;
 	}

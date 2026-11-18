@@ -623,6 +623,11 @@ def configure(conf):
 
 	if conf.env.DEST_OS == 'gamecube':
 		conf.define('XASH_GAMECUBE', 1)
+		if conf.options.GAMEDIR == 'lostcoast':
+			# Single player only, and the heap is down to a few KB in play:
+			# tables sized for a second player or for bots are cut to one
+			# (server client slots: 91 KB each).
+			conf.define('XASH_GC_LOSTCOAST', 1)
 		if conf.options.GAMEDIR == 'dod':
 			conf.define('XASH_DODGC_NETWORK', 1)
 			conf.define('DEFAULT_MAX_EDICTS', 460)

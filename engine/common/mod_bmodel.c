@@ -121,9 +121,12 @@ static qboolean gc_entities_static_block;
  * gate the BSS on that. Call site already requires BYTES > 0.
  * The LIBBBA define does not reach this file in the DoD build (the link
  * map still showed the 112 KiB block), so the DoD build is excluded by its
- * own define too: it never passes -gcchangelevel. */
+ * own define too: it never passes -gcchangelevel.
+ * Lost Coast is one map and never changes level either; its heap is down
+ * to a few KB in play, so it leaves the block out as well. */
 #if ( !defined(XASH_GAMECUBE_HAVE_LIBBBA) || !XASH_GAMECUBE_HAVE_LIBBBA ) \
-	&& !( defined(XASH_DODGC_NETWORK) && XASH_DODGC_NETWORK )
+	&& !( defined(XASH_DODGC_NETWORK) && XASH_DODGC_NETWORK ) \
+	&& !( defined(XASH_GC_LOSTCOAST) && XASH_GC_LOSTCOAST )
 #define GC_CHANGELEVEL_ENTITIES_FALLBACK_BYTES ( 112u * 1024u )
 static char gc_changelevel_entities_fallback_bss[GC_CHANGELEVEL_ENTITIES_FALLBACK_BYTES];
 static char *gc_changelevel_entities_fallback = gc_changelevel_entities_fallback_bss;
