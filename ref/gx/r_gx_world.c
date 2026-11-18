@@ -5984,7 +5984,7 @@ static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
 /* Pack v3: a model is stored once (raw vertex pieces in ARAM) and each
  * instance places it with an origin and Source angles through the GX
  * position matrix. v2 stored every instance's triangles in world space. */
-#define GC_PROP_MAX_MODELS	192
+#define GC_PROP_MAX_MODELS	224	/* 192 ran out before the triangle budget: close models for the chandelier and dome pushed the harbor boats out */
 
 typedef struct
 {
