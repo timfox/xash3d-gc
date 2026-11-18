@@ -1757,6 +1757,63 @@ static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
 	return mod;
 }
 
+/* The lean emitter rebuilds each studio entity from its edict every frame, so
+ * the client-side latch that crossfades a sequence change (0.2 s in
+ * R_StudioSetupBones) never survives. Keep it here, per edict. */
+typedef struct
+{
+	int	index;
+	int	seq, prevseq;
+	float	frame, prevframe;	/* edict frames, 0..255 */
+	float	changetime;
+} gc_seqlatch_t;
+
+static gc_seqlatch_t gc_seqlatch[16];
+
+static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
+{
+	const studiohdr_t *hdr = mod ? (const studiohdr_t *)mod->cache.data : NULL;
+	gc_seqlatch_t *l = NULL, *spare = &gc_seqlatch[0];
+	int i;
+
+	if( !hdr || ent->index <= 0 )
+		return;
+	for( i = 0; i < (int)ARRAYSIZE( gc_seqlatch ); i++ )
+	{
+		if( gc_seqlatch[i].index == ent->index )
+		{
+			l = &gc_seqlatch[i];
+			break;
+		}
+		if( !gc_seqlatch[i].index || gc_seqlatch[i].changetime < spare->changetime )
+			spare = &gc_seqlatch[i];
+	}
+	if( !l )
+	{
+		l = spare;
+		l->index = ent->index;
+		l->seq = l->prevseq = ent->curstate.sequence;
+		l->changetime = 0.0f;
+	}
+	else if( l->seq != ent->curstate.sequence )
+	{
+		l->prevseq = l->seq;
+		l->prevframe = l->frame;
+		l->seq = ent->curstate.sequence;
+		l->changetime = (float)cl.time;
+	}
+	l->frame = ed->v.frame;
+	if( l->changetime > 0.0f && (float)cl.time - l->changetime < 0.2f
+		&& l->prevseq >= 0 && l->prevseq < hdr->numseq )
+	{
+		const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex ) + l->prevseq;
+
+		ent->latched.prevsequence = l->prevseq;
+		ent->latched.sequencetime = l->changetime;
+		ent->latched.prevframe = l->prevframe * ( sd->numframes - 1 ) / 256.0f;
+	}
+}
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -2199,6 +2256,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->curstate.movetype = (int)ed->v.movetype;
 			ent->curstate.sequence = ed->v.sequence;
 			ent->curstate.frame = ed->v.frame;
+			/* Bone controllers travel with every studio entity in GoldSrc. Left
+			 * at the memset 0 they sit at the controller's start angle: the
+			 * Lost Coast fisherman's four look joints held him bent over. */
+			ent->curstate.controller[0] = ed->v.controller[0];
+			ent->curstate.controller[1] = ed->v.controller[1];
+			ent->curstate.controller[2] = ed->v.controller[2];
+			ent->curstate.controller[3] = ed->v.controller[3];
 			ent->curstate.body = ed->v.body;
 			ent->curstate.skin = ed->v.skin;
 			ent->curstate.scale = ed->v.scale > 0.0f ? ed->v.scale : 1.0f;
@@ -2268,6 +2332,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			VectorCopy( ent->origin, ent->latched.prevorigin );
 			VectorCopy( ent->angles, ent->latched.prevangles );
 			ent->latched.prevanimtime = ent->curstate.animtime;
+			memcpy( ent->latched.prevcontroller, ent->curstate.controller, sizeof( ent->latched.prevcontroller ));
+			GC_LeanSeqLatch( ent, ed, mod );
 			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			{
 				studios++;
