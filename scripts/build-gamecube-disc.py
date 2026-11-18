@@ -2018,13 +2018,30 @@ def wt_read_wads(source: Path, bsp: Path | None = None) -> dict:
 	return found
 
 
-def wt_encode(w: int, h: int, pixels: bytes, palette: bytes, alpha: bool) -> tuple[int, int, int, bytes]:
+def texgamma_table():
+	"""GoldSrc's texgamma table at the default cvars (gamma 2.5, texgamma 2.0:
+	engine/client/gamma.c BuildGammaTable): the palette of every Half-Life mip
+	and unmasked studio skin goes through it at load (imagelib LUMP_TEXGAMMA).
+	64 -> 84, 128 -> 146, 200 -> 209."""
+	import numpy as np
+
+	return np.minimum(255, (np.power(np.arange(256) / 255.0, 0.8) * 255.0).astype(np.int64)).astype(np.uint8)
+
+
+def wt_encode(
+	w: int, h: int, pixels: bytes, palette: bytes, alpha: bool, texgamma: bool = False
+) -> tuple[int, int, int, bytes]:
 	"""Palette texture to a CMPR mip chain, power-of-two sides (GX_REPEAT
-	needs them; UVs are normalised, so a resize does not move anything)."""
+	needs them; UVs are normalised, so a resize does not move anything).
+	texgamma applies GoldSrc's texture gamma to an opaque texture, as the
+	stock loader does; the baked packs skipped it and drew the world 15 to
+	20 percent darker in the midtones."""
 	import numpy as np
 	from PIL import Image
 
 	pal = np.frombuffer(palette, np.uint8).reshape(256, 3)
+	if texgamma and not alpha:
+		pal = texgamma_table()[pal]
 	idx = np.frombuffer(pixels, np.uint8).reshape(h, w)
 	rgb = pal[idx]
 	opaque = idx != 255 if alpha else np.ones((h, w), bool)
@@ -2273,7 +2290,7 @@ def build_prop_packs(
 			continue
 		st = bsp.stat()
 		gcp, gct, stamp = cache / f"gp_{stem}.gcp", cache / f"pt_{stem}.gct", cache / f"gp_{stem}.stamp"
-		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-9"
+		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-10"
 		if not (stamp.is_file() and stamp.read_text() == key):
 			for stale in (gcp, gct):
 				stale.unlink(missing_ok=True)
@@ -2402,14 +2419,19 @@ def build_world_texture_packs(
 				continue
 			_, w, h, pixels, palette = mip
 			alpha = name.startswith("{")
-			key = hashlib.md5(bytes((alpha,)) + struct.pack("<II", w, h) + pixels + palette + b"2").hexdigest()
+			# Day of Defeat maps get the stock texture gamma; the Half-Life
+			# packs keep the look they were checked with.
+			texgamma = bsp.stem.lower().startswith("dod_") and not alpha
+			key = hashlib.md5(
+				bytes((alpha,)) + struct.pack("<II", w, h) + pixels + palette + (b"2g" if texgamma else b"2")
+			).hexdigest()
 			item = cache / f"{key}.bin"
 			if item.is_file():
 				cached = item.read_bytes()
 				tw, th, levels = struct.unpack_from("<HHH", cached)
 				body = cached[6:]
 			else:
-				tw, th, levels, body = wt_encode(w, h, pixels, palette, alpha)
+				tw, th, levels, body = wt_encode(w, h, pixels, palette, alpha, texgamma)
 				item.write_bytes(struct.pack("<HHH", tw, th, levels) + body)
 			entries.append((name, tw, th, levels, GC_WT_FLAG_ALPHA if alpha else 0, int(key[:4], 16), len(blob)))
 			blob += body

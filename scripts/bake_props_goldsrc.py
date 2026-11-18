@@ -532,6 +532,11 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 	w, h = tex["w"], tex["h"]
 	masked = bool(tex["flags"] & STUDIO_NF_MASKED)
 	pal = np.frombuffer(tex["palette"], np.uint8).reshape(256, 3)
+	if not masked:
+		# GoldSrc's texture gamma, as the stock loader applies to an
+		# unmasked studio skin (imagelib LUMP_TEXGAMMA, texgamma 2.0 over
+		# gamma 2.5).
+		pal = np.minimum(255, (np.power(pal / 255.0, 0.8) * 255.0).astype(np.int64)).astype(np.uint8)
 	idx = np.frombuffer(tex["pixels"], np.uint8).reshape(h, w)
 	rgb = pal[idx].astype(np.float32)
 	cov = (idx != 255).astype(np.float32) if masked else np.ones((h, w), np.float32)
@@ -784,21 +789,22 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		if floor is not None:
 			# Half the footprint's shorter side, between 16 and 48 units.
 			reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
-			# From just above the origin and from the middle of the bounds,
-			# whichever is brighter: a prop whose origin sits under the
-			# terrain (dod_caen's King Tiger) only finds a buried, unlit
-			# face from the origin and drew black.
+			# The floor under the origin. Only when there is none there, or
+			# only a face with no light at all, try the middle and then the
+			# top of the bounds: dod_caen's far King Tiger stands over
+			# nothing but its own unlit collision brush. Taking the
+			# brightest of the three instead lit indoor sandbags from the
+			# sunlit top of their collision brush.
 			mid = (0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), 0.5 * (mins[2] + maxs[2]))
-			got = [g for g in (
-				floor.footprint((prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0), reach),
-				floor.footprint(mid, reach),
-				# A vehicle stands on its own collision brush: the ground
-				# under that brush is unlit and only the brush's top,
-				# near the top of the bounds, sees the sky.
-				floor.footprint((mid[0], mid[1], maxs[2]), reach),
-			) if g is not None]
-			if got:
-				c = max(got, key=lambda g: g[0] * 30 + g[1] * 59 + g[2] * 11)
+			for at in (
+				(prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0),
+				mid,
+				(mid[0], mid[1], maxs[2]),
+			):
+				g = floor.footprint(at, reach)
+				if g is not None and max(g) >= 4:
+					c = g
+					break
 		if c is None:
 			c = (150, 150, 150)
 		# Props read darker than the lightmapped walls beside them at 0.6 +
