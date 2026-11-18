@@ -211,6 +211,9 @@ void R_GCFxScratchFree( void )
 
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
  * use it as a texture in place (R_GXNativeTexture in r_gx_world.c). */
+void *GC_TexRegionAlloc( size_t bytes );
+qboolean GC_TexRegionFree( void *p );
+
 static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 {
 	byte *fx = R_GCAllocFxPixels( bytes );
@@ -220,6 +223,19 @@ static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 		if( level == 0 )
 			tex->gc_pixels_base = fx;
 		return (pixel_t *)fx;
+	}
+	/* Per-map budget: mips live in the persistent texture region at the top
+	 * of the map-load arena when it has room (32-byte aligned, zeroed), so
+	 * the heap keeps its headroom for entity spawns and level changes. */
+	{
+		byte *region = (byte *)GC_TexRegionAlloc( bytes );
+
+		if( region )
+		{
+			if( level == 0 )
+				tex->gc_pixels_base = region;
+			return (pixel_t *)region;
+		}
 	}
 	byte *base = (byte *)Mem_TryCalloc( r_temppool, bytes + ( level == 0 ? 31 : 0 ));
 	if( !base && level == 0 && bytes <= sizeof( gc_tiny_pixels[0] ))
@@ -252,6 +268,12 @@ void R_GCFreeMip( image_t *tex, uint level )
 	if( R_GCIsFxPixels( fx ))
 	{
 		R_GCFreeFxPixels( fx );
+		if( level == 0 )
+			tex->gc_pixels_base = NULL;
+		return;
+	}
+	if( GC_TexRegionFree( (void *)fx ))
+	{
 		if( level == 0 )
 			tex->gc_pixels_base = NULL;
 		return;
