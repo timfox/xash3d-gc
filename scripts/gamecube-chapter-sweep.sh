@@ -128,7 +128,7 @@ PY
 		# (Dolphin's render window, x11grab, muted) under .ai/evidence/ with
 		# the start map and commit in the name, labelled as a load test.
 		if [[ -n "${evidence_mp4:-}" && -f "$evidence_mp4" ]]; then
-			if [[ "${SWEEP_EVIDENCE:-0}" == "1" && -z "$fatal" && "$freeze" == no ]]; then
+			if [[ "${SWEEP_EVIDENCE:-0}" == "1" && -z "$fatal" && -z "$host_error" && "$freeze" == no ]]; then
 				commit=$(git rev-parse --short HEAD)
 				dirty=$(git diff --quiet -- engine ref common filesystem 2>/dev/null || echo -dirty)
 				ev=".ai/evidence/${map}-${commit}${dirty}-loadtest-$(date +%Y%m%d-%H%M).mp4"

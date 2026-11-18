@@ -277,6 +277,7 @@ size_t GC_MemArenaFreeBytes( void )
 
 void GC_HeapCensusReport( const char *stage );
 
+void GC_MapLoadBufferWorldSettled( qboolean settled );
 void GC_MemSample( const char *stage )
 {
 	size_t total = Mem_TotalRealSize();
@@ -285,11 +286,13 @@ void GC_MemSample( const char *stage )
 	GC_MemWatch( stage );
 
 	/* Per-map budget: spawning is done, so move map-lifetime heap blocks into
-	 * the map's leftover memory (runs every map, unchanged totals or not). */
+	 * the map's leftover memory (runs every map, unchanged totals or not).
+	 * From here on, arena carves must avoid the world's arrays. */
 	if( !Q_strcmp( stage, "map active" ))
 	{
 		extern void Mod_GCMoveWorldEntitiesToArena( void );
 
+		GC_MapLoadBufferWorldSettled( true );
 		Mod_GCMoveWorldEntitiesToArena();
 	}
 
@@ -1216,10 +1219,26 @@ done:
 	return valid;
 }
 
+/* Set at "map active", cleared when the next load borrows the arena: while
+ * set, every tail carve must lie in a gap the world-array map says is free
+ * (see GC_MapLoadBufferTailAlloc). */
+static qboolean gc_mapload_world_settled;
+
+void GC_MapLoadBufferWorldSettled( qboolean settled )
+{
+	gc_mapload_world_settled = settled;
+}
+
+qboolean GC_MapLoadBufferIsWorldSettled( void )
+{
+	return gc_mapload_world_settled;
+}
+
 void *GC_BorrowMapLoadBuffer( size_t size )
 {
 	if( size == 0 )
 		return NULL;
+	gc_mapload_world_settled = false;
 	/* Entity private objects may still point into this map's arena. */
 	if( SV_GCPrivateOverflowPinsMapArena() )
 		return NULL;
@@ -1420,6 +1439,40 @@ void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need )
 			(unsigned long)after_offset, (unsigned long)off,
 			(unsigned long)gc_mapload_tail_highwater );
 		return NULL;
+	}
+	/* After load, a lean world keeps arrays above the highwater (leafs/nodes
+	 * high slot, planes, clipnodes), and gap-placed claims (entity text,
+	 * studio slices, packet ring) can raise the highwater into the middle of
+	 * them.  A carve made "at the highwater" then landed on the world (c1a4k:
+	 * a 768 KiB carve after the entity text move hit planes, nodes and
+	 * clipnodes).  Every post-load carve goes to the first gap at or after
+	 * the requested offset that fits, or fails cleanly. */
+	if( gc_mapload_world_settled )
+	{
+		extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+		size_t from = off;
+
+		for( ;; )
+		{
+			size_t gap_end = 0;
+			const size_t start = ( Mod_GCArenaGap( from, &gap_end ) + 31u ) & ~(size_t)31u;
+
+			if( start + need <= gap_end && start + need <= gc_mapload_buf_size )
+			{
+				if( start != off )
+					Con_Reportf( "Xash3D GameCube: mem arena tail=MOVED offset_bytes=%lu -> %lu need_bytes=%lu (world data in the way)\n",
+						(unsigned long)off, (unsigned long)start, (unsigned long)need );
+				off = start;
+				break;
+			}
+			if( gap_end <= from || gap_end >= gc_mapload_buf_size )
+			{
+				Con_Reportf( "Xash3D GameCube: mem arena tail=FAIL after_bytes=%lu need_bytes=%lu (no free gap after the world)\n",
+					(unsigned long)after_offset, (unsigned long)need );
+				return NULL;
+			}
+			from = gap_end;
+		}
 	}
 	if( off + need > gc_mapload_buf_size )
 	{

@@ -13064,6 +13064,10 @@ void Mod_GCWorldCanaryCheck( const char *when )
 
 	if( !mod || mod->type != mod_brush )
 		return;
+	/* Between maps the old world is being replaced (its spill and arena are
+	 * reset for the next load): only compare a settled world. */
+	if( Q_strncmp( when, "after load", 10 ) && !GC_MapLoadBufferIsWorldSettled( ))
+		return;
 	crc = Mod_GCWorldCanary( mod, parts );
 	/* The world model reuses slot 0 across maps: (re)arm at every load. */
 	if( gc_world_canary_mod != mod || !Q_strncmp( when, "after load", 10 ))

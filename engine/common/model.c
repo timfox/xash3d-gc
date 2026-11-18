@@ -522,7 +522,10 @@ static byte *Mod_GCStudioOverflowAlloc( size_t size )
 
 	extern void Mod_GCWorldCanaryCheck( const char *when );
 
-	if( gc_studio_overflow_count >= GC_STUDIO_OVERFLOW_MAX || !CL_IsInGame( ))
+	/* Only between "map active" and the next load: during a changelevel the
+	 * client is still in game while the server loads the next map into this
+	 * same arena, and a slice carved then lands in the new map's data. */
+	if( gc_studio_overflow_count >= GC_STUDIO_OVERFLOW_MAX || !GC_MapLoadBufferIsWorldSettled( ))
 		return NULL;
 	Mod_GCWorldCanaryCheck( "before studio overflow slice" ); // covers earlier slices' writes
 	size = ( size + 31u ) & ~(size_t)31u; // keep the next carve contiguous for GrowLast
@@ -2918,6 +2921,8 @@ void Mod_GCReleaseStudioArena( void )
 
 	if( !GC_MenuRunsServer( ))
 		return;
+	/* The level change has begun: no more claims against this map's arena. */
+	GC_MapLoadBufferWorldSettled( false );
 	gc_pinned_viewmodel_count = 0;
 	memset( gc_pinned_viewmodels, 0, sizeof( gc_pinned_viewmodels ));
 	for( i = 1, mod = &mod_known[1]; i < mod_numknown; i++, mod++ )
