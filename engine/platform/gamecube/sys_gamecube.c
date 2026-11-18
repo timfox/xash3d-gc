@@ -92,6 +92,7 @@ static bool GCube_DVDReadSectors( sec_t sector, sec_t count, void *buffer );
 static qboolean GCube_MountDisc( void );
 static void GCube_EnsureFatMounted( void );
 static void GCube_LoadDiscBootOverrides( void );
+void GC_ShrinkEarlyXFBForMatch( void );
 static void GCube_ReinjectMissingBootArgv( void );
 static qboolean GCube_FatHasGameData( void );
 /* Declared later; used when logging multi-game detection onto FAT. */
@@ -1836,6 +1837,9 @@ static void GCube_LoadDiscBootOverrides( void )
 				gc_listenserver_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override listenserver %s\n",
 					gc_listenserver_map );
+#if XASH_DODGC_NETWORK
+				GC_ShrinkEarlyXFBForMatch();
+#endif
 			}
 			continue;
 		}
@@ -1860,6 +1864,9 @@ static void GCube_LoadDiscBootOverrides( void )
 				gc_connect_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override connect %s\n",
 					gc_connect_addr );
+#if XASH_DODGC_NETWORK
+				GC_ShrinkEarlyXFBForMatch();
+#endif
 			}
 			continue;
 		}

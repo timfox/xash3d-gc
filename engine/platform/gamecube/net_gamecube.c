@@ -27,6 +27,7 @@ void __wrap___lwp_wkspace_init( unsigned int size )
  * options, console, config.cfg) can set them. They are read when the link is
  * first brought up (first multiplayer use); libogc2 cannot re-init after a
  * failed bring-up, so changing them later needs a reboot. */
+void GC_MemSample( const char *stage );
 static CVAR_DEFINE( gc_net_dhcp, "gc_net_dhcp", "1", FCVAR_ARCHIVE, "GameCube network: 1 = DHCP, 0 = static address" );
 static CVAR_DEFINE( gc_net_ip_cvar, "gc_net_ip", "10.0.0.2", FCVAR_ARCHIVE, "GameCube network: static IP address" );
 static CVAR_DEFINE( gc_net_mask_cvar, "gc_net_mask", "255.255.255.0", FCVAR_ARCHIVE, "GameCube network: static subnet mask" );
@@ -433,6 +434,7 @@ int GC_NetBringUp( int max_retries )
 		Q_snprintf( status, sizeof( status ), "connected %s", gc_net_ip );
 		GC_NetSetStatus( status );
 	}
+	GC_MemSample( "net-ready" );
 	Con_Reportf( "Xash3D GameCube: net ready ip=%s mask=%s gw=%s (eth2sp1/BBA)\n",
 		gc_net_ip, gc_net_mask, gc_net_gw );
 	GC_NetReportStatus( "ready" );

@@ -1078,10 +1078,16 @@ static poolhandle_t Mem_InitPool( mempool_t *pool, const char *name, unsigned in
 #if XASH_GAMECUBE
 	if( GC_FS_ARENA_SIZE > 0 && !Q_stricmp( name, "FileSystem Pool" ))
 	{
-		pool->gc_arena = Q_malloc( GC_FS_ARENA_SIZE );
+		/* A BBA-linked host (-net) needs ~360 KiB for lwIP/net threads before the game DLL runs; the
+		 * arena peaks near 100-104 KiB on the multiplayer maps, so 128 KiB is enough there. */
+		size_t arena = GC_FS_ARENA_SIZE;
+#if XASH_DODGC_NETWORK
+		if( Sys_CheckParm( "-net" )) arena = 128u * 1024u;
+#endif
+		pool->gc_arena = Q_malloc( arena );
 		if( pool->gc_arena )
 		{
-			pool->gc_arena_size = GC_FS_ARENA_SIZE;
+			pool->gc_arena_size = arena;
 			Con_Reportf( "Xash3D GameCube: filesystem arena ready size=%s\n",
 				Q_memprint( pool->gc_arena_size ));
 		}
