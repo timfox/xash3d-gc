@@ -1,4 +1,4 @@
-From 0ce977f86ac070728330c5cc7d80788338e9a3dd Mon Sep 17 00:00:00 2001
+From ec7ffd5032ef7e5ace85e1cf9941843191746a0c Mon Sep 17 00:00:00 2001
 From: timfox <timfox@outlook.com>
 Date: Tue, 17 Nov 2026 22:14:10 -0800
 Subject: [PATCH] Lost Coast: fisherman plays his scene gestures
@@ -7,11 +7,11 @@ Each gesture event of a scene goes to the engine's gesture table when it
 starts, with its timing tags, and the renderer layers it over his pose.
 Voice paths up to 48 characters no longer lose their end (arg was 44).
 ---
- dlls/lostcoast_npcs.cpp | 42 +++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 40 insertions(+), 2 deletions(-)
+ dlls/lostcoast_npcs.cpp | 44 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 42 insertions(+), 2 deletions(-)
 
 diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
-index ea0a117d..8c5b8664 100644
+index ea0a117d..18321da7 100644
 --- a/dlls/lostcoast_npcs.cpp
 +++ b/dlls/lostcoast_npcs.cpp
 @@ -310,7 +310,9 @@ typedef struct
@@ -54,7 +54,7 @@ index ea0a117d..8c5b8664 100644
  	void RunScene( float interval );
  	void RunLead( float interval );
  	BOOL WalkTo( const Vector &goal, float interval, float stopdist, BOOL follow_z = TRUE );
-@@ -744,6 +758,24 @@ Vector CLCFisherman::PlayerPos( void )
+@@ -744,6 +758,26 @@ Vector CLCFisherman::PlayerPos( void )
  	return pl ? pl->pev->origin : pev->origin;
  }
  
@@ -62,7 +62,8 @@ index ea0a117d..8c5b8664 100644
 +// The game code and the renderer are one binary on GameCube: gestures go
 +// straight to the engine's table (engine/platform/gamecube/actor_gesture.c),
 +// which the renderer reads when it poses him.
-+extern "C" void GC_ActorGesture( int ent, const char *name, float start, float end, int ntags, const float *tags );
++// Weak: an engine built before the table existed still links, without gestures.
++extern "C" void GC_ActorGesture( int ent, const char *name, float start, float end, int ntags, const float *tags ) __attribute__(( weak ));
 +#endif
 +
 +void CLCFisherman::PlayGesture( lc_event_t *ev, float sceneStart )
@@ -72,14 +73,15 @@ index ea0a117d..8c5b8664 100644
 +
 +	for( int k = 0; k < ev->ntags * 2; k++ )
 +		tags[k] = ev->tags[k] / 255.0f;
-+	GC_ActorGesture( ENTINDEX( edict()), ev->arg, sceneStart + ev->t0, sceneStart + ev->t1, ev->ntags, tags );
++	if( GC_ActorGesture )
++		GC_ActorGesture( ENTINDEX( edict()), ev->arg, sceneStart + ev->t0, sceneStart + ev->t1, ev->ntags, tags );
 +#endif
 +}
 +
  void CLCFisherman::StartScene( lc_scene_t *sc )
  {
  	if( !sc )
-@@ -900,6 +932,10 @@ void CLCFisherman::RunScene( float interval )
+@@ -900,6 +934,10 @@ void CLCFisherman::RunScene( float interval )
  			if( t <= ev->t1 )
  				m_bFace = TRUE;
  			break;
@@ -90,7 +92,7 @@ index ea0a117d..8c5b8664 100644
  		case LCE_MOVETO:
  			// walks on past the event's end until he gets there
  			if(( pl || m_flTest != 0.0f ) && ev->started != 2 )
-@@ -1047,6 +1083,8 @@ void CLCFisherman::FishThink( void )
+@@ -1047,6 +1085,8 @@ void CLCFisherman::FishThink( void )
  					if( t >= ev->t0 && !ev->started )
  					{
  						ev->started = 1;
