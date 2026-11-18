@@ -592,6 +592,10 @@ void S_PaintChannels( int endtime )
 			extern void GC_SoundscapeMix( int *paint, int count, int gain );
 
 			GC_SoundscapeMix( (int *)paintbuffer, num_samples, gain );
+			// an actor's voice line off the disc (platform/gamecube/voice_stream.c)
+			extern void GC_VoiceStreamMix( int *paint, int count, int gain );
+
+			GC_VoiceStreamMix( (int *)paintbuffer, num_samples, gain );
 		}
 #endif
 		// transfer out according to DMA format

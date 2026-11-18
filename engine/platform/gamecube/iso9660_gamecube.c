@@ -161,12 +161,19 @@ static __inline__ bool is_dir(DIR_ENTRY *entry)
 	return entry->flags & FLAG_DIR;
 }
 
+/* xash3d-gc: a reader that streams in play (an actor's voice line) sets this
+ * for its own reads. A miss then fetches only the sectors the read touches
+ * instead of the whole 32 KB buffer, which costs a visible frame (about
+ * 20 ms) every second of speech. Zero = the full buffer, as upstream. */
+int gc_iso9660_small_reads;
+
 static int __read(MOUNT_DESCR *mdescr, void *ptr, u64 offset, size_t len)
 {
 	u32 sector = offset / SECTOR_SIZE;
 	u32 end_sector = (offset + len - 1) / SECTOR_SIZE;
 	u32 sectors = MIN(BUFFER_SIZE / SECTOR_SIZE, end_sector - sector + 1);
 	u32 sector_offset = offset % SECTOR_SIZE;
+	u32 fetch = gc_iso9660_small_reads ? sectors : BUFFER_SIZE / SECTOR_SIZE;
 	const DISC_INTERFACE *disc = mdescr->disc_interface;
 
 	len = MIN(BUFFER_SIZE - sector_offset, len);
@@ -176,14 +183,14 @@ static int __read(MOUNT_DESCR *mdescr, void *ptr, u64 offset, size_t len)
 		return len;
 	}
 
-	if (!disc->readSectors(sector, BUFFER_SIZE / SECTOR_SIZE, mdescr->read_buffer))
+	if (!disc->readSectors(sector, fetch, mdescr->read_buffer))
 	{
 		mdescr->cache_sectors = 0;
 		return -1;
 	}
 
 	mdescr->cache_start = sector;
-	mdescr->cache_sectors = BUFFER_SIZE / SECTOR_SIZE;
+	mdescr->cache_sectors = fetch;
 	memcpy(ptr, mdescr->read_buffer + sector_offset, len);
 
 	return len;
