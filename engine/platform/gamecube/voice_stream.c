@@ -18,7 +18,7 @@ The capture and smoke routes draw entities straight from their edicts, so
 the sound messages the game code sends never reach a client: the Lost Coast
 fisherman moved his mouth to nothing. His lines are 4.8 MB of 16 kHz PCM,
 which neither the sound heap nor ARAM can hold, so the one line being spoken
-is read from the disc a block at a time and added to the mixer's paint
+is read from the disc a sector at a time and added to the mixer's paint
 buffer, placed by the speaker's position like any other entity sound.
 */
 
@@ -29,7 +29,9 @@ buffer, placed by the speaker's position like any other entity sound.
 
 #if XASH_GAMECUBE
 
-#define GC_VS_BLOCK	2048	/* samples read at once (an eighth of a second) */
+#define GC_VS_BLOCK	1024	/* samples read at once: one 2 KB disc sector, 64 ms */
+
+extern int gc_iso9660_small_reads;
 
 static struct
 {
@@ -61,9 +63,14 @@ qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn
 	if( !sample || !sample[0] || sample[0] == '!' || sample[0] == '*' )
 		return false;
 	Q_snprintf( path, sizeof( path ), "sound/%s", sample );
+	/* small disc reads from here to the return: the header is 44 bytes */
+	gc_iso9660_small_reads = 1;
 	f = FS_Open( path, "rb", false );
 	if( !f )
+	{
+		gc_iso9660_small_reads = 0;
 		return false;
+	}
 	GC_VoiceStreamStop();
 	if( FS_Read( f, hdr, 12 ) != 12 || memcmp( hdr, "RIFF", 4 ) || memcmp( hdr + 8, "WAVE", 4 ))
 		goto bad;
@@ -95,8 +102,10 @@ qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn
 	gc_vs.ent = ent;
 	gc_vs.vol = bound( 0.0f, vol, 1.0f );
 	gc_vs.dist_mult = attn / 1000.0f;	/* SND_CLIP_DISTANCE */
+	gc_iso9660_small_reads = 0;
 	return true;
 bad:
+	gc_iso9660_small_reads = 0;
 	FS_Close( f );
 	return false;
 }
@@ -146,7 +155,17 @@ void GC_VoiceStreamMix( int *paint, int count, int gain )
 				const uint32_t want = Q_min( gc_vs.left, (uint32_t)GC_VS_BLOCK );
 				int i;
 
-				if( !want || FS_Read( gc_vs.f, gc_vs.buf, want * 2 ) != (fs_offset_t)( want * 2 ))
+				fs_offset_t got = 0;
+
+				if( want )
+				{
+					/* only the sectors this block touches, not the disc layer's
+					 * whole 32 KB buffer (a 20 ms stall every second) */
+					gc_iso9660_small_reads = 1;
+					got = FS_Read( gc_vs.f, gc_vs.buf, want * 2 );
+					gc_iso9660_small_reads = 0;
+				}
+				if( !want || got != (fs_offset_t)( want * 2 ))
 				{
 					GC_VoiceStreamStop();
 					return;
