@@ -5808,6 +5808,23 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 	{
 		if( Sys_CheckParm( "-gccapfacessmoke" ) && size > 0 && (uint32_t)size < GC_WT_ARAM_BYTES )
 			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
+#if XASH_DODGC_NETWORK
+		/* DoD: every measured map pack is 1.4-3.2 MiB, so a fixed 6 MiB ring held 2.8-4.6 MiB
+		 * of ARAM the match never touched, and the two 3.55 MiB player animation packs did not
+		 * fit beside it. Size the ring once per session to this map's pack plus margin for the
+		 * per-tag duplicates; a pack that does not fit below 6 MiB keeps the full ring. A later,
+		 * larger pack still works (the ring evicts the oldest entries), it just re-streams. */
+		else if( size > 0 )
+		{
+			const uint32_t margin = Q_max( 512u * 1024u, (uint32_t)size / 8u );
+			const uint64_t want = (( (uint64_t)size + margin + 32767u ) & ~(uint64_t)32767u );
+
+			if( want < GC_WT_ARAM_BYTES )
+				gc_wt_store_bytes = (uint32_t)want;
+			Con_Reportf( "Xash3D GameCube: world texture store ring %s for pack %s (full ring %s)\n",
+				Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( GC_WT_ARAM_BYTES ));
+		}
+#endif
 		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
 	}
 	if( !gc_wt_store_base )
