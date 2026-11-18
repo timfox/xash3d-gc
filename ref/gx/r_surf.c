@@ -1268,6 +1268,13 @@ qboolean R_TryInitGcmapSurfaceCache( void )
 			size = 65536;
 	}
 
+	/* The 128 KiB static store costs no heap: take it first.  Heap was tried
+	 * first, so c2a4e got a 32 KiB heap cache with 18 KiB left and died in
+	 * net_encode's _Mem_Realloc.  Heap only while another owner holds the
+	 * store (changelevel save/restore, AI .nod read). */
+	if( R_TryInitLowResSurfaceCache() )
+		return true;
+
 	/* G140: New Game must not take a 32/64 KiB crumb here — that starved
 	 * materials.txt / HUD_Init. Prefer defer until landmark/static 128 KiB. */
 	{
@@ -1313,6 +1320,10 @@ static qboolean R_TryInitGameCubeSurfaceCacheSized( int size, qboolean allow_low
 
 	if( size > GC_SURFACE_CACHE_MAX )
 		size = GC_SURFACE_CACHE_MAX;
+
+	/* Static store first, as in R_TryInitGcmapSurfaceCache. */
+	if( allow_lowres_static && R_TryInitLowResSurfaceCache() )
+		return true;
 
 	for( try_size = size; try_size >= 32768; try_size >>= 1 )
 	{
