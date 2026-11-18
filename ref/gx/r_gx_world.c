@@ -2669,9 +2669,44 @@ static void R_GXCmprSlotsReset( void )
 
 extern byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
 extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
+extern unsigned Mod_GCWorldArraySpillGeneration( void );
+
+/* Slots adopted from the map arena or the spill (R_GXCmprBounceAdopt) belong
+ * to the map that was loaded then. A level change hands that memory to the
+ * next map; when the next map's world DL could not adopt slots of its own
+ * (dod_charlie to dod_avalanche), every texture miss kept DMAing CMPR blocks
+ * into the old block, by then dod_avalanche's BSP nodes, and the first trace
+ * through them crashed. The spill generation moves on every level change. */
+static qboolean r_gx_cmpr_adopted;
+static unsigned r_gx_cmpr_adopt_gen;
+
+static void R_GXCmprDropStaleAdopted( void )
+{
+	if( !r_gx_cmpr_adopted || Mod_GCWorldArraySpillGeneration() == r_gx_cmpr_adopt_gen )
+		return;
+	GX_DrawDone();
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce: %d adopted slots belonged to the previous map, dropped\n",
+		r_gx_cmpr_nslots );
+	r_gx_cmpr_adopted = false;
+	r_gx_cmpr_bounce = NULL;
+	r_gx_cmpr_nslots = 0;
+	r_gx_cmpr_bounce_cap = 0;
+	r_gx_cmpr_far_n = 0;
+	r_gx_cmpr_far_cap = 0;
+	r_gx_cmpr_want_far = false;
+	r_gx_cmpr_big_n = 0;
+	r_gx_cmpr_big_cap = 0;
+	r_gx_cmpr_big_base = NULL;
+	r_gx_cmpr_use_big = false;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+}
 
 static byte *R_GXCmprBounce( void )
 {
+	R_GXCmprDropStaleAdopted();
 	if( !r_gx_cmpr_bounce )
 	{
 		/* Prefer spill first — tip memalign(48/32 Kb) on flash starves
@@ -2739,6 +2774,8 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	if( nslots + far_n > GC_CMPR_SLOTS_MAX )
 		return;
 	GX_DrawDone();
+	r_gx_cmpr_adopted = true;
+	r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
 	r_gx_cmpr_bounce = base;
 	r_gx_cmpr_nslots = nslots + far_n;
 	r_gx_cmpr_big_n = 0;
@@ -2848,6 +2885,7 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	static qboolean cap_pack_diag;
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
 
+	R_GXCmprDropStaleAdopted();	/* before the slot hints below are trusted */
 	img->gc_packed_used = r_gx_hot.frame;
 	if( img->gc_packed_bytes > r_gx_cmpr_bounce_cap )
 		R_GXHotNote( img );
@@ -6460,6 +6498,9 @@ static int R_GXPropBind( u8 mat )
 		byte *data;
 		GXTexObj obj;
 
+		/* Props may bind before any world texture after a level change:
+		 * drop slots of the previous map and take fresh ones here too. */
+		(void)R_GXCmprBounce();
 		for( mi = 0; mi < levels_all; mi++ )
 			remain += R_GXPropCmprBytes( (u16)Q_max( 1, gc_prop_mat_w[mat] >> mi ),
 				(u16)Q_max( 1, gc_prop_mat_h[mat] >> mi ));
