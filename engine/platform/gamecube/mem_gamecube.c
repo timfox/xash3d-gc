@@ -278,6 +278,7 @@ size_t GC_MemArenaFreeBytes( void )
 void GC_HeapCensusReport( const char *stage );
 
 void GC_MapLoadBufferWorldSettled( qboolean settled );
+void GC_TexRegionReport( const char *stage );
 void GC_MemSample( const char *stage )
 {
 	size_t total = Mem_TotalRealSize();
@@ -319,6 +320,7 @@ void GC_MemSample( const char *stage )
 
 		GC_MemReportPools( stage );
 		GC_HeapCensusReport( stage );
+		GC_TexRegionReport( stage );
 	}
 }
 
@@ -1264,7 +1266,21 @@ void *GC_BorrowMapLoadBuffer( size_t size )
 		gc_mapload_buf = (byte *)R_GCBorrowMapLoadStaticArena( alloc_size, &static_capacity );
 		if( gc_mapload_buf )
 		{
-			gc_mapload_buf_size = static_capacity;
+			extern size_t GC_TexRegionNoteArena( byte *base, size_t capacity );
+			const size_t usable = GC_TexRegionNoteArena( gc_mapload_buf, static_capacity );
+
+			if( alloc_size > usable )
+			{
+				/* The persistent texture region holds the top of the arena:
+				 * this map takes its lean load paths instead (logged). */
+				Con_Reportf( "Xash3D GameCube: budget map-load arena short need=%s usable=%s (texture region %s); lean load\n",
+					Q_memprint( alloc_size ), Q_memprint( usable ), Q_memprint( static_capacity - usable ));
+				R_GCReleaseMapLoadStaticArena( gc_mapload_buf );
+				gc_mapload_buf = NULL;
+				gc_mapload_buf_size = 0;
+				return NULL;
+			}
+			gc_mapload_buf_size = usable;
 			gc_mapload_tail_highwater = 0;
 			gc_mapload_tail_peak = 0;
 			gc_mapload_buf_in_use = true;
@@ -1328,6 +1344,138 @@ qboolean GC_IsMapLoadBuffer( const void *ptr )
 const byte *GC_MapLoadBufferBase( void )
 {
 	return gc_mapload_buf;
+}
+
+/*
+ * Persistent texture region (per-map budget, texture slots).
+ *
+ * The renderer's mip storage (HUD, sprites, skins: GX reads it in place) was
+ * ~86 KiB of heap from the client's connect on, leaving the heap empty during
+ * play and too short at every level change (entities skipped as tip-starved).
+ * Every map measured leaves >= 240 KiB at the top of the map-load arena
+ * unused, so mips live in a region growing down from the arena top instead:
+ * sized on demand by the textures actually allocated, first-fit with
+ * coalescing, shrinking when its lowest block is freed.  The arena's usable
+ * size (gc_mapload_buf_size, which every map-load user honours) is the
+ * region's low edge.  It only grows into space the world-array gap map says
+ * is free, while a map is settled; otherwise callers keep using the heap.
+ */
+typedef struct gc_texreg_blk_s
+{
+	uint32_t size;	/* whole block, header included, multiple of 32 */
+	uint32_t used;
+	uint32_t pad[6];
+} gc_texreg_blk_t;
+
+static byte  *gc_texreg_base;	/* arena base (static renderer arena) */
+static size_t gc_texreg_cap;	/* full arena capacity */
+static size_t gc_texreg_bytes;	/* region size, from the top */
+static size_t gc_texreg_live;
+
+/* Called when the static arena is borrowed: remember its geometry and
+ * return the size a map load may use. */
+size_t GC_TexRegionNoteArena( byte *base, size_t capacity )
+{
+	gc_texreg_base = base;
+	gc_texreg_cap = capacity;
+	if( gc_texreg_bytes > capacity )
+		gc_texreg_bytes = 0;
+	return capacity - gc_texreg_bytes;
+}
+
+qboolean GC_TexRegionOwns( const void *p )
+{
+	const byte *b = (const byte *)p;
+
+	return p && gc_texreg_bytes && b >= gc_texreg_base + gc_texreg_cap - gc_texreg_bytes
+		&& b < gc_texreg_base + gc_texreg_cap;
+}
+
+void *GC_TexRegionAlloc( size_t bytes )
+{
+	extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+	const size_t need = (( bytes + 31u ) & ~(size_t)31u ) + sizeof( gc_texreg_blk_t );
+	byte *low, *top;
+	gc_texreg_blk_t *h;
+
+	if( !gc_texreg_base || !bytes || need > 1024u * 1024u )
+		return NULL;
+	top = gc_texreg_base + gc_texreg_cap;
+	low = top - gc_texreg_bytes;
+	/* First fit among freed blocks. */
+	for( h = (gc_texreg_blk_t *)low; (byte *)h < top; h = (gc_texreg_blk_t *)((byte *)h + h->size ))
+	{
+		if( h->used || h->size < need )
+			continue;
+		if( h->size - need >= sizeof( gc_texreg_blk_t ) + 32u )
+		{
+			gc_texreg_blk_t *rest = (gc_texreg_blk_t *)((byte *)h + need );
+
+			rest->size = h->size - (uint32_t)need;
+			rest->used = 0;
+			h->size = (uint32_t)need;
+		}
+		h->used = 1;
+		gc_texreg_live += h->size;
+		memset( h + 1, 0, h->size - sizeof( *h ));
+		return h + 1;
+	}
+	/* Grow down into free arena space below the region. */
+	{
+		const size_t new_low = gc_texreg_cap - gc_texreg_bytes - need;
+		size_t gap_end = 0;
+
+		if( gc_texreg_cap - gc_texreg_bytes < need || !gc_mapload_world_settled
+			|| gc_mapload_buf != gc_texreg_base
+			|| new_low < Q_max( gc_mapload_tail_highwater, gc_mapload_tail_peak )
+			|| Mod_GCArenaGap( new_low, &gap_end ) != new_low
+			|| gap_end < gc_texreg_cap - gc_texreg_bytes )
+			return NULL;
+		gc_texreg_bytes += need;
+		gc_mapload_buf_size = gc_texreg_cap - gc_texreg_bytes;
+		h = (gc_texreg_blk_t *)( gc_texreg_base + new_low );
+		h->size = (uint32_t)need;
+		h->used = 1;
+		gc_texreg_live += need;
+		memset( h + 1, 0, need - sizeof( *h ));
+		return h + 1;
+	}
+}
+
+qboolean GC_TexRegionFree( void *p )
+{
+	gc_texreg_blk_t *h, *n;
+	byte *top;
+
+	if( !GC_TexRegionOwns( p ))
+		return false;
+	top = gc_texreg_base + gc_texreg_cap;
+	h = (gc_texreg_blk_t *)p - 1;
+	h->used = 0;
+	gc_texreg_live -= Q_min( gc_texreg_live, (size_t)h->size );
+	/* Coalesce every free run, then give a free bottom back to the maps. */
+	for( h = (gc_texreg_blk_t *)( top - gc_texreg_bytes ); (byte *)h < top; h = (gc_texreg_blk_t *)((byte *)h + h->size ))
+	{
+		while( !h->used && (byte *)h + h->size < top
+			&& !( n = (gc_texreg_blk_t *)((byte *)h + h->size ))->used )
+			h->size += n->size;
+	}
+	h = (gc_texreg_blk_t *)( top - gc_texreg_bytes );
+	if( gc_texreg_bytes && !h->used )
+	{
+		gc_texreg_bytes -= h->size;
+		if( gc_mapload_buf == gc_texreg_base )
+			gc_mapload_buf_size = gc_texreg_cap - gc_texreg_bytes;
+	}
+	return true;
+}
+
+void GC_TexRegionReport( const char *stage )
+{
+	if( gc_texreg_base )
+		Con_Reportf( "Xash3D GameCube: budget texture region at=%s bytes=%s live=%s arena_usable=%s\n",
+			stage, Q_memprint( gc_texreg_bytes ), Q_memprint( gc_texreg_live ),
+			Q_memprint( gc_texreg_cap - gc_texreg_bytes ));
 }
 
 /* Offset of a free arena gap that fits `bytes` for a post-load claim (entity
