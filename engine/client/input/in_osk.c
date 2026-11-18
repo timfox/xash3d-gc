@@ -420,12 +420,12 @@ static void OSK_TextCentered( float sx, float sy, int x, int y, int w, int h, co
 
 static void OSK_DrawKey( float sx, float sy, int x, int y, int w, int h, qboolean selected, const char *label )
 {
-	static const rgba_t normal = { 230, 224, 200, 255 };
-	static const rgba_t gold = { 255, 210, 80, 255 };
+	static const rgba_t normal = { 255, 255, 255, 255 };
+	static const rgba_t gold = { 255, 176, 0, 255 };
 
 	if( selected )
-		OSK_Fill( sx, sy, x - 3, y - 3, w + 6, h + 6, 255, 200, 40, 255 );
-	OSK_Fill( sx, sy, x, y, w, h, 30, 34, 20, 255 );
+		OSK_Fill( sx, sy, x - 3, y - 3, w + 6, h + 6, 255, 176, 0, 255 );
+	OSK_Fill( sx, sy, x, y, w, h, 36, 29, 20, 255 );
 	OSK_TextCentered( sx, sy, x, y, w, h, label, selected ? gold : normal );
 }
 
@@ -438,8 +438,8 @@ Draw on screen keyboard, if enabled
 */
 void OSK_Draw( void )
 {
-	static const rgba_t gold = { 255, 210, 80, 255 };
-	static const rgba_t dim = { 190, 190, 170, 255 };
+	static const rgba_t gold = { 255, 176, 0, 255 };
+	static const rgba_t dim = { 255, 176, 0, 170 };
 	static const rgba_t white = { 255, 255, 255, 255 };
 	const float sx = refState.width / 640.0f, sy = refState.height / 480.0f;
 	const int width = OSK_COLS * ( OSK_CELL + OSK_GAP ) - OSK_GAP + OSK_PAD * 2;
@@ -464,8 +464,8 @@ void OSK_Draw( void )
 	}
 
 	// panel, olive drab like the retail menus
-	OSK_Fill( sx, sy, left - 2, top - 2, width + 4, height + 4, 20, 22, 10, 230 );
-	OSK_Fill( sx, sy, left, top, width, height, 74, 80, 48, 245 );
+	OSK_Fill( sx, sy, left - 2, top - 2, width + 4, height + 4, 175, 127, 1, 255 ); // retail ClassMenuLight
+	OSK_Fill( sx, sy, left, top, width, height, 55, 43, 29, 250 ); // retail ViewportBG
 
 	// page tabs
 	for( p = 0; p < OSK_PAGES; p++ )
@@ -477,7 +477,7 @@ void OSK_Draw( void )
 		const char *tail = osk.text;
 		char shown[OSK_TEXT_MAX + 2];
 
-		OSK_Fill( sx, sy, tx, top + 4, tw, OSK_HEADER - 4, 28, 32, 16, 255 );
+		OSK_Fill( sx, sy, tx, top + 4, tw, OSK_HEADER - 4, 12, 10, 6, 255 );
 		Q_snprintf( shown, sizeof( shown ), "%s_", tail );
 		while( OSK_TextWidth( shown ) > tw - 8 && *tail )
 			Q_snprintf( shown, sizeof( shown ), "%s_", ++tail ); // keep the end of a long text visible
