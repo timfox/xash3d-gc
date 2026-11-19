@@ -6724,25 +6724,6 @@ static void SV_GCSignonStaticProps( void )
 		Q_memprint( (size_t)MSG_GetNumBytesWritten( &sv.signon ) - before ));
 }
 
-/* Provable per-frame packet bound from the entity lump (sv_init.c sizes the
- * ring with it). Stock AddToFullPack never sends an entity without a model
- * (players aside), so classes that are model-less by definition cannot be in
- * a packet. Everything else that takes an edict is counted. */
-int sv_gc_packet_bound = 0x7fffffff;
-
-static qboolean SV_GCClassNeverSent( const char *c )
-{
-	static const char *const prefix[] = { "info_", "trigger_", "path_", "light", "ambient_generic",
-		"multi_manager", "game_", "target_", "env_shake", "env_fade", "env_message", "env_render",
-		"env_sound", "env_spark", "env_funnel", "env_global", "env_state", "env_blood", "env_laser" };
-	int i;
-
-	for( i = 0; i < (int)ARRAYSIZE( prefix ); i++ )
-		if( !Q_strncmp( c, prefix[i], Q_strlen( prefix[i] )))
-			return true;
-	return false;
-}
-
 /* Pre-scan the entity lump: count the entities that always take an edict
  * (everything but the soft-skipped decoration, classes the game DLL has no
  * spawn function for, and the parity set), and give the parity set what the
@@ -6752,12 +6733,11 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	char key[2048], value[2048], classname[64];
 	int total = 0, parity = 0, optional = 0, nofunc = 0, statics = 0, must;
 	static gc_census_t census_must[GC_CENSUS_MAX], census_parity[GC_CENSUS_MAX];
-	int n_must = 0, n_parity = 0, never_must = 0, never_parity = 0, never_opt = 0;
+	int n_must = 0, n_parity = 0;
 	qboolean named;
 
 	int tier_count[GC_PARITY_TIERS] = { 0, 0, 0 }, baked = 0, t, left;
 
-	sv_gc_packet_bound = 0x7fffffff;
 	gc_parity_kept = 0;
 	gc_parity_budget = 0x7fffffff;
 	for( t = 0; t < GC_PARITY_TIERS; t++ )
@@ -6803,25 +6783,15 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
 		{
 			parity++;
-			if( SV_GCClassNeverSent( classname ))
-				never_parity++;
 			tier_count[SV_GCParityTier( classname )]++;
 			SV_GCCensusAdd( census_parity, &n_parity, classname );
 		}
 		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
-		{
 			optional++;
-			if( SV_GCClassNeverSent( classname ))
-				never_opt++;
-		}
 		else if( !SV_GetEntityClass( classname ))
 			nofunc++;
 		else
-		{
-			if( SV_GCClassNeverSent( classname ))
-				never_must++;
 			SV_GCCensusAdd( census_must, &n_must, classname );
-		}
 	}
 	must = total - parity - optional - nofunc - statics - baked;
 	gc_parity_budget = GI->max_edicts - GC_PARITY_RUNTIME_RESERVE - ( svs.maxclients + 1 ) - must;
@@ -6840,18 +6810,6 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	Con_Reportf( "Xash3D GameCube: %s parity tiers walls %d/%d logic %d/%d lights %d/%d, baked illusionary %d\n",
 		mapname, gc_parity_tier_budget[0], tier_count[0], gc_parity_tier_budget[1], tier_count[1],
 		gc_parity_tier_budget[2], tier_count[2], baked );
-	{
-		/* Sendable upper bound: always-spawned + parity kept (all of it at worst) + optional, minus the model-less
-		 * classes, plus every client slot and the run-time reserve (grenades, rockets, spawned props). */
-		int p_send = Q_min( parity - never_parity, Q_min( parity, gc_parity_budget ));
-		int bound = ( must - never_must ) + p_send + ( optional - never_opt ) + svs.maxclients + 1 + 2 * GC_PARITY_RUNTIME_RESERVE;
-
-		bound = Q_min( bound, GI->max_edicts );
-		sv_gc_packet_bound = ( bound + 7 ) & ~7;
-		Con_Reportf( "Xash3D GameCube: %s packet bound %d (always %d-%d never-sent, parity %d, optional %d-%d, clients %d, reserve %d, edicts %d)\n",
-			mapname, sv_gc_packet_bound, must, never_must, p_send, optional, never_opt, svs.maxclients + 1,
-			2 * GC_PARITY_RUNTIME_RESERVE, GI->max_edicts );
-	}
 	SV_GCCensusReport( mapname, "always", census_must, n_must );
 	SV_GCCensusReport( mapname, "parity", census_parity, n_parity );
 }
@@ -7271,7 +7229,6 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 		Con_Reportf( "Xash3D GameCube: arena budget map=%s entity_overflow=%s arena_tail_left=%s\n", mapname,
 			SV_GCPrivateOverflowReserved() ? "64 Kb" : "none",
 			Q_memprint( GC_MapArenaLargestGap()));
-	SV_GCBudgetParityEntities( mapname, entities );
 	SV_GCSizePacketEntities();
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;
@@ -7280,6 +7237,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;
 	SV_GCStaticPropsReset();
+	SV_GCBudgetParityEntities( mapname, entities );
 #endif
 
 	// user dll can override spawn entities function (Xash3D extension)
