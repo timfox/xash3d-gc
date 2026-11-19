@@ -2862,7 +2862,7 @@ static void setup_tev_bronze_dust(const Material *mat)
 	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
-	GX_LoadTexObj(select_env_tex(0.34f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.42f), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
 	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
@@ -2875,8 +2875,8 @@ static void setup_tev_bronze_dust(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 165, 105, 55, 255 }); /* warm bronze body */
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 200, 140, 75, 255 }); /* dual warm grit fleck */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 150, 95, 48, 255 }); /* warm bronze body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 185, 125, 68, 255 }); /* dual warm grit fleck */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
 	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
 
@@ -2894,11 +2894,11 @@ static void setup_tev_bronze_dust(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
-	/* dual warm bronze dust body */
+	/* dual warm bronze dust body — (CPREV+KONST)/2; no ADDHALF wash */
 	GX_SetTevDirect(GX_TEVSTAGE2);
 	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_KONST, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
@@ -2906,7 +2906,7 @@ static void setup_tev_bronze_dust(const Material *mat)
 	GX_SetTevDirect(GX_TEVSTAGE3);
 	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
