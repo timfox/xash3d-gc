@@ -85,8 +85,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Copper hold + chrome roughness + emboss/spec reel (~740 guest frames)
-	if (( n > 760 )); then
+	# Full reel through emboss/spec + HDRI sky / mirror / bloom (~920 frames)
+	if (( n > 940 )); then
 		break
 	fi
 done
@@ -137,5 +137,8 @@ pick 545 "$OUT_DIR/shots/stone-indtex.png"
 pick 600 "$OUT_DIR/shots/emboss-lit.png"
 pick 660 "$OUT_DIR/shots/hw-spec.png"
 pick 700 "$OUT_DIR/shots/hw-spec-chrome.png"
+pick 760 "$OUT_DIR/shots/sky-noon-mirror.png"
+pick 820 "$OUT_DIR/shots/sky-dusk-bloom.png"
+pick 880 "$OUT_DIR/shots/sky-golden-ibl.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

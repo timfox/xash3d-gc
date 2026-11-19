@@ -19,6 +19,8 @@ python3 scripts/import_damascus_maps.py   # ~/Desktop/pbr-gc/metal_damascus → 
 python3 scripts/import_tcom_sets.py       # Storage/Extra/Stream TCom packs → textures/<slug>_*.png
 python3 scripts/gen_assets.py             # synthetic env + **drawn** HUD sprites (no ref crops)
 python3 scripts/bake_height_from_normals.py  # stone/brick/concrete height for EMBOSS LIT
+# HDRI skyboxes + IBL matcaps (needs gxbake on PYTHONPATH):
+PYTHONPATH=/path/to/gxbake python3 scripts/bake_hdri_skyboxes.py
 make -j$(nproc)
 ```
 
@@ -41,12 +43,15 @@ the DumpFrames capture reel so you stay in control.
 
 | Button | Action |
 |--------|--------|
-| A / D-pad / L R | Cycle material |
+| A / D-pad L/R | Cycle material |
 | B | Step roughness |
-| X | Toggle env map |
+| X | Toggle IBL env |
 | Y | Cycle TEV / lighting feature path |
+| D-pad UP | Cycle HDRI skybox (GOLDEN / NOON / DUSK) |
+| D-pad DOWN | Toggle mirror floor |
+| L | Toggle bloom glow |
+| Z | Toggle fog FX |
 | START | Gallery ↔ Lab |
-| Z | Toggle idle auto-showcase |
 | Stick X | Orbit camera |
 
 ### TEV / lighting paths (Y)
@@ -67,7 +72,16 @@ the DumpFrames capture reel so you stay in control.
 | SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
-Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²** — GC-safe DOL size.
+Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²**;
+HDRI sky faces + IBL matcaps **256² CMPR** (gxbake equirect→sides) — DOL ~15MB MEM1-safe.
+
+### HDRI / FX
+
+Three IBL-driving skies baked from local equirect panoramas via **gxbake**
+(`scripts/bake_hdri_skyboxes.py`): GOLDEN, NOON, DUSK. Each packs six cube
+faces plus sharp/mid/blur matcaps that replace the old synthetic env LODs.
+Mirror floor draws a Y-flipped sphere under a translucent plaza; bloom is an
+additive outer shell.
 
 ### Dolphin proofs (emboss / specular)
 
