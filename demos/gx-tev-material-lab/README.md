@@ -43,6 +43,19 @@ Produces `gx-tev-material-lab.dol`.
 | SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
+## Roughness on Flipper
+
+B steps roughness. The demo swaps discrete env LODs:
+
+| Roughness | Env texture | Look |
+|-----------|-------------|------|
+| under 0.20 | `env_sharp` | mirror chrome |
+| under 0.55 | `env_mid` | soft reflections |
+| 0.55+ | `env_blur` | matte / frosted |
+
+Dolphin auto-reel (first ~5s) locks **CHROME** and walks 0→1 so DumpFrames
+can prove the path. Capture script also writes `shots/rough-*.png`.
+
 ## Capture
 
 ```bash

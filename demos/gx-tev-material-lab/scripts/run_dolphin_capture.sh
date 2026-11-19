@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-18}"
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-28}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -85,7 +85,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	if (( n > 90 )); then
+	# Need enough frames for roughness 0→1 reel (~330 guest frames)
+	if (( n > 360 )); then
 		break
 	fi
 done
@@ -109,5 +110,20 @@ idx=$(( ${#FRAMES[@]} * 2 / 3 ))
 cp -f "${FRAMES[$idx]}" "$OUT_DIR/shots/full-frame.png"
 cp -f "${FRAMES[10]:-${FRAMES[0]}}" "$OUT_DIR/shots/early.png"
 cp -f "${FRAMES[-1]}" "$OUT_DIR/shots/late.png"
+
+# Roughness proof samples: chrome reel starts ~frame 30, +60 per step
+pick() {
+	local i="$1" dest="$2"
+	if (( i < ${#FRAMES[@]} )); then
+		cp -f "${FRAMES[$i]}" "$dest"
+	else
+		cp -f "${FRAMES[-1]}" "$dest"
+	fi
+}
+pick 50  "$OUT_DIR/shots/rough-00.png"
+pick 110 "$OUT_DIR/shots/rough-25.png"
+pick 170 "$OUT_DIR/shots/rough-50.png"
+pick 230 "$OUT_DIR/shots/rough-75.png"
+pick 290 "$OUT_DIR/shots/rough-100.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

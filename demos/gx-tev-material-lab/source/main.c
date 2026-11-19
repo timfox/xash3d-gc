@@ -13,8 +13,12 @@
 #include <gccore.h>
 #include <ogc/tpl.h>
 
-#include "envmap_tpl.h"
-#include "envmap.h"
+#include "env_sharp_tpl.h"
+#include "env_sharp.h"
+#include "env_mid_tpl.h"
+#include "env_mid.h"
+#include "env_blur_tpl.h"
+#include "env_blur.h"
 #include "checker_tpl.h"
 #include "checker.h"
 #include "shadow_tpl.h"
@@ -84,11 +88,12 @@ typedef struct {
 static GXRModeObj *rmode = NULL;
 static void *frameBuffer[2] = { NULL, NULL };
 
-static GXTexObj texEnv, texChecker, texShadow;
+static GXTexObj texEnvSharp, texEnvMid, texEnvBlur;
+static GXTexObj texChecker, texShadow;
 static GXTexObj texHudTL, texHudFPS, texHudBottom;
 static GXTexObj texFont, texDetail, texSpec;
 static GXTexObj texRustAlbedo, texRustAO, texRustMetal, texRustNormal, texRustRough;
-static TPLFile tplEnv, tplChecker, tplShadow;
+static TPLFile tplEnvSharp, tplEnvMid, tplEnvBlur, tplChecker, tplShadow;
 static TPLFile tplHudTL, tplHudFPS, tplHudBottom;
 static TPLFile tplFont, tplDetail, tplSpec;
 static TPLFile tplRustAlbedo, tplRustAO, tplRustMetal, tplRustNormal, tplRustRough;
@@ -185,23 +190,56 @@ static void build_sphere(f32 radius)
 	}
 }
 
+static f32 current_roughness(const Material *mat)
+{
+	return (roughnessOverride >= 0.0f) ? roughnessOverride : mat->roughness;
+}
+
+/* Discrete Flipper env LODs — proves roughness by swapping pre-blurred maps. */
+static GXTexObj *select_env_tex(f32 roughness)
+{
+	if (roughness < 0.20f)
+		return &texEnvSharp;
+	if (roughness < 0.55f)
+		return &texEnvMid;
+	return &texEnvBlur;
+}
+
+static const char *env_lod_name(f32 roughness)
+{
+	if (roughness < 0.20f)
+		return "ENV LOD SHARP";
+	if (roughness < 0.55f)
+		return "ENV LOD MID";
+	return "ENV LOD BLUR";
+}
+
 static void tint_sphere_vertices(const Material *mat)
 {
 	int n = (SPHERE_STACKS + 1) * (SPHERE_SLICES + 1);
 	int i;
+	f32 roughness = current_roughness(mat);
+	/*
+	 * Soften env response with roughness, but keep enough weight that the
+	 * discrete blur LOD stays visible at R=1 (proof must show blur, not black).
+	 */
+	f32 spec_scale = clampf(1.0f - roughness * 0.45f, 0.40f, 1.0f);
+
 	for (i = 0; i < n; ++i) {
 		SphereVert *v = &sphereVerts[i];
 		v->r = mat->base.r;
 		v->g = mat->base.g;
 		v->b = mat->base.b;
-		/* Fresnel in alpha — dielectrics keep a small F0 floor */
-		v->a = (u8)(clampf(0.04f + 0.96f * v->fu, 0.0f, 1.0f) * 255.0f);
+		if (mat->metallic > 0.5f) {
+			/* Metals: full-sphere env weight falls gently with roughness */
+			f32 w = clampf(0.70f + 0.30f * v->fu, 0.0f, 1.0f) * spec_scale;
+			v->a = (u8)(w * 255.0f);
+		} else {
+			/* Dielectrics / rust: Fresnel rim only, still roughness-scaled */
+			f32 w = clampf(0.04f + 0.96f * v->fu, 0.0f, 1.0f) * spec_scale;
+			v->a = (u8)(w * 255.0f);
+		}
 	}
-}
-
-static f32 current_roughness(const Material *mat)
-{
-	return (roughnessOverride >= 0.0f) ? roughnessOverride : mat->roughness;
 }
 
 /*
@@ -224,9 +262,9 @@ static void setup_tev_hero_rust(const Material *mat)
 
 	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
 	GX_LoadTexObj(&texRustAO, GX_TEXMAP1);
-	GX_LoadTexObj(&texEnv, GX_TEXMAP2);
-	GX_InitTexObjLOD(&texEnv, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
-		roughness * 0.55f, GX_FALSE, GX_TRUE, GX_ANISO_1);
+	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP2);
+	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+		roughness * 0.75f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&texRustAO, GX_REPEAT, GX_REPEAT);
 
@@ -276,20 +314,22 @@ static void setup_tev_env_tint(const Material *mat)
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
-	GX_LoadTexObj(&texEnv, GX_TEXMAP0);
-	GX_InitTexObjLOD(&texEnv, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
-		roughness * 0.40f, GX_FALSE, GX_TRUE, GX_ANISO_1);
+	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP0);
+	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+		roughness * 0.85f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 
 	GX_SetTevDirect(GX_TEVSTAGE0);
 	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	/* Metals: lerp(base*small, env, A) ≈ env*A + base*(1-ish) via CPREV path below */
 	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
 	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
 	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* Dim whole env response by roughness-scaled vertex alpha */
 	GX_SetTevDirect(GX_TEVSTAGE1);
 	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_APREV, GX_CC_ZERO);
 	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
@@ -311,9 +351,9 @@ static void setup_tev_fresnel_konst(const Material *mat)
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
 	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
-	GX_LoadTexObj(&texEnv, GX_TEXMAP1);
-	GX_InitTexObjLOD(&texEnv, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
-		roughness * 0.45f, GX_FALSE, GX_TRUE, GX_ANISO_1);
+	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP1);
+	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+		roughness * 0.75f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
 
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ f0, f0, f0, 255 });
@@ -457,11 +497,11 @@ static void setup_tev_indtex_bump(const Material *mat)
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
 	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
 	GX_LoadTexObj(&texRustNormal, GX_TEXMAP1);
-	GX_LoadTexObj(&texEnv, GX_TEXMAP2);
+	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP2);
 	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&texRustNormal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjLOD(&texEnv, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
-		roughness * 0.35f, GX_FALSE, GX_TRUE, GX_ANISO_1);
+	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+		roughness * 0.75f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 
 	/* IndTex: normal warps env sample */
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD1, GX_TEXMAP1);
@@ -779,16 +819,22 @@ static void draw_hud(f32 fb_w, f32 fb_h, const Material *mat)
 	snprintf(line, sizeof(line), "ENV %s | %s",
 		envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
 	draw_text(12, 158, line, 1.0f);
+	snprintf(line, sizeof(line), "%s (B steps rough)", env_lod_name(rough));
+	draw_text(12, 176, line, 1.0f);
 	if (mat->use_rust_maps)
-		draw_text(12, 176, "MAPS: albedo ao metal normal rough", 1.0f);
+		draw_text(12, 194, "MAPS: albedo ao metal normal rough", 1.0f);
 
 	(void)fb_w;
 }
 
 static void load_textures(void)
 {
-	TPL_OpenTPLFromMemory(&tplEnv, (void *)envmap_tpl, envmap_tpl_size);
-	TPL_GetTexture(&tplEnv, envmap, &texEnv);
+	TPL_OpenTPLFromMemory(&tplEnvSharp, (void *)env_sharp_tpl, env_sharp_tpl_size);
+	TPL_GetTexture(&tplEnvSharp, env_sharp, &texEnvSharp);
+	TPL_OpenTPLFromMemory(&tplEnvMid, (void *)env_mid_tpl, env_mid_tpl_size);
+	TPL_GetTexture(&tplEnvMid, env_mid, &texEnvMid);
+	TPL_OpenTPLFromMemory(&tplEnvBlur, (void *)env_blur_tpl, env_blur_tpl_size);
+	TPL_GetTexture(&tplEnvBlur, env_blur, &texEnvBlur);
 	TPL_OpenTPLFromMemory(&tplChecker, (void *)checker_tpl, checker_tpl_size);
 	TPL_GetTexture(&tplChecker, checker, &texChecker);
 	TPL_OpenTPLFromMemory(&tplShadow, (void *)shadow_tpl, shadow_tpl_size);
@@ -817,7 +863,9 @@ static void load_textures(void)
 	TPL_OpenTPLFromMemory(&tplRustRough, (void *)rust_roughness_tpl, rust_roughness_tpl_size);
 	TPL_GetTexture(&tplRustRough, rust_roughness, &texRustRough);
 
-	GX_InitTexObjWrapMode(&texEnv, GX_CLAMP, GX_CLAMP);
+	GX_InitTexObjWrapMode(&texEnvSharp, GX_CLAMP, GX_CLAMP);
+	GX_InitTexObjWrapMode(&texEnvMid, GX_CLAMP, GX_CLAMP);
+	GX_InitTexObjWrapMode(&texEnvBlur, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texChecker, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&texShadow, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texHudTL, GX_CLAMP, GX_CLAMP);
@@ -909,6 +957,7 @@ int main(int argc, char **argv)
 			r += 0.25f;
 			if (r > 1.01f) r = 0.0f;
 			roughnessOverride = r;
+			tint_sphere_vertices(mat);
 		}
 		if ((down & PAD_BUTTON_X) && !(prevButtons & PAD_BUTTON_X)) {
 			envMapEnabled ^= 1;
@@ -918,8 +967,27 @@ int main(int argc, char **argv)
 		}
 		prevButtons = PAD_ButtonsHeld(0);
 		animTime += 1.0f / 60.0f;
-		if (frame >= 180 && ((frame - 180) % 90) == 0)
-			featureIndex = (int)(((frame - 180) / 90) % FEAT_COUNT);
+		/*
+		 * Roughness proof reel for Dolphin dumps:
+		 * CHROME + env_tint, step roughness 0→1 every 60 frames.
+		 */
+		if (frame == 30) {
+			materialIndex = 4; /* CHROME — env-dominant so LOD is obvious */
+			mat = &materials[materialIndex];
+			featureIndex = FEAT_HERO_RUST_PBR; /* non-rust → env_tint path */
+			roughnessOverride = 0.0f;
+			tint_sphere_vertices(mat);
+		}
+		if (frame >= 30 && frame < 330 && ((frame - 30) % 60) == 0) {
+			int step = (int)((frame - 30) / 60);
+			static const f32 steps[5] = { 0.00f, 0.25f, 0.50f, 0.75f, 1.00f };
+			if (step < 5) {
+				roughnessOverride = steps[step];
+				tint_sphere_vertices(mat);
+			}
+		}
+		if (frame >= 360 && ((frame - 360) % 90) == 0)
+			featureIndex = (int)(((frame - 360) / 90) % FEAT_COUNT);
 		++frame;
 
 		GX_SetViewport(0, 0, rmode->fbWidth, rmode->efbHeight, 0, 1);

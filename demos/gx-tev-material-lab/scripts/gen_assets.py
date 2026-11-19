@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 ROOT = Path(__file__).resolve().parents[1]
 TEX = ROOT / "textures"
@@ -137,12 +137,29 @@ def gen_envmap(n: int = 256) -> None:
                 b = int(b * fade)
             a[y, x] = (min(255, r), min(255, g), min(255, b), 255)
     img = Image.fromarray(a, "RGBA")
-    # roughness 0.25: mild blur only
-    img_r25 = img.filter(ImageFilter.GaussianBlur(radius=1.6))
-    img.save(TEX / "envmap.png")
-    img_r25.save(TEX / "envmap_r25.png")
-    img.filter(ImageFilter.GaussianBlur(radius=4.5)).save(TEX / "envmap_r50.png")
-    print("wrote envmap", n)
+    # Discrete Flipper env LODs — roughness proof (sharp / mid / blur).
+    def mip_blur(src: Image.Image, factor: int, radius: float, contrast: float = 1.0) -> Image.Image:
+        w, h = src.size
+        small = src.resize((max(1, w // factor), max(1, h // factor)), Image.Resampling.BOX)
+        back = small.resize((w, h), Image.Resampling.BILINEAR)
+        if radius > 0:
+            back = back.filter(ImageFilter.GaussianBlur(radius=radius))
+        if contrast != 1.0:
+            back = ImageEnhance.Contrast(back).enhance(contrast)
+        return back
+
+    sharp = img.convert("RGB")
+    mid = mip_blur(sharp, 8, 3.0)
+    blur = mip_blur(sharp, 32, 8.0, contrast=0.55)
+    blur = ImageEnhance.Brightness(blur).enhance(1.05)
+    sharp.save(TEX / "env_sharp.png")
+    mid.save(TEX / "env_mid.png")
+    blur.save(TEX / "env_blur.png")
+    # Legacy aliases kept for older tooling
+    sharp.save(TEX / "envmap.png")
+    mid.save(TEX / "envmap_r25.png")
+    blur.save(TEX / "envmap_r50.png")
+    print("wrote env_sharp/mid/blur", n)
 
 
 def gen_logo(n: int = 64) -> None:
@@ -341,11 +358,8 @@ def gen_bump_detail_spec() -> None:
 def main() -> None:
     gen_checker()
     gen_shadow()
-    # Keep reference-baked matcap/HUD when present (bake_from_reference.py).
-    if not (TEX / "envmap_sharp.png").is_file():
-        gen_envmap()
-    else:
-        print("keep existing envmap_sharp / envmap_r25")
+    # Always refresh synthetic env LODs (roughness proof). Keep HUD if present.
+    gen_envmap()
     gen_logo()
     gen_banner()
     gen_wordmark()
@@ -358,7 +372,10 @@ def main() -> None:
     gen_bump_detail_spec()
     # SCF stubs for gxtexconv
     for name, src in [
-        ("envmap", "envmap_r25.png"),
+        ("env_sharp", "env_sharp.png"),
+        ("env_mid", "env_mid.png"),
+        ("env_blur", "env_blur.png"),
+        ("envmap", "envmap.png"),
         ("checker", "checker.png"),
         ("shadow", "shadow.png"),
         ("hud_tl", "hud_tl.png"),
