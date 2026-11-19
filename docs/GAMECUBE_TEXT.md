@@ -87,3 +87,12 @@ so the glyph table is 104 entries (was 96). The caller colours them (A green, B 
 `GC_HiTextGlyph`; with `gc_hitext 0` the token prints as `[A]`.
 Memory: the atlas file grows by 112 bytes of glyph table (67 008 bytes, still one 64 KiB I4 texture); nothing else.
 Host test `tests/test_gamecube_hitext_buttons.py` checks the glyph table. Not seen in Dolphin.
+
+## Notices and the fatal panel (retail palette, inside the safe area)
+- **Controller disconnected:** `OSK_DrawNotice` (in_osk.c, drawn with the keyboard) shows a centred panel when no native pad
+  has been present for about 0.75 s (`GC_PadMissingNotice`, never for automated probes). Layout is `osk_notice.h`, host test
+  `tests/test_gamecube_osk_notice.py` (stays inside 32 x 24 px margins). Memory: none (soft FillRGBA + the keyboard's
+  bitmap glyphs, or hi-res glyphs when the atlas is up).
+- **Fatal / Host_Error panel:** the magenta 160x120 panel is now ViewportBG with a ClassMenuLight border on the safe area
+  (x 8..151, y 6..113 of the panel), title "DAY OF DEFEAT - ERROR". It still uses a static 38 KiB panel buffer (unchanged).
+- Not seen in Dolphin: needs a pad-less run to show the notice.
