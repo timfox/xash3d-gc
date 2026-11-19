@@ -6084,6 +6084,7 @@ static int gc_parity_kept;
 #define GC_PARITY_TIERS 3
 static int gc_parity_tier_budget[GC_PARITY_TIERS] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
 static int gc_parity_tier_kept[GC_PARITY_TIERS];
+static int gc_parity_tier_count[GC_PARITY_TIERS];	/* the census's per-tier totals, for the static wall credit */
 /* Slots left free for run-time entities (weapons, grenades, weapon boxes,
  * temp ents). DoD builds have five client slots; four bots and a player
  * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
@@ -6212,7 +6213,16 @@ static qboolean SV_GCStaticWallRecord( edict_t *ent )
 		mod = Mod_ForName( sv.model_precache[mi], false, false );
 	if( !mod || mod->type != mod_brush )
 		return false;
-	return SV_GCStaticWallAdd( mi, ent->v.origin, mod->mins, mod->maxs );
+	if( !SV_GCStaticWallAdd( mi, ent->v.origin, mod->mins, mod->maxs ))
+		return false;
+	/* In mode 1 this wall never gets an edict: its tier-0 slot in the edict budget is free for the map logic (tier 1),
+	 * which the census sized as if every wall were an edict. */
+	if( SV_GCStaticWallsMode() == 1 && gc_parity_tier_budget[1] < gc_parity_tier_count[1] )
+	{
+		gc_parity_tier_budget[1]++;
+		gc_parity_budget++;
+	}
+	return true;
 }
 
 /* Self test (mode 2, at spawn complete): the same trace against each record's hull and against its func_wall edict must
@@ -6717,6 +6727,8 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
 		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
 	/* Walls first, then map logic, then lights. */
+	for( t = 0; t < GC_PARITY_TIERS; t++ )
+		gc_parity_tier_count[t] = tier_count[t];
 	for( t = 0, left = gc_parity_budget; t < GC_PARITY_TIERS; t++ )
 	{
 		gc_parity_tier_budget[t] = Q_min( tier_count[t], left );
