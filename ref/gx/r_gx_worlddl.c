@@ -163,6 +163,14 @@ static s8 gc_tev_bound = -1;
 static u8 gc_tev_store[8 * GC_TEV_DETAIL] __attribute__(( aligned( 32 )));
 static GXTexObj gc_tev_obj;
 static u8 gc_tev_envmask[GC_TEV_MAX_ENVMASK * GC_TEV_ENVMASK] __attribute__(( aligned( 32 )));
+/* Mask index GC_TEV_MAX_ENVMASK and up: a second table of 32x32 masks
+ * (tevmat.gcm trailer GCes). The Lost Coast church's frescoes and walls each
+ * carry their own mask, nineteen more than the 64x64 table holds, and a
+ * material without a mask in a table gets no reflection. */
+#define GC_TEV_ENVMASK_SMALL		512
+#define GC_TEV_MAX_ENVMASK_SMALL	24
+static u8 gc_tev_envmask_small[GC_TEV_MAX_ENVMASK_SMALL * GC_TEV_ENVMASK_SMALL] __attribute__(( aligned( 32 )));
+static u8 gc_tev_nmask_small;
 static GXTexObj gc_tev_envmask_obj;
 static s8 gc_tev_envmask_bound = -1;
 static u8 gc_tev_emboss[GC_TEV_MAX_EMBOSS * GC_TEV_EMBOSS] __attribute__(( aligned( 32 )));
@@ -209,10 +217,17 @@ static void R_GXTevBindDetail( u8 idx )
 
 static void R_GXTevBindEnvMask( u8 idx )
 {
-	if( idx >= gc_tev_nmask )
+	const qboolean small = idx >= GC_TEV_MAX_ENVMASK;
+
+	if( small ? idx - GC_TEV_MAX_ENVMASK >= gc_tev_nmask_small : idx >= gc_tev_nmask )
 		return;
 	if( gc_tev_envmask_bound != (s8)idx )
 	{
+		if( small )
+			GX_InitTexObj( &gc_tev_envmask_obj,
+				gc_tev_envmask_small + (u32)( idx - GC_TEV_MAX_ENVMASK ) * GC_TEV_ENVMASK_SMALL,
+				32, 32, GX_TF_I4, GX_REPEAT, GX_REPEAT, GX_FALSE );
+		else
 		GX_InitTexObj( &gc_tev_envmask_obj,
 			gc_tev_envmask + (u32)idx * GC_TEV_ENVMASK,
 			64, 64, GX_TF_I4, GX_REPEAT, GX_REPEAT, GX_FALSE );
@@ -238,11 +253,15 @@ static void R_GXTevBindEmboss( u8 idx )
 	GX_LoadTexObj( &gc_tev_emboss_obj, GX_TEXMAP3 );
 }
 
+/* The flags that change the material's own stages. A reflection mask alone
+ * does not (it is read by the reflection pass): such a material draws with
+ * the plain lit stages, without a TEV set-up of its own at every change of
+ * material. */
 static int R_GXTevMatFlags( int id )
 {
 	if( id < 1 || id > (int)gc_tev_nmat )
 		return 0;
-	return gc_tev_rec[id - 1][0];
+	return gc_tev_rec[id - 1][0] & ~GC_TEV_F_ENVMASK;
 }
 
 static int R_GXTevMatEnvMask( int id )
@@ -251,9 +270,18 @@ static int R_GXTevMatEnvMask( int id )
 		return -1;
 	if( !( gc_tev_rec[id - 1][0] & GC_TEV_F_ENVMASK ))
 		return -1;
-	if( gc_tev_rec[id - 1][5] >= gc_tev_nmask )
+	if( gc_tev_rec[id - 1][5] >= GC_TEV_MAX_ENVMASK
+		? gc_tev_rec[id - 1][5] - GC_TEV_MAX_ENVMASK >= gc_tev_nmask_small
+		: gc_tev_rec[id - 1][5] >= gc_tev_nmask )
 		return -1;
 	return gc_tev_rec[id - 1][5];
+}
+
+/* True when the material's envmap mask is one of the small-table ones. */
+static qboolean R_GXTevMatEnvSmall( int id )
+{
+	return id >= 1 && id <= (int)gc_tev_nmat && ( gc_tev_rec[id - 1][0] & GC_TEV_F_ENVMASK )
+		&& gc_tev_rec[id - 1][5] >= GC_TEV_MAX_ENVMASK;
 }
 
 static int R_GXTevMatEmboss( int id )
@@ -694,6 +722,7 @@ static void R_GXMatPackLoad( void )
 	gc_tev_nmat = 0;
 	gc_tev_ndet = 0;
 	gc_tev_nmask = 0;
+	gc_tev_nmask_small = 0;
 	gc_tev_nemboss = 0;
 	gc_tev_bound = -1;
 	gc_tev_envmask_bound = -1;
@@ -733,6 +762,17 @@ static void R_GXMatPackLoad( void )
 						gc_tev_nmask = trail[4];
 						continue;
 					}
+					if( trail[2] == 'e' && trail[3] == 's'
+						&& trail[4] > 0 && trail[4] <= GC_TEV_MAX_ENVMASK_SMALL )
+					{
+						u32 sbytes = (u32)trail[4] * GC_TEV_ENVMASK_SMALL;
+
+						if( gEngfuncs.fsapi->Read( f, gc_tev_envmask_small, sbytes ) != (fs_offset_t)sbytes )
+							break;
+						DCFlushRange( gc_tev_envmask_small, sbytes );
+						gc_tev_nmask_small = trail[4];
+						continue;
+					}
 					if( trail[2] == 'e' && trail[3] == 'h'
 						&& trail[4] > 0 && trail[4] <= GC_TEV_MAX_EMBOSS )
 					{
@@ -758,9 +798,9 @@ static void R_GXMatPackLoad( void )
 	{
 		logged = true;
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: tevmat mats=%u details=%u envmasks=%u emboss=%u\n",
+			"Xash3D GameCube: tevmat mats=%u details=%u envmasks=%u+%u emboss=%u\n",
 			(unsigned)gc_tev_nmat, (unsigned)gc_tev_ndet,
-			(unsigned)gc_tev_nmask, (unsigned)gc_tev_nemboss );
+			(unsigned)gc_tev_nmask, (unsigned)gc_tev_nmask_small, (unsigned)gc_tev_nemboss );
 	}
 }
 
@@ -2589,6 +2629,11 @@ static void R_GXWorldDLDrawSkyline( void )
 /* Chunk sort keys, then (after the chunk loop) the frame's deferred batches.
  * One array: the keys are dead by the time batches are recorded. */
 static u64 gc_wd_keys[GC_WD_MAX_CHUNKS];
+/* Chunks past 1100 units this frame. A material whose mask sits in the
+ * small table (the church's frescoes and walls, the monastery's plaster)
+ * takes no reflection pass out there: from the harbor those passes cost
+ * 0.7 ms a frame for a sheen nobody can see at that range. */
+static u8 gc_wd_env_far[( GC_WD_MAX_CHUNKS + 7 ) / 8];
 static u16 gc_wd_mat_count[GC_WD_MAX_MATS * 2 + 1];
 
 /* Material-grouped world draw. Every packed bind that misses the texture slot
@@ -2827,6 +2872,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 		/* $envmap batches (most of Lost Coast) are grouped too: the reflection
 		 * pass is queued exactly as the in-place path queues it. */
 		if(( b->pad & 0x8000u ) && ( gc_wd_mats[mat].flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
+			&& !(( gc_wd_env_far[ci >> 3] >> ( ci & 7 )) & 1 && R_GXTevMatEnvSmall( gc_wd_mats[mat].tevmat ))
 			&& gc_wd_hdr.version == 2 && gc_wd_envq_n < GC_WD_ENVQ_MAX && R_GXWorldDLEnvReady())
 		{
 			gc_wd_envq[gc_wd_envq_n].chunk = chunk;
@@ -3303,6 +3349,10 @@ int R_GXWorldDLDraw( void )
 				const float span = Q_max( dx, Q_max( dy, dz ));
 
 				d.u = (u32)( keys[a] >> 16 );
+				if( d.f > 1100.0f * 1100.0f )
+					gc_wd_env_far[ci >> 3] |= (u8)( 1u << ( ci & 7u ));
+				else
+					gc_wd_env_far[ci >> 3] &= (u8)~( 1u << ( ci & 7u ));
 				order[a] = (u16)( ci
 					| ( R_GXWorldDLIsTower( ci ) ? 0x8000u : 0u )
 					| (( gc_wd_tex_overflow && d.f > far_d2
@@ -3497,6 +3547,7 @@ int R_GXWorldDLDraw( void )
 				 * only: the mirror pass is already a reflection. A forced
 				 * chunk's memory is reused, so its batches draw now. */
 				if(( b->pad & 0x8000u ) && ( m->flags & GC_WD_MAT_ENVMAP ) && !r_gx_mirror
+					&& !(( gc_wd_env_far[i >> 3] >> ( i & 7 )) & 1 && R_GXTevMatEnvSmall( m->tevmat ))
 					&& gc_wd_hdr.version == 2 && R_GXWorldDLEnvReady())
 				{
 					if( !forced )
