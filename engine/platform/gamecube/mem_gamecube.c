@@ -1884,10 +1884,19 @@ unsigned int GC_AramAllocTagged( unsigned int size, qboolean stream, const char 
 			stream ? "stream" : "reserve", tag ? tag : "?", Q_memprint( size ), base,
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )));
 	else
+	{
+		int i;
+
 		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s\n",
 			tag ? tag : "?", stream ? "stream" : "reserve", Q_memprint( size ),
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )),
 			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )));
+		/* Say what fragments it: the whole segment table, once per refusal. */
+		for( i = 0; i < gc_aram_heap.count; i++ )
+			Con_Reportf( "Xash3D GameCube: ARAM map 0x%08x %s %s%s\n", gc_aram_heap.segs[i].offset,
+				Q_memprint( gc_aram_heap.segs[i].size ), gc_aram_heap.segs[i].used ? gc_aram_heap.segs[i].tag : "FREE",
+				gc_aram_heap.segs[i].used ? ( gc_aram_heap.segs[i].cls == GC_ARAM_STREAM ? " (stream)" : " (session)" ) : "" );
+	}
 	return base;
 }
 
