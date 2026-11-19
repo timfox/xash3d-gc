@@ -9540,6 +9540,53 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		}
 	}
 
+	/* The faces lump may still live inside the staging buffer being released (dod_flash: 9801 faces,
+	 * clamped slot, so they stay a BSP alias instead of a copy). Clearing the pointer would leave the
+	 * surface load with no faces ("missing BSP faces ... before surface load"), and the tail-copy
+	 * restore below only exists when a copy was made. Move them out first; when no room can be found,
+	 * keep the staging buffer for the surface load instead of releasing it. */
+	{
+		const qboolean q2 = bmod->version == QBSP2_VERSION;
+		const void *faces = q2 ? (const void *)bmod->surfaces32 : (const void *)bmod->surfaces;
+
+		/* CapFaces lean / WorldDL never build the live surfaces, so nothing reads these faces afterwards. */
+		if( faces && !gc_capfaces_lean_surfaces && Mod_GCPointerInBuffer( faces, mod_base, bufferlen ))
+		{
+			const size_t bytes = bmod->numsurfaces * ( q2 ? sizeof( *bmod->surfaces32 ) : sizeof( *bmod->surfaces ));
+			void *copy = Mod_GCWorldArraySpillAlloc( bytes, "faces" );
+			qboolean from_spill = copy != NULL;
+
+			if( !copy )
+				copy = Mod_GCPreSurfaceTailAlloc( GC_MapLoadBufferTailHighwater(), bytes );
+			if( !copy )
+				copy = Mem_TryMalloc( mod->mempool, bytes );
+			if( !copy )
+			{
+				gc_retain_bsp_source_buffer = true;
+				gc_force_bsp_image_release = false;
+				gc_bsp_scratch_base = mod_base;
+				gc_bsp_scratch_size = GC_IsMapLoadBuffer( mod_base ) && GC_MapLoadBufferCapacity() > bufferlen
+					? GC_MapLoadBufferCapacity() : bufferlen;
+				Con_Reportf( S_WARN "Xash3D GameCube: faces (%s) still live in BSP staging and no copy fits; retaining staging for surfaces\n",
+					Q_memprint( bytes ));
+				return;
+			}
+			memcpy( copy, faces, bytes );
+			if( q2 )
+				bmod->surfaces32 = copy;
+			else
+			{
+				bmod->surfaces = copy;
+				if( from_spill )
+				{
+					gc_faces_tail_copy = copy;
+					gc_faces_source_alias = false;
+				}
+			}
+			Con_Reportf( "Xash3D GameCube: faces %s moved out of BSP staging before release\n", Q_memprint( bytes ));
+		}
+	}
+
 	if( bmod->version == QBSP2_VERSION )
 	{
 		if( Mod_GCPointerInBuffer( bmod->surfaces32, mod_base, bufferlen ))
