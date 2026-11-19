@@ -2284,6 +2284,8 @@ def build_prop_packs(
 		) if root.is_dir()
 	]
 	overlays: list[tuple[str, Path]] = []
+	failed: list[str] = []
+	missing_pack: list[str] = []
 	for bsp in sorted((source / "maps").glob("dod_*.bsp")):
 		stem = bsp.stem.lower()
 		if map_stems is not None and stem not in map_stems:
@@ -2300,6 +2302,7 @@ def build_prop_packs(
 			except (Exception, SystemExit) as error:  # the map keeps the engine's own static props
 				print(f"  props: bake failed for {bsp.name}: {error}")
 				stats = None
+				failed.append(stem)
 				for stale in (gcp, gct):
 					stale.unlink(missing_ok=True)
 			# A bake that could not find a model file is tried again next
@@ -2307,6 +2310,7 @@ def build_prop_packs(
 			if stats is None or not stats["missing"]:
 				stamp.write_text(key)
 		if not (gcp.is_file() and gct.is_file()):
+			missing_pack.append(stem)
 			continue
 		for name, src in ((f"gp_{stem}.gcp", gcp), (f"pt_{stem}.gct", gct)):
 			dest = output / "media" / name
@@ -2314,6 +2318,13 @@ def build_prop_packs(
 			shutil.copy2(src, dest)
 			overlays.append((f"media/{name}", dest))
 	print(f"  props: {len(overlays) // 2} map prop pack(s)")
+	# A map on the disc without its pack only loads GC_STATIC_PROP_MODELS (6) prop models, and most maps use 8 to 44.
+	# Fail the build rather than ship that silently; DODGC_ALLOW_MISSING_PROPPACK=1 keeps the old behaviour.
+	if missing_pack and os.environ.get("DODGC_ALLOW_MISSING_PROPPACK", "") != "1":
+		raise SystemExit(
+			"error: no prop pack (gp_<map>.gcp / pt_<map>.gct) for: " + ", ".join(sorted(missing_pack))
+			+ (" (bake failed: " + ", ".join(sorted(failed)) + ")" if failed else "")
+			+ ". Those maps would load only 6 prop models. Fix the bake, or set DODGC_ALLOW_MISSING_PROPPACK=1 to ship anyway.")
 	return overlays
 
 
