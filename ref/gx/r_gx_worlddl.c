@@ -146,7 +146,13 @@ extern void R_GXMirrorClipSet( qboolean on );
 #define GC_TEV_ENVMASK		2048
 #define GC_TEV_EMBOSS		4096
 #define GC_TEV_MAX_ENVMASK	8
+/* Only Lost Coast world packs carry emboss height tiles (GCeh trailer):
+ * other games keep one 4 KiB slot instead of 64 KiB of MEM1 BSS. */
+#if defined( XASH_GC_LOSTCOAST ) && XASH_GC_LOSTCOAST
 #define GC_TEV_MAX_EMBOSS	16
+#else
+#define GC_TEV_MAX_EMBOSS	1
+#endif
 #define GC_TEV_F_ENVMASK	0x04
 #define GC_TEV_F_EMBOSS		0x20
 static u8 gc_tev_rec[GC_TEV_MAX][8];
