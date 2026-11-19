@@ -378,6 +378,12 @@ static byte *R_GXWorldDLLmPage( u32 page )
  * 0, and in the harbor nearly every batch changes material: skipping the
  * identical setup saved 1.3 ms per world pass (two passes with the mirror). */
 static int gc_wd_tev_key = -1;
+/* Set by the draw loops for the chunk in hand: past 1100 units, in the 3D
+ * skybox and in the water mirror the $detail stage is left out. The tile
+ * repeats every 70 units or so and its smallest mip is 8x8: at that range it
+ * no longer averages out, and the white buildings across the harbor were
+ * covered in moire. Source's detail textures mip down to nothing. */
+static int gc_wd_detail_off;
 
 /* Soft decals (recipe flag 0x10, lostcoast-gc tools/bake_infodecals.py).
  * Source blends a $translucent decal by its alpha; a CMPR texture has one
@@ -515,10 +521,10 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	(void)b;
 	if( id < 1 || id > (int)gc_tev_nmat )
 		id = 0;
-	if( gc_wd_tev_key == (( id << 1 ) | ( gc_wd_chunk_lm ? 1 : 0 )))
+	if( gc_wd_tev_key == (( id << 2 ) | ( gc_wd_detail_off ? 2 : 0 ) | ( gc_wd_chunk_lm ? 1 : 0 )))
 		return;
 	R_GXWorldDLSetupLit( gc_wd_chunk_lm );
-	gc_wd_tev_key = ( id << 1 ) | ( gc_wd_chunk_lm ? 1 : 0 );
+	gc_wd_tev_key = ( id << 2 ) | ( gc_wd_detail_off ? 2 : 0 ) | ( gc_wd_chunk_lm ? 1 : 0 );
 	base_stages = gc_wd_chunk_lm ? 2 : 1;
 	stages = base_stages;
 	ntex = gc_wd_tev_gens > 1 ? 2 : 1;
@@ -535,7 +541,7 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	 * it the cliff beside the path was a smear: its 256x256 base covers
 	 * 1024 units, four units a texel, and the detail tile is what Source
 	 * puts the rock's grain in. */
-	if( ( flags & 0x01 ) && scale_fp && didx < gc_tev_ndet )
+	if( ( flags & 0x01 ) && scale_fp && didx < gc_tev_ndet && !gc_wd_detail_off )
 	{
 		scale = (float)scale_fp / 256.0f;
 		R_GXTevBindDetail( didx );
@@ -2414,6 +2420,7 @@ static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 
 	nb = *(const u16 *)( chunk + 2 );
 	R_GXWorldDLChunkArrays( chunk );
+	gc_wd_detail_off = 1;	/* the 3D skybox: always far */
 	b = (const gc_wd_batch_t *)( chunk + 16 );
 	for( k = 0; k < nb; k++, b++ )
 	{
@@ -2817,6 +2824,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 	{
 		const u64 r = gc_wd_keys[idx[k < gc_wd_defer_n ? k : 0]];
 		const int ci = (int)( r >> 48 );
+		const int detail_off = r_gx_mirror || (( gc_wd_env_far[ci >> 3] >> ( ci & 7 )) & 1 );
 		const int bi = (int)(( r >> 32 ) & 0xffffu );
 		const int key = k < gc_wd_defer_n ? (int)(( r >> 16 ) & 0xffffu ) : -2;
 
@@ -2866,6 +2874,12 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 			if( had != gc_wd_chunk_lm )
 				cur_key = -1;	/* lit TEV differs: rebuild the material */
 			cur_lm = lm;
+		}
+		if( detail_off != gc_wd_detail_off )
+		{
+			gc_wd_detail_off = detail_off;
+			if( R_GXTevMatFlags( gc_wd_mats[mat].tevmat ) & 0x01 )
+				cur_key = -1;	/* the detail stage comes or goes */
 		}
 		if( key != cur_key )
 		{
@@ -3431,6 +3445,15 @@ int R_GXWorldDLDraw( void )
 			/* A large cliff can cover much of the view even at a distance
 			 * (decided with the sort, above). */
 			chunk_far = ( order[oi] & 0x4000u ) != 0;
+			{
+				const int off = r_gx_mirror || (( gc_wd_env_far[i >> 3] >> ( i & 7 )) & 1 );
+
+				if( off != gc_wd_detail_off )
+				{
+					gc_wd_detail_off = off;
+					cur_mat = -1;	/* the detail stage comes or goes */
+				}
+			}
 			R_GXCmprSetFar( chunk_far );
 			WD_PF( 1, chunk = R_GXWorldDLResident( i, bud ));
 			if( !chunk )
