@@ -9531,7 +9531,8 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		const qboolean q2 = bmod->version == QBSP2_VERSION;
 		const void *faces = q2 ? (const void *)bmod->surfaces32 : (const void *)bmod->surfaces;
 
-		if( faces && Mod_GCPointerInBuffer( faces, mod_base, bufferlen ))
+		/* CapFaces lean / WorldDL never build the live surfaces, so nothing reads these faces afterwards. */
+		if( faces && !gc_capfaces_lean_surfaces && Mod_GCPointerInBuffer( faces, mod_base, bufferlen ))
 		{
 			const size_t bytes = bmod->numsurfaces * ( q2 ? sizeof( *bmod->surfaces32 ) : sizeof( *bmod->surfaces ));
 			void *copy = Mod_GCWorldArraySpillAlloc( bytes, "faces" );
