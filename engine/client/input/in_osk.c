@@ -369,9 +369,62 @@ static void OSK_Fill( float sx, float sy, int x, int y, int w, int h, byte r, by
 		ref.dllFuncs.FillRGBA( kRenderTransTexture, rx, ry, rw, rh, r, g, b, a );
 }
 
+#if XASH_GAMECUBE
+extern qboolean GC_HiTextActive( void );
+extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
+extern void GC_HiTextOcclude( int x, int y, int w, int h, int alpha );
+#endif
+
+/* {A} {B} {X} {Y} {S} {Z} {L} {R}: the controller button glyphs of the hi-res atlas (codes 128..135); without the atlas the
+ * token prints as "[A]" in the bitmap font. */
+typedef struct { char key; int code; float ratio; byte r, g, b; const char *name; } osk_button_t;
+
+static const osk_button_t *OSK_ButtonFor( const char *s )
+{
+	static const osk_button_t buttons[] = {
+		{ 'A', 128, 1.0f, 90, 210, 110, "[A]" }, { 'B', 129, 1.0f, 225, 80, 80, "[B]" },
+		{ 'X', 130, 1.0f, 200, 205, 220, "[X]" }, { 'Y', 131, 1.0f, 225, 205, 90, "[Y]" },
+		{ 'S', 132, 2.4f, 200, 200, 205, "[Start]" }, { 'Z', 133, 1.35f, 170, 120, 220, "[Z]" },
+		{ 'L', 134, 1.35f, 220, 220, 225, "[L]" }, { 'R', 135, 1.35f, 220, 220, 225, "[R]" },
+	};
+	int i;
+
+	if( s[0] != '{' || !s[1] || s[2] != '}' )
+		return NULL;
+	for( i = 0; i < (int)( sizeof( buttons ) / sizeof( buttons[0] )); i++ )
+		if( buttons[i].key == s[1] )
+			return &buttons[i];
+	return NULL;
+}
+
+static int OSK_GlyphWidth( const osk_button_t *b, int fp )
+{
+	return (int)(( OSK_GLYPH_H + 2 ) * fp * 0.62f * b->ratio ) + fp * 2;
+}
+
 static int OSK_TextWidthFp( const char *s, int fp )
 {
-	return (int)Q_strlen( s ) * OSK_GLYPH_ADV * fp;
+	int w = 0;
+
+	while( *s )
+	{
+		const osk_button_t *b = OSK_ButtonFor( s );
+
+		if( b )
+		{
+#if XASH_GAMECUBE
+			if( GC_HiTextActive( ))
+				w += OSK_GlyphWidth( b, fp );
+			else
+#endif
+				w += (int)Q_strlen( b->name ) * OSK_GLYPH_ADV * fp;
+			s += 3;
+			continue;
+		}
+		w += OSK_GLYPH_ADV * fp;
+		s++;
+	}
+	return w;
 }
 
 static int OSK_TextWidth( const char *s )
@@ -379,13 +432,7 @@ static int OSK_TextWidth( const char *s )
 	return OSK_TextWidthFp( s, OSK_FP );
 }
 
-#if XASH_GAMECUBE
-extern qboolean GC_HiTextActive( void );
-extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
-extern void GC_HiTextOcclude( int x, int y, int w, int h, int alpha );
-#endif
-
-static void OSK_TextFp( float sx, float sy, int x, int y, const char *s, const rgba_t color, int fp )
+static void OSK_TextRaw( float sx, float sy, int x, int y, const char *s, const rgba_t color, int fp )
 {
 #if XASH_GAMECUBE
 	/* hardware resolution: the same cell the bitmap glyph fills, as a GX glyph quad from the menu atlas */
@@ -426,6 +473,46 @@ static void OSK_TextFp( float sx, float sy, int x, int y, const char *s, const r
 				OSK_Fill( sx, sy, x + col * fp, y + row * fp, run * fp, fp, color[0], color[1], color[2], color[3] );
 			}
 		}
+	}
+}
+
+static void OSK_TextFp( float sx, float sy, int x, int y, const char *s, const rgba_t color, int fp )
+{
+	char seg[96];
+
+	while( *s )
+	{
+		const osk_button_t *b = OSK_ButtonFor( s );
+		int n = 0;
+
+		if( b )
+		{
+#if XASH_GAMECUBE
+			if( GC_HiTextActive( ))
+			{
+				const int gw = OSK_GlyphWidth( b, fp );
+				const int argb = ( color[3] << 24 ) | ( b->r << 16 ) | ( b->g << 8 ) | b->b;
+
+				GC_HiTextGlyph( b->code, x * sx, y * sy - fp * sy, ( gw - fp * 2 ) * sx, ( OSK_GLYPH_H + 2 ) * fp * sy, argb );
+				x += gw;
+				s += 3;
+				continue;
+			}
+#endif
+			OSK_TextRaw( sx, sy, x, y, b->name, color, fp );
+			x += (int)Q_strlen( b->name ) * OSK_GLYPH_ADV * fp;
+			s += 3;
+			continue;
+		}
+		while( s[n] && !OSK_ButtonFor( s + n ) && n < (int)sizeof( seg ) - 1 )
+		{
+			seg[n] = s[n];
+			n++;
+		}
+		seg[n] = 0;
+		OSK_TextRaw( sx, sy, x, y, seg, color, fp );
+		x += OSK_TextWidthFp( seg, fp );
+		s += n;
 	}
 }
 
@@ -560,9 +647,9 @@ void OSK_Draw( void )
 		OSK_DrawKey( sx, sy, x, y, w, OSK_CELL, osk.y == OSK_ROWS && OSK_ActionAt( osk.x ) == i, name );
 	}
 
-	OSK_Text( sx, sy, left + OSK_PAD, top + height - OSK_FOOTER - OSK_PAD + 6, "A type  B delete  X space", dim );
+	OSK_Text( sx, sy, left + OSK_PAD, top + height - OSK_FOOTER - OSK_PAD + 6, "{A} type  {B} delete  {X} space", dim );
 	OSK_Text( sx, sy, left + OSK_PAD, top + height - OSK_FOOTER - OSK_PAD + 6 + OSK_GLYPH_H * OSK_FP + 2,
-		"Y page  Start OK  Z cancel", dim );
+		"{Y} page  {S} OK  {Z} cancel", dim );
 }
 
 /*
