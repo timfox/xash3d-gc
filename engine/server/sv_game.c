@@ -6263,7 +6263,7 @@ void SV_GCStaticWallsSelfTest( void )
 		/* Whole-path check: SV_Move with the records on (records + the edicts) against the edicts alone must agree on
 		 * everything except which edict a wall hit reports (the world for a record). */
 		extern qboolean gc_static_walls_disable;
-		int mv_tests = 0, mv_bad = 0, mv_world = 0;
+		int mv_tests = 0, mv_bad = 0, mv_world = 0, mv_startsolid = 0;
 
 		for( i = 0; i < n; i++ )
 		{
@@ -6296,14 +6296,19 @@ void SV_GCStaticWallsSelfTest( void )
 				if( a.fraction != b.fraction || a.startsolid != b.startsolid || a.allsolid != b.allsolid
 					|| !VectorCompare( a.plane.normal, b.plane.normal ) || !VectorCompare( a.endpos, b.endpos ))
 				{
-					if( mv_bad++ < 4 )
+					/* A trace that STARTS inside a solid is order dependent in World_CombineTraces (a startsolid trace
+					 * replaces whatever was combined before it), and the records run after the area-node walk: report
+					 * those separately from real disagreements. */
+					if( a.startsolid || b.startsolid || a.allsolid || b.allsolid )
+						mv_startsolid++;
+					else if( mv_bad++ < 6 )
 						Con_Reportf( S_ERROR "Xash3D GameCube: static wall SV_Move mismatch rec %d: frac %f/%f ent %d/%d\n",
 							i, a.fraction, b.fraction, a.ent ? NUM_FOR_EDICT( a.ent ) : -1, b.ent ? NUM_FOR_EDICT( b.ent ) : -1 );
 				}
 			}
 		}
-		Con_Reportf( "Xash3D GameCube: static wall SV_Move test: %d traces, %d mismatches, %d hits reported as the world edict\n",
-			mv_tests, mv_bad, mv_world );
+		Con_Reportf( "Xash3D GameCube: static wall SV_Move test: %d traces, %d mismatches (+%d start-solid order cases), %d hits reported as the world edict\n",
+			mv_tests, mv_bad, mv_startsolid, mv_world );
 	}
 	Con_Reportf( "Xash3D GameCube: static wall self test: %d records, %d traces, %d mismatches, %d records without an edict\n",
 		n, tests, bad, noedict );
