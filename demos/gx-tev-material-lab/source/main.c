@@ -65,12 +65,12 @@
 #define LAB_CAM_DIST		5.15f
 #define LAB_LOOK_Y			0.00f
 #define LAB_CAM_Y			0.28f
-/* Reference grey haze — clear + GX fog that starts behind the sphere */
-#define LAB_FOG_R			46
-#define LAB_FOG_G			44
-#define LAB_FOG_B			52
-#define LAB_FOG_START		5.8f	/* just past sphere front; thickens behind */
-#define LAB_FOG_END			12.0f
+/* Reference grey haze — flat cool charcoal void + GX fog behind sphere */
+#define LAB_FOG_R			44
+#define LAB_FOG_G			43
+#define LAB_FOG_B			48
+#define LAB_FOG_START		6.0f	/* past sphere front; thickens behind */
+#define LAB_FOG_END			11.5f
 #define LAB_FOG_START_DENSE	4.0f	/* Y-feature showcase denser */
 #define LAB_FOG_END_DENSE	11.0f
 
@@ -134,8 +134,8 @@ static int sphereIdxCount = 0;
  */
 static Material materials[] = {
 	{ "RUST",     { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
-	/* Warm copper tuned toward the Material Lab reference look */
-	{ "COPPER",   { 235, 140,  72, 255 }, 1.00f, 0.25f, MAPS_NONE },
+	/* Warm copper — SCALE_2 env×tint; R kept lower so peach not scarlet */
+	{ "COPPER",   { 158, 132, 102, 255 }, 1.00f, 0.25f, MAPS_NONE },
 	/* TextureCom Rainbow Damascus — real albedo/metal/normal/rough maps */
 	{ "DAMASCUS", { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
 	{ "GOLD",     { 255, 220, 120, 255 }, 1.00f, 0.20f, MAPS_NONE },
@@ -261,8 +261,8 @@ static void tint_sphere_vertices(const Material *mat)
 		v->g = mat->base.g;
 		v->b = mat->base.b;
 		if (mat->metallic > 0.5f) {
-			/* Metals: strong full-sphere env; Fresnel lifts the rim */
-			f32 w = clampf(0.82f + 0.18f * v->fu, 0.0f, 1.0f) * spec_scale;
+			/* Metals: full-sphere env; mild Fresnel (copper mid ~0.55–0.75) */
+			f32 w = clampf(0.55f + 0.30f * v->fu, 0.0f, 1.0f) * spec_scale;
 			v->a = (u8)(w * 255.0f);
 		} else {
 			/* Dielectrics / rust: Fresnel rim only, still roughness-scaled */
@@ -346,7 +346,7 @@ static void setup_tev_env_tint(const Material *mat)
 
 	GX_SetNumChans(1);
 	GX_SetNumTexGens(1);
-	GX_SetNumTevStages(2);
+	GX_SetNumTevStages(1);
 	GX_SetNumIndStages(0);
 	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
@@ -358,20 +358,13 @@ static void setup_tev_env_tint(const Material *mat)
 
 	GX_SetTevDirect(GX_TEVSTAGE0);
 	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
-	/* env × metal tint */
+	/* env × metal tint, SCALE_2 for Flipper metal punch without Fresnel magenta */
 	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* CPREV + CPREV*A ≈ env*tint*(1+Fresnel) — brightens metals without clipping chrome */
-	GX_SetTevDirect(GX_TEVSTAGE1);
-	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_APREV, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
-	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevKAlphaSel(GX_TEVSTAGE1, GX_TEV_KASEL_1);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
+	(void)mat;
 }
 
 static void setup_tev_fresnel_konst(const Material *mat)
@@ -700,11 +693,11 @@ static void draw_backdrop(const Mtx view)
 	const f32 y1 = 7.00f;
 	const f32 y_lo = 0.15f;
 	const f32 y_hi = 2.10f;
-	/* Cool greys sampled from the copper reference void */
-	GXColor top = { 30, 28, 34, 255 };
-	GXColor hi = { 40, 38, 46, 255 };
-	GXColor shelf = { 52, 50, 58, 255 };
-	GXColor bot = { LAB_FOG_R, LAB_FOG_G, LAB_FOG_B, 255 };
+	/* Flat charcoal void — match reference mid-grey (~44,43,48) */
+	GXColor top = { 42, 41, 46, 255 };
+	GXColor hi = { 44, 43, 48, 255 };
+	GXColor shelf = { 46, 45, 50, 255 };
+	GXColor bot = { 45, 44, 49, 255 };
 
 	guMtxIdentity(model);
 	guMtxConcat(view, model, modelview);
