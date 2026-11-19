@@ -680,6 +680,7 @@ typedef struct
 	unsigned used;
 	file_t   *file;     /* disc mode only */
 	qboolean bad;
+	unsigned version;   /* 1: raw blocks, 2: blocks may be LZ4 (see Mod_GCAnimFetchLZ4) */
 } gc_animpack_t;
 
 typedef struct
@@ -688,6 +689,7 @@ typedef struct
 	int      seq;
 	unsigned off, len;      /* in the pool, len rounded to 32 */
 	unsigned frame;
+	unsigned ret_len;       /* what Fetch reports for it (the raw block; len also covers an in-place decode margin) */
 } gc_animent_t;
 
 static gc_animpack_t gc_animpack[GC_ANIMPACK_MAX];
@@ -820,13 +822,14 @@ static gc_animpack_t *Mod_GCAnimPackOpen( const char *name )
 		return NULL;
 	}
 	if( FS_Read( pk->file, hdr, sizeof( hdr )) != (fs_offset_t)sizeof( hdr )
-		|| hdr[0] != GC_ANIMPACK_MAGIC || hdr[1] != 1 )
+		|| hdr[0] != GC_ANIMPACK_MAGIC || ( hdr[1] != 1 && hdr[1] != 2 ))
 	{
 		Con_Reportf( S_ERROR "Xash3D GameCube: animpack '%s' has a bad header\n", name );
 		FS_Close( pk->file );
 		pk->file = NULL;
 		return NULL;
 	}
+	pk->version = hdr[1];
 	pk->numseq = hdr[2];
 	pk->size = total = hdr[5];
 	pk->bad = false;
@@ -880,11 +883,90 @@ static qboolean Mod_GCAnimPackRead( gc_animpack_t *pk, unsigned off, byte *dst, 
 	return FS_Read( pk->file, dst, len ) > 0;
 }
 
+/* LZ4 block decoder. Written for an in-place decode (the compressed bytes sit at the end of the output buffer with
+ * (compressed >> 8) + 32 bytes of margin, so the write pointer never passes the read pointer): literals are copied
+ * forward a byte at a time, matches are copied forward (overlap is legal). Every length is checked. */
+static qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend )
+{
+	const byte *obase = op;
+
+	while( ip < iend )
+	{
+		unsigned token = *ip++, lit = token >> 4, ml, off, s;
+
+		if( lit == 15 )
+		{
+			do
+			{
+				if( ip >= iend )
+					return false;
+				s = *ip++;
+				lit += s;
+			} while( s == 255 );
+		}
+		if( lit > (unsigned)( oend - op ) || lit > (unsigned)( iend - ip ))
+			return false;
+		while( lit-- )
+			*op++ = *ip++;
+		if( ip >= iend )
+			break;
+		if( iend - ip < 2 )
+			return false;
+		off = ip[0] | ( ip[1] << 8 );
+		ip += 2;
+		ml = token & 15;
+		if( ml == 15 )
+		{
+			do
+			{
+				if( ip >= iend )
+					return false;
+				s = *ip++;
+				ml += s;
+			} while( s == 255 );
+		}
+		ml += 4;
+		if( !off || off > (unsigned)( op - obase ) || ml > (unsigned)( oend - op ))
+			return false;
+		{
+			const byte *m = op - off;
+
+			while( ml-- )
+				*op++ = *m++;
+		}
+	}
+	return op == oend;
+}
+
+/* Undo the pack builder's prefilter in place (build-gamecube-disc.py animpack_prefilter): per 256 big-endian 16-bit
+ * values the high bytes then the low bytes, and the values are running differences. One 512-byte stack segment at a time. */
+static void Mod_GCAnimUnpack( byte *buf, unsigned len )
+{
+	const unsigned n = len >> 1;
+	unsigned i, j, acc = 0;
+	byte seg[512];
+
+	for( i = 0; i < n; i += 256 )
+	{
+		const unsigned g = Q_min( 256u, n - i );
+		byte *dst = buf + 2u * i;
+
+		memcpy( seg, dst, 2u * g );
+		for( j = 0; j < g; j++ )
+		{
+			acc = ( acc + ( ( (unsigned)seg[j] << 8 ) | seg[g + j] )) & 0xFFFFu;
+			dst[2 * j] = (byte)( acc >> 8 );
+			dst[2 * j + 1] = (byte)acc;
+		}
+	}
+}
+
 static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 {
 	byte dirbuf[64] __attribute__((aligned( 32 )));
 	const unsigned frame = host.framecount;
-	unsigned diroff, off, size, need, start, tries = 0, wraps = 0;
+	unsigned diroff, off, size, need, start, tries = 0, wraps = 0, raw_len = 0, comp_len = 0;
+	qboolean lz4 = false;
 	int i, slot = -1, oldest = -1;
 
 	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
@@ -892,7 +974,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( gc_animent[i].pack == pk && gc_animent[i].seq == seq )
 		{
 			gc_animent[i].frame = frame;
-			gc_animpack_fetch_len = gc_animent[i].len;
+			gc_animpack_fetch_len = gc_animent[i].ret_len;
 			return gc_animpool + gc_animent[i].off;
 		}
 	}
@@ -905,8 +987,24 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		return NULL;
 	off = ((unsigned *)( dirbuf + ( diroff & 31u )))[0];
 	size = ((unsigned *)( dirbuf + ( diroff & 31u )))[1];
+	if( pk->version >= 2 && ( size & 0x80000000u ))
+	{
+		/* An LZ4 block: [u32 raw length][LZ4 data of the prefiltered block]. It is read to the END of its pool span
+		 * (span = raw + margin) and decoded in place from there. */
+		byte lenbuf[32] __attribute__((aligned( 32 )));
+
+		comp_len = size & 0x7FFFFFFFu;
+		if( !off || ( off & 31u ) || comp_len < 8 || off + comp_len > pk->size
+			|| !Mod_GCAnimPackRead( pk, off, lenbuf, 32 ))
+			return NULL;
+		raw_len = *(unsigned *)lenbuf;
+		if( !raw_len || raw_len > gc_animpool_size / 2u )
+			return NULL;
+		lz4 = true;
+		size = raw_len + (( comp_len + 31u ) >> 8 ) + 64u + (( comp_len + 31u ) & ~31u ) - comp_len;
+	}
 	need = ( size + 31u ) & ~31u;
-	if( !off || !size || ( off & 31u ) || off + size > pk->size || need > gc_animpool_size )
+	if( !off || !size || ( off & 31u ) || off + ( lz4 ? comp_len : size ) > pk->size || need > gc_animpool_size )
 		return NULL;
 
 	/* Place it at the cursor, stepping over blocks handed out this frame. */
@@ -952,15 +1050,35 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	}
 	if( slot < 0 )
 		slot = oldest;
-	if( slot < 0 || !Mod_GCAnimPackRead( pk, off, gc_animpool + start, need ))
+	if( slot < 0 )
+		return NULL;
+	if( lz4 )
+	{
+		const unsigned cn = ( comp_len + 31u ) & ~31u;
+		byte *buf = gc_animpool + start, *cdst = buf + need - cn;
+
+		if( cn > need || !Mod_GCAnimPackRead( pk, off, cdst, cn )
+			|| !Mod_GCLZ4Decode( cdst + 4, cdst + comp_len, buf, buf + raw_len ))
+		{
+			static int lz4_fail_logs;
+
+			if( lz4_fail_logs++ < 4 )
+				Con_Reportf( S_ERROR "Xash3D GameCube: animpack LZ4 block of sequence %d failed (raw %u, packed %u)\n", seq, raw_len, comp_len );
+			return NULL;
+		}
+		Mod_GCAnimUnpack( buf, raw_len );
+		memset( buf + raw_len, 0, (( raw_len + 31u ) & ~31u ) - raw_len );
+	}
+	else if( !Mod_GCAnimPackRead( pk, off, gc_animpool + start, need ))
 		return NULL;
 	gc_animent[slot].pack = pk;
 	gc_animent[slot].seq = seq;
 	gc_animent[slot].off = start;
 	gc_animent[slot].len = need;
 	gc_animent[slot].frame = frame;
+	gc_animent[slot].ret_len = lz4 ? ( raw_len + 31u ) & ~31u : need;
 	gc_animpool_cursor = start + need;
-	gc_animpack_fetch_len = need;
+	gc_animpack_fetch_len = gc_animent[slot].ret_len;
 	return gc_animpool + start;
 }
 
