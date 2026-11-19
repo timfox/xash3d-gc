@@ -306,12 +306,23 @@ def _floats(s: str, n: int):
 def static_props(ents: list[dict]) -> list[dict]:
 	"""The entities SV_GCTryStaticProp consumes, with the keys it reads."""
 	out = []
+	named_ord = -1
 	for ent_index, e in enumerate(ents):
-		if e.get("classname") not in PROP_CLASSES or e.get("targetname"):
+		if e.get("classname") not in PROP_CLASSES:
 			continue
 		model = e.get("model", "").replace("\\", "/")
 		if not model.lower().endswith(".mdl"):
 			continue
+		# Named props keep their edict (Use, env_render, killtarget) and the
+		# pack draws them while that edict is drawable.  The ordinal counts
+		# every named prop in lump order, as the server counts its edicts
+		# (SV_GCIndexNamedProps, sv_game.c).
+		ordinal = 0
+		if e.get("targetname"):
+			named_ord += 1
+			ordinal = named_ord + 1
+			if ordinal > 255:
+				continue
 		angles = _floats(e.get("angles", "0 0 0"), 3)
 		if "angle" in e and "angles" not in e:
 			a = _floats(e["angle"], 1)[0]
@@ -323,8 +334,8 @@ def static_props(ents: list[dict]) -> list[dict]:
 				angles[1] = a
 		rendermode = int(_floats(e.get("rendermode", "0"), 1)[0])
 		renderamt = int(_floats(e.get("renderamt", "255"), 1)[0])
-		if rendermode != 0 and renderamt <= 0:
-			continue	# invisible in the retail game too
+		if rendermode != 0 and renderamt <= 0 and not ordinal:
+			continue	# invisible in the retail game too (env_render may show a named one later)
 		out.append({
 			"model": model.lower(),
 			"origin": _floats(e.get("origin", "0 0 0"), 3),
@@ -336,13 +347,15 @@ def static_props(ents: list[dict]) -> list[dict]:
 			"sequence": int(_floats(e.get("sequence", "0"), 1)[0]),
 			"skin": int(_floats(e.get("skin", "0"), 1)[0]),
 			"body": int(_floats(e.get("body", "0"), 1)[0]),
-			"additive": rendermode == 5,
+			# A named prop's rendermode 5 without an amount is its hidden state.
+			"additive": rendermode == 5 and not ordinal,
 			# env_model spawnflag 2: the game drops the model onto the floor
 			# at spawn (charlie's hedgehogs and wire sit 16-36 units up).
 			"drop": bool(int(_floats(e.get("spawnflags", "0"), 1)[0]) & 2),
 			# Lump position: the game spawns entities in this order, and a
 			# prop dropping to the floor only meets what already spawned.
 			"ent": ent_index,
+			"named": ordinal,
 		})
 	return out
 
@@ -816,7 +829,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		light_blob += bytes(base + [0, 0, 0] + direct + [0, 0, 0])
 		inst_blob += struct.pack(
 			">HH3h3h3h3hI",
-			mi, min(65535, model_recs[mi][2]),
+			mi | (prop.get("named", 0) << 8), min(65535, model_recs[mi][2]),
 			*[_clamp16(math.floor(v)) for v in mins], *[_clamp16(math.ceil(v)) for v in maxs],
 			*[_clamp16(v) for v in prop["origin"]],
 			a16(pitch), a16(yaw), a16(roll),

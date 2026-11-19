@@ -6290,6 +6290,77 @@ static int SV_GCStaticPropModel( const char *path )
 	return i;
 }
 
+/* Named map props drawn from the prop pack (charlie's 88s, mortars, radio,
+ * pipes: the game's cap of six map models never loaded most of them).  The
+ * pack instance carries the ordinal of its entity: the count of named
+ * env_model/dod_object with a .mdl, in lump order, which is the order the
+ * edicts spawn in (scripts/bake_props_goldsrc.py static_props).  The edict
+ * stays for the game's logic and the pack draws the prop while the edict is
+ * drawable, so env_render shows and hides the good/destroyed pairs as in
+ * retail.  A remote client has no edicts and draws every named prop until
+ * the visibility bits are sent to it. */
+#define GC_NAMED_PROPS_MAX 255
+static short gc_named_prop_edict[GC_NAMED_PROPS_MAX];
+static int gc_named_prop_serial[GC_NAMED_PROPS_MAX];
+static int gc_named_prop_n;
+
+static void SV_GCIndexNamedProps( void )
+{
+	int e;
+
+	gc_named_prop_n = 0;
+	if( !gc_static_prop_pack )
+		return;
+	for( e = 1; e < svgame.numEntities && gc_named_prop_n < GC_NAMED_PROPS_MAX; e++ )
+	{
+		edict_t *ed = SV_EdictNum( e );
+		const char *cls, *mdl;
+		size_t l;
+
+		if( !SV_IsValidEdict( ed ) || !ed->v.targetname || !ed->v.model )
+			continue;
+		cls = SV_ClassName( ed );
+		if( !SV_GCStaticPropClass( cls ))
+			continue;
+		mdl = SV_GetString( ed->v.model );
+		l = mdl ? Q_strlen( mdl ) : 0;
+		if( l < 4 || Q_stricmp( mdl + l - 4, ".mdl" ))
+			continue;
+		gc_named_prop_serial[gc_named_prop_n] = ed->serialnumber;
+		gc_named_prop_edict[gc_named_prop_n++] = (short)e;
+	}
+	Con_Reportf( "Xash3D GameCube: named props %d indexed for the prop pack\n", gc_named_prop_n );
+}
+
+int SV_GCNamedPropVisible( int ord )
+{
+	edict_t *ed;
+
+	if( sv.state != ss_active || ord < 0 || ord >= gc_named_prop_n )
+		return 1;
+	ed = SV_EdictNum( gc_named_prop_edict[ord] );
+	/* Removed by the game (killtarget), or its slot was given to another entity. */
+	if( !SV_IsValidEdict( ed ) || ed->free || ed->serialnumber != gc_named_prop_serial[ord] )
+		return 0;
+	if( FBitSet( ed->v.effects, EF_NODRAW ))
+		return 0;
+	if( ed->v.rendermode != kRenderNormal && ed->v.renderamt <= 0.0f )
+		return 0;
+	return 1;
+}
+
+qboolean SV_GCEdictIsPackNamed( const edict_t *ent )
+{
+	const int e = NUM_FOR_EDICT( ent );
+
+	for( int i = 0; i < gc_named_prop_n; i++ )
+	{
+		if( gc_named_prop_edict[i] == e )
+			return ent->serialnumber == gc_named_prop_serial[i];
+	}
+	return false;
+}
+
 /* If the entity block at *pfile (just after its '{') is an unnamed env_model
  * or dod_object, consume it into the static prop list and return true.
  * Otherwise leave *pfile where it was. */
@@ -7190,6 +7261,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 		Con_Reportf( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 		Con_Reportf( "Xash3D GameCube: static props %d drawn from %d models, %d without a model, %d in the prop pack; edicts in use %d\n",
 			gc_num_static_props, gc_static_prop_nmodels, gc_static_prop_deferred, gc_static_prop_packed, svgame.numEntities );
+		SV_GCIndexNamedProps();
 		SV_GCSignonStaticProps();
 		SYS_Report( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 #endif

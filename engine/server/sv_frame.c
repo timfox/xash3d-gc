@@ -269,6 +269,10 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 	svgame.dllFuncs.pfnSetupVisibility( pViewEnt, pClient, &clientpvs, &clientphs );
 	if( !clientpvs ) fullvis = true;
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	GC_StaticBrushes( sv.name, NULL, NULL );
+#endif
+
 	// g-cont: of course we can send world but not want to do it :-)
 	for( int e = 1; e < svgame.numEntities; e++ )
 	{
@@ -295,6 +299,16 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 			if( FBitSet( cl->flags, FCL_HLTV_PROXY ))
 				continue;
 		}
+
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+		/* Drawn with the world and collided from the client's own list:
+		 * never sent.  The edict stays for the server's traces.  The
+		 * runtime checks repeat the bake rule in case the game changed it. */
+		if( !player && ent->v.modelindex > 1 && GC_StaticBrushModel( ent->v.modelindex - 1 )
+			&& ent->v.rendermode == kRenderNormal && !ent->v.targetname
+			&& VectorIsNull( ent->v.origin ) && !FBitSet( ent->v.effects, EF_NODRAW ))
+			continue;
+#endif
 
 		if( FBitSet( ent->v.effects, EF_REQUEST_PHS ))
 			pset = clientphs;
