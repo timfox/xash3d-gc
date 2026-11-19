@@ -297,6 +297,11 @@ void GC_MemSample( const char *stage )
 	 * From here on, arena carves must avoid the world's arrays. */
 	if( !Q_strcmp( stage, "bsp-buffer-release" ) || !Q_strcmp( stage, "entity spawn" ) || !Q_strcmp( stage, "pre-SV_Init" ))
 		GC_HeapCensusReport( stage );
+	if( !Q_strcmp( stage, "entity spawn" ))
+	{
+		extern void SV_GCParityReport( void );
+		SV_GCParityReport();
+	}
 	if( !Q_strcmp( stage, "map active" ))
 	{
 		extern void Mod_GCMoveWorldEntitiesToArena( void );

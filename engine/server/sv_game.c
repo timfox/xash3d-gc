@@ -6124,6 +6124,39 @@ static qboolean SV_GCParityLight( const edict_t *ent, const char *classname )
 		&& ent && ent->v.targetname;
 }
 
+/* Per-class tally of the parity gate (kept / skipped), printed once at the "entity spawn" stage. */
+static struct { char name[32]; int kept, skipped; } gc_parity_tally[32];
+
+static void SV_GCParityTally( const char *classname, qboolean skip )
+{
+	int i;
+
+	for( i = 0; i < ARRAYSIZE( gc_parity_tally ) && gc_parity_tally[i].name[0]; i++ )
+		if( !Q_strcmp( gc_parity_tally[i].name, classname ))
+			break;
+	if( i >= ARRAYSIZE( gc_parity_tally ))
+		return;
+	if( !gc_parity_tally[i].name[0] )
+		Q_strncpy( gc_parity_tally[i].name, classname, sizeof( gc_parity_tally[i].name ));
+	if( skip )
+		gc_parity_tally[i].skipped++;
+	else
+		gc_parity_tally[i].kept++;
+}
+
+void SV_GCParityReport( void )
+{
+	char line[512];
+	int i, n = 0;
+
+	for( i = 0; i < ARRAYSIZE( gc_parity_tally ) && gc_parity_tally[i].name[0]; i++ )
+		n += Q_snprintf( line + n, sizeof( line ) - n, " %s=%d/%d", gc_parity_tally[i].name,
+			gc_parity_tally[i].kept, gc_parity_tally[i].skipped );
+	if( n > 0 )
+		Con_Reportf( "Xash3D GameCube: DoD parity tally (kept/skipped):%s\n", line );
+	memset( gc_parity_tally, 0, sizeof( gc_parity_tally ));
+}
+
 static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *classname )
 {
 	if( COM_StringEmpty( classname ))
@@ -6149,6 +6182,7 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 		}
 
 		if( skip ) skipped++; else kept++;
+		SV_GCParityTally( classname, skip );
 		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
 			Con_Reportf( "Xash3D GameCube: DoD parity entity %s %s (kept=%d skipped=%d slab=%zu heap=%s edicts=%d)\n",
 				classname, skip ? "skipped" : "kept", kept, skipped, gc_ent_priv_slab_used,
