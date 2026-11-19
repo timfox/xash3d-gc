@@ -126,6 +126,7 @@ void GC_AramCopy( unsigned int aram, void *buf, unsigned int len, qboolean write
 void GC_PrefetchMenuIdle( void );
 /* Reuse the session-owned ARAM window without allocating another block. */
 void GC_PrefetchResetForMenu( void );
+void GC_PrefetchReleaseForMatch( void );
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries );
 qboolean GC_PrefetchRead( const char *path, void *buffer, unsigned int size );
 qboolean GC_PrefetchContains( const char *path, unsigned int size );
@@ -233,6 +234,7 @@ static inline void GC_ClearMapLoadMemoryOpt( void ) { }
 static inline qboolean GC_MapLoadMemoryOpt( void ) { return false; }
 static inline void GC_PrefetchMenuIdle( void ) { }
 static inline void GC_PrefetchResetForMenu( void ) { }
+static inline void GC_PrefetchReleaseForMatch( void ) { }
 static inline void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )
 {
 	if( used ) *used = 0; if( capacity ) *capacity = 0; if( entries ) *entries = 0;

@@ -5804,6 +5804,42 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 	Mod_GCWorldPackInitStub();
 	start = Sys_DoubleTime( );
 	size = FS_FileLength( f );
+#if XASH_DODGC_NETWORK
+	/* DoD: every measured map pack is 1.4-3.2 MiB, so a fixed 6 MiB ring held 2.8-4.6 MiB of ARAM the
+	 * match never touched, and the two 3.55 MiB player animation packs did not fit beside it. The ring
+	 * is this map's pack plus margin for the per-tag duplicates (full 6 MiB when that does not fit).
+	 * It is recomputed at every pack open: a later, larger pack must not wrap a smaller ring (the
+	 * wrap would overwrite textures of the same pack that gc_wt.aram[] still points at), so the ring is
+	 * released and reserved again at the larger size. The previous world's textures are already gone
+	 * here (the pack state was reset above) and the store entries are cleared with it. */
+	if( size > 0 && !Sys_CheckParm( "-gccapfacessmoke" ))
+	{
+		const uint32_t margin = Q_max( 512u * 1024u, (uint32_t)size / 8u );
+		const uint64_t want64 = (( (uint64_t)size + margin + 32767u ) & ~(uint64_t)32767u );
+		const uint32_t want = want64 < GC_WT_ARAM_BYTES ? (uint32_t)want64 : GC_WT_ARAM_BYTES;
+
+		if( gc_wt_store_base && gc_wt_store_bytes < want )
+		{
+			if( GC_AramFree( gc_wt_store_base ))
+			{
+				Con_Reportf( "Xash3D GameCube: world texture store ring %s too small for pack %s, reserving %s\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( want ));
+				gc_wt_store_base = 0;
+				gc_wt_store_head = gc_wt_store_next = 0;
+				memset( gc_wt_store, 0, sizeof( gc_wt_store ));
+			}
+			else
+				Con_Reportf( S_WARN "Xash3D GameCube: world texture store ring %s too small for pack %s and could not be released\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ));
+		}
+		if( !gc_wt_store_base )
+		{
+			gc_wt_store_bytes = want;
+			Con_Reportf( "Xash3D GameCube: world texture store ring %s for pack %s (full ring %s)\n",
+				Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( GC_WT_ARAM_BYTES ));
+		}
+	}
+#endif
 	if( !gc_wt_store_base )
 	{
 		/* Size the ring to this pack when the map never changelevels into a
@@ -5827,6 +5863,12 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 		if( size_to_pack )
 			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
 		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		/* A reserve that fails at the right-sized ring retries at the full ring before giving up. */
+		if( !gc_wt_store_base && gc_wt_store_bytes < GC_WT_ARAM_BYTES )
+		{
+			gc_wt_store_bytes = GC_WT_ARAM_BYTES;
+			gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		}
 	}
 	if( !gc_wt_store_base )
 	{
@@ -9537,6 +9579,53 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 			mod->texinfo = (mtexinfo_t *)pinned;
 			if( texinfo_heap_owned )
 				gc_texinfo_malloc_block = pinned;
+		}
+	}
+
+	/* The faces lump may still live inside the staging buffer being released (dod_flash: 9801 faces,
+	 * clamped slot, so they stay a BSP alias instead of a copy). Clearing the pointer would leave the
+	 * surface load with no faces ("missing BSP faces ... before surface load"), and the tail-copy
+	 * restore below only exists when a copy was made. Move them out first; when no room can be found,
+	 * keep the staging buffer for the surface load instead of releasing it. */
+	{
+		const qboolean q2 = bmod->version == QBSP2_VERSION;
+		const void *faces = q2 ? (const void *)bmod->surfaces32 : (const void *)bmod->surfaces;
+
+		/* CapFaces lean / WorldDL never build the live surfaces, so nothing reads these faces afterwards. */
+		if( faces && !gc_capfaces_lean_surfaces && Mod_GCPointerInBuffer( faces, mod_base, bufferlen ))
+		{
+			const size_t bytes = bmod->numsurfaces * ( q2 ? sizeof( *bmod->surfaces32 ) : sizeof( *bmod->surfaces ));
+			void *copy = Mod_GCWorldArraySpillAlloc( bytes, "faces" );
+			qboolean from_spill = copy != NULL;
+
+			if( !copy )
+				copy = Mod_GCPreSurfaceTailAlloc( GC_MapLoadBufferTailHighwater(), bytes );
+			if( !copy )
+				copy = Mem_TryMalloc( mod->mempool, bytes );
+			if( !copy )
+			{
+				gc_retain_bsp_source_buffer = true;
+				gc_force_bsp_image_release = false;
+				gc_bsp_scratch_base = mod_base;
+				gc_bsp_scratch_size = GC_IsMapLoadBuffer( mod_base ) && GC_MapLoadBufferCapacity() > bufferlen
+					? GC_MapLoadBufferCapacity() : bufferlen;
+				Con_Reportf( S_WARN "Xash3D GameCube: faces (%s) still live in BSP staging and no copy fits; retaining staging for surfaces\n",
+					Q_memprint( bytes ));
+				return;
+			}
+			memcpy( copy, faces, bytes );
+			if( q2 )
+				bmod->surfaces32 = copy;
+			else
+			{
+				bmod->surfaces = copy;
+				if( from_spill )
+				{
+					gc_faces_tail_copy = copy;
+					gc_faces_source_alias = false;
+				}
+			}
+			Con_Reportf( "Xash3D GameCube: faces %s moved out of BSP staging before release\n", Q_memprint( bytes ));
 		}
 	}
 

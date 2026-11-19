@@ -3122,6 +3122,9 @@ void Mod_GCReleaseStudioArena( void )
 	gc_seqgroup_slot[0].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	gc_seqgroup_slot[1].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	Con_Reportf( "Xash3D GameCube: studio arena released models=%d bytes=%u\n", freed, (uint)before );
+#if XASH_DODGC_NETWORK
+	GC_PrefetchReleaseForMatch();
+#endif
 	GC_AramReport( "studio-release" );
 }
 
