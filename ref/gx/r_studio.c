@@ -4383,9 +4383,9 @@ capfaces_vm_pose:
  * are read up front; each skin's texels go from the file straight into the
  * studio skin window (R_GCBakedGskSkin). gc_gsk_entry wants the whole file
  * in memory, so the table entries are read here with the same layout
- * (GxBake docs/packing.md: 16-byte header, 32-byte entries). */
+ * (GxBake docs/packing.md: 16-byte header, 36-byte entries). */
 #define R_GX_GSK_HEADER	16
-#define R_GX_GSK_ENTRY	32
+#define R_GX_GSK_ENTRY	36	/* GxBake squeeze.GCSK_ENTRY: 28 bytes + 8 zero */
 #define R_GX_GSK_MAX	32	/* HL1 models use fewer; a bigger pack falls back */
 static struct
 {
@@ -4458,7 +4458,14 @@ static qboolean R_GXGskFind( int skin, gc_gsk_entry_t *e, unsigned *texel_off, u
 		lo = R_GXGskRd32( p + 20 ); lb = R_GXGskRd32( p + 24 );
 		if( !tb || (fs_offset_t)to + tb > r_gx_gsk.filesize
 			|| ( lb && (fs_offset_t)lo + lb > r_gx_gsk.filesize ))
+		{
+			static int gsk_range_logs;
+
+			if( gsk_range_logs++ < 4 )
+				gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: gsk skin %d out of range (tex %u+%u tlut %u+%u file %u)\n",
+					skin, to, tb, lo, lb, (unsigned)r_gx_gsk.filesize );
 			return false;
+		}
 		memset( e, 0, sizeof( *e ));
 		e->skin = (uint16_t)skin;
 		e->fmt = p[2];
@@ -4533,6 +4540,21 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 				ptexture->index = num;
 				return;
 			}
+			{
+				static int gsk_reject_logs;
+
+				if( gsk_reject_logs++ < 8 )
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: gsk skin %s refused fmt=%d %dx%d tex=%u tlut=%d/%u, 8-bit path\n",
+						texname, e.fmt, e.width, e.height, e.texel_bytes, e.tlut_entries, e.tlut_bytes );
+			}
+		}
+		else
+		{
+			static int gsk_miss_logs;
+
+			if( gsk_miss_logs++ < 4 )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gsk pack has no skin %d for %s\n",
+					(int)( ptexture - first ), ptexture->name );
 		}
 	}
 #endif

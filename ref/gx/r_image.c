@@ -1761,8 +1761,18 @@ int R_GCBakedGskSkin( const char *name, file_t *f, const gc_gsk_entry_t *e, unsi
 	default:
 		return 0;
 	}
-	if( e->texel_bytes < GX_GetTexBufferSize( e->width, e->height, e->fmt, GX_FALSE, 0 ))
-		return 0;
+	/* Tiled size by hand: libogc's GX_GetTexBufferSize has no case for the
+	 * CI formats and sizes them as 32 bytes a texel, which refused every CI
+	 * skin. 4 bpp formats tile 8x8, 8 bpp 8x4, 16 bpp 4x4; a tile is 32 bytes. */
+	{
+		const qboolean bpp4 = ( e->fmt == GX_TF_I4 || e->fmt == GX_TF_CI4 || e->fmt == GX_TF_CMPR );
+		const qboolean bpp8 = ( e->fmt == GX_TF_I8 || e->fmt == GX_TF_IA4 || e->fmt == GX_TF_CI8 );
+		const uint tw = ( bpp4 || bpp8 ) ? 8 : 4, th = bpp4 ? 8 : 4;
+		const uint need = (( e->width + tw - 1 ) / tw ) * (( e->height + th - 1 ) / th ) * 32u;
+
+		if( e->texel_bytes < need )
+			return 0;
+	}
 	if( ci && ( !e->tlut_bytes || e->tlut_fmt > GX_TL_RGB5A3 || e->tlut_entries < 16
 		|| e->tlut_entries > 256 || ( e->tlut_entries & 15 ) || e->tlut_bytes < e->tlut_entries * 2u ))
 		return 0;
@@ -1826,7 +1836,7 @@ int R_GCBakedGskSkin( const char *name, file_t *f, const gc_gsk_entry_t *e, unsi
 	{
 		static int gsk_logged;
 
-		if( gsk_logged++ < 8 )
+		if( gsk_logged++ < 16 )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: gsk skin %s %dx%d fmt=%d tlut=%d (%s)\n",
 				name, e->width, e->height, e->fmt, ci ? e->tlut_entries : 0, Q_memprint( bytes ));
 	}

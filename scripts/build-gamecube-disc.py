@@ -747,6 +747,40 @@ def copy_tree_if_present(source_root: Path, output_root: Path, relative: str) ->
 			shutil.copy2(child, destination)
 
 
+def stage_gxbake_packs(roots: "list[Path]", output: Path) -> int:
+	"""GxBake packs next to what is staged: gc_studio/<model>.gsk skin packs
+	(`gxbake squeeze --emit`) for models on the disc, and sound/**/<name>.dsp
+	DSP ADPCM twins for staged .wav files. Roots are the data tree and any
+	--gxbake-packs folders, later roots winning. Returns files staged."""
+	staged = 0
+	model_stems = {p.stem.lower() for p in output.rglob("*.mdl")}
+	for root in roots:
+		if not root or not root.is_dir():
+			continue
+		studio = root / "gc_studio"
+		if studio.is_dir():
+			for gsk in sorted(studio.glob("*.gsk")):
+				if gsk.stem.lower() not in model_stems:
+					continue
+				dest = output / "gc_studio" / gsk.name.lower()
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				shutil.copy2(gsk, dest)
+				staged += 1
+		sound = root / "sound"
+		if sound.is_dir():
+			for dsp in sorted(sound.rglob("*.dsp")):
+				rel = dsp.relative_to(root)
+				if not ( output / rel.with_suffix(".wav") ).is_file():
+					continue
+				dest = output / rel
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				shutil.copy2(dsp, dest)
+				staged += 1
+	if staged:
+		print(f"GxBake packs: staged {staged} .gsk/.dsp file(s)")
+	return staged
+
+
 def copy_alias_if_present(output_root: Path, source_relative: str, alias_relative: str) -> None:
 	source = output_root / source_relative
 	if not source.is_file():
@@ -4586,6 +4620,14 @@ def main() -> None:
 		help="do not auto-stage sibling gamedirs next to --data (dod, gearbox, …)",
 	)
 	parser.add_argument("--extras", type=Path, default=gc_out / "valve" / "extras.pk3")
+	parser.add_argument(
+		"--gxbake-packs",
+		type=Path,
+		action="append",
+		default=[Path(p) for p in os.environ.get("XASH_GC_GXBAKE_PACKS", "").split(os.pathsep) if p],
+		help="folder of GxBake output (gc_studio/*.gsk, sound/**/*.dsp) to stage beside the data "
+		"(repeatable; also XASH_GC_GXBAKE_PACKS, os.pathsep-separated)",
+	)
 	parser.add_argument("--output", type=Path, default=Path("OUT/xash3d-gc.iso"))
 	parser.add_argument(
 		"--smoke-map",
@@ -4832,6 +4874,7 @@ def main() -> None:
 				tas=args.probe_tas,
 				dumpframes=args.probe_dumpframes,
 			)
+			stage_gxbake_packs([args.data, *args.gxbake_packs], smoke_data)
 			validation_errors = validate_smoke_assets(smoke_data, args.smoke_map)
 			if validation_errors:
 				print("Smoke asset validation failed:", file=sys.stderr)
@@ -4912,6 +4955,7 @@ def main() -> None:
 				print("Warning: GameCube retail menu background bake failed.", file=sys.stderr)
 			if not stage_gc_loading_assets(args.data, staged_data):
 				print("Warning: GameCube loading plaque bake failed.", file=sys.stderr)
+			stage_gxbake_packs([args.data, *args.gxbake_packs], staged_data)
 			if primary_gamedir == "valve":
 				validation_errors = validate_staged_retail_assets(staged_data)
 				if validation_errors:

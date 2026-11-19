@@ -1901,7 +1901,11 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 			|| r_gx_native_bound_pixels != img->pixels[0] )
 		{
 			static u32 gsk_tlut_next;
-			const u8 wrap = Q_stristr( img->name, "sprites/" ) ? GX_CLAMP : GX_REPEAT;
+			/* Same as the RGB565 path: view models and sprites clamp. GX only
+			 * repeats power-of-two sizes, so other sizes clamp too. */
+			const qboolean pow2 = !( img->width & ( img->width - 1 )) && !( img->height & ( img->height - 1 ));
+			const u8 wrap = ( !pow2 || R_GXNativeFullRes( img ) || Q_stristr( img->name, "sprites/" ))
+				? GX_CLAMP : GX_REPEAT;
 			gc_gsk_entry_t e;
 			GXTlutObj tlut;
 

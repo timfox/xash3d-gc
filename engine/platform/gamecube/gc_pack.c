@@ -144,7 +144,10 @@ uint32_t gc_dsp_decode( const gc_dsp_t *dsp, uint32_t first, uint32_t count, gc_
 /* --- GCSK --------------------------------------------------------------- */
 
 #define GSK_HEADER 16
-#define GSK_ENTRY 32
+/* 36, not 32: GxBake writes each entry as >HBBHHHHIIII8x (squeeze.GCSK_ENTRY,
+ * docs/packing.md "... tlut bytes; 8 x 0"). With 32 every skin after the first
+ * was read from the wrong place. Fixed here for the port; GxBake's copy too. */
+#define GSK_ENTRY 36
 
 int gc_gsk_parse( const uint8_t *blob, size_t len )
 {
