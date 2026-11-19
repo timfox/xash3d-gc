@@ -157,7 +157,12 @@ void SV_GCSizePacketEntities( void )
 	{
 		const size_t gap = GC_MapArenaLargestGap();
 		const size_t each = sizeof( entity_state_t ) * 5;
-		int count = gap > GC_DOD_ARENA_KEEP ? (int)(( gap - GC_DOD_ARENA_KEEP ) / each ) : 0;
+		extern size_t Mod_GCWorldEntityTextHeapBytes( void );
+		/* Leave room for the entity text to move off the heap at MAP_READY: with the ring at
+		 * 256 the gap was 161 KB and the 180 KB text stayed on the heap (charlie, ceres). */
+		const size_t text = Mod_GCWorldEntityTextHeapBytes();
+		const size_t need = GC_DOD_ARENA_KEEP + ( text + 1023u ) / 1024u * 1024u;
+		int count = gap > need ? (int)(( gap - need ) / each ) : 0;
 
 		count = Q_min( count, visible ) & ~7;
 		if( count > 128 )
@@ -176,9 +181,9 @@ void SV_GCSizePacketEntities( void )
 				sv_gc_visible_cap = count;
 				sv_gc_local_ring = block + count * 3;
 				sv_gc_local_ring_entries = count * 2;
-				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s\n",
+				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s entity_text_reserved=%s\n",
 					count < visible ? "Warning: REDUCED " : "", sv.name, count, visible,
-					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()));
+					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), Q_memprint( text ));
 				return;
 			}
 		}

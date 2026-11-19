@@ -8711,6 +8711,20 @@ free_submodels:
  */
 void Mod_GCWorldCanaryCheck( const char *when );
 
+/* Bytes the world's entity text will need in the map arena at MAP_READY
+ * (Mod_GCMoveWorldEntitiesToArena), or 0 when it is not a movable heap block.
+ * The DoD packet ring is sized with this left over, or the ring takes the gap
+ * and the text stays on the heap (180 KB on dod_charlie). */
+size_t Mod_GCWorldEntityTextHeapBytes( void )
+{
+	model_t *mod = worldmodel;
+
+	if( !mod || mod->type != mod_brush || !mod->entities || !gc_entities_malloc_block
+		|| mod->entities != (char *)gc_entities_malloc_block )
+		return 0;
+	return Q_strlen( mod->entities ) + 1;
+}
+
 void Mod_GCMoveWorldEntitiesToArena( void )
 {
 	model_t *mod = worldmodel;
