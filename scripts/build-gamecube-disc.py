@@ -2981,8 +2981,8 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			# full resolution. GC_VM_SKIN_EDGE=256 keeps them at 256 (one skin is 64 KiB of palette indices; the
 			# companion is read through the studio scratch, so raise GC_VM_COMPANION_KB with it).
 			if stem.startswith("v_") and stem not in prop_tex64:
-				edge = int(os.environ.get("GC_VM_SKIN_EDGE", "") or edge)
-				companion_cap = int(os.environ.get("GC_VM_COMPANION_KB", "") or 96) * 1024
+				edge = int(os.environ.get("GC_VM_SKIN_EDGE", "") or 256)
+				companion_cap = int(os.environ.get("GC_VM_COMPANION_KB", "") or 400) * 1024
 			tex_payload = lean_studio_tex_companion_bytes(src, max_edge=edge)
 			if tex_payload and len(tex_payload) > companion_cap:
 				tex_payload = lean_studio_tex_companion_bytes(src, max_edge=64)
