@@ -300,16 +300,78 @@ def gen_ui_panels() -> None:
     print("wrote HUD panels")
 
 
+def gen_bump_detail_spec() -> None:
+    """Extras used by Flipper feature paths (IndTex / mod2x / spec mask)."""
+    n = 128
+    bump = np.zeros((n, n, 4), dtype=np.uint8)
+    for y in range(n):
+        for x in range(n):
+            fx = x / n * 2 * math.pi
+            fy = y / n * 2 * math.pi
+            hx = 0.35 * math.sin(fx * 4) + 0.2 * math.sin(fx * 9 + fy * 3)
+            hy = 0.35 * math.sin(fy * 4) + 0.2 * math.sin(fy * 7 + fx * 2)
+            bump[y, x, 0] = int(128 + max(-1.0, min(1.0, hx)) * 100)
+            bump[y, x, 1] = int(128 + max(-1.0, min(1.0, hy)) * 100)
+            bump[y, x, 2] = 200
+            bump[y, x, 3] = 255
+    Image.fromarray(bump, "RGBA").save(TEX / "bump.png")
+
+    rng = np.random.default_rng(1)
+    noise = rng.integers(90, 165, (128, 128))
+    det = np.zeros((128, 128, 4), dtype=np.uint8)
+    det[:, :, 0] = det[:, :, 1] = det[:, :, 2] = noise.astype(np.uint8)
+    det[:, :, 3] = 255
+    Image.fromarray(det, "RGBA").save(TEX / "detail.png")
+
+    spec = np.zeros((256, 256, 4), dtype=np.uint8)
+    for y in range(256):
+        for x in range(256):
+            sx = (x - 128) / 128.0
+            sy = (128 - y) / 128.0
+            if sx * sx + sy * sy > 1.0:
+                continue
+            sun = math.hypot(sx - 0.35, sy - 0.40)
+            w = max(0.0, 1.0 - sun / 0.35) ** 2
+            v = int(255 * w)
+            spec[y, x] = (v, v, v, 255)
+    Image.fromarray(spec, "RGBA").save(TEX / "specmask.png")
+    print("wrote bump/detail/specmask")
+
+
 def main() -> None:
     gen_checker()
     gen_shadow()
-    gen_envmap()
+    # Keep reference-baked matcap/HUD when present (bake_from_reference.py).
+    if not (TEX / "envmap_sharp.png").is_file():
+        gen_envmap()
+    else:
+        print("keep existing envmap_sharp / envmap_r25")
     gen_logo()
     gen_banner()
     gen_wordmark()
     gen_font_atlas()
     gen_glyphs()
-    gen_ui_panels()
+    if not (TEX / "hud_tl.png").is_file() or (TEX / "hud_tl.png").stat().st_size < 1000:
+        gen_ui_panels()
+    else:
+        print("keep existing HUD panels")
+    gen_bump_detail_spec()
+    # SCF stubs for gxtexconv
+    for name, src in [
+        ("envmap", "envmap_r25.png"),
+        ("checker", "checker.png"),
+        ("shadow", "shadow.png"),
+        ("hud_tl", "hud_tl.png"),
+        ("hud_fps", "hud_fps.png"),
+        ("hud_bottom", "hud_bottom.png"),
+        ("font", "font.png"),
+        ("bump", "bump.png"),
+        ("detail", "detail.png"),
+        ("specmask", "specmask.png"),
+    ]:
+        (TEX / f"{name}.scf").write_text(
+            f'<filepath="{src}" id="{name}" colfmt=6 />\n'
+        )
     print("done", TEX)
 
 
