@@ -1054,6 +1054,10 @@ static qboolean gc_listenserver_configured;
 static qboolean gc_dumpeye_configured;
 static qboolean gc_vst_configured;
 static qboolean gc_vm256_configured;
+/* "cvar <name> <value>" lines of gamecube.cfg: set once the cvar system is up (GCube_ApplyCfgCvars). */
+#define GC_CFG_CVARS_MAX 8
+static struct { char name[48]; char value[64]; } gc_cfg_cvars[GC_CFG_CVARS_MAX];
+static int gc_cfg_cvar_count;
 static qboolean gc_connect_configured;
 static qboolean gc_newgame_configured;
 static qboolean gc_menu_newgame_configured;
@@ -1131,6 +1135,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_dumpeye_arg[0] = '\0';
 	gc_vst_configured = false;
 	gc_vm256_configured = false;
+	gc_cfg_cvar_count = 0;
 	gc_connect_configured = false;
 	gc_connect_addr[0] = '\0';
 	gc_net_ip_configured = false;
@@ -1816,6 +1821,38 @@ static void GCube_LoadDiscBootOverrides( void )
 			}
 		}
 
+		/* cvar <name> <value>: the game's cvars (dod_bots, dod_gc_autojoin...) cannot be set by a plain cfg line, the
+		 * console is not running when this file is read. */
+		if( !Q_strnicmp( cursor, "cvar ", 5 ) && gc_cfg_cvar_count < GC_CFG_CVARS_MAX )
+		{
+			char *tok = cursor + 5, *end;
+			size_t n;
+
+			while( *tok == ' ' || *tok == '\t' )
+				tok++;
+			for( end = tok; *end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n'; end++ );
+			n = (size_t)( end - tok );
+			if( n > 0 && n < sizeof( gc_cfg_cvars[0].name ))
+			{
+				char *val = end, *vend;
+
+				while( *val == ' ' || *val == '\t' )
+					val++;
+				if( *val == '"' )
+					val++;
+				for( vend = val; *vend && *vend != '"' && *vend != '\r' && *vend != '\n'; vend++ );
+				if( (size_t)( vend - val ) < sizeof( gc_cfg_cvars[0].value ))
+				{
+					memcpy( gc_cfg_cvars[gc_cfg_cvar_count].name, tok, n );
+					gc_cfg_cvars[gc_cfg_cvar_count].name[n] = '\0';
+					memcpy( gc_cfg_cvars[gc_cfg_cvar_count].value, val, (size_t)( vend - val ));
+					gc_cfg_cvars[gc_cfg_cvar_count].value[vend - val] = '\0';
+					gc_cfg_cvar_count++;
+					continue;
+				}
+			}
+		}
+
 		/* On-rails VST. Wins over dumpeye: the camera rides the path. */
 		if( !Q_strnicmp( cursor, "gcvst", 5 ))
 		{
@@ -2351,4 +2388,19 @@ void GC_PrintBuildInfo( void )
 		lines++;
 	}
 	Mem_Free( data );
+}
+
+
+/* Called by Host_InitCommon once Cvar_Init has run: create the cvars the disc cfg named, so the game's own registration
+ * finds (and, through Dod_CvarRegisterKeep, keeps) them. */
+void GCube_ApplyCfgCvars( void )
+{
+	int i;
+
+	for( i = 0; i < gc_cfg_cvar_count; i++ )
+	{
+		Cvar_Get( gc_cfg_cvars[i].name, gc_cfg_cvars[i].value, FCVAR_SERVER, "disc cfg" );
+		Cvar_DirectSet( Cvar_FindVar( gc_cfg_cvars[i].name ), gc_cfg_cvars[i].value );
+		SYS_Report( "Xash3D GameCube: disc cfg cvar set\n" );
+	}
 }

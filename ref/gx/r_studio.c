@@ -4548,8 +4548,11 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 	{
 		extern qboolean Mod_GCForceStudioSkinUploadActive( void );
 
+		/* A listen server (the DoD play route) loads its team bodies after the map: they would draw white if their
+		 * skins were skipped like the CapFaces bake's. */
 		if( gEngfuncs.Sys_CheckParm( "-gcmap" )
 			&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" )
+			&& !gEngfuncs.Sys_CheckParm( "-gclistenserver" )
 			&& !Mod_GCForceStudioSkinUploadActive())
 			return;
 	}

@@ -1472,6 +1472,12 @@ static void Host_InitCommon( int argc, char **argv, const char *progname, qboole
 	Cmd_Init();
 	Cvar_Init();
 #if XASH_GAMECUBE
+	{
+		extern void GCube_ApplyCfgCvars( void );
+		GCube_ApplyCfgCvars();
+	}
+#endif
+#if XASH_GAMECUBE
 	GC_MemWatch( "init Cmd_Init" );
 #endif
 
