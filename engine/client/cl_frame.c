@@ -1822,7 +1822,7 @@ static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 }
 
 /*
-======
+=============
 CL_GCLeanPlayerEffects
 
 The New Game routes run a lean client frame without CL_EmitEntities, where
@@ -1854,7 +1854,7 @@ void CL_GCLeanPlayerEffects( void )
 		VectorSet( cl.viewheight, 0.0f, 0.0f, player->v.view_ofs[2] );
 	CL_AddEntityEffects( lp );
 }
-=======
+
 #define GC_LEAN_WALL_POOL 40	/* static wall draw slots per frame: PVS + frustum visible, reported when exceeded */
 
 void CL_GameCubeLeanEmitBrushEntities( void )
