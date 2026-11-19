@@ -6170,12 +6170,110 @@ void SV_GCParityReport( void )
 	memset( gc_parity_tally, 0, sizeof( gc_parity_tally ));
 }
 
+/* gc_static_walls: 0 off, 1 unnamed plain func_walls become static records with no edict (collision only until the
+ * client side draws them), 2 records AND edicts (the self test compares them at spawn complete). */
+static int SV_GCStaticWallsMode( void )
+{
+	static convar_t *cv;
+
+	if( !cv )
+		cv = Cvar_Get( "gc_static_walls", "0", FCVAR_SERVER, "unnamed plain func_wall as static collision records" );
+	return (int)cv->value;
+}
+
+static qboolean SV_GCStaticWallRecord( edict_t *ent )
+{
+	const char *name = SV_GetString( ent->v.model );
+	model_t *mod;
+	int mi;
+
+	if( !name || name[0] != '*' || ent->v.targetname || ent->v.rendermode != kRenderNormal || ent->v.renderfx != kRenderFxNone
+		|| !VectorIsNull( ent->v.angles ))
+		return false;
+	if(( mi = SV_ModelIndex( name )) <= 0 || mi >= MAX_MODELS )
+		return false;
+	mod = sv.models[mi];
+	if( !mod )
+		mod = Mod_ForName( sv.model_precache[mi], false, false );
+	if( !mod || mod->type != mod_brush )
+		return false;
+	return SV_GCStaticWallAdd( mi, ent->v.origin, mod->mins, mod->maxs );
+}
+
+/* Self test (mode 2, at spawn complete): the same trace against each record's hull and against its func_wall edict must
+ * agree exactly; prints the mismatch count and the first few. */
+void SV_GCStaticWallsSelfTest( void )
+{
+	static const float hulls[3][6] = {
+		{ 0, 0, 0, 0, 0, 0 }, { -16, -16, -36, 16, 16, 36 }, { -16, -16, -18, 16, 16, 18 } };
+	int i, k, tests = 0, bad = 0, noedict = 0, n = SV_GCStaticWallCount();
+
+	if( SV_GCStaticWallsMode() != 2 || n <= 0 )
+		return;
+	for( i = 0; i < n; i++ )
+	{
+		vec3_t amin, amax;
+		int mi, j;
+		edict_t *ed = NULL;
+
+		SV_GCStaticWallBounds( i, amin, amax, &mi );
+		for( j = 1; j < svgame.numEntities; j++ )
+		{
+			edict_t *e = EDICT_NUM( j );
+
+			if( !e->free && e->v.modelindex == mi && e->v.solid == SOLID_BSP && !Q_strcmp( SV_ClassName( e ), "func_wall" ))
+			{
+				ed = e;
+				break;
+			}
+		}
+		if( !ed )
+		{
+			noedict++;
+			continue;
+		}
+		for( k = 0; k < 96; k++ )
+		{
+			vec3_t start, end, mins, maxs;
+			trace_t a, b;
+			const float *hl = hulls[k % 3];
+			int c;
+
+			for( c = 0; c < 3; c++ )
+			{
+				start[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+				end[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+				mins[c] = hl[c];
+				maxs[c] = hl[3 + c];
+			}
+			SV_ClipMoveToEntity( ed, start, mins, maxs, end, &a );
+			SV_GCStaticWallTrace( i, start, mins, maxs, end, &b );
+			tests++;
+			if( a.fraction != b.fraction || a.startsolid != b.startsolid || a.allsolid != b.allsolid
+				|| !VectorCompare( a.plane.normal, b.plane.normal ) || !VectorCompare( a.endpos, b.endpos ))
+			{
+				if( bad++ < 4 )
+					Con_Reportf( S_ERROR "Xash3D GameCube: static wall %d mismatch: frac %f/%f solid %d/%d normal (%.2f %.2f %.2f)/(%.2f %.2f %.2f)\n",
+						i, a.fraction, b.fraction, a.startsolid, b.startsolid, a.plane.normal[0], a.plane.normal[1], a.plane.normal[2],
+						b.plane.normal[0], b.plane.normal[1], b.plane.normal[2] );
+			}
+		}
+	}
+	Con_Reportf( "Xash3D GameCube: static wall self test: %d records, %d traces, %d mismatches, %d records without an edict\n",
+		n, tests, bad, noedict );
+}
+
 static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *classname )
 {
 	if( COM_StringEmpty( classname ))
 		return false;
 	if( ent && SV_GCBakedIllusionary( classname, ent->v.targetname != 0 ))
 		return true;
+	if( ent && !Q_strcmp( classname, "func_wall" ) && SV_GCStaticWallsMode() >= 1 && SV_GCStaticWallRecord( (edict_t *)ent ))
+	{
+		if( SV_GCStaticWallsMode() == 1 )
+			return true;	/* record only: no edict, no networked entity */
+	}
 	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
 	{
 		static int kept, skipped;

@@ -1711,6 +1711,10 @@ void Mod_GCPromoteMapModels( void )
 				Mod_GCAttachStudioSkins( mod );
 		}
 	}
+	{
+		extern void SV_GCStaticWallsSelfTest( void );
+		SV_GCStaticWallsSelfTest();
+	}
 	Mod_GCRebindPromotedStudios();
 	Con_Reportf( "Xash3D GameCube: mapmodel studios promote ok=%d/%d budget=%s tip=%s\n",
 		ok, tried, Q_memprint( gc_real_studio_bytes ), Q_memprint( GC_MemHeapFreeBytes() ));
