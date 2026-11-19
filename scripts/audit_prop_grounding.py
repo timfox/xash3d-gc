@@ -65,7 +65,7 @@ def audit(bsp_path: Path, model_roots: list[Path], log=print, floor=None) -> lis
 		return None
 
 	def verts_of(prop: dict):
-		key = (prop["model"], prop["body"], prop["sequence"])
+		key = (prop["model"], prop["body"], prop["sequence"], prop.get("sequence_name", "").lower())
 		if key in cache:
 			return cache[key]
 		cache[key] = None
@@ -81,7 +81,7 @@ def audit(bsp_path: Path, model_roots: list[Path], log=print, floor=None) -> lis
 		if mdl is None:
 			return None
 		try:
-			cmds, _tex = bp.model_triangles(mdl, prop["body"], prop["skin"], prop["sequence"], 1.0)
+			cmds, _tex = bp.model_triangles(mdl, prop["body"], prop["skin"], bp.prop_sequence(mdl, prop), 1.0)
 		except Exception as error:  # noqa: BLE001
 			log(f"  {rel}: {error}")
 			return None
@@ -93,11 +93,11 @@ def audit(bsp_path: Path, model_roots: list[Path], log=print, floor=None) -> lis
 		raw = list(prop["origin"])
 		origin = list(raw)
 		dropped = False
-		if prop["drop"]:
-			z = floor.drop(origin, before=prop.get("ent"))
-			if z is not None:
-				origin[2] = z
-				dropped = True
+		if prop.get("toss") or prop["drop"]:
+			moved = dict(prop)
+			fall = bp.fall_like_the_game if prop.get("toss") else bp.drop_like_the_game
+			dropped = fall(floor, moved) is not None
+			origin = list(moved["origin"])
 		pts = verts_of(prop)
 		row = {
 			"ent": prop["ent"],
@@ -105,6 +105,7 @@ def audit(bsp_path: Path, model_roots: list[Path], log=print, floor=None) -> lis
 			"name": ents[prop["ent"]].get("targetname", ""),
 			"model": prop["model"],
 			"spawnflags": ents[prop["ent"]].get("spawnflags", "0"),
+			"sequence": prop.get("sequence_name", "") or prop["sequence"],
 			"x": round(raw[0], 1), "y": round(raw[1], 1), "z_map": round(raw[2], 1),
 			"z_baked": round(origin[2], 1),
 			"drop_flag": int(prop["drop"]), "dropped": int(dropped),
