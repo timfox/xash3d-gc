@@ -354,6 +354,19 @@ static qboolean r_gx_tex_band_logged;
 #define GC_GX_G36_DENSER_LIVE_BUDGET 32
 #endif
 
+/* -gccapture (engine CL_GCCaptureMode): an offline film capture. Frame rate
+ * matters less than what the shot shows, so every map face in view draws: no
+ * eye-PVS skips, no small or far face culls, and twice the face budgets. The
+ * primary frustum stays (faces off screen are not seen anyway). */
+qboolean R_GXCaptureMode( void )
+{
+	static int capture = -1;
+
+	if( capture < 0 )
+		capture = gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 1 : 0;
+	return capture != 0;
+}
+
 static int R_GXFrameFaceBudget( void )
 {
 	/* Cap only during the armed G36 window; denser AM gets a tighter band. */
@@ -369,6 +382,8 @@ static int R_GXFrameFaceBudget( void )
 		}
 		return GC_GX_G36_SAMPLE_FACE_BUDGET;
 	}
+	if( R_GXCaptureMode( ))
+		return GC_GX_FRAME_FACE_BUDGET * 2;
 	return GC_GX_FRAME_FACE_BUDGET;
 }
 
@@ -380,6 +395,8 @@ static int R_GXLiveFaceBudget( void )
 			return GC_GX_G36_DENSER_LIVE_BUDGET;
 		return GC_GX_G36_SAMPLE_LIVE_BUDGET;
 	}
+	if( R_GXCaptureMode( ))
+		return GC_GX_LIVE_FACE_BUDGET * 2;
 	return GC_GX_LIVE_FACE_BUDGET;
 }
 #ifndef GC_GX_FILL_FACE_BUDGET
@@ -5630,6 +5647,7 @@ static int R_GXDrawWorldLiveSurfaces( model_t *world, qboolean opaque_too )
 	int skip_frustum = 0;
 	int nsort = 0;
 	const qboolean newgame = gEngfuncs.Sys_CheckParm( "-gcnewgame" );
+	const qboolean capture = R_GXCaptureMode();
 	qboolean surfaces_live;
 	qboolean surfaces_pinned;
 	static qboolean live_logged;
@@ -5719,13 +5737,13 @@ static int R_GXDrawWorldLiveSurfaces( model_t *world, qboolean opaque_too )
 			/* Prefer closer / larger walls under the emit budget. */
 			{
 				int area = (int)surf->extents[0] * (int)surf->extents[1];
-				if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+				if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 				{
 					skip_area++;
 					continue;
 				}
 				/* G283: match cap path — far-small cull dropped tunnel walls. */
-				if( !newgame
+				if( !newgame && !capture
 					&& area > 0 && area < GC_GX_FAR_MIN_AREA
 					&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 				{
@@ -9767,6 +9785,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 	 * the probe/route helpers from each bounded face loop below. */
 	const int frame_budget = R_GXFrameFaceBudget();
 	const int live_budget = R_GXLiveFaceBudget();
+	const qboolean capture = R_GXCaptureMode();
 
 	/* Reserve HUD TEXMAP0 slabs before world uploads fill MEM1. */
 	R_GXReserveHudPool();
@@ -10347,7 +10366,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				if( want_live_overlap && GC_CapFaceIsLive( slot ))
 					continue;
 				/* Lean / pack: drop faces outside eye PVS (cluster of centroid). */
-				if( !GC_CapFaceInPVS( slot ))
+				if( !capture && !GC_CapFaceInPVS( slot ))
 				{
 					pvs_skips++;
 					continue;
@@ -10390,7 +10409,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				}
 				}
 				area = (int)surf->extents[0] * (int)surf->extents[1];
-				if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+				if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 				{
 					r_gx_face_skips++;
 					r_gx_face_skip_area++;
@@ -10401,7 +10420,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				/* G281: skip far-small cull on New Game — tunnel walls along
 				 * the look path were dropped while dump eye was distant.
 				 * Solo -gcworldrender CapFaces use the same dump eye. */
-				if( !newgame_probe && !gEngfuncs.Sys_CheckParm( "-gcworldrender" )
+				if( !newgame_probe && !capture && !gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 					&& area > 0 && area < GC_GX_FAR_MIN_AREA
 					&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 				{
@@ -10851,7 +10870,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 			msurface_t *surf = &draw[slot];
 			vec3_t bmins, bmaxs;
 
-			if( !GC_CapFaceInPVS( slot ))
+			if( !capture && !GC_CapFaceInPVS( slot ))
 			{
 				pvs_skips++;
 				continue;
@@ -10885,13 +10904,13 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				}
 			}
 			area = (int)surf->extents[0] * (int)surf->extents[1];
-			if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+			if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 			{
 				r_gx_face_skips++;
 				r_gx_face_skip_area++;
 				continue;
 			}
-			if( area > 0 && area < GC_GX_FAR_MIN_AREA
+			if( !capture && area > 0 && area < GC_GX_FAR_MIN_AREA
 				&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 			{
 				r_gx_face_skips++;

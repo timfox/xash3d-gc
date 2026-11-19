@@ -183,6 +183,19 @@ void CL_CineInit( void )
 	Cmd_AddCommand( "cine_info", CL_CineInfo_f, "cinematic camera state" );
 }
 
+/* -gccapture: an offline film capture, where frame rate matters less than
+ * what the shot shows. The GameCube route then draws every map face in view
+ * (no PVS or small/far face culls, larger face budgets), the whole cast and
+ * map props in range, and gives temp entities a bigger pool. */
+qboolean CL_GCCaptureMode( void )
+{
+	static int capture = -1;
+
+	if( capture < 0 )
+		capture = Sys_CheckParm( "-gccapture" ) ? 1 : 0;
+	return capture != 0;
+}
+
 qboolean CL_CineActive( void )
 {
 	return cine.state == CINE_PREROLL || cine.state == CINE_PLAYING;

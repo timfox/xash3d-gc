@@ -489,8 +489,9 @@ void CL_GCEnsureTempEntPool( void )
 	extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 	extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
 	static double next_try, next_sprite_try;
-	const int want = 16;
-	const size_t bytes = sizeof( TEMPENTITY ) * want;
+	/* -gccapture: shell bursts, smoke and tracers by the dozen. */
+	int want = CL_GCCaptureMode() ? 64 : 16;
+	size_t bytes = sizeof( TEMPENTITY ) * want;
 	const char *where = "heap";
 	int i;
 
@@ -531,6 +532,23 @@ void CL_GCEnsureTempEntPool( void )
 	}
 	else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
 		cl_tempents = Mem_Calloc( cls.mempool, bytes );
+	if( !cl_tempents && want > 16 )
+	{
+		/* No room for the capture pool: the usual 16 rather than none. */
+		Con_Reportf( "Xash3D GameCube: no room for %d client tempents (%s), trying 16\n", want, Q_memprint( bytes ));
+		want = 16;
+		bytes = sizeof( TEMPENTITY ) * want;
+		cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
+		if( cl_tempents )
+		{
+			memset( cl_tempents, 0, bytes );
+			Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
+			gc_tempents_in_spill = true;
+			where = "spill";
+		}
+		else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
+			cl_tempents = Mem_Calloc( cls.mempool, bytes );
+	}
 	if( !cl_tempents )
 	{
 		static int fail_logs;

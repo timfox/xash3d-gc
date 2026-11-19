@@ -1842,6 +1842,8 @@ static inline qboolean R_GXWorldDLBoxVisible( u32 i )
  * frustum test keeps a margin of 15 % of the distance. Without this every
  * character in the map was animated and skinned every frame (30 ms in the
  * Lost Coast harbor). `key` identifies the entity for the cluster memo. */
+qboolean R_GXCaptureMode( void );
+
 qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs )
 {
 	static struct { int key; float org[3]; int cluster; } memo[32];
@@ -1879,7 +1881,7 @@ qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs
 		memo[p].cluster = R_GXWorldDLEyeCluster( c );
 	}
 	cl = memo[p].cluster;
-	if( cl < 0 || (u32)cl >= gc_wd_hdr.n_clusters )
+	if( cl < 0 || (u32)cl >= gc_wd_hdr.n_clusters || R_GXCaptureMode( ))
 		return true;
 	return ( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))) != 0;
 }
@@ -3309,6 +3311,8 @@ int R_GXWorldDLDraw( void )
 	{
 		/* Chunks outside the camera go. -gcworlddlfull draws the whole PVS. */
 		const qboolean frustum_cull = !gEngfuncs.Sys_CheckParm( "-gcworlddlfull" );
+		/* -gccapture: every chunk in view, not only the eye's PVS row. */
+		const qboolean capture = R_GXCaptureMode();
 		int pvs_hits = 0, frustum_drop = 0, tower_chunks = 0, forced_n = 0;
 		static u16 order[GC_WD_MAX_CHUNKS];
 		const qboolean skip_water = GC_GetWaterFaceCount() > 0
@@ -3323,7 +3327,7 @@ int R_GXWorldDLDraw( void )
 		{
 			const u16 cl = gc_wd_chunk_cluster[i];
 
-			if( !( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))))
+			if( !capture && !( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))))
 				continue;
 			pvs_hits++;
 			/* Nothing under the water reflects in it. */
