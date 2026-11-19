@@ -1992,6 +1992,16 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 			if( buf == NULL && GC_MapLoadMemoryOpt()
 				&& ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
 				buf = CL_GCLoadHudSpriteBss( loadname, &size );
+			/* An effect sprite larger than the 128 KiB staging buffer (puff and smoke sprites, 190-215 KiB) never fits
+			 * as a whole file: the pool request below fails (a "mem FAIL FileSystem Pool" line and a texture-mip trim
+			 * on every map that loads one) and the streaming shrink at the end of the ladder is what serves it.
+			 * Take the shrink first for those. */
+			if( buf == NULL && gc_sprite_effect_load && type == SPR_CLIENT && GC_MapLoadMemoryOpt()
+				&& FS_FileSize( loadname, false ) > (fs_offset_t)( 128 * 1024 ))
+			{
+				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
+				used_sys = buf != NULL;
+			}
 			if( buf == NULL )
 				buf = FS_LoadFile( loadname, &size, false );
 			if( buf == NULL && GC_MapLoadMemoryOpt()
