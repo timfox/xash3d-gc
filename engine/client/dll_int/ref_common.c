@@ -351,6 +351,12 @@ static int Cmd_AddRefCommand( const char *cmd_name, xcommand_t function, const c
 
 static void pfnStudioEvent( const mstudioevent_t *event, const cl_entity_t *e )
 {
+#if XASH_DODGC_NETWORK
+	/* The DoD server already plays the view model's 5004 sounds from its
+	 * own table; letting the client play them too would double every shot. */
+	if( event && event->event == 5004 && e == &clgame.viewent )
+		return;
+#endif
 	clgame.dllFuncs.pfnStudioEvent( event, e );
 }
 

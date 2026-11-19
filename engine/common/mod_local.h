@@ -190,6 +190,12 @@ qboolean Mod_GCIsRetainedBspScratch( const void *buf );
 /* True when the world keeps real hull0 clipnodes (WorldDL pack present), so
  * point traces are safe on the CapFaces (-gcworldrender) route. */
 qboolean Mod_GCWorldTraceReady( const model_t *world );
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/* Brush entities baked into the world DL (model.c): list of "*N" numbers
+ * (bit 15: solid) for this map, and the test the server packs with. */
+const word *GC_StaticBrushes( const char *mapname, int *count, int *serial );
+qboolean GC_StaticBrushModel( int num );
+#endif
 void Mod_GCClearRetainedBspScratch( void );
 #if XASH_GAMECUBE
 /* G154: when LUMP_LIGHTING lives in ARAM (c5a1 tip/scratch OOM), CapFaces/G180
