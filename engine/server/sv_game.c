@@ -194,6 +194,54 @@ static qboolean gc_ent_priv_overflow_from_tip;
 static byte gc_ent_priv_overflow_bits[GC_ENTITY_OVERFLOW_BYTES / 16 / 8];
 static size_t gc_ent_priv_overflow_capacity;
 static size_t gc_ent_priv_overflow_used;
+#if XASH_DODGC_NETWORK
+/* Weapon boxes (a dead player's drop, 384 B of private data) come and go all match long, and at the end of a crowded match both the
+ * slab and the heap had nothing left for one: the game wrote into a NULL block and hung (dod_donner, 4 bots, ~265 s). A small fixed
+ * pool serves them first so they never need the heap. Other non-essential classes that miss everywhere get a shared scratch block
+ * and their edict is freed again (see SV_GCNonEssentialClass). */
+#define GC_BOX_PRIV_SLOTS 12
+#define GC_BOX_PRIV_BYTES 512
+static byte gc_box_priv[GC_BOX_PRIV_SLOTS][GC_BOX_PRIV_BYTES] __attribute__((aligned( 32 )));
+static unsigned gc_box_priv_used;
+static byte gc_nonessential_scratch[1024] __attribute__((aligned( 32 )));
+static int gc_box_pool_misses, gc_nonessential_drops;
+
+static void *SV_GCBoxPrivAlloc( size_t size )
+{
+	int i;
+
+	if( size > GC_BOX_PRIV_BYTES )
+		return NULL;
+	for( i = 0; i < GC_BOX_PRIV_SLOTS; i++ )
+		if( !( gc_box_priv_used & ( 1u << i )))
+		{
+			gc_box_priv_used |= 1u << i;
+			return gc_box_priv[i];
+		}
+	return NULL;
+}
+
+static qboolean SV_GCBoxPrivFree( const void *ptr )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( p < &gc_box_priv[0][0] || p >= &gc_box_priv[0][0] + sizeof( gc_box_priv ))
+		return false;
+	gc_box_priv_used &= ~( 1u << (( p - &gc_box_priv[0][0] ) / GC_BOX_PRIV_BYTES ));
+	return true;
+}
+
+static qboolean SV_GCNonEssentialClass( const char *cn )
+{
+	return !Q_stricmp( cn, "weaponbox" ) || !Q_stricmp( cn, "gib" ) || !Q_strnicmp( cn, "env_", 4 )
+		|| !Q_stricmp( cn, "spark_shower" ) || !Q_stricmp( cn, "beam" ) || !Q_stricmp( cn, "smokepuff" );
+}
+
+qboolean SV_GCIsNonEssentialScratch( const void *ptr )
+{
+	return ptr == gc_nonessential_scratch;
+}
+#endif
 
 /* Borrow only the unused tail of this world's retained map arena. The server
  * releases it after all entity private-data destructors have run. */
@@ -1623,6 +1671,12 @@ static void GAME_EXPORT SV_FreePrivateData( edict_t *pEdict )
 #if XASH_GAMECUBE
 	if( pEdict->pvPrivateData == gc_player_private_fallback )
 		; /* static New Game player fallback — never free() */
+#if XASH_DODGC_NETWORK
+	else if( pEdict->pvPrivateData == gc_nonessential_scratch )
+		; /* shared scratch of a non-essential entity that got no block: never free() */
+	else if( SV_GCBoxPrivFree( pEdict->pvPrivateData ))
+		; /* fixed weapon box pool slot */
+#endif
 	else if( pEdict->pvPrivateData == gc_soundent_private_fallback )
 	{
 		gc_soundent_fallback_used = false;
@@ -1845,6 +1899,17 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 
 	SpawnEdict( &ent->v );
 
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+	if( ent->pvPrivateData && SV_GCIsNonEssentialScratch( ent->pvPrivateData ))
+	{
+		if( gc_nonessential_drops++ < 3 )
+			Con_Reportf( S_WARN "Xash3D GameCube: no private block for %s (heap_free=%s), edict %d freed again (%d so far)\n",
+				pszClassName, Q_memprint( GC_MemHeapFreeBytes() ), NUM_FOR_EDICT( ent ), gc_nonessential_drops );
+		ent->pvPrivateData = NULL;	/* skip the game's free callback: the object lived in the shared scratch */
+		SV_FreeEdict( ent );
+		return NULL;
+	}
+#endif
 #if XASH_GAMECUBE
 	/* Tip MEM1: brush furniture / pickups can miss a private block without
 	 * ending the whole map. Boss/combat NPCs still abort after reclaim. */
@@ -3896,6 +3961,18 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 			 * holes left by destroyed entities before requesting heap memory. */
 			/* Prefer slab/overflow up through 2 KiB so GetClassPtr never sees
 			 * NULL mid-construction when tip heap is empty (c1a1f ~entity 408). */
+#if XASH_DODGC_NETWORK
+			if( !pEdict->pvPrivateData && NUM_FOR_EDICT( pEdict ) > svs.maxclients && !Q_stricmp( SV_ClassName( pEdict ), "weaponbox" ))
+			{
+				if(( pEdict->pvPrivateData = SV_GCBoxPrivAlloc( size )) != NULL )
+				{
+					memset( pEdict->pvPrivateData, 0, size );
+					used_fallback = true;
+				}
+				else if( gc_box_pool_misses++ == 0 )
+					Con_Reportf( S_WARN "Xash3D GameCube: weapon box pool of %d is full, taking the slab or heap\n", GC_BOX_PRIV_SLOTS );
+			}
+#endif
 			if( !pEdict->pvPrivateData && size <= 2048
 				&& (( pEdict->pvPrivateData = SV_GCPrivateSlabAlloc( size )) != NULL
 					|| ( pEdict->pvPrivateData = SV_GCPrivateOverflowAlloc( size )) != NULL ))
@@ -3918,6 +3995,18 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 				Con_Reportf( S_WARN "Xash3D GameCube: ent private slab+overflow miss size=%zu edict=%d classname=%s\n",
 					size, NUM_FOR_EDICT( pEdict ), SV_ClassName( pEdict ));
 			}
+#if XASH_DODGC_NETWORK
+			/* A non-essential entity (weapon box, gib, effect) that finds no block anywhere: the game constructs into a NULL pointer
+			 * and hangs. Hand it a shared scratch block instead; SV_AllocPrivateData frees the edict again right after the
+			 * constructor returns (the class is only ever created through that path). */
+			if( !pEdict->pvPrivateData && NUM_FOR_EDICT( pEdict ) > svs.maxclients && size <= sizeof( gc_nonessential_scratch )
+				&& SV_GCNonEssentialClass( SV_ClassName( pEdict )))
+			{
+				memset( gc_nonessential_scratch, 0, size );
+				pEdict->pvPrivateData = gc_nonessential_scratch;
+				used_fallback = true;
+			}
+#endif
 			/* Player spawn must not return NULL — GetClassPtr crashes. Keep a
 			 * static fallback for the single-player client edict under New Game. */
 			if( !pEdict->pvPrivateData
@@ -7233,6 +7322,9 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;
 	memset( gc_ent_priv_slab_bits, 0, sizeof( gc_ent_priv_slab_bits ));
+#if XASH_DODGC_NETWORK
+	gc_box_priv_used = 0;
+#endif
 	gc_ent_priv_slab_hits = 0;
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;
