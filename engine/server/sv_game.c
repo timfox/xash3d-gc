@@ -6089,6 +6089,18 @@ static int gc_parity_tier_kept[GC_PARITY_TIERS];
  * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
 #define GC_PARITY_RUNTIME_RESERVE 32
 
+/* The heap a parity entity needs to spawn. Solid walls (tier 0) and pure logic entities (relays, retargeters, auto
+ * triggers, info_target: an edict and a 112-byte slab entry, no model/sound/sprite load) cost almost no heap, so they
+ * only give way at 4 KB; everything else keeps the 16 KB guard. Charlie's entities spawn with 13-16 KB free: at a flat
+ * 16 KB its whole objective logic (relays/changetargets) was dropped from run to run. */
+static unsigned SV_GCParityHeapFloorKB( const char *classname, int tier )
+{
+	if( tier == 0 || !Q_strcmp( classname, "trigger_relay" ) || !Q_strcmp( classname, "trigger_changetarget" )
+		|| !Q_strcmp( classname, "trigger_auto" ) || !Q_strcmp( classname, "info_target" ))
+		return 4;
+	return 16;
+}
+
 static int SV_GCParityTier( const char *classname )
 {
 	if( !Q_strcmp( classname, "func_wall" ) || !Q_strcmp( classname, "func_wall_toggle" )
@@ -6104,12 +6116,12 @@ static int SV_GCParityTier( const char *classname )
 /* Which condition tripped, for the per-class tally (heap, slab, edicts, budget). */
 static int gc_parity_why[4];
 
-static qboolean SV_GCEntityPressure( int tier )
+static qboolean SV_GCEntityPressure( unsigned floor_kb )
 {
 	/* Tier 0 (func_wall family) is solid geometry players walk into and shoot at: it costs an edict and a 112-byte slab
 	 * entry, almost no heap, so it only gives way at 4 KB. The rest keeps the 16 KB guard. (Charlie sat at 13-16 KB
 	 * when the entities spawned: whether ALL its parity entities, walls included, were dropped depended on noise.) */
-	const qboolean heap = GC_MemHeapFreeBytes() < ( tier == 0 ? 4u : 16u ) * 1024u;
+	const qboolean heap = GC_MemHeapFreeBytes() < floor_kb * 1024u;
 	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
 	const qboolean ents = svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
 
@@ -6337,7 +6349,7 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 			extern void GC_HeapCensusReport( const char *stage );
 			GC_HeapCensusReport( "first parity entity" );
 		}
-		const qboolean skip = SV_GCEntityPressure( tier ) || gc_parity_kept >= gc_parity_budget
+		const qboolean skip = SV_GCEntityPressure( SV_GCParityHeapFloorKB( classname, tier )) || gc_parity_kept >= gc_parity_budget
 			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
 
 		if( !skip )
