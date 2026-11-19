@@ -2680,8 +2680,9 @@ static void setup_tev_nickel_foam(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 165, 172, 180, 255 }); /* pale nickel body */
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 210, 215, 225, 255 }); /* cool foam glint */
+	/* Keep pale nickel under whiteout — no ADDHALF, DIVIDE_2 grit/env (#334). */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 145, 150, 158, 255 }); /* cool nickel body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 118, 124, 132, 255 }); /* dual foam fleck */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
 	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
 
@@ -2703,7 +2704,7 @@ static void setup_tev_nickel_foam(const Material *mat)
 	GX_SetTevDirect(GX_TEVSTAGE2);
 	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
@@ -2711,7 +2712,7 @@ static void setup_tev_nickel_foam(const Material *mat)
 	GX_SetTevDirect(GX_TEVSTAGE3);
 	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
