@@ -9599,16 +9599,25 @@ static int R_GXDrawWorldDLFrame( void )
 	drawn = R_GXWorldDLDraw();
 	ST_MARK( 1 );
 	R_GXTrace( "worlddl done" );
-	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
-	 * prop VAT change hangs Dolphin's GP after the first frame. */
+	/* The map's fog on the props too. It was held to the world after a GP
+	 * hang in an early Dolphin run; without it the refinery towers and the
+	 * village across the harbor stood crisp and white in front of hazed
+	 * cliffs, where retail's are blue-grey with distance. */
 	/* Opaque first, then the transparent sheet. The baked opaque water
 	 * that used to bury hulls is gone from the world DL, so props sort by
 	 * plain depth: world, props, then water blended over whatever is
 	 * submerged. Underwater veil last so it covers props too. */
-	R_GXTrace( "horizon" );
-	R_GXPropDrawHorizon( RI.rvp.vieworigin );
-	R_GXTrace( "props" );
-	R_GXPropDraw( RI.rvp.vieworigin );
+	{
+		extern void R_GXFogBegin( void );
+		extern void R_GXFogEnd( void );
+
+		R_GXFogBegin();
+		R_GXTrace( "horizon" );
+		R_GXPropDrawHorizon( RI.rvp.vieworigin );
+		R_GXTrace( "props" );
+		R_GXPropDraw( RI.rvp.vieworigin );
+		R_GXFogEnd();
+	}
 	R_GXTrace( "fisherman" );
 	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
 	R_GXTrace( "canister" );
