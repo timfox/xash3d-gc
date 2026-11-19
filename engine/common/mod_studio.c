@@ -1791,6 +1791,19 @@ static void Mod_GCReleaseStudioTexBuf( void *ptr )
 
 #define GC_STUDIO_TEX_STREAM_MIN ( 96 * 1024 )
 
+/* A DoD match preloads every weapon's view model at map start (G156). Their 256 px skins are 100+ KB of CMPR each:
+ * sixteen weapons cannot all be resident, and the loads that used to fail (whole-file FS alloc) were what kept the
+ * list lazy. Defer the skins now on purpose: the equipped weapon gets them from the deferred attach
+ * (Mod_GCAttachDeferredStudioSkins, 'deferred T.mdl skins'), which is the path v_garand always used. */
+static qboolean Mod_GCDeferVmSkins( const model_t *mod )
+{
+#if XASH_DODGC_NETWORK
+	return Sys_CheckParm( "-gclistenserver" ) && Q_stristr( mod->name, "models/v_" ) != NULL;
+#else
+	return false;
+#endif
+}
+
 /* Read just the header, texture table and skin table of a big gc_studio companion into the 16 KB scratch and
  * remember where the pixels are. The in-memory header length is made to match, so the callers' checks pass. */
 static qboolean Mod_GCStudioTexStreamHeader( file_t *f, const char *path, fs_offset_t sz, fs_offset_t *size_out )
@@ -2444,7 +2457,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				mesh = (size_t)src->texturedataindex;
 			}
 			else if( !skip_studio_textures && !Host_IsDedicated( )
-				&& src->numtextures == 0 )
+				&& src->numtextures == 0 && !Mod_GCDeferVmSkins( mod ))
 			{
 				tex_buf = Mod_GCLoadStudioTexFile( mod->name, &tex_len );
 				thdr = R_StudioLoadHeader( mod, tex_buf, tex_len );
