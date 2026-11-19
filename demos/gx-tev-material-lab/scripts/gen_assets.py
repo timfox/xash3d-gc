@@ -48,10 +48,11 @@ def save_rgba(img: Image.Image, name: str, size: tuple[int, int] | None = None) 
 
 
 def gen_checker(n: int = 512, tiles: int = 8) -> None:
+    """Warm mid-grey checkers closer to the copper reference floor."""
     a = np.zeros((n, n, 4), dtype=np.uint8)
     cell = n // tiles
-    dark = (42, 40, 46, 255)
-    mid = (92, 88, 98, 255)
+    dark = (58, 48, 48, 255)
+    mid = (118, 102, 100, 255)
     for y in range(n):
         for x in range(n):
             a[y, x] = dark if ((x // cell) + (y // cell)) % 2 == 0 else mid
@@ -60,23 +61,32 @@ def gen_checker(n: int = 512, tiles: int = 8) -> None:
 
 
 def gen_shadow(n: int = 256) -> None:
+    """Darker, tighter contact shadow (reference oval reads almost black)."""
     a = np.zeros((n, n, 4), dtype=np.uint8)
     cx = cy = (n - 1) * 0.5
     for y in range(n):
         for x in range(n):
-            d = math.hypot(x - cx, y - cy) / (n * 0.48)
+            # Slightly elliptical like the reference contact shadow
+            dx = (x - cx) / (n * 0.46)
+            dy = (y - cy) / (n * 0.40)
+            d = math.hypot(dx, dy)
             if d >= 1.0:
                 continue
-            # soft blob
-            t = (1.0 - d) ** 2
-            a[y, x, 3] = int(200 * t)
+            t = (1.0 - d) ** 1.6
+            a[y, x, 3] = int(235 * t)
             a[y, x, 0] = a[y, x, 1] = a[y, x, 2] = 0
-    Image.fromarray(a, "RGBA").filter(ImageFilter.GaussianBlur(radius=6)).save(TEX / "shadow.png")
+    Image.fromarray(a, "RGBA").filter(ImageFilter.GaussianBlur(radius=3.5)).save(
+        TEX / "shadow.png"
+    )
     print("wrote shadow", n)
 
 
 def gen_envmap(n: int = 256) -> None:
-    """Sphere-map style env: urban dusk / outdoor courtyard with clear structure."""
+    """Sphere-map env: soft golden-hour courtyard (reference copper reflections).
+
+    Drawn procedurally — no screenshot crop. Softer buildings, warmer sky,
+    diffused sun, and a light plaza so copper tint reads peach/orange not magenta.
+    """
     a = np.zeros((n, n, 4), dtype=np.uint8)
     cx = cy = (n - 1) * 0.5
     for y in range(n):
@@ -85,67 +95,79 @@ def gen_envmap(n: int = 256) -> None:
             ny = (y - cy) / cy
             r2 = nx * nx + ny * ny
             if r2 > 1.02:
-                a[y, x] = (16, 14, 20, 255)
+                a[y, x] = (18, 16, 20, 255)
                 continue
             z = math.sqrt(max(0.0, 1.0 - min(r2, 1.0)))
-            vy = -ny
-            elev = vy * 0.9 + z * 0.1
+            elev = (-ny) * 0.92 + z * 0.08
             ang = math.atan2(nx, max(z, 1e-4))
-            if elev > 0.18:
-                t = min(1.0, (elev - 0.18) / 0.82)
-                r = int(55 + 70 * t)
-                g = int(35 + 45 * t)
-                b = int(95 + 120 * t)
-                # sun disc upper-right
-                sun = math.hypot(nx - 0.38, ny + 0.40)
-                if sun < 0.10:
-                    w = (0.10 - sun) / 0.10
-                    r = min(255, int(r + 220 * w))
-                    g = min(255, int(g + 210 * w))
-                    b = min(255, int(b + 180 * w))
-                elif sun < 0.26:
-                    w = (0.26 - sun) / 0.16
-                    r = min(255, int(r + 90 * w))
-                    g = min(255, int(g + 55 * w))
-                    b = min(255, int(b + 35 * w))
-                # soft clouds
-                clouds = 0.5 + 0.5 * math.sin(nx * 9.0 + ny * 4.0)
-                if clouds > 0.75 and elev > 0.4:
-                    w = (clouds - 0.75) / 0.25
-                    r = min(255, int(r + 40 * w))
-                    g = min(255, int(g + 35 * w))
-                    b = min(255, int(b + 45 * w))
-            elif elev > -0.12:
-                # building skyline
-                h = 0.05 + 0.18 * abs(math.sin(ang * 5.0)) + 0.10 * abs(math.sin(ang * 11.0 + 1.3))
-                h += 0.06 * abs(math.sin(ang * 17.0))
+
+            if elev > 0.22:
+                # Warm twilight sky (less blue/purple than older map)
+                t = min(1.0, (elev - 0.22) / 0.78)
+                r = int(95 + 55 * t)
+                g = int(70 + 40 * t)
+                b = int(88 + 55 * t)
+                # Diffused sun disc (upper-right) — soft for R≈0.25 copper
+                sun = math.hypot(nx - 0.36, ny + 0.38)
+                if sun < 0.14:
+                    w = (0.14 - sun) / 0.14
+                    w = w * w
+                    r = min(255, int(r + 160 * w))
+                    g = min(255, int(g + 145 * w))
+                    b = min(255, int(b + 110 * w))
+                elif sun < 0.34:
+                    w = (0.34 - sun) / 0.20
+                    r = min(255, int(r + 55 * w))
+                    g = min(255, int(g + 40 * w))
+                    b = min(255, int(b + 22 * w))
+                # Soft cloud streaks
+                clouds = 0.5 + 0.5 * math.sin(nx * 6.5 + ny * 3.2)
+                if clouds > 0.78 and elev > 0.45:
+                    w = (clouds - 0.78) / 0.22
+                    r = min(255, int(r + 28 * w))
+                    g = min(255, int(g + 24 * w))
+                    b = min(255, int(b + 30 * w))
+            elif elev > -0.08:
+                # Soft distant architecture — low contrast so copper doesn't get a dark belt
+                h = (
+                    0.03
+                    + 0.12 * abs(math.sin(ang * 3.6))
+                    + 0.07 * abs(math.sin(ang * 7.5 + 0.7))
+                    + 0.04 * abs(math.sin(ang * 13.0 + 1.1))
+                )
                 if elev < h:
-                    shade = 22 + int(30 * abs(math.sin(ang * 3.0)))
-                    r = shade + 18
-                    g = shade + 8
-                    b = shade + 28
-                    # window grid
-                    wx = int(abs(ang) * 55.0) % 7
-                    wy = int((h - elev) * 90.0) % 5
-                    if wx in (1, 4) and wy in (1, 3) and shade < 45:
-                        r, g, b = 210, 160, 90
+                    shade = 0.45 + 0.20 * abs(math.sin(ang * 2.1))
+                    r = int(72 + 28 * shade)
+                    g = int(55 + 18 * shade)
+                    b = int(50 + 14 * shade)
+                    strip = 0.5 + 0.5 * math.sin(ang * 14.0) * math.sin((h - elev) * 28.0)
+                    if strip > 0.88:
+                        w = (strip - 0.88) / 0.12
+                        r = min(255, int(r + 35 * w))
+                        g = min(255, int(g + 22 * w))
+                        b = min(255, int(b + 10 * w))
                 else:
-                    r, g, b = 70, 50, 95
+                    r, g, b = 96, 80, 78
             else:
-                # checker courtyard / ground
-                gx = int((nx * 0.5 + 0.5) * 18)
-                gz = int(((z * 0.7 + elev) * 0.5 + 0.5) * 18)
-                if (gx + gz) % 2 == 0:
-                    r, g, b = 40, 36, 44
-                else:
-                    r, g, b = 95, 90, 100
-                fade = 0.45 + 0.55 * max(0.0, z)
-                r = int(r * fade)
-                g = int(g * fade)
-                b = int(b * fade)
+                # Soft plaza — lightly blurred checkers (less literal floor mirror)
+                gx = (nx * 0.5 + 0.5) * 10.0
+                gz = ((z * 0.65 + elev) * 0.5 + 0.5) * 10.0
+                # Smooth checker via fractional blend
+                fx, fz = gx - math.floor(gx), gz - math.floor(gz)
+                edge = min(fx, 1.0 - fx, fz, 1.0 - fz)
+                soft = 0.35 + 0.65 * min(1.0, edge * 6.0)
+                base = 0.55 + 0.20 * ((int(gx) + int(gz)) % 2)
+                val = base * soft
+                fade = 0.60 + 0.40 * max(0.0, z)
+                r = int((95 + 55 * val) * fade)
+                g = int((82 + 48 * val) * fade)
+                b = int((76 + 42 * val) * fade)
             a[y, x] = (min(255, r), min(255, g), min(255, b), 255)
+
     img = Image.fromarray(a, "RGBA")
-    # Discrete Flipper env LODs — roughness proof (sharp / mid / blur).
+    # Stronger soften so building mass / plaza don't read as hard belts on copper
+    sharp_rgb = img.filter(ImageFilter.GaussianBlur(radius=1.6)).convert("RGB")
+
     def mip_blur(src: Image.Image, factor: int, radius: float, contrast: float = 1.0) -> Image.Image:
         w, h = src.size
         small = src.resize((max(1, w // factor), max(1, h // factor)), Image.Resampling.BOX)
@@ -156,14 +178,13 @@ def gen_envmap(n: int = 256) -> None:
             back = ImageEnhance.Contrast(back).enhance(contrast)
         return back
 
-    sharp = img.convert("RGB")
+    sharp = sharp_rgb
     mid = mip_blur(sharp, 8, 3.0)
     blur = mip_blur(sharp, 32, 8.0, contrast=0.55)
     blur = ImageEnhance.Brightness(blur).enhance(1.05)
     sharp.save(TEX / "env_sharp.png")
     mid.save(TEX / "env_mid.png")
     blur.save(TEX / "env_blur.png")
-    # Legacy aliases kept for older tooling
     sharp.save(TEX / "envmap.png")
     mid.save(TEX / "envmap_r25.png")
     blur.save(TEX / "envmap_r50.png")
