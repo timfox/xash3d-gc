@@ -92,15 +92,23 @@ static bool GCube_DVDReadSectors( sec_t sector, sec_t count, void *buffer );
 static qboolean GCube_MountDisc( void );
 static void GCube_EnsureFatMounted( void );
 static void GCube_LoadDiscBootOverrides( void );
+void GC_ShrinkEarlyXFBForMatch( void );
 static void GCube_ReinjectMissingBootArgv( void );
 static qboolean GCube_FatHasGameData( void );
 /* Declared later; used when logging multi-game detection onto FAT. */
 void GCube_AppendSwissEvidence( const char *fmt, ... );
 
+static qboolean gc_dvd_mount_failed;
+
 static qboolean GCube_MountDisc( void )
 {
 	if( gc_dvd_mounted )
 		return true;
+	/* A failed first mount can hang on DVD_Init/ISO9660 retry under Dolphin.
+	 * Skip remount so Platform_Init can continue (cfg reinject still needs a
+	 * successful first mount — diagnostics land on that attempt). */
+	if( gc_dvd_mount_failed )
+		return false;
 
 	SYS_Report( "Xash3D GameCube: DVD mount begin\n" );
 	DVD_Init();
@@ -118,6 +126,7 @@ static qboolean GCube_MountDisc( void )
 	{
 		SYS_Report( "Xash3D GameCube: mounting DVD filesystem failed\n" );
 		gc_dvd_mounted = false;
+		gc_dvd_mount_failed = true;
 		return false;
 	}
 
@@ -1048,6 +1057,7 @@ static qboolean gc_connect_configured;
 static qboolean gc_newgame_configured;
 static qboolean gc_menu_newgame_configured;
 static qboolean gc_retail_newgame_configured;
+static qboolean gc_menuauto_configured;
 static qboolean gc_phase_test_configured;
 static qboolean gc_changelevel_configured;
 static qboolean gc_landmark_configured;
@@ -1126,6 +1136,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_newgame_configured = false;
 	gc_menu_newgame_configured = false;
 	gc_retail_newgame_configured = false;
+	gc_menuauto_configured = false;
 	gc_newsaveload_configured = false;
 	gc_configroundtrip_configured = false;
 	gc_saveinterrupt_configured = false;
@@ -1401,6 +1412,20 @@ static void GCube_LoadDiscBootOverrides( void )
 			{
 				gc_retail_newgame_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override retailnewgame\n" );
+				continue;
+			}
+		}
+
+		/* Show the retail main menu, then synthetic pad selects New Game.
+		 * Unlike menunewgame, UI_Main_Menu still opens so the title plate is
+		 * visible before play-start (Lost Coast LCG-7). */
+		if( !Q_strnicmp( cursor, "menuauto", 8 ))
+		{
+			char ch = cursor[8];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_menuauto_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override menuauto\n" );
 				continue;
 			}
 		}
@@ -1836,6 +1861,9 @@ static void GCube_LoadDiscBootOverrides( void )
 				gc_listenserver_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override listenserver %s\n",
 					gc_listenserver_map );
+#if XASH_DODGC_NETWORK
+				GC_ShrinkEarlyXFBForMatch();
+#endif
 			}
 			continue;
 		}
@@ -1860,6 +1888,9 @@ static void GCube_LoadDiscBootOverrides( void )
 				gc_connect_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override connect %s\n",
 					gc_connect_addr );
+#if XASH_DODGC_NETWORK
+				GC_ShrinkEarlyXFBForMatch();
+#endif
 			}
 			continue;
 		}
@@ -1969,6 +2000,16 @@ static void GCube_ReinjectMissingBootArgv( void )
 	}
 	if( gc_dumpframes_configured && !Sys_CheckParm( "-gcdumpframes" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcdumpframes";
+	/* LCG-7: GetArgv often misses gamecube.cfg before DVD/chdir is ready.
+	 * CapFaces reinject covers smoke; retail title menu needs the same for
+	 * menuauto + startmap so New Game still reaches d2_lostcoast. */
+	if( gc_menuauto_configured && !Sys_CheckParm( "-gcmenuauto" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcmenuauto";
+	if( gc_startmap_configured && !Sys_CheckParm( "-gcstartmap" ) && n + 2 < cap )
+	{
+		gc_argv[n++] = "-gcstartmap";
+		gc_argv[n++] = gc_startmap;
+	}
 
 	if( n != host.argc )
 	{
@@ -2013,6 +2054,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	 * flag makes the full-AI/sentence/node-graph profile unambiguous. */
 	if( gc_menu_newgame_configured )
 		gc_argv[fake_argc++] = "-gcfullactors";
+	if( gc_menuauto_configured )
+		gc_argv[fake_argc++] = "-gcmenuauto";
 	if( gc_worldrender_configured )
 		gc_argv[fake_argc++] = "-gcworldrender";
 	if( gc_capfaces_smoke_configured )

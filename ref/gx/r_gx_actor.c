@@ -101,6 +101,12 @@ extern size_t Mod_GCStudioSkinRemaining( void );
 
 static gca_slot_t gca_slots[GCA_MAX];
 
+/* Studio arena reset: the cores point into the released arena. */
+void R_GXActorSlotsReset( void )
+{
+	memset( gca_slots, 0, sizeof( gca_slots ));
+}
+
 static gca_slot_t *R_GXActorSlot( const model_t *mod, const studiohdr_t *hdr )
 {
 	char base[64], path[MAX_QPATH];

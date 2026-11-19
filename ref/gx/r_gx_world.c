@@ -5974,6 +5974,11 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
  * full and the fraction stays where it always was. */
 #define GC_PROP_FAR_COVER_MAX	0.12f
 #define GC_PROP_FAR_COVER_MIN	0.05f
+/* Past the ordinary limit, only while the ordinary models asked for do not
+ * fit the cache at all (the close models have already stood down by then):
+ * smaller props going far for that stretch costs less than streaming a
+ * 3000-triangle model from ARAM every frame. */
+#define GC_PROP_FAR_COVER_OVER	0.30f
 static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
 #define GC_PROP_DRAW_TRIS	6000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
@@ -6674,6 +6679,60 @@ static u32 gc_prop_want_frame[GC_PROP_MAX_MODELS], gc_prop_want_bytes, gc_prop_w
  * everything else, never by pushing a chain out to be streamed again. */
 static u32 gc_prop_want_prev, gc_prop_close_new;
 
+/* A chain was refused although the free bytes would have held it: the gaps
+ * between the resident chains were each too small. Set by R_GXPropCacheGet,
+ * served at the start of the next frame's props. */
+static u32 gc_prop_cache_compact_want, gc_prop_cache_compact_frame;
+/* A chain was refused because the cache is full of chains drawn this frame.
+ * When that was an ordinary model, the close models stand down for a second
+ * and a half so it gets its place: their admission goes by last frame's
+ * demand, and in the harbor that let them take the room of a 68 KB model
+ * that was then streamed every frame (3 reads, 2925 triangles). */
+static qboolean gc_prop_cache_overflow;
+static u32 gc_prop_close_block;
+
+/* Slide the resident chains down to the start of the cache, closing the gaps.
+ * One stretch of the harbor had 37 KB free in a 608 KB cache and no hole for
+ * a 25 KB chain, which was then streamed from ARAM every frame for two
+ * seconds (4 reads, props 4.9 ms, 55.9 fps). The chains are display lists the
+ * GP reads in place, so it has to be idle while they move. */
+static void R_GXPropCacheCompact( void )
+{
+	u32 at = 0, moved = 0, k, n = 0;
+	static u16 order[GC_PROP_MAX_MODELS];
+
+	for( k = 0; k < gc_prop_nmodels; k++ )
+	{
+		u32 j;
+
+		if( gc_prop_cache_ofs[k] < 0 )
+			continue;
+		for( j = n; j > 0 && gc_prop_cache_ofs[order[j - 1]] > gc_prop_cache_ofs[k]; j-- )
+			order[j] = order[j - 1];
+		order[j] = (u16)k;
+		n++;
+	}
+	GX_DrawDone();
+	for( k = 0; k < n; k++ )
+	{
+		const unsigned m = order[k];
+		const u32 bytes = gc_prop_chain_bytes[m];
+
+		if( (u32)gc_prop_cache_ofs[m] != at )
+		{
+			memmove( gc_prop_cache + at, gc_prop_cache + gc_prop_cache_ofs[m], bytes );
+			gc_prop_cache_ofs[m] = (s32)at;
+			moved += bytes;
+		}
+		at += bytes;
+	}
+	if( moved )
+		DCFlushRange( gc_prop_cache, at );
+	gc_prop_cache_head = at;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache compacted: %u chains, %u Kb moved, %u Kb free in one piece\n",
+		n, moved / 1024u, ( gc_prop_cache_size - at ) / 1024u );
+}
+
 static byte *R_GXPropCacheGet( unsigned model )
 {
 	const u32 bytes = gc_prop_chain_bytes[model];
@@ -6842,7 +6901,18 @@ static byte *R_GXPropCacheGet( unsigned model )
 				victim = (s32)k;
 		}
 		if( victim < 0 )
+		{
+			u32 resident = 0;
+
+			for( k = 0; k < gc_prop_nmodels; k++ )
+				if( gc_prop_cache_ofs[k] >= 0 )
+					resident += gc_prop_chain_bytes[k];
+			if( resident + bytes > gc_prop_cache_size )
+				gc_prop_cache_overflow = true;
+			else if( bytes > gc_prop_cache_compact_want )
+				gc_prop_cache_compact_want = bytes;
 			return NULL;
+		}
 		gc_prop_cache_ofs[victim] = -1;
 	}
 	GC_AramTransfer( gc_prop_aram + gc_prop_dl_base + gc_prop_models[model].dl_ofs,
@@ -7175,6 +7245,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		 * range put a dozen full models on screen at once in the harbor,
 		 * which the frame does not have. Never in the water mirror. */
 		if( bm->close_model && bm->close_model <= gc_prop_nmodels && !r_gx_mirror
+			&& gc_prop_cache_frame >= gc_prop_close_block
 			&& cover2 > 0.40f * 0.40f )
 		{
 			const float cd = (float)bm->close_dist8 * 8.0f;
@@ -7193,6 +7264,24 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 				{
 					gc_prop_close_new += cb;
 					model = cm;
+				}
+				/* A close model that cannot be resident is not worth
+				 * streaming: the ordinary model is drawn, and it asks
+				 * again when there is room. */
+				if( model == cm )
+				{
+					const qboolean overflow = gc_prop_cache_overflow;
+
+					if( !R_GXPropCacheGet( cm ))
+					{
+						if( gc_prop_want_frame[cm] == gc_prop_cache_frame + 1u )
+						{
+							gc_prop_want_frame[cm] = 0;
+							gc_prop_want_bytes -= cb;
+						}
+						gc_prop_cache_overflow = overflow;
+						model = in->model;
+					}
 				}
 			}
 		}
@@ -7380,17 +7469,43 @@ void R_GXPropDrawHorizon( const float *org )
 	gc_prop_close_new = 0;
 	if( gc_prop_cache_size )
 	{
-		if( gc_prop_want_bytes > gc_prop_cache_size / 100u * 92u )
-			gc_prop_far_cover *= 1.01f;
-		else if( gc_prop_want_bytes < gc_prop_cache_size / 4u * 3u )
+		if( gc_prop_cache_overflow && gc_prop_cache_frame < gc_prop_close_block )
+		{
+			if( gc_prop_far_cover < GC_PROP_FAR_COVER_MAX )
+				gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
+			gc_prop_far_cover *= 1.03f;
+			if( gc_prop_far_cover > GC_PROP_FAR_COVER_OVER )
+				gc_prop_far_cover = GC_PROP_FAR_COVER_OVER;
+		}
+		else if( gc_prop_want_bytes > gc_prop_cache_size / 100u * 92u )
+		{
+			/* Holds what the overflow raised: letting go here would ask
+			 * for the same chains again. */
+			if( gc_prop_far_cover < GC_PROP_FAR_COVER_MAX )
+			{
+				gc_prop_far_cover *= 1.01f;
+				if( gc_prop_far_cover > GC_PROP_FAR_COVER_MAX )
+					gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
+			}
+		}
+		else if( gc_prop_far_cover > GC_PROP_FAR_COVER_MAX || gc_prop_want_bytes < gc_prop_cache_size / 4u * 3u )
 			gc_prop_far_cover *= 0.99f;
-		if( gc_prop_far_cover > GC_PROP_FAR_COVER_MAX )
-			gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
 		if( gc_prop_far_cover < GC_PROP_FAR_COVER_MIN )
 			gc_prop_far_cover = GC_PROP_FAR_COVER_MIN;
 	}
 	gc_prop_want_bytes = 0;
 	gc_prop_cache_frame++;
+	/* Not more than twice a second: it waits for the GP. */
+	if( gc_prop_cache_compact_want && gc_prop_cache
+		&& gc_prop_cache_frame - gc_prop_cache_compact_frame >= 30u )
+	{
+		R_GXPropCacheCompact();
+		gc_prop_cache_compact_frame = gc_prop_cache_frame;
+	}
+	gc_prop_cache_compact_want = 0;
+	if( gc_prop_cache_overflow )
+		gc_prop_close_block = gc_prop_cache_frame + 90u;
+	gc_prop_cache_overflow = false;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
 	{
 		/* Glints read strongest with the low sun ahead (bearing yaw 137). */
