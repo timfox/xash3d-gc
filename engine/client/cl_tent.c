@@ -1574,6 +1574,11 @@ void CL_GCDodEjectBrass( const char *options )
 {
 	static int map = -1; /* the world model keeps its slot across maps */
 	static int shells;
+	/* The DoD temp entity pool has 16 entries, shared with the muzzle flash,
+	 * smoke and explosions. An MG42 would fill it with casings alone, so at
+	 * most 6 are in flight; the next ones are skipped until one has died. */
+	static float in_flight[6];
+	int slot;
 	vec3_t forward, right, up, origin, velocity, angles;
 	TEMPENTITY *shell;
 	int i, body;
@@ -1596,6 +1601,14 @@ void CL_GCDodEjectBrass( const char *options )
 	}
 	if( !shells )
 		return;
+	for( slot = 0; slot < (int)ARRAYSIZE( in_flight ); slot++ )
+	{
+		/* a level change or restart winds the clock back */
+		if( in_flight[slot] <= cl.time || in_flight[slot] > cl.time + 3.0f )
+			break;
+	}
+	if( slot == (int)ARRAYSIZE( in_flight ))
+		return;
 
 	AngleVectors( cl.viewangles, forward, right, up );
 	VectorAdd( cl.simorg, cl.viewheight, origin );
@@ -1612,6 +1625,7 @@ void CL_GCDodEjectBrass( const char *options )
 	shell = R_TempModel( origin, velocity, angles, 2.5f, shells, TE_BOUNCE_SHELL );
 	if( !shell )
 		return;
+	in_flight[slot] = shell->die;
 	body = options ? Q_atoi( options ) : 0;
 	shell->entity.curstate.body = bound( 0, body, 3 );
 }
