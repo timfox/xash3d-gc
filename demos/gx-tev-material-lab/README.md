@@ -84,6 +84,10 @@ the DumpFrames capture reel so you stay in control.
 | VELVET | Soft wrap nap + rim sheen IndTex |
 | CARBON | Dual-scale weave × metal IndTex glints |
 | PEARL | Soft body + animated nacre Fresnel coat |
+| DNA LADDER | Helical dual-rail IndTex twist × warm KONST |
+| FUSION GLASS | Dual KONST amber/cool plasma × soft IndTex bands |
+| MAGLEV RAIL | Anisotropic IndTex lines × blue-metal KONST |
+| MYCELIUM NET | Organic branch IndTex × damp matte KONST |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
