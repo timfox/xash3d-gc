@@ -279,8 +279,15 @@ void GC_HeapCensusReport( const char *stage );
 
 void GC_MapLoadBufferWorldSettled( qboolean settled );
 void GC_TexRegionReport( const char *stage );
+#ifdef XASH_GC_MALLOC_TRACE
+void GC_MallocTraceFlush( void );
+#endif
+
 void GC_MemSample( const char *stage )
 {
+#ifdef XASH_GC_MALLOC_TRACE
+	GC_MallocTraceFlush();
+#endif
 	size_t total = Mem_TotalRealSize();
 	size_t delta = (total >= gc_mem_last) ? (total - gc_mem_last) : 0;
 
