@@ -350,7 +350,7 @@ int Image_GCMaxLoadDimension( const char *name )
 	 * companions are now 128² (ava-play99-43); keep PoT so we don't force
 	 * a non-power resample (96) that collapses back toward muddy tiles. */
 	if( name && name[0] == '#' && Q_stristr( name, "models/v_" ))
-		return 128;
+		return Sys_CheckParm( "-gcvm256" ) ? 256 : 128;
 
 	if( name && name[0] == '#' && Q_strstr( name, "_stb_font" ))
 		return Q_min( max_dim, 128 );
@@ -1390,7 +1390,7 @@ qboolean Image_AddIndexedImageToPack( const byte *in, int width, int height )
 		 * and dot). The 256² sheets stay clamped: at 128 they did not fit
 		 * the lean MEM1 arena (OOM, 2x2 fallback). */
 		const qboolean small_hud = image.hud_sprite && width <= 128 && height <= 128;
-		const int max_size = image.mdl_decode ? 128
+		const int max_size = image.mdl_decode ? ( Sys_CheckParm( "-gcvm256" ) ? 256 : 128 )
 			: small_hud ? Q_max( 128, Image_GCMaxLoadDimension( NULL ))
 			: Image_GCMaxLoadDimension( NULL );
 		if( scaled_width > max_size || scaled_height > max_size )

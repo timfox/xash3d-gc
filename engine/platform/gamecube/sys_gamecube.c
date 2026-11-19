@@ -1053,6 +1053,7 @@ static qboolean gc_smoke_map_configured;
 static qboolean gc_listenserver_configured;
 static qboolean gc_dumpeye_configured;
 static qboolean gc_vst_configured;
+static qboolean gc_vm256_configured;
 static qboolean gc_connect_configured;
 static qboolean gc_newgame_configured;
 static qboolean gc_menu_newgame_configured;
@@ -1129,6 +1130,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_dumpeye_configured = false;
 	gc_dumpeye_arg[0] = '\0';
 	gc_vst_configured = false;
+	gc_vm256_configured = false;
 	gc_connect_configured = false;
 	gc_connect_addr[0] = '\0';
 	gc_net_ip_configured = false;
@@ -1802,6 +1804,18 @@ static void GCube_LoadDiscBootOverrides( void )
 			continue;
 		}
 
+		/* View-model skins at their 256 px source size (see -gcvm256 in r_image.c / img_utils.c). */
+		if( !Q_strnicmp( cursor, "gcvm256", 7 ))
+		{
+			char ch = cursor[7];
+
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_vm256_configured = true;
+				continue;
+			}
+		}
+
 		/* On-rails VST. Wins over dumpeye: the camera rides the path. */
 		if( !Q_strnicmp( cursor, "gcvst", 5 ))
 		{
@@ -1990,6 +2004,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 		gc_argv[n++] = "-gcmap";
 		gc_argv[n++] = gc_smoke_map;
 	}
+	if( gc_vm256_configured && !Sys_CheckParm( "-gcvm256" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcvm256";
 	if( gc_vst_configured && !Sys_CheckParm( "-gcvst" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcvst";
 	else if( !gc_vst_configured && gc_dumpeye_configured && gc_dumpeye_arg[0]
@@ -2065,6 +2081,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 		gc_argv[fake_argc++] = "-gcmap";
 		gc_argv[fake_argc++] = gc_smoke_map;
 	}
+	if( gc_vm256_configured )
+		gc_argv[fake_argc++] = "-gcvm256";
 	if( gc_vst_configured )
 		gc_argv[fake_argc++] = "-gcvst";
 	else if( gc_dumpeye_configured && gc_dumpeye_arg[0] )

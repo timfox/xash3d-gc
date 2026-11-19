@@ -923,7 +923,9 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		byte *dst = NULL;
 
 		R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
-		while(( cw > 128 || ch > 128 ) && cw > 8 && ch > 8 )
+		const int vm_cmpr_cap = gEngfuncs.Sys_CheckParm( "-gcvm256" ) ? 256 : 128;
+
+		while(( cw > vm_cmpr_cap || ch > vm_cmpr_cap ) && cw > 8 && ch > 8 )
 		{
 			cw >>= 1;
 			ch >>= 1;
