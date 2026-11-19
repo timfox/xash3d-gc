@@ -115,6 +115,18 @@ Host test `tests/test_gamecube_hitext_buttons.py` checks the glyph table. Not se
   (x 8..151, y 6..113 of the panel), title "DAY OF DEFEAT - ERROR". It still uses a static 38 KiB panel buffer (unchanged).
 - Not seen in Dolphin: needs a pad-less run to show the notice.
 
+## Progressive scan prompt at boot (cost: none; not seen in Dolphin)
+`GC_BootProgressivePrompt` (vid_gamecube.c) runs on the early boot splash: only on an NTSC console with a component cable
+(`VIDEO_HaveComponentCable`) and B held at boot, as GameCube releases do. It draws a retail-palette panel inside the safe
+area ("Use 480p? ... A Yes  B No", `No in N s`); A = yes, B / Start / 10 s timeout = no. The answer lives in a static for the
+session and makes `GC_ResolveVideoMode` pick `TVNtsc480Prog`.
+- **XFB:** 640x480 480p and 480i frames are the same size (600 KiB), so no XFB allocation changes; the switch is refused (and
+  reported) if a mode ever needed a larger XFB than the one already allocated.
+- **SYS arena / ARAM:** unchanged. **.bss:** unchanged; the prompt shares the 160x120 panel buffer the fatal breadcrumb already
+  had (it moved to file scope as `gc_text_panel`).
+- Not verified: the 480p presentation path (GX copy filter, vfilter) beyond what `-gcvideo prog` already exercised, and the
+  prompt on screen (Dolphin needs a component cable setting: Config > GameCube > progressive scan, plus B held).
+
 ## Keyboard footer hints with button glyphs
 The on-screen keyboard's footer ("{A} type  {B} delete  {X} space", "{Y} page  {S} OK  {Z} cancel") uses the same
 `{A}`-style tokens: with the hi-res atlas up they are GX glyph quads (cell about 12 px at the keyboard's text scale), without
