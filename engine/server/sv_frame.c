@@ -956,6 +956,17 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 #endif
 #if XASH_GAMECUBE
 	GC_ProfMark( "sv send: add entities (AddToFullPack)" );
+	{
+		/* How many entities a frame of this match really carries: the local packet ring is sized for 256 (PR 297). */
+		static int max_ents, max_logs;
+
+		if( frame_ents.num_entities > max_ents )
+		{
+			max_ents = frame_ents.num_entities;
+			if( max_logs++ < 24 )
+				Con_Reportf( "Xash3D GameCube: packet entities per frame: new max %d (cap %d)\n", max_ents, sv_gc_visible_cap );
+		}
+	}
 	if( SV_GCLogSite( &gc_log_n_54873 ))
 		Con_Reportf( "Xash3D GameCube: AddEntitiesToPacket ready ents=%d\n",
 			frame_ents.num_entities );
