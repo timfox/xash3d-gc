@@ -177,7 +177,7 @@ minus the 360.7 KiB saved = about **22,525 KiB (22.0 MiB)** (M, D). The remainin
 
 | Pool | KiB | Group | Basis |
 |---|--:|---|---|
-| XFB (one, 640x480 RGB) | 600 | all | M (malloc trace: `GC_AllocXFB` 600.0 KiB) |
+| XFB (one, 640x480 RGB) | 600 (300 on listen/connect routes) | all | M (malloc trace: `GC_AllocXFB` 600.0 KiB). PR 245 (master 578fa947d) shrinks the frame to 320 wide on listen/connect routes only as a stopgap, so those routes hold 300 KiB, menus and offline 600 KiB |
 | FileSystem Pool arena | 192 | all | M (`Mem_InitPool` 192 KiB); peak use about 104 KiB |
 | ISO9660 mount | 34 | all | M |
 | `_Mem_Alloc` pool tables | 80 | all | M (32 + 48 KiB) |
