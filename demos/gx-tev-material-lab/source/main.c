@@ -6,6 +6,8 @@
 	Any pad input cancels the capture reel so the player stays in control.
 
 	Hero maps: real TextureCom / Desktop PBR sets (albedo AO metal normal rough).
+	D-Pad UP cycles HDRI skyboxes (gxbake equirect→faces + IBL matcaps).
+	D-Pad DOWN toggles mirror floor; L toggles bloom glow; Z toggles fog FX.
 ---------------------------------------------------------------------------------*/
 
 #include <stdio.h>
@@ -154,6 +156,7 @@
 #include "height_brick.h"
 #include "height_concrete_tpl.h"
 #include "height_concrete.h"
+#include "lab_sky_tex.h"
 
 #define DEFAULT_FIFO_SIZE	(256 * 1024)
 #define SPHERE_SLICES		72
@@ -242,6 +245,22 @@ static TPLFile tplHudTL, tplHudFPS, tplHudBottom;
 static TPLFile tplFont, tplDetail, tplSpec;
 static TPLFile tplHeightStone, tplHeightBrick, tplHeightConcrete;
 static PbrSet pbrSets[MAPS_COUNT];
+
+/* HDRI skybox + IBL matcaps (gxbake equirect → 256² CMPR faces). */
+#define LAB_SKY_COUNT 3
+#define LAB_SKY_SIDES 6
+typedef struct {
+	const char *name;
+	GXTexObj face[LAB_SKY_SIDES]; /* rt bk lf ft up dn */
+	GXTexObj iblSharp, iblMid, iblBlur;
+	TPLFile tplFace[LAB_SKY_SIDES];
+	TPLFile tplIblS, tplIblM, tplIblB;
+} SkyPack;
+static SkyPack skyPacks[LAB_SKY_COUNT];
+static int skyIndex = 0;
+static int mirrorFloor = 1;
+static int bloomEnabled = 1;
+static int fogFxEnabled = 0;
 
 /* Lost Coast cliff emboss: sun-tangent UV epsilon (see r_gx_worlddl.c). */
 #define LAB_EMBOSS_EPS		(6.0f / 64.0f)
@@ -370,24 +389,24 @@ static f32 current_roughness(const Material *mat)
 	return (roughnessOverride >= 0.0f) ? roughnessOverride : mat->roughness;
 }
 
-/* Discrete Flipper env LODs — proves roughness by swapping pre-blurred maps.
- * R≈0.25 (copper reference) stays on sharp so the courtyard still reads. */
+/* Discrete Flipper env LODs — active HDRI IBL matcaps (sharp/mid/blur). */
 static GXTexObj *select_env_tex(f32 roughness)
 {
+	SkyPack *sky = &skyPacks[skyIndex];
 	if (roughness < 0.35f)
-		return &texEnvSharp;
+		return &sky->iblSharp;
 	if (roughness < 0.70f)
-		return &texEnvMid;
-	return &texEnvBlur;
+		return &sky->iblMid;
+	return &sky->iblBlur;
 }
 
 static const char *env_lod_name(f32 roughness)
 {
 	if (roughness < 0.35f)
-		return "ENV LOD SHARP";
+		return "IBL LOD SHARP";
 	if (roughness < 0.70f)
-		return "ENV LOD MID";
-	return "ENV LOD BLUR";
+		return "IBL LOD MID";
+	return "IBL LOD BLUR";
 }
 
 static void tint_sphere_vertices(const Material *mat)
@@ -1091,70 +1110,140 @@ static void draw_sphere(Mtx modelview)
 	GX_SetTevDirect(GX_TEVSTAGE0);
 }
 
-/*
- * Soft vertical haze card behind the sphere (z = -2.4). Drawn with fog off so
- * the reference gradient survives: darker crown → grey fog shelf → lighter
- * near the horizon. Floor/sphere keep GX fog so far checkers melt into haze.
- */
-static void draw_backdrop(const Mtx view)
+/* One sky cube face: GoldSrc-oriented textures remapped to Y-up lab axes. */
+static void draw_sky_face(GXTexObj *tex, f32 x0, f32 y0, f32 z0,
+	f32 x1, f32 y1, f32 z1, f32 x2, f32 y2, f32 z2, f32 x3, f32 y3, f32 z3)
+{
+	GX_LoadTexObj(tex, GX_TEXMAP0);
+	GX_InitTexObjWrapMode(tex, GX_CLAMP, GX_CLAMP);
+	GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
+		GX_Position3f32(x0, y0, z0); GX_TexCoord2f32(0, 0);
+		GX_Position3f32(x1, y1, z1); GX_TexCoord2f32(1, 0);
+		GX_Position3f32(x2, y2, z2); GX_TexCoord2f32(1, 1);
+		GX_Position3f32(x3, y3, z3); GX_TexCoord2f32(0, 1);
+	GX_End();
+}
+
+static void draw_skybox(const Mtx view)
 {
 	Mtx model, modelview;
-	const f32 z = -2.40f;
-	const f32 x = 14.0f;
-	const f32 y0 = -1.10f;
-	const f32 y1 = 7.00f;
-	const f32 y_lo = 0.15f;
-	const f32 y_hi = 2.10f;
-	/* Flat charcoal void — match reference mid-grey (~44,43,48) */
-	GXColor top = { 42, 41, 46, 255 };
-	GXColor hi = { 44, 43, 48, 255 };
-	GXColor shelf = { 46, 45, 50, 255 };
-	GXColor bot = { 45, 44, 49, 255 };
+	SkyPack *sky = &skyPacks[skyIndex];
+	const f32 s = 40.0f;
 
 	guMtxIdentity(model);
 	guMtxConcat(view, model, modelview);
 	GX_LoadPosMtxImm(modelview, GX_PNMTX0);
 
 	GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){0, 0, 0, 0});
+	GX_SetNumChans(0);
+	GX_SetNumTexGens(1);
+	GX_SetNumTevStages(1);
+	GX_SetNumIndStages(0);
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
+	GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+	GX_SetCullMode(GX_CULL_NONE);
+	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+
+	/* Y-up remap of GoldSrc sides: ±X=rt/lf, ±Y=up/dn, ±Z=bk/ft */
+	draw_sky_face(&sky->face[0],  s,-s,-s,  s,-s, s,  s, s, s,  s, s,-s); /* rt +X */
+	draw_sky_face(&sky->face[2], -s,-s, s, -s,-s,-s, -s, s,-s, -s, s, s); /* lf -X */
+	draw_sky_face(&sky->face[4], -s, s,-s,  s, s,-s,  s, s, s, -s, s, s); /* up +Y */
+	draw_sky_face(&sky->face[5], -s,-s, s,  s,-s, s,  s,-s,-s, -s,-s,-s); /* dn -Y */
+	draw_sky_face(&sky->face[1], -s,-s, s,  s,-s, s,  s, s, s, -s, s, s); /* bk +Z */
+	draw_sky_face(&sky->face[3],  s,-s,-s, -s,-s,-s, -s, s,-s,  s, s,-s); /* ft -Z */
+
+	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+}
+
+/* Soft additive bloom glow — scaled chrome shell around the sphere. */
+static void draw_bloom_glow(Mtx modelview)
+{
+	Mtx glow, scl;
+	f32 pulse = 1.08f + 0.03f * sinf(animTime * 2.2f);
+
+	if (!bloomEnabled)
+		return;
+
+	guMtxScale(scl, pulse, pulse, pulse);
+	guMtxConcat(modelview, scl, glow);
+	GX_LoadPosMtxImm(glow, GX_PNMTX0);
 
 	GX_SetNumChans(1);
-	GX_SetNumTexGens(0);
+	GX_SetNumTexGens(1);
 	GX_SetNumTevStages(1);
 	GX_SetNumIndStages(0);
 	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
+	GX_LoadTexObj(select_env_tex(0.15f), GX_TEXMAP0);
 	GX_SetTevDirect(GX_TEVSTAGE0);
-	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
-	GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASA, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetCullMode(GX_CULL_FRONT); /* outer shell */
+	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_FALSE);
+	GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_CLEAR);
+	GX_SetColorUpdate(GX_TRUE);
+
+	{
+		int i;
+		/* Dim vertex alpha for soft bloom contribution */
+		for (i = 0; i < sphereIdxCount; ++i) {
+			SphereVert *v = &sphereVerts[sphereIdx[i]];
+			/* temporarily push low alpha via color — use a=40-ish via konst path */
+			(void)v;
+		}
+	}
+	/* Use konst alpha instead of mutating verts */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 255, 255, 255, 48 });
+	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_K0_A);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevKColorSel(GX_TEVSTAGE0, GX_TEV_KCSEL_K0);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_NRM, GX_DIRECT);
 	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_TEX1, GX_DIRECT);
 	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0);
 	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-	GX_SetCullMode(GX_CULL_NONE);
-	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
-	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
-	GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX1, GX_TEX_ST, GX_F32, 0);
 
-	GX_Begin(GX_QUADS, GX_VTXFMT0, 12);
-		/* Crown → upper haze */
-		GX_Position3f32(-x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
-		GX_Position3f32( x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
-		GX_Position3f32( x, y1, z);   GX_Color4u8(top.r, top.g, top.b, top.a);
-		GX_Position3f32(-x, y1, z);   GX_Color4u8(top.r, top.g, top.b, top.a);
-		/* Fog shelf behind the sphere */
-		GX_Position3f32(-x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
-		GX_Position3f32( x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
-		GX_Position3f32( x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
-		GX_Position3f32(-x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
-		/* Near-horizon band */
-		GX_Position3f32(-x, y0, z);   GX_Color4u8(bot.r, bot.g, bot.b, bot.a);
-		GX_Position3f32( x, y0, z);   GX_Color4u8(bot.r, bot.g, bot.b, bot.a);
-		GX_Position3f32( x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
-		GX_Position3f32(-x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
-	GX_End();
+	{
+		int i;
+		GX_Begin(GX_TRIANGLES, GX_VTXFMT0, (u16)sphereIdxCount);
+		for (i = 0; i < sphereIdxCount; ++i) {
+			SphereVert *v = &sphereVerts[sphereIdx[i]];
+			GX_Position3f32(v->x, v->y, v->z);
+			GX_Normal3f32(v->nx, v->ny, v->nz);
+			GX_Color4u8(255, 255, 255, 48);
+			GX_TexCoord2f32(v->u, v->v);
+			GX_TexCoord2f32(v->u2, v->v2);
+		}
+		GX_End();
+	}
+
+	GX_SetCullMode(GX_CULL_BACK);
+	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 }
+
+/* Flat charcoal backdrop removed — HDRI skybox fills the void. */
 
 static void apply_scene_fog(int dense)
 {
@@ -1168,7 +1257,8 @@ static void draw_floor(const Mtx view)
 {
 	/*
 	 * Vertex-colored plaza: even cell count so a checker CROSS sits on
-	 * world origin under the sphere, with equal cells on every side.
+	 * world origin under the sphere. Mirror mode: semi-transparent so the
+	 * reflected sphere (drawn first) reads through the tiles.
 	 */
 	Mtx model, modelview;
 	const f32 y = -1.12f;
@@ -1177,6 +1267,7 @@ static void draw_floor(const Mtx view)
 	const f32 cell = (2.0f * s) / (f32)cells;
 	const GXColor dark = { 58, 48, 48, 255 };
 	const GXColor mid = { 118, 102, 100, 255 };
+	u8 a = mirrorFloor ? 160 : 255;
 	int ix, iz;
 	u16 nverts;
 
@@ -1201,7 +1292,10 @@ static void draw_floor(const Mtx view)
 	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
 	GX_SetCullMode(GX_CULL_NONE);
 	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
-	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+	if (mirrorFloor)
+		GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+	else
+		GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
 	GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 
 	nverts = (u16)(cells * cells * 4);
@@ -1213,13 +1307,14 @@ static void draw_floor(const Mtx view)
 			f32 x0 = -s + (f32)ix * cell;
 			f32 x1 = x0 + cell;
 			GXColor c = (((ix + iz) & 1) == 0) ? dark : mid;
-			GX_Position3f32(x0, y, z0); GX_Color4u8(c.r, c.g, c.b, c.a);
-			GX_Position3f32(x1, y, z0); GX_Color4u8(c.r, c.g, c.b, c.a);
-			GX_Position3f32(x1, y, z1); GX_Color4u8(c.r, c.g, c.b, c.a);
-			GX_Position3f32(x0, y, z1); GX_Color4u8(c.r, c.g, c.b, c.a);
+			GX_Position3f32(x0, y, z0); GX_Color4u8(c.r, c.g, c.b, a);
+			GX_Position3f32(x1, y, z0); GX_Color4u8(c.r, c.g, c.b, a);
+			GX_Position3f32(x1, y, z1); GX_Color4u8(c.r, c.g, c.b, a);
+			GX_Position3f32(x0, y, z1); GX_Color4u8(c.r, c.g, c.b, a);
 		}
 	}
 	GX_End();
+	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
 	(void)texChecker;
 }
 
@@ -1466,13 +1561,18 @@ static void draw_hud(f32 fb_w, f32 fb_h, const Material *mat)
 			draw_text_centered(320, 384, line, 1.0f, 170, 168, 185, ca);
 		}
 
-		/* Quiet mode hint + active Flipper path */
+		/* Quiet mode hint + active Flipper path / FX */
 		draw_text_col(12, 112, "GALLERY", 1.0f, 180, 170, 210, 180);
-		snprintf(line, sizeof(line), "%s  -  START lab",
-			envMapEnabled ? "ENV ON" : "ENV OFF");
+		snprintf(line, sizeof(line), "SKY %s  IBL %s",
+			skyPacks[skyIndex].name, envMapEnabled ? "ON" : "OFF");
 		draw_text_col(12, 128, line, 1.0f, 150, 150, 165, 160);
-		snprintf(line, sizeof(line), "Y: %s", featureNames[featureIndex]);
+		snprintf(line, sizeof(line), "Y:%s", featureNames[featureIndex]);
 		draw_text_col(12, 144, line, 1.0f, 170, 165, 190, 200);
+		snprintf(line, sizeof(line), "MIRROR %s  BLOOM %s  FOG %s",
+			mirrorFloor ? "ON" : "OFF",
+			bloomEnabled ? "ON" : "OFF",
+			fogFxEnabled ? "ON" : "OFF");
+		draw_text_col(12, 160, line, 1.0f, 150, 148, 165, 170);
 	} else {
 		/* Engineer lab — full Flipper status */
 		snprintf(line, sizeof(line), "MATERIAL: %s", mat->name);
@@ -1496,7 +1596,8 @@ static void draw_hud(f32 fb_w, f32 fb_h, const Material *mat)
 				envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
 			draw_text_col(12, 148, line, 1.0f, 255, 255, 255, 255);
 		}
-		draw_text_col(12, 202, "START: gallery   Z: auto", 1.0f, 180, 180, 190, 220);
+		draw_text_col(12, 202, "UP sky  DOWN mirror  L bloom  Z fog", 1.0f, 180, 180, 190, 220);
+		draw_text_col(12, 220, "START: gallery mode", 1.0f, 160, 160, 170, 200);
 		snprintf(line, sizeof(line), "FPS %.1f", fpsSmooth);
 		draw_text_col(520, 14, line, 1.0f, 230, 230, 240, 255);
 	}
@@ -1581,6 +1682,39 @@ static void load_textures(void)
 	TPL_GetTexture(&tplHeightBrick, height_brick, &texHeightBrick);
 	TPL_OpenTPLFromMemory(&tplHeightConcrete, (void *)height_concrete_tpl, height_concrete_tpl_size);
 	TPL_GetTexture(&tplHeightConcrete, height_concrete, &texHeightConcrete);
+
+#define LOAD_SKY_FACE(pack, si, skyname, side) do { \
+	TPL_OpenTPLFromMemory(&skyPacks[pack].tplFace[si], (void *)sky_##skyname##_##side##_tpl, sky_##skyname##_##side##_tpl_size); \
+	TPL_GetTexture(&skyPacks[pack].tplFace[si], sky_##skyname##_##side, &skyPacks[pack].face[si]); \
+	GX_InitTexObjWrapMode(&skyPacks[pack].face[si], GX_CLAMP, GX_CLAMP); \
+} while (0)
+#define LOAD_SKY_IBL(pack, skyname) do { \
+	TPL_OpenTPLFromMemory(&skyPacks[pack].tplIblS, (void *)ibl_##skyname##_sharp_tpl, ibl_##skyname##_sharp_tpl_size); \
+	TPL_GetTexture(&skyPacks[pack].tplIblS, ibl_##skyname##_sharp, &skyPacks[pack].iblSharp); \
+	TPL_OpenTPLFromMemory(&skyPacks[pack].tplIblM, (void *)ibl_##skyname##_mid_tpl, ibl_##skyname##_mid_tpl_size); \
+	TPL_GetTexture(&skyPacks[pack].tplIblM, ibl_##skyname##_mid, &skyPacks[pack].iblMid); \
+	TPL_OpenTPLFromMemory(&skyPacks[pack].tplIblB, (void *)ibl_##skyname##_blur_tpl, ibl_##skyname##_blur_tpl_size); \
+	TPL_GetTexture(&skyPacks[pack].tplIblB, ibl_##skyname##_blur, &skyPacks[pack].iblBlur); \
+	GX_InitTexObjWrapMode(&skyPacks[pack].iblSharp, GX_CLAMP, GX_CLAMP); \
+	GX_InitTexObjWrapMode(&skyPacks[pack].iblMid, GX_CLAMP, GX_CLAMP); \
+	GX_InitTexObjWrapMode(&skyPacks[pack].iblBlur, GX_CLAMP, GX_CLAMP); \
+} while (0)
+
+	skyPacks[0].name = "GOLDEN";
+	LOAD_SKY_FACE(0, 0, golden, rt); LOAD_SKY_FACE(0, 1, golden, bk);
+	LOAD_SKY_FACE(0, 2, golden, lf); LOAD_SKY_FACE(0, 3, golden, ft);
+	LOAD_SKY_FACE(0, 4, golden, up); LOAD_SKY_FACE(0, 5, golden, dn);
+	LOAD_SKY_IBL(0, golden);
+	skyPacks[1].name = "NOON";
+	LOAD_SKY_FACE(1, 0, noon, rt); LOAD_SKY_FACE(1, 1, noon, bk);
+	LOAD_SKY_FACE(1, 2, noon, lf); LOAD_SKY_FACE(1, 3, noon, ft);
+	LOAD_SKY_FACE(1, 4, noon, up); LOAD_SKY_FACE(1, 5, noon, dn);
+	LOAD_SKY_IBL(1, noon);
+	skyPacks[2].name = "DUSK";
+	LOAD_SKY_FACE(2, 0, dusk, rt); LOAD_SKY_FACE(2, 1, dusk, bk);
+	LOAD_SKY_FACE(2, 2, dusk, lf); LOAD_SKY_FACE(2, 3, dusk, ft);
+	LOAD_SKY_FACE(2, 4, dusk, up); LOAD_SKY_FACE(2, 5, dusk, dn);
+	LOAD_SKY_IBL(2, dusk);
 
 	GX_InitTexObjWrapMode(&texEnvSharp, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texEnvMid, GX_CLAMP, GX_CLAMP);
@@ -1675,7 +1809,7 @@ int main(int argc, char **argv)
 		/* Any intentional input cancels capture reel — Tim stays in control */
 		if (down & (PAD_BUTTON_A | PAD_BUTTON_B | PAD_BUTTON_X | PAD_BUTTON_Y |
 				PAD_BUTTON_START | PAD_TRIGGER_Z | PAD_TRIGGER_L | PAD_TRIGGER_R |
-				PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT)) {
+				PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT | PAD_BUTTON_UP | PAD_BUTTON_DOWN)) {
 			captureReel = 0;
 			idleTimer = 0.0f;
 		}
@@ -1704,8 +1838,16 @@ int main(int argc, char **argv)
 			featureIndex = (featureIndex + 1) % FEAT_COUNT;
 		if ((down & PAD_BUTTON_START) && !(prevButtons & PAD_BUTTON_START))
 			galleryMode ^= 1;
+		if ((down & PAD_BUTTON_UP) && !(prevButtons & PAD_BUTTON_UP)) {
+			skyIndex = (skyIndex + 1) % LAB_SKY_COUNT;
+			cardTimer = 1.8f;
+		}
+		if ((down & PAD_BUTTON_DOWN) && !(prevButtons & PAD_BUTTON_DOWN))
+			mirrorFloor ^= 1;
+		if ((down & PAD_TRIGGER_L) && !(prevButtons & PAD_TRIGGER_L))
+			bloomEnabled ^= 1;
 		if ((down & PAD_TRIGGER_Z) && !(prevButtons & PAD_TRIGGER_Z))
-			autoShowcase ^= 1;
+			fogFxEnabled ^= 1;
 
 		prevButtons = held;
 		mat = &materials[materialIndex];
@@ -1799,7 +1941,21 @@ int main(int argc, char **argv)
 				roughnessOverride = 0.05f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
-			if (frame == 730)
+			if (frame == 740) {
+				skyIndex = 1; /* NOON */
+				mirrorFloor = 1;
+				bloomEnabled = 1;
+			}
+			if (frame == 800) {
+				skyIndex = 2; /* DUSK */
+				select_material(14, 1); /* CHROME — IBL + bloom */
+			}
+			if (frame == 860) {
+				skyIndex = 0; /* GOLDEN */
+				mirrorFloor = 1;
+				bloomEnabled = 1;
+			}
+			if (frame == 920)
 				captureReel = 0;
 			mat = &materials[materialIndex];
 		} else if (autoShowcase && galleryMode && idleTimer > 7.5f && bootTimer <= 0.0f) {
@@ -1827,8 +1983,23 @@ int main(int argc, char **argv)
 		GX_InvalidateTexAll();
 		GX_LoadProjectionMtx(perspective, GX_PERSPECTIVE);
 
-		draw_backdrop(view);
-		apply_scene_fog(featureIndex == FEAT_FOG_HAZE);
+		draw_skybox(view);
+		apply_scene_fog(fogFxEnabled || featureIndex == FEAT_FOG_HAZE);
+
+		/* Mirrored sphere under the plaza (Y flip about floor) */
+		if (mirrorFloor) {
+			Mtx mirror, scl;
+			guMtxIdentity(model);
+			guMtxRotRad(rot, 'y', animTime * 0.18f + camPunch * 0.55f);
+			guMtxScale(scl, 1.0f, -1.0f, 1.0f);
+			guMtxConcat(scl, rot, mirror);
+			/* Translate so reflection sits under floor plane y=-1.12 */
+			mirror[1][3] = -2.24f;
+			guMtxConcat(view, mirror, modelview);
+			setup_pbr_tev(mat, envMapEnabled);
+			draw_sphere(modelview);
+		}
+
 		draw_floor(view);
 		draw_shadow(view);
 
@@ -1839,6 +2010,7 @@ int main(int argc, char **argv)
 		guMtxConcat(view, model, modelview);
 		setup_pbr_tev(mat, envMapEnabled);
 		draw_sphere(modelview);
+		draw_bloom_glow(modelview);
 
 		draw_hud((f32)rmode->fbWidth, (f32)rmode->efbHeight, mat);
 
