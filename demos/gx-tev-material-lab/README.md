@@ -18,6 +18,7 @@ python3 scripts/import_rust_maps.py       # ~/Desktop/pbr-gc/rust → textures/r
 python3 scripts/import_damascus_maps.py   # ~/Desktop/pbr-gc/metal_damascus → damascus_*.png
 python3 scripts/import_tcom_sets.py       # Storage/Extra/Stream TCom packs → textures/<slug>_*.png
 python3 scripts/gen_assets.py             # synthetic env + **drawn** HUD sprites (no ref crops)
+python3 scripts/bake_height_from_normals.py  # stone/brick/concrete height for EMBOSS LIT
 make -j$(nproc)
 ```
 
@@ -26,27 +27,59 @@ Produces `gx-tev-material-lab.dol`.
 HUD chrome (logo, purple banner, GC A/B/X/Y buttons, FPS) is generated as
 sprites in `gen_assets.py` — do **not** run `bake_from_reference.py` (retired).
 
+## Presentation
+
+Opens in **Gallery** mode (title card, soft letterbox, idle camera orbit).
+**START** flips to **Lab** (full Flipper engineer HUD). Any pad input cancels
+the DumpFrames capture reel so you stay in control.
+
+```bash
+./scripts/run_dolphin.sh          # interactive Flatpak Dolphin
+```
+
 ## Controls
 
 | Button | Action |
 |--------|--------|
-| A | Cycle material (RUST / copper / damascus / corrugated / steel / cladding / concrete / brick / wood / paint / solar / gold / iron / chrome / plastic) |
+| A / D-pad / L R | Cycle material |
 | B | Step roughness |
 | X | Toggle env map |
-| Y | Cycle TEV feature path |
+| Y | Cycle TEV / lighting feature path |
+| START | Gallery ↔ Lab |
+| Z | Toggle idle auto-showcase |
+| Stick X | Orbit camera |
 
-### TEV feature paths (Y)
+### TEV / lighting paths (Y)
 
 | Path | What Flipper is doing |
 |------|------------------------|
-| RUST PBR MAPS | albedo × AO + synthetic env × Fresnel |
+| PBR MAPS + ENV | albedo × AO + synthetic env × Fresnel |
 | FRESNEL+KONST | albedo + env × konst F0 |
-| MOD2X DETAIL | rust albedo × detail `GX_CS_SCALE_2` |
+| NORMAL INDTEX | active-material normal IndTex-warps env into albedo |
+| HW KEY LIGHT | `GX_LIGHT0` key diffuse × albedo (diffuse-only A/B) |
+| HW KEY+FILL | key + cool fill (`GX_LIGHT0\|1`) |
+| HW KEY+RIM | key + fill + rim backlight |
+| EMBOSS LIT | Lost Coast dual-sample height emboss under HW key (`lit×(0.5+h0−h1)×2`) |
+| HW SPEC | `GX_DF_CLAMP` + `GX_AF_SPEC`; shininess from roughness |
+| MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
-| INDTEX BUMP | rust normal IndTex warps env into albedo |
-| FOG HAZE | denser `GX_FOG_PERSP_LIN` (base grey fog is always on) |
+| FOG HAZE | denser `GX_FOG_PERSP_LIN` |
 | SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
 | ALPHA CLIP | `GX_SetAlphaCompare` |
+
+Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²** — GC-safe DOL size.
+
+### Dolphin proofs (emboss / specular)
+
+Capture reel frames ~570–700 lock **STONE + EMBOSS LIT** then **DAMASCUS/CHROME + HW SPEC**.
+If this environment has no Dolphin/devkit, build on a machine with `DEVKITPRO` and run:
+
+```bash
+./scripts/run_dolphin_capture.sh /tmp/gx-tev-material-lab-cap
+# → shots/emboss-lit.png, shots/hw-spec.png
+```
+
+Sibling self-hosted worker [GX TEV Material Lab](bc-bf36fe5e-1557-50c8-9093-12a29316f14e) can Dolphin-prove when available.
 
 ## Roughness on Flipper
 

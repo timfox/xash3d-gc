@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Import Tim's PBR rust set from ~/Desktop/pbr-gc/rust into textures/."""
 from __future__ import annotations
+# GC-safe default 256² (512² blows the DOL past MEM1).
 
 import os
 from pathlib import Path
@@ -27,9 +28,9 @@ def main() -> None:
 	TEX.mkdir(parents=True, exist_ok=True)
 	for name, fn in MAPS.items():
 		src = SRC / fn
-		im = Image.open(src).convert("RGB").resize((512, 512), Image.Resampling.LANCZOS)
+		im = Image.open(src).convert("RGB").resize((256, 256), Image.Resampling.LANCZOS)
 		arr = np.asarray(im)
-		out = np.dstack([arr, np.full((512, 512), 255, np.uint8)])
+		out = np.dstack([arr, np.full((256, 256), 255, np.uint8)])
 		png = TEX / f"rust_{name}.png"
 		Image.fromarray(out).save(png)
 		(TEX / f"rust_{name}.scf").write_text(
