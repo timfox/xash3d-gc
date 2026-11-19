@@ -183,6 +183,13 @@ static s8 gc_tev_envmask_bound = -1;
 static u8 gc_tev_emboss[GC_TEV_MAX_EMBOSS * GC_TEV_EMBOSS] __attribute__(( aligned( 32 )));
 static GXTexObj gc_tev_emboss_obj;
 static s8 gc_tev_emboss_bound = -1;
+/* The tiles are shade factors, not heights (GCeh trailer byte 5 = 1): half
+ * of 1 + N.L across the surface for the map's sun, taken from the material's
+ * normal map, and the stage is lit x tile x 2. The height version took the
+ * difference of two samples four texels apart of a made-up height (the mean
+ * of the normal's X and Y): a second derivative, which lit every bump's rim
+ * and gave the cliffs a quilted look retail does not have. */
+static qboolean gc_tev_emboss_shade;
 /* d2_lostcoast env_sun → UV emboss offset (bake_tevmat.SUN_TANGENT x/y). */
 #define GC_TEV_EMBOSS_EPS	(4.0f / 64.0f)
 static const float gc_tev_emboss_ds = -0.7206f * GC_TEV_EMBOSS_EPS;
@@ -566,6 +573,28 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	if( eidx >= 0 && !( flags & 0x10 ))
 	{
 		R_GXTevBindEmboss( (u8)eidx );
+		if( gc_tev_emboss_shade )
+		{
+			tm[0][0] = 1.0f; tm[0][1] = 0.0f; tm[0][2] = 0.0f; tm[0][3] = 0.0f;
+			tm[1][0] = 0.0f; tm[1][1] = 1.0f; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
+			tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 1.0f; tm[2][3] = 0.0f;
+			GX_LoadTexMtxImm( tm, GX_TEXMTX1, GX_MTX2x4 );
+			tc0 = (u8)( GX_TEXCOORD0 + ntex );
+			GX_SetTexCoordGen( tc0, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX1 );
+			ntex += 1;
+			GX_SetNumTexGens( (u8)ntex );
+			st = (u8)( GX_TEVSTAGE0 + stages );
+			GX_SetTevDirect( st );
+			GX_SetTevOrder( st, tc0, GX_TEXMAP3, GX_COLORNULL );
+			GX_SetTevColorIn( st, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+			GX_SetTevColorOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+			GX_SetTevAlphaIn( st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+			GX_SetTevAlphaOp( st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			stages += 1;
+			GX_SetNumTevStages( (u8)stages );
+		}
+		else
+		{
 		/* TEXCOORD for h(uv) and h(uv+d): identity scale, sun offset in mtx1. */
 		tm[0][0] = 1.0f; tm[0][1] = 0.0f; tm[0][2] = 0.0f; tm[0][3] = 0.0f;
 		tm[1][0] = 0.0f; tm[1][1] = 1.0f; tm[1][2] = 0.0f; tm[1][3] = 0.0f;
@@ -617,6 +646,7 @@ static void R_GXTevMatAppend( int id, int a, int b )
 		st++;
 		stages = (int)( st - GX_TEVSTAGE0 );
 		GX_SetNumTevStages( (u8)stages );
+		}
 	}
 	/* Source $alphatest, $translucent and $decal: the alpha is the shape of
 	 * the grate, rail or decal, so it cuts out on lightmapped chunks as well
@@ -759,6 +789,7 @@ static void R_GXMatPackLoad( void )
 	gc_tev_nmask = 0;
 	gc_tev_nmask_small = 0;
 	gc_tev_nemboss = 0;
+	gc_tev_emboss_shade = false;
 	gc_tev_bound = -1;
 	gc_tev_envmask_bound = -1;
 	gc_tev_emboss_bound = -1;
@@ -817,6 +848,7 @@ static void R_GXMatPackLoad( void )
 							break;
 						DCFlushRange( gc_tev_emboss, hbytes );
 						gc_tev_nemboss = trail[4];
+						gc_tev_emboss_shade = trail[5] == 1;
 						continue;
 					}
 					break;
