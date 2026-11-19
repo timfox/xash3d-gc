@@ -230,7 +230,13 @@ qboolean GC_HeapCheck( const char *tag )
 	}
 	__malloc_unlock( _REENT );
 	if( ok )
-		Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p\n", tag, chunks, (void *)top );
+	{
+		/* ~10 of these a frame: the first 40 and every 5000th are enough, and keep a long run under the host log cap. */
+		static unsigned ok_logs;
+
+		if( ok_logs++ < 40 || !( ok_logs % 5000 ))
+			Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p (#%u)\n", tag, chunks, (void *)top, ok_logs );
+	}
 	else
 	{
 		failures++;

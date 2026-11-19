@@ -1643,6 +1643,27 @@ void Mod_GCPromoteMapModels( void )
 	 * stay in the 184 KiB studio BSS. */
 	FS_ClearFindMissCache();
 	Image_GCPurgeDecodeScratch();
+	/* The team body cores (models/player/<team>/<team>.mdl, ~79 KB each) first, while the spill and heap are still one
+	 * piece: loaded lazily on first draw they hit "spill alloc miss" + a malloc that fails on a fragmented heap that
+	 * reports 300 KB free (caen: brit-inf, zalec: us-para), and that side's bots have no body. */
+	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		const char *name = sv.model_precache[i];
+		qboolean is_view = false;
+
+		if( !name || !Q_stristr( name, "models/player/" ) || !Q_stristr( name, ".mdl" ))
+			continue;
+		if( !Mod_GCStudioNameAllowed( name, &is_view ))
+			continue;
+		tried++;
+		if( Mod_GCPromoteStudioPath( name ))
+		{
+			ok++;
+			Con_Reportf( "Xash3D GameCube: early player body promote '%s' ok (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+		}
+		else
+			Con_Reportf( S_WARN "Xash3D GameCube: early player body promote '%s' FAILED (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+	}
 	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
 	{
 		const char *name = sv.model_precache[i];
