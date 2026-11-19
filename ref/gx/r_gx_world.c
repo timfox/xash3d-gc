@@ -7163,8 +7163,33 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			( mv[1][0] * gc_prop_sun[0] + mv[1][1] * gc_prop_sun[1] + mv[1][2] * gc_prop_sun[2] ) * 1.0e6f,
 			( mv[2][0] * gc_prop_sun[0] + mv[2][1] * gc_prop_sun[1] + mv[2][2] * gc_prop_sun[2] ) * 1.0e6f );
 		GX_LoadLightObj( &lo, GX_LIGHT1 );
-		if( gc_prop_lit_mode != 1 )
+		if( lt[9] == 3 )
 		{
+			/* Record 3: the ambient cube's vertical gradient. The sky term
+			 * is signed, base + up x N.z, so a face that looks down goes
+			 * darker than one that looks sideways, as the cube's bottom
+			 * face says (a hull's underside: 0.04 against 0.22 for its
+			 * sides). A channel has one diffuse function, so the sun,
+			 * which must clamp, has the second colour channel, and a
+			 * second stage adds the two. */
+			if( gc_prop_lit_mode != 2 )
+			{
+				const GXColor black = { 0, 0, 0, 255 };
+
+				GX_SetNumChans( 2 );
+				GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+					GX_LIGHT0, GX_DF_SIGNED, GX_AF_NONE );
+				GX_SetChanCtrl( GX_COLOR1A1, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+					GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE );
+				GX_SetChanMatColor( GX_COLOR0A0, white );
+				GX_SetChanMatColor( GX_COLOR1A1, white );
+				GX_SetChanAmbColor( GX_COLOR1A1, black );
+				gc_prop_lit_mode = 2;
+			}
+		}
+		else if( gc_prop_lit_mode != 1 )
+		{
+			GX_SetNumChans( 1 );
 			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
 				GX_LIGHT0 | GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE );
 			GX_SetChanMatColor( GX_COLOR0A0, white );
@@ -7177,6 +7202,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	{
 		if( gc_prop_lit_mode != 0 )
 		{
+			GX_SetNumChans( 1 );
 			GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
 				GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
 			gc_prop_lit_mode = 0;
@@ -7184,12 +7210,27 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		GX_SetChanMatColor( GX_COLOR0A0, col );
 	}
 	{
-		const int x2 = ( gc_prop_vsize == 11 && gc_prop_cur_light && gc_prop_cur_light[9] == 2 ) ? 1 : 0;
+		/* 0: x1. 1: x2 (record 2). 2: two channels, x2 (record 3). */
+		const int rec = ( gc_prop_vsize == 11 && gc_prop_cur_light ) ? gc_prop_cur_light[9] : 0;
+		const int x2 = rec == 3 ? 2 : rec == 2 ? 1 : 0;
 
 		if( gc_prop_tev_x2 != x2 )
 		{
 			GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
-			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, x2 ? GX_CS_SCALE_2 : GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, x2 == 1 ? GX_CS_SCALE_2 : GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			if( x2 == 2 )
+			{
+				/* ( texture x channel 0 + texture x channel 1 ) x 2 */
+				GX_SetNumTevStages( 2 );
+				GX_SetTevDirect( GX_TEVSTAGE1 );
+				GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR1A1 );
+				GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_CPREV );
+				GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+				GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+				GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			}
+			else
+				GX_SetNumTevStages( 1 );
 			gc_prop_tev_x2 = x2;
 		}
 	}
@@ -9541,6 +9582,11 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
 	R_GXTrace( "hot service" );
 	R_GXHotService();
+	{
+		extern void R_GXBloomGlowPrepass( void );
+
+		R_GXBloomGlowPrepass();
+	}
 	R_GXTrace( "mirror" );
 	R_GXWaterMirrorPass();
 	R_GXTrace( "3d state" );
