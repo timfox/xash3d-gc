@@ -1559,6 +1559,64 @@ TEMPENTITY *R_TempModel( const vec3_t pos, const vec3_t dir, const vec3_t angles
 	return pTemp;
 }
 
+#if XASH_DODGC_NETWORK
+/*
+==============
+CL_GCDodEjectBrass
+
+Retail DoD throws a casing on view model studio events 6001/6002. The
+option is the body of models/shells.mdl: 0 small (pistols, SMGs), 1 medium
+(carbines, MP44), 2 large (rifles, BAR, MGs), 3 MG42. The throw follows the
+stock EV_GetDefaultShellInfo numbers.
+==============
+*/
+void CL_GCDodEjectBrass( const char *options )
+{
+	static int map = -1; /* the world model keeps its slot across maps */
+	static int shells;
+	vec3_t forward, right, up, origin, velocity, angles;
+	TEMPENTITY *shell;
+	int i, body;
+
+	if( map != cl.servercount || !shells )
+	{
+		map = cl.servercount;
+		shells = 0;
+		for( i = 1; i < MAX_MODELS; i++ )
+		{
+			const char *name = SV_Active() ? sv.model_precache[i]
+				: ( cl.models[i] ? cl.models[i]->name : "" );
+
+			if( !Q_stricmp( name, "models/shells.mdl" ))
+			{
+				shells = i;
+				break;
+			}
+		}
+	}
+	if( !shells )
+		return;
+
+	AngleVectors( cl.viewangles, forward, right, up );
+	VectorAdd( cl.simorg, cl.viewheight, origin );
+	VectorMA( origin, 20.0f, forward, origin );
+	VectorMA( origin, -12.0f, up, origin );
+	VectorMA( origin, 4.0f, right, origin );
+
+	VectorCopy( cl.simvel, velocity );
+	VectorMA( velocity, COM_RandomFloat( 50.0f, 70.0f ), right, velocity );
+	VectorMA( velocity, COM_RandomFloat( 100.0f, 150.0f ), up, velocity );
+	VectorMA( velocity, 25.0f, forward, velocity );
+
+	VectorSet( angles, 0.0f, cl.viewangles[1], 0.0f );
+	shell = R_TempModel( origin, velocity, angles, 2.5f, shells, TE_BOUNCE_SHELL );
+	if( !shell )
+		return;
+	body = options ? Q_atoi( options ) : 0;
+	shell->entity.curstate.body = bound( 0, body, 3 );
+}
+#endif
+
 /*
 ==============
 R_DefaultSprite

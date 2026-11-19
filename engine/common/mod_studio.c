@@ -757,13 +757,22 @@ static qboolean Mod_GCAnimPoolReady( void )
 	/* Then the world-array spill, where r_gx_worlddl.c keeps room for the
 	 * ring next to the DoD team cores (ceres PR 108: viewmodel skins had
 	 * filled the arena and the bodies drew nothing). */
-	for( gc_animpool_size = GC_ANIMPACK_POOL; !gc_animpool && gc_animpool_size >= GC_ANIMPACK_CHUNK; gc_animpool_size >>= 1 )
+	/* Only when the arena gave nothing.  This loop used to reset the size
+	 * to the full pool even after the arena had granted a smaller ring, so
+	 * the ring then ran past its block: at the top of the arena that is
+	 * past gc_studio_bss into mod_known[0], the world model (avalanche and
+	 * caen died in the first seconds, in whatever read the world next). */
+	if( !gc_animpool )
 	{
-		gc_animpool = (byte *)Mod_GCWorldArraySpillTryAlloc( gc_animpool_size, "animpack ring" );
-		if( gc_animpool )
+		for( gc_animpool_size = GC_ANIMPACK_POOL; gc_animpool_size >= GC_ANIMPACK_CHUNK; gc_animpool_size >>= 1 )
 		{
-			Mod_GCWorldArraySpillPinBase( gc_animpool, gc_animpool_size );
-			gc_animpool_in_spill = true;
+			gc_animpool = (byte *)Mod_GCWorldArraySpillTryAlloc( gc_animpool_size, "animpack ring" );
+			if( gc_animpool )
+			{
+				Mod_GCWorldArraySpillPinBase( gc_animpool, gc_animpool_size );
+				gc_animpool_in_spill = true;
+				break;
+			}
 		}
 	}
 	if( !gc_animpool )

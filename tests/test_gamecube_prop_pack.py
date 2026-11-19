@@ -130,9 +130,9 @@ class PropPackTest(unittest.TestCase):
 			self.disc.gx_cmpr_encode_blocks, log=logs.append)
 		return stats, (tmp / "gp_dod_test.gcp").read_bytes(), (tmp / "pt_dod_test.gct").read_bytes(), logs
 
-	def test_only_unnamed_props_with_a_model_file_are_instanced(self):
+	def test_props_with_a_model_file_are_instanced_named_ones_too(self):
 		stats, _gcp, _gct, logs = self.bake()
-		self.assertEqual(stats["instances"], 2)
+		self.assertEqual(stats["instances"], 3)	# two unnamed, one named
 		self.assertEqual(stats["models"], 1)	# one model, placed twice
 		self.assertEqual(stats["missing"], 1)
 		self.assertTrue(any("not_on_disc" in line for line in logs))
@@ -143,7 +143,7 @@ class PropPackTest(unittest.TestCase):
 		hdr = struct.unpack_from(">8I", gcp, 0)
 		self.assertEqual(gcp[:4], b"GCpr")
 		self.assertEqual(hdr[1] >> 16, 7)
-		self.assertEqual(hdr[1] & 0xFFFF, 2)
+		self.assertEqual(hdr[1] & 0xFFFF, 3)
 		self.assertEqual(hdr[2] >> 16, 1)
 		self.assertEqual(hdr[3], 32)
 		for word in (hdr[4], hdr[5], hdr[7], len(gcp)):
@@ -152,6 +152,10 @@ class PropPackTest(unittest.TestCase):
 		model, count, *rest = struct.unpack_from(">HH3h3h3h3hI", gcp, 32)
 		mins, maxs, org, ang, lit = rest[0:3], rest[3:6], rest[6:9], rest[9:12], rest[12]
 		self.assertEqual((model, count), (0, 2))
+		# The named prop: same model in the low byte, its ordinal + 1 above it
+		# (R_GXPropEmitReal asks SV_GCNamedPropVisible for ordinal 0).
+		words = [struct.unpack_from(">H", gcp, 32 + i * 32)[0] for i in range(3)]
+		self.assertEqual(sorted(words), [0, 0, 0x0100])
 		self.assertEqual(tuple(org), (100, 200, 0))
 		self.assertEqual(ang[1], 16384)	# 90 degrees of yaw
 		self.assertEqual(lit & 0xFF, 1)
@@ -269,6 +273,20 @@ class DropToFloorTests(unittest.TestCase):
 		]
 		props = self.props.static_props(ents)
 		self.assertEqual([p["drop"] for p in props], [True, False])
+
+	def test_named_props_get_their_ordinal_in_lump_order(self):
+		ents = [
+			{"classname": "env_model", "model": "models/a.mdl"},
+			{"classname": "env_model", "model": "models/a.mdl", "targetname": "good"},
+			{"classname": "func_wall", "model": "*1", "targetname": "wall"},
+			{"classname": "env_model", "targetname": "no_model"},
+			# Hidden until env_render shows it: still baked when named.
+			{"classname": "dod_object", "model": "models/b.mdl", "targetname": "bad", "rendermode": "5"},
+			{"classname": "env_model", "model": "models/b.mdl", "rendermode": "5", "renderamt": "0"},
+		]
+		props = self.props.static_props(ents)
+		self.assertEqual([p["named"] for p in props], [0, 1, 2])
+		self.assertEqual([p["additive"] for p in props], [False, False, False])
 
 	def test_footprint_light_ignores_a_dark_texel_under_the_origin(self):
 		light = self.props.FloorLight.__new__(self.props.FloorLight)

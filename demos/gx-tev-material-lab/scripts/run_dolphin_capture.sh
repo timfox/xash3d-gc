@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 2350; DumpFrames is slower than realtime — default 6 min.
+# Full reel ends ~frame 2420; DumpFrames is slower than realtime — default 6 min.
 TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-360}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
@@ -90,8 +90,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through neon-rim / thin-film-oil / brushed-titanium (~2350 frames)
-	if (( n > 2450 )); then
+	# Full reel through batch4 toon/mercury/jade/holo (~2420 frames)
+	if (( n > 2480 )); then
 		break
 	fi
 done
@@ -166,5 +166,10 @@ pick 2120 "$OUT_DIR/shots/neon-rim.png"
 pick 2190 "$OUT_DIR/shots/thin-film-oil.png"
 pick 2260 "$OUT_DIR/shots/brushed-titanium.png"
 pick 2320 "$OUT_DIR/shots/rust-hero-end.png"
+pick 2120 "$OUT_DIR/shots/toon-ink-rim.png"
+pick 2190 "$OUT_DIR/shots/liquid-mercury.png"
+pick 2260 "$OUT_DIR/shots/jade-glaze.png"
+pick 2330 "$OUT_DIR/shots/holo-foil.png"
+pick 2390 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

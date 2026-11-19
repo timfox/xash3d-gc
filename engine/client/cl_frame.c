@@ -1775,7 +1775,7 @@ typedef struct
 	float	changetime;
 } gc_seqlatch_t;
 
-static gc_seqlatch_t gc_seqlatch[16];
+static gc_seqlatch_t gc_seqlatch[40];
 
 static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 {
@@ -1861,7 +1861,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	static cl_entity_t lean_brush_ents[6];
 	/* WorldDL listen: emit every nearby map prop (avalanche has ~dozen
 	 * env_model instances across 5 unique MDLs). Was 4 — only sandbags. */
-	static cl_entity_t lean_studio_ents[24];
+	static cl_entity_t lean_studio_ents[40];	/* 24 film actors plus map props */
 	static qboolean lean_player_seen;
 	edict_t *player;
 	vec3_t view_org;
@@ -1996,8 +1996,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		int studio_slots = 0;
 		int bodies[4];
 		int n_bodies = 0;
-		int picks[24];
-		float pick_dists[24];
+		int picks[40];
+		float pick_dists[40];
 		/* Leave room for the other players and bots (emitted after). */
 		const int pick_cap = Q_max( 1, studio_budget - Q_max( 0, svs.maxclients - 1 ));
 		int n_picks = 0;
@@ -2023,6 +2023,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				if( n_bodies < (int)( sizeof( bodies ) / sizeof( bodies[0] )))
 					bodies[n_bodies++] = e;
 				continue;
+			}
+			{
+				extern qboolean SV_GCEdictIsPackNamed( const edict_t *ent );
+
+				/* Named map props are drawn from the prop pack: no studio load. */
+				if( SV_GCEdictIsPackNamed( ed ))
+					continue;
 			}
 			mod = SV_ModelHandle( ed->v.modelindex );
 			/* Before the type test: an unloaded handle is not mod_studio yet. */

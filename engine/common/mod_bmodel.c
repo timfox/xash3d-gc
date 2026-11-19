@@ -389,6 +389,21 @@ static qboolean gc_world_msurface_retained;
 static const model_t *gc_world_blocks_owner;
 /* World lighting/PVS sizes for the arena gap finder and canary (end of file). */
 static size_t gc_world_lightdata_bytes, gc_world_visdata_bytes;
+/* Every leaf the world BSP loaded.  Mod_SetupSubmodels lowers numleafs to the
+ * world's visleafs, but the leafs of the brush entities stay live behind them
+ * in the same array (avalanche: 231 func_wall). */
+static size_t gc_world_total_leafs;
+static const mleaf_t *gc_world_total_leafs_of;
+
+/* Entries in a world leaf array, brush entity leafs included. */
+static size_t Mod_GCLeafArrayCount( const model_t *mod )
+{
+	const size_t count = mod->numleafs >= 0 ? (size_t)mod->numleafs + 1 : 0;
+
+	if( mod->leafs && mod->leafs == gc_world_total_leafs_of && gc_world_total_leafs > count )
+		return gc_world_total_leafs;
+	return count;
+}
 static byte *gc_bsp_scratch_base;
 static size_t gc_bsp_scratch_size;
 static size_t gc_bsp_scratch_carve_high;
@@ -3772,7 +3787,7 @@ static void Mod_MakeHull0( model_t *mod, const dbspmodel_t *bmod )
 			{
 				const byte *p = (const byte *)mod->leafs;
 				busy[busy_count].start = p - gc_bsp_scratch_base;
-				busy[busy_count].end = busy[busy_count].start + mod->numleafs * sizeof( *mod->leafs );
+				busy[busy_count].end = busy[busy_count].start + Mod_GCLeafArrayCount( mod ) * sizeof( *mod->leafs );
 				busy_count++;
 			}
 
@@ -4135,6 +4150,13 @@ static void Mod_SetupSubmodels( model_t *mod, dbspmodel_t *bmod )
 	const qboolean qbsp2 = FBitSet( mod->flags, MODEL_QBSP2 ) ? true : false;
 	const char *name = mod->name;
 	model_t *world = mod; // submodels might want to share hulls
+#if XASH_GAMECUBE
+	if( bmod->isworld )
+	{
+		gc_world_total_leafs = mod->numleafs > 0 ? (size_t)mod->numleafs : 0;
+		gc_world_total_leafs_of = mod->leafs;
+	}
+#endif
 
 	mod->numframes = 2;	// regular and alternate animation
 
@@ -7797,7 +7819,7 @@ static void Mod_LoadNodes( model_t *mod, dbspmodel_t *bmod )
 				{
 					const byte *p = (const byte *)mod->leafs;
 					busy[busy_count].start = p - gc_bsp_scratch_base;
-					busy[busy_count].end = busy[busy_count].start + mod->numleafs * sizeof( *mod->leafs );
+					busy[busy_count].end = busy[busy_count].start + Mod_GCLeafArrayCount( mod ) * sizeof( *mod->leafs );
 					busy_count++;
 				}
 
@@ -8814,7 +8836,7 @@ static size_t Mod_GCCollectWorldScratchBusy( model_t *mod, dbspmodel_t *bmod, gc
 	{
 		const byte *p = (const byte *)mod->leafs;
 		busy[busy_count].start = p - gc_bsp_scratch_base;
-		busy[busy_count].end = busy[busy_count].start + (size_t)mod->numleafs * sizeof( *mod->leafs );
+		busy[busy_count].end = busy[busy_count].start + Mod_GCLeafArrayCount( mod ) * sizeof( *mod->leafs );
 		busy_count++;
 	}
 
@@ -10877,7 +10899,7 @@ static size_t Mod_GCCollectAllWorldScratchBusy( model_t *mod, dbspmodel_t *bmod,
 		Mod_GCBusyAdd( busy, &n, cap, bmod->nodes, bmod->numnodes * sizeof( dnode_t ));
 	}
 	Mod_GCBusyAdd( busy, &n, cap, mod->planes, mod->numplanes * sizeof( mplane_t ));
-	Mod_GCBusyAdd( busy, &n, cap, mod->leafs, ( mod->numleafs + 1 ) * sizeof( mleaf_t ));
+	Mod_GCBusyAdd( busy, &n, cap, mod->leafs, Mod_GCLeafArrayCount( mod ) * sizeof( mleaf_t ));
 	Mod_GCBusyAdd( busy, &n, cap, mod->vertexes, mod->numvertexes * sizeof( mvertex_t ));
 	Mod_GCBusyAdd( busy, &n, cap, mod->edges16, mod->numedges * ( bsp2 ? sizeof( medge32_t ) : sizeof( medge16_t )));
 	Mod_GCBusyAdd( busy, &n, cap, mod->nodes, mod->numnodes * sizeof( mnode_t ));
@@ -12968,7 +12990,12 @@ static int Mod_GCWorldArenaRanges( gc_arena_range_t *r, int max, const byte *are
 	if( !mod || mod->type != mod_brush )
 		return 0;
 	Mod_GCLiveRange( r, &n, max, arena, cap, mod->planes, mod->numplanes * sizeof( mplane_t ));
-	Mod_GCLiveRange( r, &n, max, arena, cap, mod->leafs, ( mod->numleafs + 1 ) * sizeof( mleaf_t ));
+	/* numleafs is only the world's visleafs after submodel setup; brush
+	 * entity leafs follow in the same array and a claim placed on them
+	 * zeroed their contents (avalanche: traces through func_wall then read a
+	 * NULL plane in R_RecursiveLightPoint / PM_RecursiveSurfCheck). */
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->leafs,
+		Mod_GCLeafArrayCount( mod ) * sizeof( mleaf_t ));
 	Mod_GCLiveRange( r, &n, max, arena, cap, mod->nodes, mod->numnodes * sizeof( mnode_t ));
 	Mod_GCLiveRange( r, &n, max, arena, cap, mod->vertexes, mod->numvertexes * sizeof( mvertex_t ));
 	Mod_GCLiveRange( r, &n, max, arena, cap, mod->edges16, mod->numedges * sizeof( medge32_t ));
@@ -13032,8 +13059,8 @@ static uint32_t gc_world_canary_crc;
 static const model_t *gc_world_canary_mod;
 
 /* Per-component CRCs, so a change names what was overwritten. */
-enum { GC_CANARY_PLANES, GC_CANARY_LIGHT, GC_CANARY_VIS, GC_CANARY_NODES, GC_CANARY_CLIP, GC_CANARY_COUNT };
-static const char *gc_canary_names[GC_CANARY_COUNT] = { "planes", "lighting", "pvs", "nodes", "clipnodes" };
+enum { GC_CANARY_PLANES, GC_CANARY_LIGHT, GC_CANARY_VIS, GC_CANARY_NODES, GC_CANARY_CLIP, GC_CANARY_LEAFS, GC_CANARY_COUNT };
+static const char *gc_canary_names[GC_CANARY_COUNT] = { "planes", "lighting", "pvs", "nodes", "clipnodes", "leafs" };
 static uint32_t gc_world_canary_parts[GC_CANARY_COUNT];
 
 static uint32_t Mod_GCWorldCanary( const model_t *mod, uint32_t *parts )
@@ -13076,6 +13103,18 @@ static uint32_t Mod_GCWorldCanary( const model_t *mod, uint32_t *parts )
 		CRC32_ProcessBuffer( &crc, mod->clipnodes16, mod->numclipnodes
 			* ( world.version == QBSP2_VERSION ? sizeof( mclipnode32_t ) : sizeof( mclipnode16_t )));
 		parts[GC_CANARY_CLIP] = CRC32_Final( crc );
+	}
+	/* Leaf contents, brush entity leafs included (they sit behind the
+	 * world's visleafs and were the ones a claim landed on). */
+	if( mod->leafs )
+	{
+		const size_t count = Mod_GCLeafArrayCount( mod );
+		size_t l;
+
+		CRC32_Init( &crc );
+		for( l = 0; l < count; l++ )
+			CRC32_ProcessBuffer( &crc, &mod->leafs[l].contents, sizeof( mod->leafs[l].contents ));
+		parts[GC_CANARY_LEAFS] = CRC32_Final( crc );
 	}
 	CRC32_Init( &all );
 	CRC32_ProcessBuffer( &all, parts, sizeof( parts[0] ) * GC_CANARY_COUNT );
