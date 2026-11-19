@@ -8005,13 +8005,46 @@ static qboolean R_GXWaterNormalReady( void )
 	f = gEngfuncs.fsapi->Open( "media/water_gx.ia8", "rb", false );
 	if( !f )
 		return false;
+	/* 64x64 and its mip levels down to 4x4. Without them the far water
+	 * sampled the ripples a dozen texels apart: every pixel near the far
+	 * shore took a different slope each frame and the reflection sparkled
+	 * there (Source mipmaps its $normalmap; the averaged slopes flatten
+	 * with distance as the ripples do). */
 	tex = (byte *)GC_MapLoadBufferTailAlloc(
-		Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), 8192 );
+		Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), 8192 + 2048 + 512 + 128 + 32 );
 	if( tex && gEngfuncs.fsapi->Read( f, tex, 8192 ) == 8192 )
 	{
-		DCFlushRange( tex, 8192 );
-		GX_InitTexObj( &gc_wnrm_obj, tex, 64, 64, GX_TF_IA8, GX_REPEAT, GX_REPEAT, GX_FALSE );
-		GX_InitTexObjFilterMode( &gc_wnrm_obj, GX_LINEAR, GX_LINEAR );
+		byte *src = tex;
+		int w;
+
+		/* IA8: 4x4 texel blocks, two bytes a texel. */
+#define WNRM_AT( base, bw, x, y ) (( base ) + (((( y ) >> 2 ) * (( bw ) >> 2 ) + (( x ) >> 2 )) * 32 ) + (((( y ) & 3 ) * 4 + (( x ) & 3 )) * 2 ))
+		for( w = 64; w > 4; w >>= 1 )
+		{
+			byte *dst = src + w * w * 2;
+			const int hw = w >> 1;
+			int x, y, c;
+
+			for( y = 0; y < hw; y++ )
+			{
+				for( x = 0; x < hw; x++ )
+				{
+					const byte *t0 = WNRM_AT( src, w, x * 2, y * 2 );
+					const byte *t1 = WNRM_AT( src, w, x * 2 + 1, y * 2 );
+					const byte *t2 = WNRM_AT( src, w, x * 2, y * 2 + 1 );
+					const byte *t3 = WNRM_AT( src, w, x * 2 + 1, y * 2 + 1 );
+					byte *d = WNRM_AT( dst, hw, x, y );
+
+					for( c = 0; c < 2; c++ )
+						d[c] = (byte)(( t0[c] + t1[c] + t2[c] + t3[c] + 2 ) >> 2 );
+				}
+			}
+			src = dst;
+		}
+#undef WNRM_AT
+		DCFlushRange( tex, 8192 + 2048 + 512 + 128 + 32 );
+		GX_InitTexObj( &gc_wnrm_obj, tex, 64, 64, GX_TF_IA8, GX_REPEAT, GX_REPEAT, GX_TRUE );
+		GX_InitTexObjLOD( &gc_wnrm_obj, GX_LIN_MIP_LIN, GX_LINEAR, 0.0f, 4.0f, -1.0f, GX_FALSE, GX_FALSE, GX_ANISO_1 );
 		gc_wnrm_state = 1;
 	}
 	gEngfuncs.fsapi->Close( f );
