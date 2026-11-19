@@ -13110,21 +13110,28 @@ void GC_DrawFatalBreadcrumb( const char *message, const char *details )
 	if( !rmode || !rmode->fbWidth || !rmode->xfbHeight || !xfb[0] )
 		return;
 
+	/* Retail palette (ViewportBG 55 43 29, ClassMenuLight 175 127 1, gold title) and a 1 px border on the 5% title-safe
+	 * area of the 160x120 panel (x 8..151, y 6..113): nothing is drawn nearer the screen edge than that. */
 	panel = fatal_panel;
 	for( row = 0; row < panel_h; row++ )
 	{
 		unsigned short *rowdst = panel + row * panel_w;
 		for( col = 0; col < panel_w; col++ )
-			rowdst[col] = 0xF81F; /* magenta RGB565 */
+		{
+			const int edge = (( row == 6 || row == 113 ) && col >= 8 && col <= 151 )
+				|| (( col == 8 || col == 151 ) && row >= 6 && row <= 113 );
+
+			rowdst[col] = edge ? 0xABE0 : 0x3143;
+		}
 	}
 	GC_StatusDrawLine( panel, panel_w, panel_w, panel_h,
-		4, 4, "XASH3D GAMECUBE FATAL", 0xFFFF, 1, 24 );
-	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 4, 20,
-		message ? message : "UNKNOWN ERROR", 0xFFE0, 1, 25, 2 );
-	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 4, 40,
-		details ? details : "NO DETAILS", 0xFFFF, 1, 25, 6 );
+		12, 10, "DAY OF DEFEAT - ERROR", 0xFD80, 1, 22 );
+	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 12, 22,
+		message ? message : "UNKNOWN ERROR", 0xFFE0, 1, 22, 3 );
+	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 12, 52,
+		details ? details : "NO DETAILS", 0xFFFF, 1, 22, 5 );
 	GC_StatusDrawLine( panel, panel_w, panel_w, panel_h,
-		4, panel_h - 14, "HALTED: POWER CYCLE OR RESET", 0x07E0, 1, 28 );
+		12, 102, "POWER CYCLE OR RESET", 0x07E0, 1, 22 );
 
 	/* Always CPU-blit into XFB RAM so the panel stays readable even when
 	 * Flipper CopyDisp / DisableCopyToVRAM leave the soft latch empty. */

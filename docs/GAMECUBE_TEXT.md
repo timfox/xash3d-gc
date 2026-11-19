@@ -78,3 +78,12 @@ kill feed, scoreboard, console and the team/class text menus all end up there) t
 `CopyDisp`. Default 0: the atlas is freed when the match starts, as before. **Memory when on: +64 KiB MEM1 resident**
 (inside the 64-128 KiB target; no ARAM paging needed at this size). If the queue (900 glyphs) fills, glyphs fall back to
 the soft path. Not measured: frame time with it on, heap on the heaviest maps.
+
+## Notices and the fatal panel (retail palette, inside the safe area)
+- **Controller disconnected:** `OSK_DrawNotice` (in_osk.c, drawn with the keyboard) shows a centred panel when no native pad
+  has been present for about 0.75 s (`GC_PadMissingNotice`, never for automated probes). Layout is `osk_notice.h`, host test
+  `tests/test_gamecube_osk_notice.py` (stays inside 32 x 24 px margins). Memory: none (soft FillRGBA + the keyboard's
+  bitmap glyphs, or hi-res glyphs when the atlas is up).
+- **Fatal / Host_Error panel:** the magenta 160x120 panel is now ViewportBG with a ClassMenuLight border on the safe area
+  (x 8..151, y 6..113 of the panel), title "DAY OF DEFEAT - ERROR". It still uses a static 38 KiB panel buffer (unchanged).
+- Not seen in Dolphin: needs a pad-less run to show the notice.
