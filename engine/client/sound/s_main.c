@@ -2267,6 +2267,13 @@ qboolean S_Init( void )
 	}
 #if XASH_GAMECUBE
 	Con_Reportf( "Xash3D GameCube: sound dma init ready\n" );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	{
+		extern void S_GCSoundStoreClaimEarly( void );
+
+		S_GCSoundStoreClaimEarly();
+	}
+#endif
 #endif
 
 	snd.soundtime = 0;

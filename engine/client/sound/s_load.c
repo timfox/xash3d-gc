@@ -298,7 +298,14 @@ static uint32_t s_gc_snd_bytes;
  * so take the largest ring that fits rather than none. */
 static qboolean S_GCSoundStoreReady( void )
 {
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Claimed at sound init, before the map's streams.  A 2 MiB ring there
+	 * cost charlie its 1.9 MiB light-face stream; 1 MiB leaves every stream
+	 * what it had. */
+	static const uint32_t sizes[] = { GC_SND_ARAM_BYTES / 2, GC_SND_ARAM_BYTES / 4, GC_SND_ARAM_BYTES / 8 };
+#else
 	static const uint32_t sizes[] = { GC_SND_ARAM_BYTES, GC_SND_ARAM_BYTES / 2, GC_SND_ARAM_BYTES / 4 };
+#endif
 	static uint32_t retry_at;
 
 	if( s_gc_snd_base )
@@ -318,6 +325,13 @@ static qboolean S_GCSoundStoreReady( void )
 	retry_at = (uint32_t)( host.realtime * 10.0 ) + 100;
 	Con_Reportf( "Xash3D GameCube: ARAM sound store refused, no %u KiB hole\n", (uint)( sizes[ARRAYSIZE( sizes ) - 1] / 1024u ));
 	return false;
+}
+
+/* Sound init: ARAM is still empty.  Asked on the first shot instead, the
+ * ring met a full segment table on charlie and was refused for the match. */
+void S_GCSoundStoreClaimEarly( void )
+{
+	(void)S_GCSoundStoreReady();
 }
 
 static uint32_t S_GCSoundHash( const char *name )
