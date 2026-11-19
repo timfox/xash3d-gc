@@ -6011,6 +6011,13 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
  * 3000-triangle model from ARAM every frame. */
 #define GC_PROP_FAR_COVER_OVER	0.30f
 static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
+/* How much of the view a prop fills before it may take its close model
+ * (bounding radius over distance). At 0.40 the church altar, 260 units away
+ * and inside Source's own LOD 0 range, stayed a 286-triangle box until the
+ * player stood over it. The chain cache admits a close model only while it
+ * fits and stands them down when it does not, so the harbor no longer needs
+ * the tighter gate. */
+#define GC_PROP_CLOSE_COVER	0.15f
 #define GC_PROP_DRAW_TRIS	6000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
 #define GC_PROP_TEX_SLOTS	16
@@ -7285,7 +7292,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		 * which the frame does not have. Never in the water mirror. */
 		if( bm->close_model && bm->close_model <= gc_prop_nmodels && !r_gx_mirror
 			&& gc_prop_cache_frame >= gc_prop_close_block
-			&& cover2 > 0.40f * 0.40f )
+			&& cover2 > GC_PROP_CLOSE_COVER * GC_PROP_CLOSE_COVER )
 		{
 			const float cd = (float)bm->close_dist8 * 8.0f;
 
