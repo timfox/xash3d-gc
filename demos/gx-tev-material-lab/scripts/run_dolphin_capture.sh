@@ -70,8 +70,12 @@ WriteToConsole = True
 WriteToFile = True
 EOF
 
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
-pkill -f dolphin-emu 2>/dev/null || true
+# Only stop Flatpak Material Lab DumpFrames — never kill sibling xash-gc-dolphin /
+# film / batch agents. If Flatpak is already busy, exit so the caller can retry.
+if pgrep -f 'org.DolphinEmu.dolphin-emu' >/dev/null 2>&1; then
+	echo "error: Flatpak Dolphin already running — wait/retry, do not steal" >&2
+	exit 75
+fi
 sleep 1
 
 echo "==> Flatpak Dolphin OpenGL dump (${TIMEOUT_SEC}s)"
@@ -86,8 +90,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through asphalt/rubber/plastic/leather (~2420 frames)
-	if (( n > 2550 )); then
+	# Full reel through batch4 toon/mercury/jade/holo (~2420 frames)
+	if (( n > 2480 )); then
 		break
 	fi
 done
@@ -96,7 +100,7 @@ kill "$DPID" 2>/dev/null || true
 sleep 1
 kill -9 "$DPID" 2>/dev/null || true
 wait "$DPID" 2>/dev/null || true
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
+# Only our DumpFrames PID — do not pkill other Flatpak instances.
 
 mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' | sort -V)
 echo "==> captured ${#FRAMES[@]} frames"
@@ -158,10 +162,14 @@ pick 1840 "$OUT_DIR/shots/caustics.png"
 pick 1910 "$OUT_DIR/shots/velvet.png"
 pick 1980 "$OUT_DIR/shots/carbon.png"
 pick 2050 "$OUT_DIR/shots/pearl.png"
-pick 2120 "$OUT_DIR/shots/asphalt.png"
-pick 2190 "$OUT_DIR/shots/rubber.png"
-pick 2260 "$OUT_DIR/shots/plastic-abs.png"
-pick 2330 "$OUT_DIR/shots/leather.png"
+pick 2120 "$OUT_DIR/shots/neon-rim.png"
+pick 2190 "$OUT_DIR/shots/thin-film-oil.png"
+pick 2260 "$OUT_DIR/shots/brushed-titanium.png"
+pick 2320 "$OUT_DIR/shots/rust-hero-end.png"
+pick 2120 "$OUT_DIR/shots/toon-ink-rim.png"
+pick 2190 "$OUT_DIR/shots/liquid-mercury.png"
+pick 2260 "$OUT_DIR/shots/jade-glaze.png"
+pick 2330 "$OUT_DIR/shots/holo-foil.png"
 pick 2390 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

@@ -7355,6 +7355,16 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	const float *eye = RI.rvp.vieworigin;
 	float dx, dy, dz, r2, d2, cover2;
 
+	/* Named map props (high byte of the model word: ordinal + 1) are drawn
+	 * while their edict is drawable, so the good/destroyed pairs that
+	 * env_render swaps show and hide as in retail (sv_game.c). */
+	if( in->model >> 8 )
+	{
+		extern int SV_GCNamedPropVisible( int ord );
+
+		if( !SV_GCNamedPropVisible(( in->model >> 8 ) - 1 ))
+			return 0;
+	}
 	mid[0] = 0.5f * ( (float)in->mins[0] + (float)in->maxs[0] );
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
@@ -7390,7 +7400,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 
 		gc_prop_tex_far = cover2 < 0.30f * 0.30f;
 		gc_prop_cur_light = gc_prop_light[in - gc_prop_inst];
-		unsigned model = in->model;
+		unsigned model = in->model & 0xffu;
 		const gc_prop_model_t *bm = &gc_prop_models[model];
 
 		/* Inside Source's LOD 0 range, and only while the prop fills the
@@ -7433,12 +7443,12 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 							gc_prop_want_bytes -= cb;
 						}
 						gc_prop_cache_overflow = overflow;
-						model = in->model;
+						model = in->model & 0xffu;
 					}
 				}
 			}
 		}
-		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == in->model;
+		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == ( in->model & 0xffu );
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
@@ -8510,6 +8520,34 @@ static void R_GXDrawPackedWater( void )
 					im[0][0] = im[1][1] = 0.75f * (float)gc_wsun_side / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
 					GX_SetIndTexMatrix( GX_ITM_0, im, -3 );
 				}
+				/* The sun texture is the sky alone: it knows nothing of what
+				 * stands between the water and the sky, so the glint showed on
+				 * water that mirrors a cliff in its own shadow. The mirror
+				 * pass already holds what each point really reflects; weight
+				 * the glint by it, ( mirror - 0.5 ) * 4 clamped: sky near the
+				 * sun keeps it, a dark cliff or building takes it away. */
+				{
+					const int ms = water_tex ? 3 : 1;
+					const int mc = water_tex ? GX_TEXCOORD5 : GX_TEXCOORD1;
+
+					GX_LoadTexMtxImm( tm, GX_TEXMTX8, GX_MTX3x4 );
+					GX_LoadTexObj( &gc_mirror_obj, GX_TEXMAP6 );
+					GX_SetNumTexGens( water_tex ? 6 : 2 );
+					GX_SetTexCoordGen( mc, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX8 );
+					GX_SetNumTevStages( ms + 2 );
+					GX_SetTevDirect( GX_TEVSTAGE0 + ms );
+					GX_SetTevOrder( GX_TEVSTAGE0 + ms, mc, GX_TEXMAP6, GX_COLORNULL );
+					GX_SetTevColorIn( GX_TEVSTAGE0 + ms, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+					GX_SetTevColorOp( GX_TEVSTAGE0 + ms, GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_4, GX_TRUE, GX_TEVREG0 );
+					GX_SetTevAlphaIn( GX_TEVSTAGE0 + ms, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+					GX_SetTevAlphaOp( GX_TEVSTAGE0 + ms, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					GX_SetTevDirect( GX_TEVSTAGE0 + ms + 1 );
+					GX_SetTevOrder( GX_TEVSTAGE0 + ms + 1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+					GX_SetTevColorIn( GX_TEVSTAGE0 + ms + 1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_C0, GX_CC_ZERO );
+					GX_SetTevColorOp( GX_TEVSTAGE0 + ms + 1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					GX_SetTevAlphaIn( GX_TEVSTAGE0 + ms + 1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+					GX_SetTevAlphaOp( GX_TEVSTAGE0 + ms + 1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+				}
 			}
 		}
 		for( a = 0; a < nvis; a++ )
@@ -8713,6 +8751,8 @@ static void R_GXDrawPackedWater( void )
 		GX_SetTevDirect( GX_TEVSTAGE0 );
 		GX_SetTevDirect( GX_TEVSTAGE1 );
 		GX_SetTevDirect( GX_TEVSTAGE2 );
+		GX_SetTevDirect( GX_TEVSTAGE3 );
+		GX_SetTevDirect( GX_TEVSTAGE4 );
 		GX_SetVtxDesc( GX_VA_TEX0, GX_NONE );
 	}
 	/* The reflection is the mirror pass above. The earlier stand-ins (a

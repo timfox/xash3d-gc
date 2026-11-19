@@ -88,6 +88,16 @@ the DumpFrames capture reel so you stay in control.
 | RUBBER | Soft wrap tire rubber, muted Fresnel |
 | PLASTIC ABS | Cool-tinted injection plastic + soft dielectric coat |
 | LEATHER | Warm hide grain + soft sheen IndTex |
+| NEON RIM | Solid albedo×AO body + thin KONST Fresnel accent (not force-field) |
+| THIN FILM OIL | Dark body + low-sat rainbow on Fresnel only (not IRIDESCENT bloom) |
+| BRUSHED TITANIUM | Cool Ti tint + directional IndTex brush streaks (not ANISO FLAKE) |
+| STAINED GLASS | Cobalt-tinted panes × AO + sharp Fresnel IndTex coat |
+| LED MATRIX | Pixel-grid panel × metal-gated KONST emissive (no force-field shell) |
+| OIL SLICK | Dark wet body + rainbow Fresnel film (≠ IRIDESCENT / thin-film oil) |
+| TOON INK RIM | Cel body + KONST ink rim (≠ TOON RAMP / force field) |
+| LIQUID MERCURY | Cool chrome fluid × metal IndTex |
+| JADE GLAZE | Soft wrap jade body + dielectric glaze |
+| HOLO FOIL | Foil base + metal IndTex × rainbow KONST |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |

@@ -359,6 +359,119 @@ def face_lightmap(bsp: Bsp, lightofs: int, lw: int, lh: int):
 	return [[tuple(lit[lightofs + (y * lw + x) * 3: lightofs + (y * lw + x) * 3 + 3]) for x in range(lw)] for y in range(lh)]
 
 
+SB_CLASSES = ("func_wall", "func_illusionary")
+SB_MAX = 256
+SB_MODEL_MAX = 1024
+SB_SOLID = 0x8000
+
+
+def parse_entities(bsp_bytes: bytes) -> list[dict]:
+	text = lump(bsp_bytes, 0).decode("latin1", "replace")
+	ents, cur = [], None
+	for line in text.splitlines():
+		line = line.strip()
+		if line == "{":
+			cur = {}
+		elif line == "}":
+			if cur is not None:
+				ents.append(cur)
+			cur = None
+		elif cur is not None and line.startswith('"'):
+			parts = line.split('"')
+			if len(parts) >= 4:
+				cur[parts[1]] = parts[3]
+	return ents
+
+
+def _zero(val: str | None) -> bool:
+	if not val:
+		return True
+	try:
+		return all(float(x) == 0.0 for x in val.split())
+	except ValueError:
+		return False
+
+
+def static_brushes(bsp: "Bsp") -> list[tuple[int, bool]]:
+	"""Brush entities that never change: (model number, solid).  An unnamed
+	func_wall or func_illusionary drawn opaque at the lump origin cannot be
+	triggered, moved, hidden or faded, so its faces are baked with the world
+	and the server keeps it out of the packets (GC_StaticBrushes, model.c).
+	The rule reads the entity lump only, so every machine with the same disc
+	agrees on the set."""
+	ents = parse_entities(bsp.data)
+	uses: dict[str, int] = {}
+	for e in ents:
+		m = e.get("model", "")
+		if m.startswith("*"):
+			uses[m] = uses.get(m, 0) + 1
+	out: list[tuple[int, bool]] = []
+	for e in ents:
+		cls = e.get("classname", "")
+		model = e.get("model", "")
+		if cls not in SB_CLASSES or not model.startswith("*") or uses.get(model) != 1:
+			continue
+		try:
+			num = int(model[1:])
+		except ValueError:
+			continue
+		if num < 1 or num >= min(len(bsp.models), SB_MODEL_MAX):
+			continue
+		if e.get("targetname") or e.get("globalname") or e.get("master"):
+			continue
+		if not all(_zero(e.get(k)) for k in ("rendermode", "renderfx", "origin", "angles", "effects")):
+			continue
+		if cls == "func_illusionary" and e.get("skin", "0").strip() not in ("", "0", "-1"):
+			continue
+		first, count = bsp.models[num][14], bsp.models[num][15]
+		plain = True
+		for fi in range(first, first + count):
+			miptex = bsp.texinfos[bsp.faces[fi][4]][2]
+			name = bsp.mip_names[miptex].lower() if 0 <= miptex < len(bsp.mip_names) else ""
+			if name[:1] in ("{", "!", "*", "+", "-") or name.startswith("scroll") or "water" in name:
+				plain = False
+				break
+		if not plain:
+			continue
+		out.append((num, cls == "func_wall"))
+		if len(out) >= SB_MAX:
+			break
+	return out
+
+
+def face_clusters(bsp: "Bsp", f, pts) -> list[int]:
+	"""PVS clusters a brush entity face is seen from.  Its faces are not cut
+	by the world tree, so sample in front of the middle and of each corner;
+	the face is emitted into every cluster found (same depth, drawn once per
+	visible chunk)."""
+	pl = bsp.planes[f[0]]
+	sign = -1.0 if f[1] else 1.0
+	n = len(pts)
+	c = [sum(p[a] for p in pts) / n for a in range(3)]
+	found: list[int] = []
+	for dist in (2.0, 8.0):
+		samples = [c] + [[p[a] + (c[a] - p[a]) * 0.15 for a in range(3)] for p in pts]
+		for q in samples:
+			cl = bsp.cluster_at(tuple(q[a] + pl[a] * sign * dist for a in range(3)))
+			if cl >= 0 and cl not in found:
+				found.append(cl)
+		if found:
+			break
+	return found[:6]
+
+
+def write_static_brushes(out_path: Path, statics: list[tuple[int, bool]], wd_bytes: int) -> None:
+	"""media/wd_<map>_sb.gcd, big-endian: "GCsb", version, count, byte size of
+	the world DL these faces were baked into (the runtime ignores the list if
+	the pack on disc is another size), then one u16 per entity: model number,
+	bit 15 set when solid."""
+	body = bytearray(struct.pack(">4sHHI", b"GCsb", 1, len(statics), wd_bytes))
+	for num, solid in statics:
+		body += struct.pack(">H", num | (SB_SOLID if solid else 0))
+	out_path.parent.mkdir(parents=True, exist_ok=True)
+	out_path.write_bytes(body)
+
+
 def bake(map_bsp: Path, out_path: Path) -> None:
 	bsp = Bsp(map_bsp)
 	stem = map_bsp.stem
@@ -395,7 +508,14 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	world_num = bsp.models[0][15]
 	n_faces = n_orphans = n_skip = 0
 
-	for fi in range(world_first, world_first + world_num):
+	statics = static_brushes(bsp)
+	face_list = [(fi, False) for fi in range(world_first, world_first + world_num)]
+	for num, _solid in statics:
+		first, count = bsp.models[num][14], bsp.models[num][15]
+		face_list += [(fi, True) for fi in range(first, first + count)]
+	n_static_faces = 0
+
+	for fi, is_static in face_list:
 		f = bsp.faces[fi]
 		ti0, ti1, miptex, flags = bsp.texinfos[f[4]]
 		mat = mat_for(miptex, flags)
@@ -409,44 +529,51 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		name = bsp.mip_names[miptex].lower()
 		water = name.startswith("*") or name.startswith("!") or "water" in name
 
-		cluster = face_cluster.get(fi, -1)
-		if cluster < 0:
-			cx = sum(p[0] for p in pts) / len(pts)
-			cy = sum(p[1] for p in pts) / len(pts)
-			cz = sum(p[2] for p in pts) / len(pts)
-			pl = bsp.planes[f[0]]
-			sign = -1.0 if f[1] else 1.0
-			cluster = bsp.cluster_at((cx + pl[0] * sign * 4, cy + pl[1] * sign * 4, cz + pl[2] * sign * 4))
-		if cluster < 0:
+		if is_static:
+			clusters = face_clusters(bsp, f, pts)
+		else:
+			cluster = face_cluster.get(fi, -1)
+			if cluster < 0:
+				cx = sum(p[0] for p in pts) / len(pts)
+				cy = sum(p[1] for p in pts) / len(pts)
+				cz = sum(p[2] for p in pts) / len(pts)
+				pl = bsp.planes[f[0]]
+				sign = -1.0 if f[1] else 1.0
+				cluster = bsp.cluster_at((cx + pl[0] * sign * 4, cy + pl[1] * sign * 4, cz + pl[2] * sign * 4))
+			clusters = [cluster] if cluster >= 0 else []
+		if not clusters:
 			n_orphans += 1
 			continue
 
 		sts = st_for(ti0, ti1, tw, th, pts)
-		chunk = chunks.setdefault(cluster, Chunk())
 		pl = bsp.planes[f[0]]
 		nrm = (-pl[0], -pl[1], -pl[2]) if f[1] else (pl[0], pl[1], pl[2])
-		cell = None
-		lw = lh = 1
-		bmins = (0, 0)
-		if not water and not (flags & TEX_SPECIAL) and f[6] >= 0 and bsp.lighting:
-			bmins, (lw, lh) = face_extents(ti0, ti1, pts)
-			samples = face_lightmap(bsp, f[6], lw, lh)
-			if samples:
-				cell = chunk.lm.alloc(lw, lh)
+		for cluster in clusters:
+			chunk = chunks.setdefault(cluster, Chunk())
+			cell = None
+			lw = lh = 1
+			bmins = (0, 0)
+			if not water and not (flags & TEX_SPECIAL) and f[6] >= 0 and bsp.lighting:
+				bmins, (lw, lh) = face_extents(ti0, ti1, pts)
+				samples = face_lightmap(bsp, f[6], lw, lh)
+				if samples:
+					cell = chunk.lm.alloc(lw, lh)
+					if cell:
+						chunk.lm.blit(cell, samples)
+			verts = []
+			for p, (s, t) in zip(pts, sts):
+				col = (96, 132, 140) if water else light_at(bsp, f, ti0, ti1, flags, pts, p)
 				if cell:
-					chunk.lm.blit(cell, samples)
-		verts = []
-		for p, (s, t) in zip(pts, sts):
-			col = (96, 132, 140) if water else light_at(bsp, f, ti0, ti1, flags, pts, p)
-			if cell:
-				u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
-				v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
-				lu, lv = cell_st(cell, u, v, lw, lh)
-			else:
-				lu, lv = GREY_UV
-			verts.append((p, col, nrm, s, t, lu, lv))
-		chunk.emit(mat, GX_DRAW_TRIFAN, verts)
+					u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
+					v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
+					lu, lv = cell_st(cell, u, v, lw, lh)
+				else:
+					lu, lv = GREY_UV
+				verts.append((p, col, nrm, s, t, lu, lv))
+			chunk.emit(mat, GX_DRAW_TRIFAN, verts)
 		n_faces += 1
+		if is_static:
+			n_static_faces += 1
 
 	# BSP tree for point-in-leaf → cluster (child encoding matches lostcoast)
 	plane_remap: dict[int, int] = {}
@@ -565,11 +692,13 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	struct.pack_into(">I", body, 60, max_chunk)
 	out_path.parent.mkdir(parents=True, exist_ok=True)
 	out_path.write_bytes(body)
+	write_static_brushes(out_path.with_name(out_path.stem + "_sb.gcd"), statics, len(body))
 
 	tris = sum(c.tris for c in chunks.values())
 	batches = sum(len(c.batches) for c in chunks.values())
 	print(f"world DL bake {stem} (GoldSrc BSP30):")
 	print(f"  faces={n_faces} skip={n_skip} orphans={n_orphans} tris={tris}")
+	print(f"  static brush entities={len(statics)} (solid {sum(1 for _n, so in statics if so)}) faces={n_static_faces}")
 	print(f"  clusters={bsp.numclusters} chunks={len(order)} batches={batches} mats={len(mat_recs)}")
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)}")
 	print(f"  MEM1 resident={ofs_pvsdir // 1024} KB  ARAM chunks={run // 1024} KB (max {max_chunk // 1024} KB)")
