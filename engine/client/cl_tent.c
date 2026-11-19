@@ -3678,6 +3678,27 @@ int GAME_EXPORT CL_DecalIndex( int id )
 		 */
 		if( GC_MapLoadMemoryOpt() && host.draw_decals[id][0] == '{' )
 		{
+#if XASH_DODGC_NETWORK
+			/* DoD: the five retail bullet holes are 16x16 (1152 bytes each
+			 * in decals.wad), cheap enough to load as they are. Everything
+			 * larger keeps the embedded stand-in. */
+			if( !Q_strnicmp( host.draw_decals[id], "{shot", 5 )
+				&& GC_MemHeapFreeBytes() > 24 * 1024 )
+			{
+				gl_texturenum = ref.dllFuncs.GL_LoadTexture( host.draw_decals[id], NULL, 0, TF_DECAL );
+				if( gl_texturenum > 0 )
+				{
+					static int logs;
+
+					if( logs++ < 5 )
+						Con_Reportf( "Xash3D GameCube: retail decal %s tex=%d (heap %s)\n",
+							host.draw_decals[id], gl_texturenum, Q_memprint( GC_MemHeapFreeBytes( )));
+					cl.decal_index[id] = gl_texturenum;
+					Image_ClearForceFlags();
+					return gl_texturenum;
+				}
+			}
+#endif
 			gl_texturenum = CL_GCEnsureLeanDecalForName( host.draw_decals[id] );
 			cl.decal_index[id] = gl_texturenum;
 			Image_ClearForceFlags();
