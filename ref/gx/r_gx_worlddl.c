@@ -214,6 +214,8 @@ static char gc_wd_mapbase[40];
 static void R_GXWorldDLFog( f32 z_near, f32 z_far );
 
 static qboolean R_GXWorldDLFetch( u32 file_ofs, void *dst, u32 len );
+static void R_GXWorldDLLoadPVS( int cluster );
+extern int R_GXCmprSlotCount( void );
 
 static void R_GXTevBindDetail( u8 idx )
 {
@@ -1421,6 +1423,87 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	}
 
 	gc_wd_tev_gens = gc_wd_hdr.version == 2 ? 2 : 1;
+	/* A map that got no texture slots from the map arena binds every world
+	 * texture through one 24 KB bounce: 13 to 28 ARAM reads a frame, 2.8 to
+	 * 5.8 ms (avalanche shows 37 textures at once). Its chunk cache in the
+	 * spill is often far larger than any view can fill: avalanche and
+	 * glider hold about 380 KB and draw 39 KB a frame. Measure the most
+	 * chunk bytes one cluster's PVS can show, keep that plus a quarter, and
+	 * turn the rest of the cache into texture slots. */
+	if( !gc_wd_cache_in_arena && !cmpr_adopted && gc_wd_aram && gc_wd_pvs
+		&& R_GXCmprSlotCount() <= 8 && gc_wd_hdr.n_clusters > 0
+		&& gc_wd_hdr.n_clusters * 4u <= gc_wd_cache_size
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocacheslots" ))
+	{
+		const u32 visbytes = ( gc_wd_hdr.n_clusters + 7 ) >> 3;
+		u32 *const per_cluster = (u32 *)gc_wd_cache;	/* the cache is idle until the first frame */
+		const u32 slot_bytes = 10944u;	/* a 128x128 chain */
+		const u32 big_bytes = 21984u;	/* a 256x128 chain */
+		u32 need = 0, keep, floor_bytes, c, k, total = 0, open_rows = 0;
+		int nslots = 0, big_n = 0;
+
+		memset( per_cluster, 0, gc_wd_hdr.n_clusters * 4u );
+		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
+		{
+			if( gc_wd_chunk_cluster[i] < gc_wd_hdr.n_clusters )
+			{
+				per_cluster[gc_wd_chunk_cluster[i]] += gc_wd_chunk_bytes[i];
+				total += gc_wd_chunk_bytes[i];
+			}
+		}
+		for( c = 0; c < gc_wd_hdr.n_clusters; c++ )
+		{
+			u32 sum = 0;
+
+			R_GXWorldDLLoadPVS( (int)c );
+			for( k = 0; k < visbytes; k++ )
+			{
+				u32 bits = gc_wd_pvs[k], j;
+
+				for( j = 0; bits; j++, bits >>= 1 )
+				{
+					if(( bits & 1u ) && k * 8u + j < gc_wd_hdr.n_clusters )
+						sum += per_cluster[k * 8u + j];
+				}
+			}
+			/* A cluster with no row sees everything; the eye is only in
+			 * one when it is outside the map. */
+			if( sum >= total )
+				open_rows++;
+			else if( sum > need )
+				need = sum;
+		}
+		if( open_rows == gc_wd_hdr.n_clusters )
+			need = total;
+		floor_bytes = Q_max( 96u * 1024u, gc_wd_hdr.max_chunk * 2u );
+		keep = need + need / 4u + (( gc_wd_hdr.max_chunk + 31u ) & ~31u );
+		keep = ( Q_max( keep, floor_bytes ) + 32767u ) & ~32767u;
+		if( gc_wd_cache_size > keep )
+		{
+			u32 spare = gc_wd_cache_size - keep;
+
+			nslots = (int)Q_min( spare / slot_bytes, 48u );
+			/* Past sixteen full slots, a few take whole 256x128 chains. */
+			while( nslots > 16 && big_n < 6
+				&& (u32)( nslots - 2 ) * slot_bytes + (u32)( big_n + 1 ) * big_bytes <= spare )
+			{
+				nslots -= 2;
+				big_n++;
+			}
+		}
+		if( nslots >= 8 )
+		{
+			byte *tex = gc_wd_cache + keep;
+
+			gc_wd_cache_size = keep;
+			R_GXCmprBounceAdopt( tex, nslots, slot_bytes, 0, 0 );
+			if( big_n )
+				R_GXCmprBigAdopt( tex + (size_t)nslots * slot_bytes, big_n, big_bytes );
+		}
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL widest PVS %u Kb of chunks, cache %u Kb, texture slots from its tail: %d x %u + %d x %u\n",
+			need / 1024u, gc_wd_cache_size / 1024u, nslots >= 8 ? nslots : 0, slot_bytes,
+			nslots >= 8 ? big_n : 0, big_bytes );
+	}
 	gc_wd_pvs_cluster = -2;
 	/* The tail of the chunk cache is the overflow bounce. A frustum chunk
 	 * that does not fit the shore budget still draws from here. */
