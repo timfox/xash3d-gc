@@ -96,3 +96,9 @@ Host test `tests/test_gamecube_hitext_buttons.py` checks the glyph table. Not se
 - **Fatal / Host_Error panel:** the magenta 160x120 panel is now ViewportBG with a ClassMenuLight border on the safe area
   (x 8..151, y 6..113 of the panel), title "DAY OF DEFEAT - ERROR". It still uses a static 38 KiB panel buffer (unchanged).
 - Not seen in Dolphin: needs a pad-less run to show the notice.
+
+## Keyboard footer hints with button glyphs
+The on-screen keyboard's footer ("{A} type  {B} delete  {X} space", "{Y} page  {S} OK  {Z} cancel") uses the same
+`{A}`-style tokens: with the hi-res atlas up they are GX glyph quads (cell about 12 px at the keyboard's text scale), without
+it the bitmap font prints `[A]`. Width-aware (`OSK_TextWidthFp`), so centred labels stay centred. No memory cost.
+Not seen in Dolphin; no host test (the routine lives in in_osk.c next to the engine's draw calls).
