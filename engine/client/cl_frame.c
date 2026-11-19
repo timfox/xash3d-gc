@@ -2380,6 +2380,16 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 
 				if( e == cl.playernum + 1 )
 					continue;
+				/* Spectator in-eye (OBS_IN_EYE 4): the view sits inside the
+				 * followed player, so drawing its body puts the head and
+				 * shoulders in front of the camera. iuser2 is the target. */
+				if( SV_IsValidEdict( SV_EdictNum( cl.playernum + 1 )))
+				{
+					edict_t *self = SV_EdictNum( cl.playernum + 1 );
+
+					if( self->v.iuser1 == 4 && self->v.iuser2 == e )
+						continue;
+				}
 				if( !SV_IsValidEdict( ed ))
 					reject = 1;
 				else if( FBitSet( ed->v.effects, EF_NODRAW ))
