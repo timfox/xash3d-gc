@@ -26,6 +26,7 @@ GNU General Public License for more details.
 
 #if XASH_GAMECUBE
 static CVAR_DEFINE_AUTO( gc_hud_retail, "0", 0, "set by the DoD client while its retail HUD draws; the lean route then skips its own TEAM/HP/AMMO bars" );
+static CVAR_DEFINE_AUTO( gc_osk_open, "0", 0, "1 while the on-screen keyboard is up (the client hides the HUD pieces under it)" );
 #endif
 CVAR_DEFINE_AUTO( osk_enable, OSK_DEFAULT_ENABLE, FCVAR_ARCHIVE | FCVAR_FILTERABLE, "enable built-in on-screen keyboard" );
 
@@ -589,6 +590,7 @@ void OSK_Draw( void )
 #if XASH_GAMECUBE
 	if( GC_PadMissingNotice( ))
 		OSK_DrawNotice( sx, sy );
+	gc_osk_open.value = ( osk.enable && osk_enable.value ) ? 1.0f : 0.0f;
 #endif
 	if( !osk.enable || !osk_enable.value )
 		return;
@@ -802,6 +804,7 @@ void OSK_Init( void )
 	/* shared with the game's client DLL (it sets it each frame the retail HUD draws); registered here so the client's lookup
 	 * at start-up finds it instead of warning about a non-existent cvar */
 	Cvar_RegisterVariable( &gc_hud_retail );
+	Cvar_RegisterVariable( &gc_osk_open );
 #endif
 	Cvar_RegisterVariable( &osk_enable );
 }
