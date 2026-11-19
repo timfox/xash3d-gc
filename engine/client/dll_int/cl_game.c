@@ -1022,6 +1022,20 @@ static int gc_hud_call_trace;
 
 void CL_DrawHUD( int state )
 {
+#if XASH_GAMECUBE
+	/* gc_hud_off 1 (console or listenserver.cfg): draw no client HUD at all, for clean spectator and
+	 * capture footage. The cvar is looked up by name each frame so a value set before any
+	 * registration still counts. */
+	if( state == CL_ACTIVE )
+	{
+		static convar_t *gc_hud_off;
+
+		if( !gc_hud_off )
+			gc_hud_off = Cvar_FindVar( "gc_hud_off" );
+		if( gc_hud_off && gc_hud_off->value != 0.0f )
+			return;
+	}
+#endif
 	if( state == CL_ACTIVE && !cl.video_prepped )
 		state = CL_LOADING;
 
