@@ -1246,6 +1246,17 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 	}
 	*length = 0;
 
+	/* The mirror exists but could not be read into memory: the retail file is 3-5x bigger and fails the same way
+	 * (zalec: v_bren 525 KB after the 125 KB mirror). The slot path loads the weapon when it is equipped. */
+	if( Sys_CheckParm( "-gclistenserver" ) && FS_FileExists( mirror, false ))
+	{
+		static int skip_logs;
+
+		if( skip_logs++ < 8 )
+			Con_Reportf( "Xash3D GameCube: no retail fallback for '%s' (gc_studio mirror exists), loads when used\n", model_path );
+		return NULL;
+	}
+
 	buf = FS_LoadFileMalloc( model_path, length, false );
 	if( buf && *length >= (fs_offset_t)sizeof( studiohdr_t ))
 	{
