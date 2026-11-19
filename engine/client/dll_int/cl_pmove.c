@@ -506,7 +506,7 @@ static void CL_GCAddStaticBrushes( void )
 	const word *list;
 	const int room = MAX_PHYSENTS - cl.maxclients - GC_SB_DYNAMIC_RESERVE - 1;
 	qboolean all;
-	int nphys = 1, nvis = 1;
+	int nphys = 1, nvis = 1, unloaded = 0;
 
 	if( !cl.worldmodel )
 		return;
@@ -538,7 +538,12 @@ static void CL_GCAddStaticBrushes( void )
 		const qboolean solid = ( list[i] & 0x8000 ) != 0;
 		model_t *mod = CL_ModelHandle(( list[i] & 0x7fff ) + 1 );
 
-		if( !mod || mod->type != mod_brush || !mod->hulls[1].lastclipnode )
+		if( !mod )
+		{
+			unloaded++;	/* signon: the client has not bound its models yet */
+			continue;
+		}
+		if( mod->type != mod_brush || !mod->hulls[1].lastclipnode )
 			continue;
 		if( !all )
 		{
@@ -566,7 +571,10 @@ static void CL_GCAddStaticBrushes( void )
 	clgame.pmove->numphysent = nphys;
 	clgame.pmove->numvisent = nvis;
 
-	if( all )
+	/* Keep the fill only when every model was there: the first calls of a
+	 * map come before the models are bound, and an empty fill kept for the
+	 * whole map would leave the player walking through the baked walls. */
+	if( all && !unloaded )
 	{
 		filled_serial = serial;
 		filled_world = cl.worldmodel;
