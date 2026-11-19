@@ -1313,6 +1313,14 @@ void SV_GCStaticWallTrace( int i, const vec3_t start, vec3_t mins, vec3_t maxs, 
 	SV_ClipMoveToEntity( SV_GCStaticWallEdict( &gc_static_walls[i] ), start, mins, maxs, end, trace );
 }
 
+void SV_GCStaticWallInfo( int i, vec3_t origin, vec3_t mins, vec3_t maxs, int *modelindex )
+{
+	VectorCopy( gc_static_walls[i].origin, origin );
+	VectorCopy( gc_static_walls[i].mins, mins );
+	VectorCopy( gc_static_walls[i].maxs, maxs );
+	*modelindex = gc_static_walls[i].modelindex;
+}
+
 void SV_GCStaticWallBounds( int i, vec3_t absmin, vec3_t absmax, int *modelindex )
 {
 	VectorCopy( gc_static_walls[i].absmin, absmin );
