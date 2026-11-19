@@ -369,6 +369,9 @@ extern host_parm_t	host;
 #define CMD_FILTERABLE  BIT( 4 ) // filtered in unprivileged mode if cl_filterstuffcmd is 1
 #define CMD_REFDLL      BIT( 5 ) // added by ref.dll
 #define CMD_OVERRIDABLE BIT( 6 ) // can be removed by DLLs if name matches
+#if XASH_GAMECUBE
+#define CMD_GC_STATICNAME BIT( 7 ) // name points at the statically linked DLL's literal, not freed
+#endif
 
 typedef void (*xcommand_t)( void );
 

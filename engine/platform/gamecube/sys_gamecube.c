@@ -1109,6 +1109,9 @@ static char gc_autocampaign_delay[16];
  * later chapter can be load-tested on the real route (not a playthrough). */
 static qboolean gc_startmap_configured;
 static char gc_startmap[32];
+/* Probe-only: gamecube.cfg "probecmd <script>" → -gcprobecmd (sv_gc_campaign.c). */
+static qboolean gc_probecmd_configured;
+static char gc_probecmd[512];
 static qboolean gc_modeltrace_configured;
 static qboolean gc_net_configured;
 static qboolean gc_netfast_configured;
@@ -1169,6 +1172,8 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_autohop_configured = false;
 	gc_autocampaign_configured = false;
 	gc_startmap_configured = false;
+	gc_probecmd_configured = false;
+	gc_probecmd[0] = '\0';
 	gc_modeltrace_configured = false;
 	gc_phase_test[0] = '\0';
 	gc_changelevel_map[0] = '\0';
@@ -1324,6 +1329,24 @@ static void GCube_LoadDiscBootOverrides( void )
 				Q_strncpy( gc_autocampaign_delay, "20", sizeof( gc_autocampaign_delay ));
 			gc_autocampaign_configured = true;
 			SYS_Report( "Xash3D GameCube: disc boot override autocampaign %s\n", gc_autocampaign_delay );
+			continue;
+		}
+
+		if( !Q_strnicmp( cursor, "probecmd", 8 ) && ( cursor[8] == ' ' || cursor[8] == '\t' ))
+		{
+			/* Repeated lines append (';'-joined): the cfg line buffer is short. */
+			const char *arg = cursor + 8;
+			int n = (int)Q_strlen( gc_probecmd );
+
+			while( *arg == ' ' || *arg == '\t' )
+				arg++;
+			if( n > 0 && n < (int)sizeof( gc_probecmd ) - 1 )
+				gc_probecmd[n++] = ';';
+			while( *arg && *arg != '\r' && *arg != '\n' && n < (int)sizeof( gc_probecmd ) - 1 )
+				gc_probecmd[n++] = *arg++;
+			gc_probecmd[n] = '\0';
+			gc_probecmd_configured = n > 0;
+			SYS_Report( "Xash3D GameCube: disc boot override probecmd %s\n", gc_probecmd );
 			continue;
 		}
 
@@ -2216,6 +2239,11 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	{
 		gc_argv[fake_argc++] = "-gcstartmap";
 		gc_argv[fake_argc++] = gc_startmap;
+	}
+	if( gc_probecmd_configured )
+	{
+		gc_argv[fake_argc++] = "-gcprobecmd";
+		gc_argv[fake_argc++] = gc_probecmd;
 	}
 	if( gc_modeltrace_configured )
 		gc_argv[fake_argc++] = "-gcmodeltrace";

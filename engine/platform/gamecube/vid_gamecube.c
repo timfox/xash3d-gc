@@ -13375,15 +13375,11 @@ static void GC_TryDeferredHudSheets( void )
 	}
 	Con_Reportf( "Xash3D GameCube: G290 deferred HUD sheets present=%u\n",
 		gc_present_count );
-	/* G327 deferred VidInit with the sheets; bring both up together. */
+	/* G327 deferred HUD_VidInit: once per map, after the world presents. */
 	if( Sys_CheckParm( "-gcnewgame" ) && !Sys_CheckParm( "-gcfullphysics" ))
 	{
 		SCR_LoadCreditsFont();
-		if( clgame.dllFuncs.pfnVidInit )
-		{
-			clgame.dllFuncs.pfnVidInit();
-			Con_Reportf( "Xash3D GameCube: newgame lean HUD VidInit after world present\n" );
-		}
+		CL_GCEnsureHudVidInit( "after world present" );
 	}
 	CL_GCPreloadNewGameHudSpritesLate();
 #endif
@@ -18915,16 +18911,12 @@ qboolean GC_PrepareNewGameWorldPresent( void )
 	FS_ClearFindMissCache();
 	if( Sys_CheckParm( "-gcnewgame" ) && !Sys_CheckParm( "-gcfullphysics" ))
 	{
-		Con_Reportf( "Xash3D GameCube: G327 defer lean HUD VidInit/sprites until post-present\n" );
+		Con_Reportf( "Xash3D GameCube: G327 defer HUD VidInit until post-present\n" );
 	}
 	else
 	{
 		SCR_LoadCreditsFont();
-		if( clgame.dllFuncs.pfnVidInit )
-		{
-			clgame.dllFuncs.pfnVidInit();
-			Con_Reportf( "Xash3D GameCube: newgame lean HUD VidInit after world present\n" );
-		}
+		CL_GCEnsureHudVidInit( "prepare" );
 		CL_GCPreloadNewGameHudSprites();
 	}
 	Con_Reportf( "Xash3D GameCube: G327 prepare HUD ready\n" );
@@ -19411,7 +19403,7 @@ qboolean GC_PrepareNewGameWorldPresent( void )
 				ref.dllFuncs.R_AllowFog( false );
 				ref.dllFuncs.R_Set2DMode( true );
 				CL_DrawHUD( CL_ACTIVE );
-				Con_Reportf( "Xash3D GameCube: HUD lean draw\n" );
+				Con_Reportf( "Xash3D GameCube: HUD draw (V_RenderView pump)\n" );
 				ref.dllFuncs.R_AllowFog( true );
 				Platform_SetTimer( 0.0f );
 				ref.dllFuncs.R_EndFrame();

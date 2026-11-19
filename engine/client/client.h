@@ -356,6 +356,9 @@ typedef struct
 	int      type;            // fixed width font or variable
 	convar_t *rendermode;     // user-defined default rendermode
 	qboolean	valid;           // all rectangles are valid
+#if XASH_GAMECUBE
+	int      gc_texw, gc_texh;  // atlas size when the texture is only a token (ARAM cells)
+#endif
 } cl_font_t;
 
 typedef struct scissor_state_s
@@ -888,6 +891,8 @@ model_t *CL_LoadModel( const char *modelname, int *index );
 #if XASH_GAMECUBE
 void CL_GCPreloadNewGameHudSprites( void );
 void CL_GCPreloadNewGameHudSpritesLate( void );
+qboolean CL_GCEnsureHudVidInit( const char *why );
+void CL_GCHudVidInitReset( void );
 #endif
 HSPRITE pfnSPR_LoadExt( const char *szPicName, uint texFlags );
 void SPR_AdjustSize( float *x, float *y, float *w, float *h );

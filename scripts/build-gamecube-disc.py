@@ -548,7 +548,7 @@ MENU_RESOURCE_DIRS = (
 )
 
 
-SMOKE_HUD_RES = 320
+SMOKE_HUD_RES = 640  # the client lays the HUD out on a 640x480 screen
 
 SMOKE_HUD_SPRITES = (
 	"sprites/animglow01.spr",
@@ -1584,17 +1584,10 @@ GC_STUDIO_MODELS = (
 	"models/islavet.mdl",
 )
 
-# Direct-load HUD sheets for lean New Game Redraw (ISO9660 sprites/ lookups
-# false-miss like models/). Keep the set tiny — bootstrap MEM is tight.
+# Sprites read early through the bootstrap search path (ISO9660 sprites/
+# lookups false-miss like models/). The HUD itself is the retail 640 set of
+# hud.txt, read from the disc by the client's HUD_VidInit.
 GC_HUD_SPRITES = (
-	# G288: lean single-frame aliases — fat retail soft-fails under tip.
-	("sprites/320_pain.spr", "sprites/gc_320_pain.spr"),
-	("sprites/320_train.spr", "sprites/gc_320_train.spr"),
-	("sprites/320hud2.spr", "sprites/gc_320hud2.spr"),
-	# G173: lean 64×64 downsample of fat 320hud1 (~66 KiB → ~5 KiB).
-	("sprites/320hud1.spr", "sprites/gc_320hud1.spr"),
-	# G174: lean 64×64 downsample of 128×128 crosshairs (~17 KiB → ~5 KiB).
-	("sprites/crosshairs.spr", "sprites/gc_crosshairs.spr"),
 	# G320: reactor electricity / env_beam (~7 KiB retail; tip-safe as-is).
 	"sprites/lgtning.spr",
 )
@@ -3127,81 +3120,6 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 	return staged
 
 
-def lean_hl_spr_bytes(src: Path, scale: int = 2) -> bytes | None:
-	"""Nearest-neighbor downsample a single-frame HL SPR (G173/G174 lean HUD).
-
-	G187: for SPR_ALPHATEST sheets, prefer any non-255 texel in the scale×scale
-	block so thin crosshair strokes survive 128→64 (plain NN often empties them).
-	"""
-	import math
-
-	try:
-		d = src.read_bytes()
-	except OSError:
-		return None
-	if len(d) < 44 or d[:4] != b"IDSP":
-		return None
-	ver = struct.unpack_from("<i", d, 4)[0]
-	if ver != 2:
-		return None
-	typ = struct.unpack_from("<i", d, 8)[0]
-	tex = struct.unpack_from("<i", d, 12)[0]
-	face = struct.unpack_from("<i", d, 32)[0]
-	sync = struct.unpack_from("<i", d, 36)[0]
-	ncolors = struct.unpack_from("<h", d, 40)[0]
-	if ncolors <= 0 or ncolors > 256:
-		return None
-	pal_off = 42
-	frame_off = pal_off + ncolors * 3
-	if frame_off + 20 > len(d):
-		return None
-	ftype = struct.unpack_from("<i", d, frame_off)[0]
-	if ftype != 0:
-		return None
-	ox, oy, w, h = struct.unpack_from("<iiii", d, frame_off + 4)
-	pix_off = frame_off + 20
-	if w <= 0 or h <= 0 or pix_off + w * h > len(d):
-		return None
-	if scale < 1 or (w % scale) or (h % scale):
-		return None
-	nw, nh = w // scale, h // scale
-	pix = d[pix_off : pix_off + w * h]
-	out_pix = bytearray(nw * nh)
-	# texFormat 3 = SPR_ALPHATEST — index 255 is transparent.
-	preserve_ink = tex == 3
-	for y in range(nh):
-		sy = y * scale
-		for x in range(nw):
-			sx = x * scale
-			sample = pix[sy * w + sx]
-			if preserve_ink and sample == 255:
-				found = 255
-				for dy in range(scale):
-					row = (sy + dy) * w
-					for dx in range(scale):
-						p = pix[row + sx + dx]
-						if p != 255:
-							found = p
-							break
-					if found != 255:
-						break
-				sample = found
-			out_pix[y * nw + x] = sample
-	br = math.sqrt((nw * 0.5) ** 2 + (nh * 0.5) ** 2)
-	out = bytearray()
-	out += b"IDSP"
-	out += struct.pack("<iii", 2, typ, tex)
-	out += struct.pack("<f", br)
-	out += struct.pack("<ii", nw, nh)
-	out += struct.pack("<iii", 1, face, sync)
-	out += struct.pack("<h", ncolors)
-	out += d[pal_off:frame_off]
-	out += struct.pack("<i", 0)
-	out += struct.pack("<iiii", ox // scale, oy // scale, nw, nh)
-	out += out_pix
-	return bytes(out)
-
-
 def inject_gc_font_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
 	"""G296: tip-safe downsampled CREDITSFONT (128×32) — full wad tip at VidInit."""
 	wad = data / "gfx.wad"
@@ -3283,42 +3201,14 @@ def inject_gc_font_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int
 
 
 def inject_gc_hud_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
-	"""Add allowlisted HUD sprites into bootstrap under their disc paths."""
-	# G173/G174/G288: downsample fat sheets to ~5 KiB under gc_* aliases.
-	# Digit/ammo sheets are multi-frame; lean_hl_spr_bytes keeps only frame 0 and
-	# CapFaces HUD drew empty glyphs (hud6/hud7). Prefer full retail under gc_*
-	# when tip can afford it (~17–66 KiB). Crosshairs stay NN-downsampled.
-	lean_scale = {
-		"gc_crosshairs.spr": 2,  # 128→64, single-frame ALPHATEST
-	}
-	full_copy = {
-		"gc_320hud1.spr",
-		"gc_320hud2.spr",
-		"gc_320_train.spr",
-		"gc_320_pain.spr",
-	}
+	"""Add allowlisted early sprites into bootstrap under their disc paths."""
 	staged = 0
-	for entry in GC_HUD_SPRITES:
-		if isinstance(entry, tuple):
-			src_rel, arc_rel = entry
-		else:
-			src_rel = arc_rel = entry
-		src = data / src_rel
-		if not src.is_file():
+	for rel in GC_HUD_SPRITES:
+		src = data / rel
+		arcname = rel.lower()
+		if not src.is_file() or arcname in archive.NameToInfo:
 			continue
-		arcname = arc_rel.lower()
-		if arcname in archive.NameToInfo:
-			continue
-		arc_base = Path(arc_rel).name.lower()
-		if arc_base in full_copy:
-			archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
-		elif arc_base in lean_scale:
-			payload = lean_hl_spr_bytes(src, scale=lean_scale[arc_base])
-			if not payload:
-				continue
-			archive.writestr(arcname, payload, compress_type=zipfile.ZIP_STORED)
-		else:
-			archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
+		archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
 		staged += 1
 	return staged
 
@@ -3483,6 +3373,23 @@ def write_smoke_overrides(
 		lines.append("heapcensus")
 	media.mkdir(exist_ok=True)
 	(media / "StartupVids.txt").write_text("", encoding="ascii")
+
+
+def probe_cmd_cfg_lines(script: str, width: int = 100) -> list[str]:
+	"""Split a ';'-separated probe console script into "probecmd" cfg lines."""
+	lines: list[str] = []
+	cur = ""
+	for part in (p.strip() for p in script.split(";")):
+		if not part:
+			continue
+		if cur and len(cur) + 1 + len(part) > width:
+			lines.append("probecmd " + cur)
+			cur = part
+		else:
+			cur = f"{cur};{part}" if cur else part
+	if cur:
+		lines.append("probecmd " + cur)
+	return lines
 
 
 def write_probe_newgame_override(
@@ -5033,6 +4940,11 @@ def main() -> None:
 					# many seconds, then the player is moved into the next
 					# unvisited trigger_changelevel (sv_gc_campaign.c).
 					menu_lines.append("autocampaign " + os.environ["XASH_GC_PROBE_AUTOCAMPAIGN"])
+				if os.environ.get("XASH_GC_PROBE_CMD"):
+					# Scripted console commands on the first spawned map
+					# (sv_gc_campaign.c probecmd; "@<sec>" waits). The cfg
+					# line buffer is short, so split into appended lines.
+					menu_lines.extend(probe_cmd_cfg_lines(os.environ["XASH_GC_PROBE_CMD"]))
 				if os.environ.get("XASH_GC_PROBE_MEMREPORT") == "1":
 					menu_lines.append("memreport")
 				if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":

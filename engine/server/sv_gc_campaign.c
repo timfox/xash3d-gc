@@ -176,6 +176,69 @@ static void SV_GCCampaignCenterPrint( const char *text )
 	MSG_WriteString( &cl->netchan.message, text );
 }
 
+/* Probe-only console script (gamecube.cfg "probecmd ..." → -gcprobecmd):
+ * ';'-separated console commands run on the first map the local client
+ * spawns in; a token "@<seconds>" holds the rest until the map has run that
+ * long.  Used to script HUD evidence runs (give items, take damage, open the
+ * weapon menu) without a pad. */
+static void SV_GCProbeCmdFrame( void )
+{
+	static char script[512];
+	static int pos = -1;
+	static double start;
+	char cmd[128];
+
+	if( pos == -2 )
+		return;
+	if( pos == -1 )
+	{
+		if( !Sys_GetParmFromCmdLine( "-gcprobecmd", script ))
+		{
+			pos = -2;
+			return;
+		}
+		if( sv.state != ss_active || !svs.clients || svs.clients[0].state != cs_spawned )
+			return;
+		pos = 0;
+		start = sv.time;
+		Con_Printf( "Xash3D GameCube: probecmd start map=%s time=%.1f\n", sv.name, sv.time );
+	}
+	if( sv.state != ss_active )
+		return;
+	while( script[pos] )
+	{
+		int n = 0, tok;
+
+		while( script[pos] == ';' || script[pos] == ' ' )
+			pos++;
+		tok = pos;
+		while( script[pos] && script[pos] != ';' && n < (int)sizeof( cmd ) - 1 )
+			cmd[n++] = script[pos++];
+		while( n > 0 && cmd[n - 1] == ' ' )
+			n--;
+		cmd[n] = '\0';
+		if( !n )
+			continue;
+		if( cmd[0] == '@' )
+		{
+			double at = Q_atof( cmd + 1 );
+
+			if( sv.time - start < at )
+			{
+				pos = tok; /* re-read this marker next frame */
+				return;
+			}
+			Con_Printf( "Xash3D GameCube: probecmd mark %s map=%s t=%.1f\n", cmd, sv.name, sv.time - start );
+			continue;
+		}
+		Con_Printf( "Xash3D GameCube: probecmd exec %s\n", cmd );
+		Cbuf_AddText( cmd );
+		Cbuf_AddText( "\n" );
+	}
+	pos = -2;
+	Con_Printf( "Xash3D GameCube: probecmd done\n" );
+}
+
 /* Once per server frame while a map is running. */
 void SV_GCCampaignFrame( void )
 {
@@ -183,6 +246,8 @@ void SV_GCCampaignFrame( void )
 	double delay = 20.0, elapsed;
 	gc_campaign_trigger_t *t;
 	edict_t *player, *trig;
+
+	SV_GCProbeCmdFrame();
 
 	{
 		static unsigned calls;

@@ -601,10 +601,19 @@ static void *r_hudhi_arena;
 static unsigned r_hudhi_arena_tries_frame;
 static unsigned r_hudhi_frames;
 static gc_gx_tex_t r_hudhi_tex;
+static unsigned r_hudhi_evictions, r_hudhi_lend_logs;
+
+/* Draw-sync token after the last queued draw that sampled a cell: the
+ * arena may be rewritten once the GP has passed it (GC_GXFenceWait never
+ * blocks on a stuck GP; a token from an earlier, presented frame has long
+ * been reached, so a model-skin decode mid-frame does not wait at all). */
+static u16 r_hudhi_fence;
+static qboolean r_hudhi_fence_valid;
 
 static void R_GXHudHiGpuIdle( void )
 {
-	GX_DrawDone();
+	if( r_hudhi_fence_valid )
+		GC_GXFenceWait( r_hudhi_fence );
 }
 
 static qboolean R_GXHudHiEnsure( void )
@@ -655,19 +664,47 @@ void R_GXHudHiBeginFrame( void )
 		GC_HudHiBeginFrame( &r_hudhi );
 }
 
+extern void *Image_GCLendMdlDecode( void (*evict)( void ), size_t *bytes );
+extern void Image_GCReturnMdlDecode( void );
+static qboolean r_hudhi_arena_lent;	/* the arena is the borrowed decode buffer */
+/* Half-Life's 640 HUD: cells in the lent decode buffer, token resident
+ * copies (never drawn). Day of Defeat keeps its heap arena and 64 px
+ * fallback copies. */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#define GC_HUDHI_LEND_DECODE 1
+#else
+#define GC_HUDHI_LEND_DECODE 0
+#endif
+
+/* A model-skin decode is taking the borrowed buffer back: wait for queued
+ * HUD draws, drop every cell (rebuilt from ARAM on the next draw). */
+static void R_GXHudHiEvictArena( void )
+{
+	R_GXHudHiGpuIdle();
+	GC_HudHiSetArena( &r_hudhi, NULL, 0 );
+	r_hudhi_arena = NULL;
+	r_hudhi_arena_lent = false;
+	r_hudhi_arena_tries_frame = 0;
+	r_hudhi_evictions++;
+}
+
 static void R_GXHudHiReleaseArena( void )
 {
 	if( !r_hudhi_arena )
 		return;
-	GX_DrawDone();
+	R_GXHudHiGpuIdle();
 	GC_HudHiSetArena( &r_hudhi, NULL, 0 );
-	free( r_hudhi_arena );
+	if( r_hudhi_arena_lent )
+		Image_GCReturnMdlDecode();
+	else
+		free( r_hudhi_arena );
 	r_hudhi_arena = NULL;
+	r_hudhi_arena_lent = false;
 }
 
-/* The cell arena comes from the heap on the first hi-res draw after a map
- * load (it is released before the next one). Asked for at most once a
- * second when the heap says no. */
+/* The cell arena is taken on the first hi-res draw after a map load (it is
+ * released before the next one): the lent decode buffer, else (before any
+ * lend has worked, e.g. DoD's boot) the heap, asked at most once a second. */
 static qboolean R_GXHudHiArena( void )
 {
 	static const unsigned sizes[] = { GC_HUDHI_ARENA_MAX, 48u * 1024u, 32u * 1024u };
@@ -678,6 +715,35 @@ static qboolean R_GXHudHiArena( void )
 	if( r_hudhi_arena_tries_frame && r_hudhi_frames - r_hudhi_arena_tries_frame < 60 )
 		return false;
 	r_hudhi_arena_tries_frame = r_hudhi_frames ? r_hudhi_frames : 1;
+	/* The 128 KiB model-skin decode buffer between decodes (BSS: no heap and
+	 * no map-arena budget): a decode evicts the cells through
+	 * R_GXHudHiEvictArena. Big enough for a full weapon bucket of 170x45
+	 * icons plus the digits and pickup history. */
+	if( GC_HUDHI_LEND_DECODE )
+	{
+		size_t lent_bytes = 0;
+
+		r_hudhi_arena = Image_GCLendMdlDecode( R_GXHudHiEvictArena, &lent_bytes );
+		if( r_hudhi_arena )
+		{
+			r_hudhi_arena_lent = true;
+			GC_HudHiSetArena( &r_hudhi, r_hudhi_arena, (uint32_t)lent_bytes );
+			if( r_hudhi_lend_logs < 4 )
+			{
+				r_hudhi_lend_logs++;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res cell arena %uK (decode buffer, evictions=%u)\n",
+					(unsigned)( lent_bytes / 1024u ), r_hudhi_evictions );
+			}
+			return true;
+		}
+		/* The decode buffer is busy for a load right now: wait for it
+		 * rather than take heap for the rest of the map. */
+		if( r_hudhi_lend_logs > 0 )
+		{
+			r_hudhi_arena_tries_frame = 0;
+			return false;
+		}
+	}
 	for( i = 0; i < sizeof( sizes ) / sizeof( sizes[0] ); i++ )
 	{
 		r_hudhi_arena = memalign( 32, sizes[i] );
@@ -696,7 +762,7 @@ static qboolean R_GXHudHiArena( void )
 
 /* Bind the full-resolution cell for a HUD draw from a registered sheet and
  * remap its texture coordinates onto the cell. NULL: draw the shrunk sheet. */
-static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, float *t2 )
+static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, float *t2, qboolean *skip )
 {
 	image_t *img;
 	int handle, x0, y0, x1, y1, fresh;
@@ -710,7 +776,12 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
 	if( !img )
 		return NULL;
 	handle = GC_HudHiFind( &r_hudhi, texnum, img->name );
-	if( handle < 0 || !R_GXHudHiArena())
+	if( handle < 0 )
+		return NULL;
+	/* Registered sheets keep only a token resident copy (cl_sprite.c):
+	 * when no cell can be built this frame, draw nothing rather than it. */
+	*skip = GC_HUDHI_LEND_DECODE;
+	if( !R_GXHudHiArena())
 		return NULL;
 	GC_HudHiSheetSize( &r_hudhi, handle, &sw, &sh );
 	smin = Q_min( *s1, *s2 );
@@ -767,6 +838,10 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
 	r_hudhi_tex.fmt = GX_TF_RGB5A3;
 	r_hudhi_tex.tiled = (u16 *)texels;
 	r_hudhi_tex.valid = true;
+	/* The quad that samples this cell is queued next: its token is the
+	 * one after everything queued so far. */
+	r_hudhi_fence = GC_GXFenceNext();
+	r_hudhi_fence_valid = true;
 	return &r_hudhi_tex;
 }
 
@@ -11548,7 +11623,13 @@ qboolean R_GXDrawStretchPic( float x, float y, float w, float h,
 	if( !r_gx_hud_2d_ready )
 		return false;
 
-	gxt = R_GXHudHiBind( texnum, &s1, &t1, &s2, &t2 );
+	{
+		qboolean skip = false;
+
+		gxt = R_GXHudHiBind( texnum, &s1, &t1, &s2, &t2, &skip );
+		if( !gxt && skip )
+			return true;
+	}
 	if( !gxt )
 		gxt = R_GXBindTexnum( (unsigned)texnum, true );
 	if( !gxt )

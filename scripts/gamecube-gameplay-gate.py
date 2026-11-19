@@ -31,10 +31,10 @@ REQUIRED_POST_ACTION = (
 	"Xash3D GameCube: native axis usercmd ready",
 )
 
-# G506 Pure Flipper presentation: HUD sheets, live lean HUD draw, landmark viewmodel.
+# G506 Pure Flipper presentation: HUD sheets, live HUD draw, landmark viewmodel.
 REQUIRED_PRESENTATION = (
 	"Xash3D GameCube: G172 HUD sheets loaded",
-	"Xash3D GameCube: lean HUD sprites drawn",
+	"Xash3D GameCube: HUD sprites drawn",
 	"Xash3D GameCube: G105 landmark viewmodel ready",
 )
 

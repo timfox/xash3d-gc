@@ -19,8 +19,8 @@ No libogc or engine dependencies: tested on the host (test_gamecube_hud_hires.py
 
 #include "aram_core.h"
 
-#define GC_HUDHI_SHEETS    16
-#define GC_HUDHI_CELLS     32
+#define GC_HUDHI_SHEETS    32
+#define GC_HUDHI_CELLS     128
 #define GC_HUDHI_NAME_LEN  80
 #define GC_HUDHI_MAX_DIM   512
 

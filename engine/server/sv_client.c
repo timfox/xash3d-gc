@@ -4375,3 +4375,40 @@ void Test_RunQueryRateLimit( void )
 }
 
 #endif // XASH_ENGINE_TESTS
+
+#if XASH_GAMECUBE
+/*
+==================
+SV_GCForceClientHudUpdate
+
+The GameCube local map routes spawn the server before the client DLL is up,
+so the game's first Health/Battery/WeaponList/CurWeapon/HideWeapon messages
+reach a client with no hooks and are dropped; the game only resends on a
+change. Ask it to resend all of them, as the game's own "fullupdate" client
+command does (CBasePlayer::ForceClientDllUpdate), plus the view entity,
+without the engine's demo-recording extras (ambient sounds, decals,
+static ents).
+==================
+*/
+qboolean SV_GCForceClientHudUpdate( void )
+{
+	sv_client_t *cl = svs.clients;
+
+	if( sv.state != ss_active || !cl || cl->state != cs_spawned || !cl->edict || !svgame.dllFuncs.pfnClientCommand )
+	{
+		static int logs;
+
+		if( logs++ < 3 )
+			Con_Reportf( "Xash3D GameCube: HUD state resend waits (sv=%d cl=%d)\n",
+				sv.state, cl ? cl->state : -1 );
+		return false;
+	}
+	Cmd_TokenizeString( "fullupdate" );
+	svgame.dllFuncs.pfnClientCommand( cl->edict );
+	/* The view entity went out with the same early messages: without it
+	 * the client draws no crosshair (CL_DrawCrosshair checks it). */
+	SV_UpdateClientView( cl );
+	Con_Reportf( "Xash3D GameCube: HUD state resent to the client (game fullupdate, view)\n" );
+	return true;
+}
+#endif

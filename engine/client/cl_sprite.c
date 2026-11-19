@@ -47,6 +47,13 @@ static int sprite_fx_cap;
  * their source size. */
 int gc_sprite_fx_prescale = 1;
 int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
+/* Half-Life's 640 HUD keeps every sheet in ARAM with a token resident copy;
+ * Day of Defeat keeps its own sizes (64 px fallback copies). */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#define GC_HUD_SHEETS_IN_ARAM 1
+#else
+#define GC_HUD_SHEETS_IN_ARAM 0
+#endif
 void R_GXHudHiSetTexnum( int handle, int texnum );
 
 /* The palette the image loader would install for this sprite (see
@@ -320,7 +327,14 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 		 * mid-match and failed with ~28 KiB free, and again with 130 KiB
 		 * free but in pieces: it always takes the same ARAM full-resolution
 		 * route with a small resident copy. */
-		if( bytes == 1 && GC_MapLoadMemoryOpt() && ( pinframe.width >= 128 || pinframe.height >= 128 ))
+		/* Half-Life's 640 HUD (640hud1-9 256x256/256x128/256x64, the 128x48
+		 * pain arrows, 96x96 train dial, 128x128 crosshairs) is drawn 1:1 on
+		 * the 640x480 EFB: every sheet from 64 px up keeps its full-resolution
+		 * indices in ARAM and is drawn from cells built on demand, so MEM1
+		 * holds only a token resident copy of it. */
+		if( bytes == 1 && ( gc_sprite_effect_load || !GC_HUD_SHEETS_IN_ARAM
+			? GC_MapLoadMemoryOpt() && ( pinframe.width >= 128 || pinframe.height >= 128 )
+			: ( pinframe.width >= 64 || pinframe.height >= 64 )))
 		{
 			/* 128 keeps the art at the size it is drawn, but its texture
 			 * needs contiguous heap: on dod_caen 101 KiB free still could not
@@ -333,7 +347,10 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 			const qboolean hires = Mod_SpriteHudPalette( hud_rgba )
 				&& ( hud_hires = R_GXHudHiRegister( texname, pinframe.width, pinframe.height,
 					(const byte *)pin + sizeof( dspriteframe_t ), hud_rgba )) >= 0;
-			const int cap = ( hires || Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
+			/* With the ARAM copy the resident texture is never sampled
+			 * (R_GXHudHiBind draws cells), so it only needs to exist. */
+			const int cap = ( hires && GC_HUD_SHEETS_IN_ARAM ) ? 8
+				: ( hires || Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
 			int f = 1;
 
 			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1

@@ -692,7 +692,11 @@ int Cmd_AddCommandEx( const char *cmd_name, xcommand_t function, const char *cmd
 			Q_strncpy( cmd->desc, cmd_desc, desc_len );
 #endif
 			cmd->function = function;
+#if XASH_GAMECUBE
+			cmd->flags = iFlags | ( cmd->flags & CMD_GC_STATICNAME );
+#else
 			cmd->flags = iFlags;
+#endif
 
 			Con_DPrintf( S_WARN "%s: %s already defined but is allowed to be overriden\n", funcname, cmd_name );
 			return 1;
@@ -720,6 +724,13 @@ int Cmd_AddCommandEx( const char *cmd_name, xcommand_t function, const char *cmd
 		return 0;
 	}
 #endif
+#if XASH_GAMECUBE
+	/* The client DLL is linked into the DOL and registers its commands
+	 * with string literals: keep the pointer (HUD_Init adds ~100). */
+	if( FBitSet( iFlags, CMD_CLIENTDLL ))
+		cmd->name = (char *)cmd_name;
+	else
+#endif
 	cmd->name = copystringpool( cmd_pool, cmd_name );
 #if XASH_GAMECUBE
 	if( !cmd->name )
@@ -736,6 +747,10 @@ int Cmd_AddCommandEx( const char *cmd_name, xcommand_t function, const char *cmd
 #endif
 	cmd->function = function;
 	cmd->flags = iFlags;
+#if XASH_GAMECUBE
+	if( FBitSet( iFlags, CMD_CLIENTDLL ))
+		SetBits( cmd->flags, CMD_GC_STATICNAME );
+#endif
 
 	// insert it at the right alphanumeric position
 	for( prev = NULL, cur = cmd_functions; cur && Q_strcmp( cur->name, cmd_name ) < 0; prev = cur, cur = cur->next );
@@ -771,7 +786,11 @@ void GAME_EXPORT Cmd_RemoveCommand( const char *cmd_name )
 
 			*back = cmd->next;
 
+#if XASH_GAMECUBE
+			if( cmd->name && !FBitSet( cmd->flags, CMD_GC_STATICNAME ))
+#else
 			if( cmd->name )
+#endif
 				Mem_Free( cmd->name );
 
 			Mem_Free( cmd );
@@ -1142,7 +1161,11 @@ void Cmd_Unlink( int group )
 
 		*prev = cmd->next;
 
+#if XASH_GAMECUBE
+		if( cmd->name && !FBitSet( cmd->flags, CMD_GC_STATICNAME )) Mem_Free( cmd->name );
+#else
 		if( cmd->name ) Mem_Free( cmd->name );
+#endif
 
 		Mem_Free( cmd );
 		count++;

@@ -1886,23 +1886,12 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 						!Q_stricmp( gcmap, "c4a3" )
 						|| !Q_strnicmp( gcmap, "c5a", 3 );
 
-					/* G336: denser AM cold New Game stalls mid full HUD_Init after
-					 * StatusIcon (probe 20260810-035405/040141) before MOTD hook.
-					 * Force lean HUD for those maps before G326 ensure; c1a0d,
-					 * tram hops, and early Interloper (c4a1a–d) keep quality=1. */
-					if( !Q_stricmp( gcmap, "c1a0a" )
-						|| !Q_stricmp( gcmap, "c1a0b" )
-						|| !Q_stricmp( gcmap, "c1a0c" )
-						|| !Q_strnicmp( gcmap, "c1a1", 4 )
-						|| !Q_strnicmp( gcmap, "c1a2", 4 )
-						|| !Q_strnicmp( gcmap, "c1a3", 4 )
-						|| !Q_strnicmp( gcmap, "c1a4", 4 )
-						|| !Q_strnicmp( gcmap, "c2a", 3 )
-						|| !Q_strnicmp( gcmap, "c3a", 3 )
-						|| g336_xen_lean )
+					/* Renderer quality only (the client HUD is the full
+					 * retail one at any gc_quality). */
+					if( g336_xen_lean )
 					{
 						Cvar_Set( "gc_quality", "0" );
-						Con_Reportf( "Xash3D GameCube: G336 lean HUD for denser map %s\n",
+						Con_Reportf( "Xash3D GameCube: G336 low-memory cold load for Xen map %s\n",
 							gcmap );
 					}
 					if( xen_boss_skip_premap )

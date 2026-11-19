@@ -532,7 +532,8 @@ static qboolean CL_GCCreditsFontTextureOk( const cl_font_t *font )
 	const int tex = font->hFontTexture;
 
 	return tex > 0 && ( tex == ref.dllFuncs.GL_FindTexture( "#gc_lean_hudfont" )
-		|| tex == ref.dllFuncs.GL_FindTexture( "#gc_full_hudfont" ));
+		|| tex == ref.dllFuncs.GL_FindTexture( "#gc_full_hudfont" )
+		|| tex == ref.dllFuncs.GL_FindTexture( "#gc_aram_hudfont" ));
 }
 
 static void CL_GCHudTextEnsureFont( void )

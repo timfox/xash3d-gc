@@ -398,7 +398,7 @@ probe_collect_exit_status "$child"
 			"Xash3D GameCube: map loaded c0a0",
 			"Xash3D GameCube: entity lump spawn ready",
 			"Xash3D GameCube: G172 HUD sheets loaded",
-			"Xash3D GameCube: lean HUD sprites drawn",
+			"Xash3D GameCube: HUD sprites drawn",
 			"Xash3D GameCube: G105 landmark viewmodel ready",
 			"Xash3D GameCube: lean play active armed state=4 signon=2/2",
 			"Xash3D GameCube: post-G36 sustained world present",
@@ -409,7 +409,7 @@ probe_collect_exit_status "$child"
 			"Xash3D GameCube: world interaction use done classname=func_door",
 			# Presentation re-confirmed on the live path after actions.
 			"Xash3D GameCube: G172 HUD sheets loaded",
-			"Xash3D GameCube: lean HUD sprites drawn",
+			"Xash3D GameCube: HUD sprites drawn",
 			"Xash3D GameCube: G105 landmark viewmodel ready",
 			"sampled_nonblack=1",
 			"frame time=0.71ms",
@@ -429,7 +429,7 @@ probe_collect_exit_status "$child"
 			"Xash3D GameCube: G105 landmark viewmodel ready models/v_crowbar.mdl",
 			"Xash3D GameCube: MAP_READY c0a0",
 			"Xash3D GameCube: G172 HUD sheets loaded real=4 of 4",
-			"Xash3D GameCube: lean HUD sprites drawn pain=1",
+			"Xash3D GameCube: HUD sprites drawn pain=1",
 			"Xash3D GameCube: G164 studio gouraud shades=29 mask=0xfffffff8 viewmodel=1",
 			"Xash3D GameCube: G154 disc lightmap bind size=601.95 Kb (bake-only)",
 			"Xash3D GameCube: G180 lightmap atlas 128x64 faces=320 cols=32",
@@ -571,21 +571,38 @@ probe_collect_exit_status "$child"
 			"Xash3D GameCube: G121 PlaybackEvent deliver index=1 name=events/glock.sc",
 			"Xash3D GameCube: world interaction use done classname=func_button",
 			"Xash3D GameCube: G172 HUD sheets loaded",
-			"Xash3D GameCube: lean HUD sprites drawn",
+			"Xash3D GameCube: HUD sprites drawn",
 			"Xash3D GameCube: G105 landmark viewmodel ready",
 			"Xash3D GameCube: gcmap smoke frames ready",
 			"frame time=10ms\nframe time=11ms\nframe time=12ms",
 		))
 		self.assertEqual(gate.check(base)[0], True)
 		self.assertEqual(gate.check(base.replace("gcmap smoke frames ready", ""))[0], False)
-		self.assertEqual(gate.check(base.replace("lean HUD sprites drawn", ""))[0], False)
+		self.assertEqual(gate.check(base.replace("HUD sprites drawn", ""))[0], False)
 		self.assertEqual(gate.check(base.replace("G105 landmark viewmodel ready", ""))[0], False)
 
-	def test_g172_marker_is_emitted_from_active_hud_draw_path(self) -> None:
-		source = (ROOT / "engine/client/cl_scrn.c").read_text(encoding="utf-8")
-		draw = source.index("CL_DrawHUD( CL_ACTIVE );")
-		marker = source.index("G172 HUD sheets loaded draw-verified lean=1", draw)
-		self.assertLess(marker, source.index("HUD lean draw", marker))
+	def test_probe_cmd_script_splits_into_short_cfg_lines(self) -> None:
+		disc = load_script("disc_probecmd", "scripts/build-gamecube-disc.py")
+		script = "@4;sv_cheats 1;" + ";".join(["give weapon_9mmAR"] * 9) + ";@10;slot3"
+		lines = disc.probe_cmd_cfg_lines(script)
+		# sys_gamecube.c reads gamecube.cfg with a 128-byte line buffer.
+		self.assertTrue(all(len(line) + 1 < 128 for line in lines))
+		self.assertTrue(all(line.startswith("probecmd ") for line in lines))
+		# Appending the lines with ';' gives the script back.
+		self.assertEqual(";".join(line[len("probecmd "):] for line in lines), script)
+
+	def test_hud_markers_come_from_the_client_hud_path(self) -> None:
+		source = (ROOT / "engine/client/dll_int/cl_game.c").read_text(encoding="utf-8")
+		# G172 is logged by the HUD_VidInit that loaded the client's sheets.
+		vidinit = source.index("clgame.dllFuncs.pfnVidInit();", source.index("qboolean CL_GCEnsureHudVidInit"))
+		self.assertLess(vidinit, source.index("G172 HUD sheets loaded real=%d", vidinit))
+		# G506's draw marker follows the client's Redraw, which runs only
+		# after HUD_VidInit has.
+		ensure = source.index('CL_GCEnsureHudVidInit( "first HUD draw" );')
+		redraw = source.index("clgame.dllFuncs.pfnRedraw( cl.time, cl.intermission );", ensure)
+		self.assertLess(redraw, source.index("HUD sprites drawn n=%d", redraw))
+		# No engine-side stand-in HUD draws on the active present path.
+		self.assertNotIn("lean HUD sprites drawn", (ROOT / "engine/client/cl_scrn.c").read_text(encoding="utf-8"))
 
 	def test_release_packet_validates_dol_elf_and_iso(self) -> None:
 		packet = load_script("release_packet", "scripts/gamecube-release-packet.py")
@@ -1005,7 +1022,7 @@ probe_collect_exit_status "$child"
 				"Xash3D GameCube: G45 controller ready port=0 type=standard\n"
 				"Xash3D GameCube: input polling active\n"
 				"Xash3D GameCube: G172 HUD sheets loaded\n"
-				"Xash3D GameCube: lean HUD sprites drawn\n"
+				"Xash3D GameCube: HUD sprites drawn\n"
 				"Xash3D GameCube: G105 landmark viewmodel ready\n"
 				"Xash3D GameCube: FAT shutdown (return to Swiss loader via exit stub)\n"
 				"sampled_nonblack=1\n"

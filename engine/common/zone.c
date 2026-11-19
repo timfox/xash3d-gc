@@ -229,6 +229,22 @@ void GC_MemReportPools( const char *stage )
 	}
 }
 
+/* Snapshot pool sizes (begin) and report the pools that grew (end). */
+static size_t gc_pool_snap[256];
+void GC_MemPoolDelta( const char *what, qboolean begin )
+{
+	size_t i;
+
+	for( i = 0; i < poolcount && i < ARRAYSIZE( gc_pool_snap ); i++ )
+	{
+		if( begin )
+			gc_pool_snap[i] = poolchain[i].realsize;
+		else if( poolchain[i].realsize != gc_pool_snap[i] )
+			Con_Reportf( "Xash3D GameCube: pool delta at=%s pool=%s %d bytes\n", what,
+				poolchain[i].name, (int)poolchain[i].realsize - (int)gc_pool_snap[i] );
+	}
+}
+
 void GC_MemReportPoolPressure( const char *subsystem, size_t requested )
 {
 	static char last_subsystem[64];

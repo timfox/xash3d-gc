@@ -139,6 +139,122 @@ W_ReadLump (18–34 KiB) tips at New Game VidInit.
 */
 #define GC_LEAN_FONT_BSS_BYTES (8 * 1024)
 
+/*
+=============
+CL_GCLoadAramHudFont
+
+The HUD (titles, pickup text, say text, menus of the client) is laid out on
+the retail 640x480 screen (CL_GetScreenInfo) and drawn 1:1 on the EFB, so it
+takes the full 256-wide CREDITSFONT, as retail at 640 does. Its 8-bit pixels
+live in ARAM (hud_hires.c) and glyphs are drawn from cells built on demand;
+MEM1 holds a 4x4 token texture. The file is staged in the model-skin decode
+buffer, so the font costs no heap.
+=============
+*/
+int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
+void R_GXHudHiSetTexnum( int handle, int texnum );
+void *Image_GCAllocMdlDecode( size_t bytes );
+void Image_GCReleaseMdlDecode( void );
+
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+static qboolean CL_GCLoadAramHudFont( cl_font_t *font, float scale, convar_t *rendermode )
+{
+	static const char *const path = "gfx/gc_creditsfont256.fnt";
+	static const char *const texname = "#gc_aram_hudfont";
+	static qfont_t cached_src;
+	static int cached_tex;
+	static qboolean cached;
+	byte rgba_pal[256 * 4], token[4 * 4 * 4];
+	const byte *fin, *pal;
+	qfont_t src;
+	file_t *f = NULL;
+	fs_offset_t flen, total = 0, got;
+	byte *buf = NULL;
+	int i, tex = 0, handle;
+	const int font_width = 256;
+	unsigned short numcolors;
+
+	if( cached && cached_tex > 0 && ref.dllFuncs.GL_FindTexture( texname ) == cached_tex )
+	{
+		src = cached_src;
+		tex = cached_tex;
+		goto apply;
+	}
+	cached = false;
+
+	f = FS_Open( path, "rb", false );
+	if( !f )
+		return false;
+	flen = FS_FileLength( f );
+	if( flen < (fs_offset_t)sizeof( qfont_t ) || !( buf = (byte *)Image_GCAllocMdlDecode( (size_t)flen )))
+	{
+		FS_Close( f );
+		return false;
+	}
+	while( total < flen && ( got = FS_Read( f, buf + total, flen - total )) > 0 )
+		total += got;
+	FS_Close( f );
+	if( total != flen )
+		goto fail;
+	memcpy( &src, buf, sizeof( src ));
+	le_struct_swap( qfont_swap, &src );
+	fin = buf + sizeof( qfont_t ) - 4;
+	if( src.height < 1 || (size_t)( fin - buf ) + (size_t)font_width * src.height + 2 + 768 > (size_t)flen )
+		goto fail;
+	pal = fin + font_width * src.height;
+	numcolors = (unsigned short)( pal[0] | ( pal[1] << 8 ));
+	pal += 2;
+	if( numcolors != 256 )
+		goto fail;
+	for( i = 0; i < 256; i++ )
+	{
+		rgba_pal[i * 4 + 0] = pal[i * 3 + 0];
+		rgba_pal[i * 4 + 1] = pal[i * 3 + 1];
+		rgba_pal[i * 4 + 2] = pal[i * 3 + 2];
+		rgba_pal[i * 4 + 3] = i == 255 ? 0 : 255;
+	}
+	handle = R_GXHudHiRegister( texname, font_width, src.height, fin, rgba_pal );
+	Image_GCReleaseMdlDecode();
+	buf = NULL;
+	if( handle < 0 )
+		return false;
+	memset( token, 0, sizeof( token ));
+	tex = ref.dllFuncs.GL_CreateTexture( texname, 4, 4, token, TF_FONT | TF_NEAREST | TF_HAS_ALPHA );
+	if( tex <= 0 )
+		return false;
+	R_GXHudHiSetTexnum( handle, tex );
+	cached_src = src;
+	cached_tex = tex;
+	cached = true;
+	Con_Reportf( "Xash3D GameCube: HUD font CREDITSFONT %dx%d in ARAM (token tex=%d)\n",
+		font_width, src.height, tex );
+apply:
+	font->hFontTexture = tex;
+	font->type = FONT_VARIABLE;
+	font->valid = true;
+	font->scale = scale ? scale : 1.0f;
+	font->rendermode = rendermode;
+	font->charHeight = Q_rint( src.rowheight * font->scale );
+	font->gc_texw = font_width;
+	font->gc_texh = src.height;
+	for( i = 0; i < ARRAYSIZE( font->fontRc ); i++ )
+	{
+		const charinfo *ci = &src.fontinfo[i];
+
+		font->fontRc[i].left   = (word)ci->startoffset % font_width;
+		font->fontRc[i].right  = font->fontRc[i].left + ci->charwidth;
+		font->fontRc[i].top    = (word)ci->startoffset / font_width;
+		font->fontRc[i].bottom = font->fontRc[i].top + src.rowheight;
+		font->charWidths[i] = Q_rint( ci->charwidth * font->scale );
+	}
+	return true;
+fail:
+	if( buf )
+		Image_GCReleaseMdlDecode();
+	return false;
+}
+#endif
+
 qboolean CL_GCLoadLeanHudFont( cl_font_t *font, float scale, convar_t *rendermode )
 {
 	static byte bss[GC_LEAN_FONT_BSS_BYTES] __attribute__((aligned( 32 )));
@@ -175,6 +291,12 @@ qboolean CL_GCLoadLeanHudFont( cl_font_t *font, float scale, convar_t *rendermod
 		return false;
 	if( font->valid )
 		return true;
+	font->gc_texw = font->gc_texh = 0;
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+	/* Half-Life's HUD screen is 640x480 (CL_GetScreenInfo): the full font. */
+	if( CL_GCLoadAramHudFont( font, scale, rendermode ))
+		return true;
+#endif
 
 	font_width = full ? 256 : 128;
 
@@ -442,6 +564,15 @@ int CL_DrawCharacter( float x, float y, int number, const rgba_t color, cl_font_
 
 	int texw, texh;
 	R_GetTextureParms( &texw, &texh, font->hFontTexture );
+#if XASH_GAMECUBE
+	if( font->gc_texw > 0 && font->gc_texh > 0 )
+	{
+		/* The atlas is drawn from full-resolution ARAM cells: the
+		 * resident texture is a token, its size is not the atlas'. */
+		texw = font->gc_texw;
+		texh = font->gc_texh;
+	}
+#endif
 	if( !texw || !texh )
 		return font->charWidths[number];
 

@@ -977,14 +977,19 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 #if XASH_GAMECUBE
 	if( CL_GameCubeLocalMapRoute() )
 	{
-		/* Full hud.txt preload at quality 1 OOMs on New Game. Lean VidInit runs
-		 * later at world present (gc_quality=0). GetSpriteRes no longer maps
-		 * unset m_iMaxRes to sprites/0_*.spr. */
+		/* HUD_VidInit runs after the first world presents (G327) or at the
+		 * latest before the first HUD draw: CL_GCEnsureHudVidInit. */
+		CL_GCHudVidInitReset();
 		Con_Reportf( "Xash3D GameCube: serverdata HUD vidinit deferred for local map route\n" );
 	}
 	else
+	{
+		CL_GCHudVidInitReset();
+		CL_GCEnsureHudVidInit( "serverdata" );
+	}
+#else
+	clgame.dllFuncs.pfnVidInit();
 #endif
-		clgame.dllFuncs.pfnVidInit();
 
 	cls.state = ca_connected;
 

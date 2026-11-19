@@ -35,12 +35,46 @@ static qboolean gc_mdl_decode_busy;
 static byte gc_transient[128 * 1024] __attribute__((aligned(32)));
 static qboolean gc_transient_busy;
 
+/* Between decodes the buffer is lent to the HUD (the 640 HUD's cell arena,
+ * r_gx_world.c): a decode takes it back through the borrower's evict hook,
+ * which waits for the GPU and drops its cells (they are rebuilt from ARAM). */
+static void (*gc_mdl_decode_evict)( void );
+
 void *Image_GCAllocMdlDecode( size_t bytes )
 {
+	if( gc_mdl_decode_busy && gc_mdl_decode_evict )
+	{
+		void (*evict)( void ) = gc_mdl_decode_evict;
+
+		gc_mdl_decode_evict = NULL;
+		evict();
+		gc_mdl_decode_busy = false;
+	}
 	if( gc_mdl_decode_busy || bytes > sizeof( gc_mdl_decode_rgba ))
 		return NULL;
 	gc_mdl_decode_busy = true;
 	return gc_mdl_decode_rgba;
+}
+
+void *Image_GCLendMdlDecode( void (*evict)( void ), size_t *bytes )
+{
+	if( gc_mdl_decode_busy || !evict )
+		return NULL;
+	gc_mdl_decode_busy = true;
+	gc_mdl_decode_evict = evict;
+	if( bytes )
+		*bytes = sizeof( gc_mdl_decode_rgba );
+	return gc_mdl_decode_rgba;
+}
+
+/* The borrower gives the buffer back on its own (map load). */
+void Image_GCReturnMdlDecode( void )
+{
+	if( gc_mdl_decode_evict )
+	{
+		gc_mdl_decode_evict = NULL;
+		gc_mdl_decode_busy = false;
+	}
 }
 
 qboolean Image_GCIsMdlDecode( const void *ptr )
