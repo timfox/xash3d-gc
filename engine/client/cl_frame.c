@@ -1847,9 +1847,9 @@ static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
  * with DODGC_FILM_ACTOR_TAG in dod-gc's src/dod_film.h. */
 #define GC_FILM_ACTOR_TAG	0x46494C4D	/* 'FILM' */
 /* Studio slots in capture mode: dod-gc's 64-actor cast, the players and props. */
-#define GC_LEAN_STUDIO_MAX	96
+#define GC_LEAN_STUDIO_MAX	72
 /* Brush entities (func_wall, doors, breakables) in capture mode, was 6. */
-#define GC_LEAN_BRUSH_MAX	48
+#define GC_LEAN_BRUSH_MAX	16
 
 /* The lean emitter rebuilds each studio entity from its edict every frame, so
  * the client-side latch that crossfades a sequence change (0.2 s in
@@ -1950,7 +1950,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	/* WorldDL listen: emit every nearby map prop (avalanche has ~dozen
 	 * env_model instances across 5 unique MDLs). Was 4 — only sandbags. */
 	static cl_entity_t lean_studio_static[40];	/* 24 film actors plus map props */
-	/* -gccapture: a 64-actor cast plus props, from the heap once. */
+	/* -gccapture: a 64-actor cast plus props, from the spill or heap per map. */
 	static cl_entity_t *lean_studio_big;
 	cl_entity_t *lean_studio_ents = lean_studio_static;
 	int studio_budget = (int)( sizeof( lean_studio_static ) / sizeof( lean_studio_static[0] ));
@@ -1970,19 +1970,40 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	if( CL_GCCaptureMode( ))
 	{
 		extern size_t GC_MemHeapFreeBytes( void );
+		extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+		extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
 		const size_t big_bytes = sizeof( cl_entity_t ) * ( GC_LEAN_STUDIO_MAX + GC_LEAN_BRUSH_MAX );
-		static qboolean big_tried;
+		static qboolean big_in_spill;
+		static int big_tried_spawn = -1;
 
-		/* Once, in game: Mem_Calloc does not come back on failure, so only
-		 * with a margin left on the heap. */
-		if( !lean_studio_big && !big_tried && cls.state == ca_active )
+		/* A spill block dies with its map (the spill rewinds). */
+		if( lean_studio_big && big_in_spill && !Mod_GCWorldArraySpillHolds( lean_studio_big, big_bytes ))
 		{
-			big_tried = true;
-			if( GC_MemHeapFreeBytes() > big_bytes + 512 * 1024 )
+			lean_studio_big = NULL;
+			big_in_spill = false;
+		}
+		/* Once per map, in game: the world-array spill first (MEM1 is down to
+		 * a few KiB by then), the heap only with a margin, since Mem_Calloc
+		 * does not come back on failure. ~1.6 KiB per slot. */
+		if( !lean_studio_big && big_tried_spawn != svs.spawncount && cls.state == ca_active )
+		{
+			const char *where = "spill";
+
+			big_tried_spawn = svs.spawncount;
+			lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
+			if( lean_studio_big )
+			{
+				memset( lean_studio_big, 0, big_bytes );
+				big_in_spill = true;
+			}
+			else if( GC_MemHeapFreeBytes() > big_bytes + 512 * 1024 )
+			{
 				lean_studio_big = Mem_Calloc( host.mempool, big_bytes );
-			Con_Reportf( "Xash3D GameCube: capture mode studio slots %d, brush slots %d %s (%s)\n",
+				where = "heap";
+			}
+			Con_Reportf( "Xash3D GameCube: capture mode studio slots %d, brush slots %d %s in %s (%s)\n",
 				GC_LEAN_STUDIO_MAX, GC_LEAN_BRUSH_MAX, lean_studio_big ? "allocated" : "not allocated",
-				Q_memprint( big_bytes ));
+				lean_studio_big ? where : "spill or heap", Q_memprint( big_bytes ));
 		}
 		if( lean_studio_big )
 		{

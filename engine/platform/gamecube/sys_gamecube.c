@@ -1102,6 +1102,7 @@ static qboolean gc_nohud_configured;	/* gamecube.cfg 'nohud': the engine's lean 
 static qboolean gc_capfaces_smoke_configured;
 static qboolean gc_tas_configured;
 static qboolean gc_dumpframes_configured;
+static qboolean gc_capture_configured;	/* gccapture: -gccapture, offline film capture */
 static qboolean gc_swissquit_configured;
 static int gc_swissquit_frames = -1; /* -1 idle, >=0 countdown, -2 done */
 static u64 gc_swissquit_last_poll_ticks; /* coalesce vid+input polls same frame */
@@ -1190,6 +1191,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_capfaces_smoke_configured = false;
 	gc_tas_configured = false;
 	gc_dumpframes_configured = false;
+	gc_capture_configured = false;
 	gc_swissquit_configured = false;
 	gc_memreport_configured = false;
 	gc_net_configured = false;
@@ -1645,6 +1647,18 @@ static void GCube_LoadDiscBootOverrides( void )
 			continue;
 		}
 
+		/* Film capture: draw everything, frame rate second (CL_GCCaptureMode). */
+		if( !Q_strnicmp( cursor, "gccapture", 9 ))
+		{
+			char ch = cursor[9];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_capture_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override gccapture\n" );
+				continue;
+			}
+		}
+
 		/* G347: soft DumpFrames latch for Dolphin PNG evidence. */
 		if( !Q_strnicmp( cursor, "dumpframes", 10 ))
 		{
@@ -2068,6 +2082,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 	}
 	if( gc_dumpframes_configured && !Sys_CheckParm( "-gcdumpframes" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcdumpframes";
+	if( gc_capture_configured && !Sys_CheckParm( "-gccapture" ) && n + 1 < cap )
+		gc_argv[n++] = "-gccapture";
 	/* LCG-7: GetArgv often misses gamecube.cfg before DVD/chdir is ready.
 	 * CapFaces reinject covers smoke; retail title menu needs the same for
 	 * menuauto + startmap so New Game still reaches d2_lostcoast. */
@@ -2226,6 +2242,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	}
 	if( gc_dumpframes_configured )
 		gc_argv[fake_argc++] = "-gcdumpframes";
+	if( gc_capture_configured )
+		gc_argv[fake_argc++] = "-gccapture";
 	if( gc_swissquit_configured )
 		gc_argv[fake_argc++] = "-gcswissquit";
 	if( gc_retail_newgame_configured && !gc_menu_newgame_configured )
