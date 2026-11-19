@@ -1089,7 +1089,20 @@ static bool read_directories(MOUNT_DESCR *mdescr)
 		u8 namelen;
 		/* Read the fixed 8-byte header only. Full PATHTABLE_ENTRY sizeof
 		 * includes ISO_MAXPATHLEN and is not required for the walk. */
-		if (__read(mdescr, raw, (u64) path_table * SECTOR_SIZE + offset, sizeof(raw)) != (int)sizeof(raw))
+		/* A sector read can come back zero-filled without an error (ceres,
+		 * Dolphin: the header of entry 102, first one in the table's second
+		 * sector, read as eight zero bytes and the mount failed in two boots
+		 * of three). No entry has a zero name length or parent, so drop the
+		 * cached sector and read again. */
+		int attempt;
+		for (attempt = 0; attempt < 8; attempt++)
+		{
+			if (__read(mdescr, raw, (u64) path_table * SECTOR_SIZE + offset, sizeof(raw)) == (int)sizeof(raw)
+				&& raw[0] != 0 && (raw[6] | raw[7]) != 0)
+				break;
+			mdescr->cache_sectors = 0;
+		}
+		if (attempt == 8)
 			return false;
 		memset(&entry, 0, sizeof(entry));
 		namelen = raw[0];
@@ -1100,8 +1113,20 @@ static bool read_directories(MOUNT_DESCR *mdescr)
 		entry.parent = ((u16)raw[6] << 8) | (u16)raw[7];
 		if (namelen >= ISO_MAXPATHLEN)
 			return false;
-		if (namelen > 0
-			&& __read(mdescr, entry.name, (u64) path_table * SECTOR_SIZE + offset + 8, namelen) != (int)namelen)
+		for (attempt = 0; attempt < 8; attempt++)
+		{
+			u32 k, nonzero = 0;
+			/* _read: a name may cross into the next sector. */
+			if (_read(mdescr, entry.name, (u64) path_table * SECTOR_SIZE + offset + 8, namelen) == (int)namelen)
+			{
+				for (k = 0; k < namelen; k++)
+					nonzero |= (u8)entry.name[k];
+				if (nonzero)
+					break;
+			}
+			mdescr->cache_sectors = 0;
+		}
+		if (attempt == 8)
 			return false;
 		if (parent->index != entry.parent)
 			parent = entry_from_index(mdescr->iso_rootentry, entry.parent);
