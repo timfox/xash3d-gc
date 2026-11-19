@@ -86,8 +86,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through velvet/carbon/pearl (~2140 frames)
-	if (( n > 2200 )); then
+	# Full reel through batch47 pewter/ivy/brass/garnet (~2420 frames)
+	if (( n > 2480 )); then
 		break
 	fi
 done
@@ -158,6 +158,10 @@ pick 1840 "$OUT_DIR/shots/caustics.png"
 pick 1910 "$OUT_DIR/shots/velvet.png"
 pick 1980 "$OUT_DIR/shots/carbon.png"
 pick 2050 "$OUT_DIR/shots/pearl.png"
-pick 2110 "$OUT_DIR/shots/rust-hero-end.png"
+pick 2120 "$OUT_DIR/shots/pewter-foam.png"
+pick 2190 "$OUT_DIR/shots/ivy-wool.png"
+pick 2260 "$OUT_DIR/shots/brass-dust.png"
+pick 2330 "$OUT_DIR/shots/garnet-felt.png"
+pick 2390 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"
