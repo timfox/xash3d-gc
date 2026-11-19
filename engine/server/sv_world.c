@@ -1249,6 +1249,8 @@ typedef struct
 	vec3_t origin, mins, maxs, absmin, absmax;
 } gc_static_wall_t;
 
+/* Self test: SV_Move with the records switched off, to compare against the edict-only result. */
+qboolean gc_static_walls_disable;
 static gc_static_wall_t gc_static_walls[GC_STATIC_WALLS_MAX];
 static int gc_num_static_walls;
 static edict_t gc_static_tmp_edict;
@@ -1322,6 +1324,8 @@ static void SV_ClipToStaticWalls( moveclip_t *clip )
 {
 	int i;
 
+	if( gc_static_walls_disable )
+		return;
 	for( i = 0; i < gc_num_static_walls; i++ )
 	{
 		const gc_static_wall_t *w = &gc_static_walls[i];
