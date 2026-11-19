@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Bake matcap + HUD panels from the Project-store Material Lab reference."""
+"""OPTIONAL: bake HUD chrome from the Material Lab reference.
+
+Hero surface maps come from scripts/import_rust_maps.py (real PBR TIFs),
+NOT from extracting the copper sphere out of the reference screenshot.
+"""
 from __future__ import annotations
 
 import os

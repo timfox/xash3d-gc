@@ -1,12 +1,11 @@
 # GX / TEV Material Lab
 
-Standalone GameCube (libogc) Flipper tech demo:
+Standalone GameCube (libogc) Flipper tech demo.
 
-1. **Hero shot** — reference copper sphere (metallic 1.0 / roughness 0.25) via
-   reference-baked matcap IBL + Fresnel look.
-2. **Feature showcase** — cycle real Flipper/TEV techniques (mod2x detail,
-   specular mask, IndTex bump warp, fog, scale2 light, alpha compare, konst
-   Fresnel) with a live HUD that names the active path.
+**Hero material** uses Tim’s real PBR rust set from `~/Desktop/pbr-gc/rust`
+(albedo / AO / metallic / normal / roughness) — **not** a texture extracted
+from the copper reference screenshot. Env reflections use a synthetic
+sphere-map, combined in TEV with Fresnel.
 
 ## Build
 
@@ -15,10 +14,8 @@ export DEVKITPRO=/opt/devkitpro
 export DEVKITPPC=/opt/devkitpro/devkitPPC
 export PATH="$DEVKITPPC/bin:$DEVKITPRO/tools/bin:$PATH"
 
-# Optional: refresh matcap/HUD from the Project-store reference PNG
-python3 scripts/bake_from_reference.py
-
-python3 scripts/gen_assets.py   # procedural extras (bump/detail/font/…)
+python3 scripts/import_rust_maps.py   # from ~/Desktop/pbr-gc/rust → textures/rust_*.png
+python3 scripts/gen_assets.py         # synthetic env, HUD chrome, detail/spec
 make -j$(nproc)
 ```
 
@@ -28,8 +25,8 @@ Produces `gx-tev-material-lab.dol`.
 
 | Button | Action |
 |--------|--------|
-| A | Cycle material (copper / gold / iron / chrome / brushed / plastic) |
-| B | Step roughness (0 → 0.25 → 0.5 → 0.75 → 1.0) |
+| A | Cycle material (RUST / copper / gold / iron / chrome / plastic) |
+| B | Step roughness |
 | X | Toggle env map |
 | Y | Cycle TEV feature path |
 
@@ -37,23 +34,17 @@ Produces `gx-tev-material-lab.dol`.
 
 | Path | What Flipper is doing |
 |------|------------------------|
-| HERO MATCAP IBL | Reference-baked matcap sample × material tint |
-| FRESNEL+KONST | Env × konst F0 + vertex Schlick rim |
-| MOD2X DETAIL | Dual-tex matcap × detail with `GX_CS_SCALE_2` |
-| SPEC MASK ADD | Matcap + specular-lobe texture add via konst |
-| INDTEX BUMP | `GX_SetTevIndirect` bump warp into env (Lost Coast-style) |
-| FOG HAZE | `GX_SetFog` perspective linear haze |
-| SCALE2 LIGHT | Env × vertex with `GX_CS_SCALE_2` boost |
-| ALPHA CLIP | `GX_SetAlphaCompare` cutout path |
-
-After ~3s the demo also auto-advances feature paths so a single Dolphin
-framedump run can harvest showcase stills.
+| RUST PBR MAPS | albedo × AO + synthetic env × Fresnel |
+| FRESNEL+KONST | albedo + env × konst F0 |
+| MOD2X DETAIL | rust albedo × detail `GX_CS_SCALE_2` |
+| SPEC MASK ADD | albedo + specular-lobe add |
+| INDTEX BUMP | rust normal IndTex warps env into albedo |
+| FOG HAZE | `GX_FOG_PERSP_LIN` |
+| SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
+| ALPHA CLIP | `GX_SetAlphaCompare` |
 
 ## Capture
 
 ```bash
 ./scripts/run_dolphin_capture.sh /tmp/gx-tev-material-lab-cap
 ```
-
-Uses Flatpak Dolphin (`org.DolphinEmu.dolphin-emu`) with frame dumps. Prefer a
-`/tmp/...` output path so Flatpak can write frames.
