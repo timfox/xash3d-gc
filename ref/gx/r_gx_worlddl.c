@@ -29,6 +29,13 @@ void R_GXPropDrawHorizon( const float *org );
 
 #define GC_WD_FLAG_LIGHT_X1	0x0001	/* GoldSrc lighting: lightmap pages at x1 */
 #define GC_WD_FLAG_NO_NRM	0x0002	/* v2 vertices without the normal (never read): 12 bytes */
+/* v2 vertices carry a one-byte index into the chunk's own RGBA table (header
+ * word 12) instead of four colour bytes: 9 bytes a vertex. A lit chunk reads
+ * nothing but the alpha of that colour, and the chunk cache is what the view
+ * from the start of d2_lostcoast ran out of (1037 KB wanted, 906 KB of
+ * cache: a dozen chunks read from ARAM again every frame, 30 fps). A chunk
+ * with no table (the 3D skybox, lit by its vertex colours) keeps them. */
+#define GC_WD_FLAG_CLR_INDEX	0x0004
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
 #define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
@@ -424,6 +431,28 @@ static void R_GXWorldDLSoftOff( void )
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	gc_wd_soft_on = false;
 	gc_wd_tev_key = -1;
+}
+
+/* Point the vertex arrays at a chunk: positions, and its colour table when
+ * the pack indexes colours. gc_wd_clr_mode: 0 unknown, 1 direct, 2 indexed. */
+static u8 gc_wd_clr_mode;
+
+static void R_GXWorldDLChunkArrays( const byte *chunk )
+{
+	GX_SetArray( GX_VA_POS, (void *)( chunk + *(const u32 *)( chunk + 4 )), 6 );
+	if( gc_wd_hdr.flags & GC_WD_FLAG_CLR_INDEX )
+	{
+		const u32 clr = *(const u32 *)( chunk + 12 );
+		const u8 mode = clr ? 2 : 1;
+
+		if( gc_wd_clr_mode != mode )
+		{
+			GX_SetVtxDesc( GX_VA_CLR0, clr ? GX_INDEX8 : GX_DIRECT );
+			gc_wd_clr_mode = mode;
+		}
+		if( clr )
+			GX_SetArray( GX_VA_CLR0, (void *)( chunk + clr ), 4 );
+	}
 }
 
 static void R_GXWorldDLSetupLit( int lightmap )
@@ -2357,7 +2386,7 @@ static void R_GXWorldDLEnvFlush( void )
 		if( gc_wd_envq[q].chunk != chunk )
 		{
 			chunk = gc_wd_envq[q].chunk;
-			GX_SetArray( GX_VA_POS, (void *)( chunk + *(const u32 *)( chunk + 4 )), 6 );
+			R_GXWorldDLChunkArrays( chunk );
 		}
 		if( key != last )
 		{
@@ -2384,7 +2413,7 @@ static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 	u32 nb, k;
 
 	nb = *(const u16 *)( chunk + 2 );
-	GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+	R_GXWorldDLChunkArrays( chunk );
 	b = (const gc_wd_batch_t *)( chunk + 16 );
 	for( k = 0; k < nb; k++, b++ )
 	{
@@ -2478,6 +2507,7 @@ static void R_GXWorldDLRestoreHarbor( Mtx mv, Mtx44 proj, const float *org )
 	if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
 		GX_SetVtxDesc( GX_VA_NRM, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	gc_wd_clr_mode = 1;
 	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 	GX_SetVtxDesc( GX_VA_TEX1, GX_DIRECT );
 	if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
@@ -2725,7 +2755,7 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 		b = (const gc_wd_batch_t *)( chunk + 16 ) + (int)(( r >> 32 ) & 0xffffu );
 		if( ci != cur_chunk )
 		{
-			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			R_GXWorldDLChunkArrays( chunk );
 			cur_chunk = ci;
 		}
 		if( lm != cur_lm )
@@ -2816,7 +2846,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 		b = (const gc_wd_batch_t *)( chunk + ( gc_wd_hdr.version == 2 ? 16 : 8 )) + bi;
 		if( ci != cur_chunk )
 		{
-			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			R_GXWorldDLChunkArrays( chunk );
 			cur_chunk = ci;
 		}
 		if( lm != cur_lm )
@@ -3063,7 +3093,7 @@ static void R_GXWorldDLDynDraw( void )
 				|| l->origin[2] + r < gc_wd_chunk_mins[i * 3 + 2] || l->origin[2] - r > gc_wd_chunk_maxs[i * 3 + 2] )
 				continue;
 			nb = *(const u16 *)( chunk + 2 );
-			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			R_GXWorldDLChunkArrays( chunk );
 			b = (const gc_wd_batch_t *)( chunk + 16 );
 			for( kk = 0; kk < nb; kk++, b++ )
 			{
@@ -3186,6 +3216,7 @@ int R_GXWorldDLDraw( void )
 		if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
 			GX_SetVtxDesc( GX_VA_NRM, GX_DIRECT );
 		GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+		gc_wd_clr_mode = 1;
 		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
 		GX_SetVtxDesc( GX_VA_TEX1, GX_DIRECT );
 		if( !( gc_wd_hdr.flags & GC_WD_FLAG_NO_NRM ))
@@ -3420,7 +3451,7 @@ int R_GXWorldDLDraw( void )
 			}
 			gc_wd_pf_bytes += gc_wd_chunk_bytes[i];
 			nb = *(const u16 *)( chunk + 2 );
-			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			R_GXWorldDLChunkArrays( chunk );
 			/* Version 2 header is 16 bytes: npos, nbatches, pos_ofs, lm_ofs. */
 			{
 				u32 lm_ofs = 0;
