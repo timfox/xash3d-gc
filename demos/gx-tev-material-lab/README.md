@@ -91,7 +91,7 @@ the DumpFrames capture reel so you stay in control.
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
 Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²**;
-HDRI sky faces + IBL matcaps **256² CMPR** (gxbake equirect→sides) — DOL ~15MB MEM1-safe.
+HDRI sky faces **512² CMPR** + IBL matcaps **256²** (gxbake equirect→sides) — DOL ~≤16MB MEM1-safe.
 
 ### HDRI / FX
 

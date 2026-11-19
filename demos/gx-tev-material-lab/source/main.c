@@ -271,7 +271,7 @@ static TPLFile tplFont, tplDetail, tplSpec;
 static TPLFile tplHeightStone, tplHeightBrick, tplHeightConcrete;
 static PbrSet pbrSets[MAPS_COUNT];
 
-/* HDRI skybox + IBL matcaps (gxbake equirect → 256² CMPR faces). */
+/* HDRI skybox + IBL matcaps (gxbake equirect → 512² sky / 256² IBL CMPR). */
 #define LAB_SKY_COUNT 3
 #define LAB_SKY_SIDES 6
 typedef struct {
@@ -477,8 +477,8 @@ static void tint_sphere_vertices(const Material *mat)
 		v->g = mat->base.g;
 		v->b = mat->base.b;
 		if (mat->metallic > 0.5f) {
-			/* Metals: keep center quieter so matcap rim doesn't read as a shell */
-			f32 w = clampf(0.28f + 0.45f * v->fu, 0.0f, 1.0f) * spec_scale;
+			/* Metals: flat/low Fresnel — matcap limbs must not read as a glowing rim */
+			f32 w = clampf(0.10f + 0.22f * v->fu, 0.0f, 1.0f) * spec_scale;
 			v->a = (u8)(w * 255.0f);
 		} else {
 			/* Dielectrics / rust: Fresnel rim only, still roughness-scaled */
@@ -550,25 +550,35 @@ static void setup_tev_hero_pbr(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
-	/* st2: metal map → REG0 (conductor weight); rough map still selects env LOD */
+	/* st2: metal map → REG0; metals also fold quiet Fresnel (APREV) into weight.
+	 * REG0 = metal × KONST(~0.40) so limbs stay shy of a glowing rim. */
 	GX_SetTevDirect(GX_TEVSTAGE2);
 	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	if (metal) {
+		GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 100, 100, 100, 255 });
+		GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+		GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, GX_CC_ZERO);
+	} else {
+		GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	}
 	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
 	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	(void)set->rough; /* loaded above; LOD via select_env_tex(roughness) */
 
-	/* st3: normal-warped env × (metal map | Fresnel) + body */
+	/* st3: normal-warped env × (metal×KONST×Fresnel | Fresnel) + body */
 	if (envMapEnabled) {
 		GX_SetTevIndirect(GX_TEVSTAGE3, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
 			GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
 		GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-		if (metal)
-			GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_C0, GX_CC_CPREV);
-		else
+		if (metal) {
+			/* env × min(C0, APREV) approx: use APREV (quiet Fresnel) — metal in REG0
+			 * already scaled; multiply env by APREV so limb tracks Fresnel not full map */
 			GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-		/* DIVIDE_2 softens matcap limb brightening (was reading as a force-field rim) */
+		} else {
+			GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+		}
+		/* DIVIDE_2 + quiet Fresnel/KONST: steel/damascus limbs no longer glow */
 		GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
 	} else {
 		GX_SetTevDirect(GX_TEVSTAGE3);
