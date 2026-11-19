@@ -7072,6 +7072,13 @@ static int gc_prop_pf_frames;
  * Each prop pass resets it after its own state setup. */
 static int gc_prop_vtx_frac = -1;
 static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 0 flat colour, -1 not set */
+/* The prop stage's colour scale: 1 = x2, 0 = x1, -1 not set. The world's
+ * lightmap stage is x2 (a texel of 0.5 is identity), so a sunlit wall reaches
+ * twice its texture; the props' light was baked to 0..1 and stopped at once,
+ * which left sunlit rocks and boats at half the brightness of the ground they
+ * stand on. A light record marked 2 (byte 9) is baked at half scale and
+ * drawn x2, like the world. */
+static int gc_prop_tev_x2 = -1;
 
 static u32 gc_prop_far_fallbacks;	/* small props drawn from the far chain because the cache was full */
 
@@ -7133,6 +7140,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		}
 		gc_prop_vtx_frac = (int)m->frac;
 		gc_prop_lit_mode = -1;
+		gc_prop_tev_x2 = -1;
 	}
 	if( gc_prop_vsize == 11 && gc_prop_cur_light )
 	{
@@ -7174,6 +7182,16 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			gc_prop_lit_mode = 0;
 		}
 		GX_SetChanMatColor( GX_COLOR0A0, col );
+	}
+	{
+		const int x2 = ( gc_prop_vsize == 11 && gc_prop_cur_light && gc_prop_cur_light[9] == 2 ) ? 1 : 0;
+
+		if( gc_prop_tev_x2 != x2 )
+		{
+			GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
+			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, x2 ? GX_CS_SCALE_2 : GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			gc_prop_tev_x2 = x2;
+		}
 	}
 	if( far_lod && !gc_prop_far_mem && !gc_prop_far_tried && gc_prop_far_size
 		&& GC_MapLoadBufferTailPeak() > 0 )
@@ -7273,7 +7291,8 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		}
 		if( additive )
 		{
-			const GXColor dim = { 70, 66, 54, 255 };
+			/* Half as much under the x2 stage: the same shaft either way. */
+			const GXColor dim = { (u8)( gc_prop_tev_x2 > 0 ? 35 : 70 ), (u8)( gc_prop_tev_x2 > 0 ? 33 : 66 ), (u8)( gc_prop_tev_x2 > 0 ? 27 : 54 ), 255 };
 
 			GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
 			GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
