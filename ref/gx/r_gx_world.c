@@ -9582,6 +9582,11 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
 	R_GXTrace( "hot service" );
 	R_GXHotService();
+	{
+		extern void R_GXBloomGlowPrepass( void );
+
+		R_GXBloomGlowPrepass();
+	}
 	R_GXTrace( "mirror" );
 	R_GXWaterMirrorPass();
 	R_GXTrace( "3d state" );
