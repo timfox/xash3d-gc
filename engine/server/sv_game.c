@@ -6101,11 +6101,22 @@ static int SV_GCParityTier( const char *classname )
 	return 1;
 }
 
+/* Which condition tripped, for the per-class tally (heap, slab, edicts, budget). */
+static int gc_parity_why[4];
+
 static qboolean SV_GCEntityPressure( void )
 {
-	return GC_MemHeapFreeBytes() < 16u * 1024u
-		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
-		|| svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+	const qboolean heap = GC_MemHeapFreeBytes() < 16u * 1024u;
+	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
+	const qboolean ents = svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+
+	if( heap )
+		gc_parity_why[0]++;
+	else if( slab )
+		gc_parity_why[1]++;
+	else if( ents )
+		gc_parity_why[2]++;
+	return heap || slab || ents;
 }
 
 /* An unnamed func_illusionary is non-solid decoration nothing can target:
@@ -6153,7 +6164,9 @@ void SV_GCParityReport( void )
 		n += Q_snprintf( line + n, sizeof( line ) - n, " %s=%d/%d", gc_parity_tally[i].name,
 			gc_parity_tally[i].kept, gc_parity_tally[i].skipped );
 	if( n > 0 )
-		Con_Reportf( "Xash3D GameCube: DoD parity tally (kept/skipped):%s\n", line );
+		Con_Reportf( "Xash3D GameCube: DoD parity tally (kept/skipped):%s | pressure: heap<16KB %d, private slab %d, edicts %d; budget/tier skips are the rest\n", line,
+			gc_parity_why[0], gc_parity_why[1], gc_parity_why[2] );
+	memset( gc_parity_why, 0, sizeof( gc_parity_why ));
 	memset( gc_parity_tally, 0, sizeof( gc_parity_tally ));
 }
 
