@@ -10281,6 +10281,17 @@ static void GC_FatalDrawWrapped( unsigned short *dst, int stride, int width, int
 	}
 }
 
+static unsigned short GC_RGB8To565( int r, int g, int b )
+{
+	if( r < 0 ) r = 0;
+	if( g < 0 ) g = 0;
+	if( b < 0 ) b = 0;
+	if( r > 255 ) r = 255;
+	if( g > 255 ) g = 255;
+	if( b > 255 ) b = 255;
+	return (unsigned short)((( r >> 3 ) << 11 ) | (( g >> 2 ) << 5 ) | ( b >> 3 ));
+}
+
 /* One 160x120 RGB565 panel shared by the fatal breadcrumb and the boot prompt (38 KiB of .bss that already existed). */
 static unsigned short gc_text_panel[160 * 120];
 
@@ -10351,16 +10362,6 @@ static qboolean GC_BootProgressivePrompt( void )
 	return false;
 }
 
-static unsigned short GC_RGB8To565( int r, int g, int b )
-{
-	if( r < 0 ) r = 0;
-	if( g < 0 ) g = 0;
-	if( b < 0 ) b = 0;
-	if( r > 255 ) r = 255;
-	if( g > 255 ) g = 255;
-	if( b > 255 ) b = 255;
-	return (unsigned short)((( r >> 3 ) << 11 ) | (( g >> 2 ) << 5 ) | ( b >> 3 ));
-}
 
 #if XASH_GAMECUBE
 /* HL1-themed loading plaque (baked at disc build). Keep tiny for MEM1. */
