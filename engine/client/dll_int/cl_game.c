@@ -1022,6 +1022,13 @@ static int gc_hud_call_trace;
 
 void CL_DrawHUD( int state )
 {
+	/* cinematic shot: frame stamp always, HUD only when cine_hud is set */
+	if( state == CL_ACTIVE && CL_CineActive( ))
+	{
+		CL_CineDraw2D();
+		if( CL_CineHideHUD( ))
+			return;
+	}
 #if XASH_GAMECUBE
 	/* gc_hud_off 1 (console or listenserver.cfg): draw no client HUD at all, for clean spectator and
 	 * capture footage. The cvar is looked up by name each frame so a value set before any

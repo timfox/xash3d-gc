@@ -1019,6 +1019,16 @@ void V_Shutdown( void );
 qboolean V_PreRender( void );
 void V_PostRender( void );
 void V_RenderView( void );
+
+//
+// cl_cine.c
+//
+void CL_CineInit( void );
+qboolean CL_CineActive( void );
+qboolean CL_CineView( vec3_t org, vec3_t ang, float *fov );
+qboolean CL_CineHideHUD( void );
+qboolean CL_CineHideViewModel( void );
+void CL_CineDraw2D( void );
 #if XASH_GAMECUBE
 qboolean V_RenderViewBoundedGC( void );
 #if XASH_GAMECUBE

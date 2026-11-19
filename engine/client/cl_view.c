@@ -712,6 +712,30 @@ static void V_ApplyRefUnderwater( ref_viewpass_t *rvp )
 
 /*
 ==================
+V_ApplyCineCamera
+
+a playing cinematic shot (cl_cine.c) owns the eye, the angles and the fov
+==================
+*/
+static void V_ApplyCineCamera( ref_viewpass_t *rvp )
+{
+	float fov;
+
+	if( !CL_CineView( rvp->vieworigin, rvp->viewangles, &fov ))
+		return;
+
+	rvp->fov_x = bound( 10.0f, fov, 150.0f );
+	rvp->fov_y = V_CalcFov( &rvp->fov_x, clgame.viewport[2], clgame.viewport[3] );
+	if( refState.wideScreen && r_adjust_fov.value )
+		V_AdjustFov( &rvp->fov_x, &rvp->fov_y, clgame.viewport[2], clgame.viewport[3], false );
+
+	// viewentity stays the player, so the cameraman's own body is not drawn
+	if( CL_CineHideViewModel( ))
+		clgame.viewent.model = NULL;
+}
+
+/*
+==================
 V_RenderView
 
 ==================
@@ -760,6 +784,8 @@ void V_RenderView( void )
 			clgame.viewent.curstate.animtime = cl.local.weaponstarttime;
 
 		V_GetRefParams( &rp, &rvp );
+		if( viewnum == 0 )
+			V_ApplyCineCamera( &rvp );
 		V_RefApplyOverview( &rvp );
 		V_ApplyRefUnderwater( &rvp );
 
