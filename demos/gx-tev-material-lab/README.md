@@ -43,7 +43,7 @@ sprites in `gen_assets.py` — do **not** run `bake_from_reference.py` (retired)
 | MOD2X DETAIL | rust albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | INDTEX BUMP | rust normal IndTex warps env into albedo |
-| FOG HAZE | `GX_FOG_PERSP_LIN` |
+| FOG HAZE | denser `GX_FOG_PERSP_LIN` (base grey fog is always on) |
 | SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
