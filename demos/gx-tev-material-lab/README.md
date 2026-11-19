@@ -78,6 +78,9 @@ the DumpFrames capture reel so you stay in control.
 | WET SURFACE | Darkened albedo×AO + sharp Fresnel glaze (metal/normal/rough) |
 | OXIDE PATINA | Scrolled detail × albedo + metal IndTex glints |
 | PORCELAIN | Soft wrap body + normal-warped dielectric coat |
+| GOLD LEAF | Warm gold tint × metal IndTex foil glints |
+| FROST ICE | Cool frost tint + crystalline Fresnel coat |
+| CAUSTICS | Scrolled underwater light pools × PBR maps |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
