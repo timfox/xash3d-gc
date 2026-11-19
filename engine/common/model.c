@@ -1646,6 +1646,20 @@ void Mod_GCPromoteMapModels( void )
 	/* The team body cores (models/player/<team>/<team>.mdl, ~79 KB each) first, while the spill and heap are still one
 	 * piece: loaded lazily on first draw they hit "spill alloc miss" + a malloc that fails on a fragmented heap that
 	 * reports 300 KB free (caen: brit-inf, zalec: us-para), and that side's bots have no body. */
+	{
+		int n_pre = 0, n_player = 0;
+
+		for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+		{
+			n_pre++;
+			if( Q_stristr( sv.model_precache[i], "models/player" ))
+			{
+				n_player++;
+				Con_Reportf( "Xash3D GameCube: precache list has %s (index %d)\n", sv.model_precache[i], i );
+			}
+		}
+		Con_Reportf( "Xash3D GameCube: early body promote: %d precached models, %d player\n", n_pre, n_player );
+	}
 	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
 	{
 		const char *name = sv.model_precache[i];
