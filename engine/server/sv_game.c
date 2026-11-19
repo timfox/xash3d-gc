@@ -6174,11 +6174,11 @@ void SV_GCParityReport( void )
  * client side draws them), 2 records AND edicts (the self test compares them at spawn complete). */
 static int SV_GCStaticWallsMode( void )
 {
-	static convar_t *cv;
+	/* Not Cvar_Get: that would replace the FCVAR_TEMPORARY cvar the disc cfg ("cvar gc_static_walls 2") created with a
+	 * fresh default. The console (server.cfg / autoexec) can still create it. */
+	convar_t *cv = Cvar_FindVar( "gc_static_walls" );
 
-	if( !cv )
-		cv = Cvar_Get( "gc_static_walls", "0", FCVAR_SERVER, "unnamed plain func_wall as static collision records" );
-	return (int)cv->value;
+	return cv ? (int)cv->value : 0;
 }
 
 static qboolean SV_GCStaticWallRecord( edict_t *ent )
