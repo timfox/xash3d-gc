@@ -5842,7 +5842,25 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 #endif
 	if( !gc_wt_store_base )
 	{
-		if( Sys_CheckParm( "-gccapfacessmoke" ) && size > 0 && (uint32_t)size < GC_WT_ARAM_BYTES )
+		/* Size the ring to this pack when the map never changelevels into a
+		 * larger one. Lost Coast is one map; CapFaces smoke is the same.
+		 * DoD keeps the 6 MB ring so a tram hop can keep shared textures
+		 * without re-reading them. The retail title → New Game path does
+		 * not pass -gccapfacessmoke, so Lost Coast builds must gate on the
+		 * compile define / map stem or the pack would still take 6 MB
+		 * (menu probe 2026-11-18: ARAM reserve 6 Mb while wt is 1.4 MB). */
+		qboolean size_to_pack = false;
+
+		if( size > 0 && (uint32_t)size < GC_WT_ARAM_BYTES )
+		{
+#if defined(XASH_GC_LOSTCOAST) && XASH_GC_LOSTCOAST
+			size_to_pack = true;
+#else
+			if( Sys_CheckParm( "-gccapfacessmoke" ) || !Q_stricmp( stem, "d2_lostcoast" ))
+				size_to_pack = true;
+#endif
+		}
+		if( size_to_pack )
 			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
 		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
 		/* A reserve that fails at the right-sized ring retries at the full ring before giving up. */

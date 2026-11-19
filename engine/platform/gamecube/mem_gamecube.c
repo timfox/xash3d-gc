@@ -1990,8 +1990,13 @@ unsigned int GC_AramWorldDLReserve( unsigned int size )
 		gc_aram_worlddl_base = 0;
 		gc_aram_worlddl_capacity = 0;
 	}
-	/* Round up so the tram chain's slightly larger packs reuse the block. */
+	/* Round up so the tram chain's slightly larger packs reuse the block.
+	 * Lost Coast is one map: keep the 32-byte DMA align only, so a 2.3 MB
+	 * pack does not pay another ~200–700 KiB of empty ARAM (stream=3700 Kb
+	 * on an older 3.5 MB bake; today's file is 2.36 MB). */
+#if !( defined(XASH_GC_LOSTCOAST) && XASH_GC_LOSTCOAST )
 	aligned = ( aligned + 256u * 1024u - 1u ) & ~( 256u * 1024u - 1u );
+#endif
 	gc_aram_worlddl_base = GC_AramAllocTagged( aligned, true, "worlddl" );
 	if( gc_aram_worlddl_base ) gc_aram_worlddl_capacity = aligned;
 	return gc_aram_worlddl_base;

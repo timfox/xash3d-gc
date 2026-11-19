@@ -2919,8 +2919,18 @@ void Mod_GCReleaseStudioArena( void )
 	model_t *mod;
 	int i, freed = 0;
 
+	/* The DoD play route needs this release too: a body model kept in a
+	 * slice of the old map's arena (us-inf.mdl) survived the level change
+	 * and the next map loaded its planes and nodes over it (ceres, charlie
+	 * to avalanche: WORLD CANARY CHANGED parts=planes,nodes,clipnodes). */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
 	if( !GC_MenuRunsServer( ))
 		return;
+#endif
+	{
+		extern void R_GXActorSlotsReset( void );
+		R_GXActorSlotsReset();
+	}
 	/* The level change has begun: no more claims against this map's arena. */
 	GC_MapLoadBufferWorldSettled( false );
 	gc_pinned_viewmodel_count = 0;

@@ -250,7 +250,9 @@ static void GC_AllocXFB( int i, GXRModeObj *mode )
 		return;
 	if( xfb[i] )
 		free( MEM_K1_TO_K0( xfb[i] ));
+	GC_MemSample( "pre-XFB" );
 	raw = SYS_AllocateFramebuffer( mode );
+	GC_MemSample( "post-XFB" );
 	if( !raw )
 	{
 		xfb[i] = NULL;
@@ -338,7 +340,11 @@ static GXRModeObj *GC_NetworkVideoMode( GXRModeObj *preferred )
 	gc_network_video_mode = *preferred;
 	/* VI scales the 320-pixel XFB to the mode's existing 640-pixel output.
 	 * Preserve its scanline count and television timing (480i/480p/PAL). */
-	gc_network_video_mode.fbWidth = 640;
+	/* 640 wide only for the menu build (hi-res GX menu text, #226). A boot straight into a
+	 * listen host or a connecting peer never shows that menu and falls back to the soft text
+	 * in a match anyway, and the 640 XFB costs 300 KiB of the BBA-linked heap that the
+	 * host needs (SV_InitGame / map load ran out of memory with it). */
+	gc_network_video_mode.fbWidth = ( Sys_CheckParm( "-gclistenserver" ) || Sys_CheckParm( "-gcconnect" )) ? 320 : 640;
 	return &gc_network_video_mode;
 }
 #endif
@@ -8141,6 +8147,36 @@ static unsigned int GC_GetFrameBudgetSampleTarget( void )
 void Platform_Minimize_f( void )
 {
 }
+
+#if XASH_DODGC_NETWORK
+/* Called once gamecube.cfg has selected a listen host or a peer connect: no 640x480 menu follows, so
+ * trade the early splash's 614 KB XFB for a 320-wide one (307 KB) before the heap fills up. The block is
+ * freed and the smaller one is carved from the same hole, so the other 307 KB stays usable. */
+void GC_ShrinkEarlyXFBForMatch( void )
+{
+	u32 need;
+
+	if( !rmode || !xfb[0] || rmode->fbWidth <= 320 )
+		return;
+	rmode->fbWidth = 320;
+	need = VIDEO_GetFrameBufferSize( rmode );
+	if( xfb_bytes[0] <= need )
+		return;
+	VIDEO_SetBlack( true );
+	VIDEO_Flush();
+	VIDEO_WaitVSync();
+	free( MEM_K1_TO_K0( xfb[0] ));
+	xfb[0] = NULL;
+	xfb_bytes[0] = 0;
+	GC_AllocXFB( 0, rmode );
+	VIDEO_Configure( rmode );
+	if( xfb[0] )
+		VIDEO_SetNextFramebuffer( xfb[0] );
+	VIDEO_Flush();
+	VIDEO_SetBlack( false );
+	SYS_Report( "Xash3D GameCube: XFB shrunk to %ux%u for the match route\n", (unsigned)rmode->fbWidth, (unsigned)rmode->xfbHeight );
+}
+#endif
 
 void GC_EarlyBootSplash( void )
 {
