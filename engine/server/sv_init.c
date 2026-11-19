@@ -1464,6 +1464,16 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 	{
 		Con_Reportf( "Xash3D GameCube: G201 delta reinit skipped (newgame/gcmap)\n" );
 	}
+#if XASH_DODGC_NETWORK
+	/* DoD: the game DLL load already parsed delta.lst and the file does not
+	 * change between maps. Reading it again (three loads with the diagnostic
+	 * below) at a level change failed on the fragmented heap with 117 KB
+	 * free and was fatal (ceres, charlie to avalanche, soak run 7). */
+	else if( Delta_IsInitialized( ))
+	{
+		Con_Reportf( "Xash3D GameCube: delta reinit skipped (already initialized)\n" );
+	}
+#endif
 	else
 	{
 		/* Temporary G201 evidence: FS_FileExists and FS_LoadFile use separate

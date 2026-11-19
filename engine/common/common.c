@@ -639,7 +639,11 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 	/* DoD bots read their waypoint graph (22-31 KiB) after the map is up,
 	 * not only while it loads; the store claim refuses while another owner
 	 * (the transition save) holds it, so any time is safe. */
+#if XASH_DODGC_NETWORK
+	if( !pfile && !com_gc_borrowed_file )
+#else
 	if( !pfile && GC_MenuRunsServer() && !com_gc_borrowed_file )
+#endif
 	{
 		extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
 		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
