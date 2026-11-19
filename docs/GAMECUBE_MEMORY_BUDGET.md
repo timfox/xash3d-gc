@@ -162,6 +162,106 @@ This changes the ARAM layout, so it has not been made.
 - The `ARAM <stage> session= stream= free=` report line is not in these logs;
   the build that produced them predates it.
 
+## One memory plan: full detail (A), network (B), hi-res HUD and text (C)
+
+Goal (Tim, 2026-11-18): all three fit together, with named pools and ARAM streaming, without
+dropping content. Fixed inputs from the menu/HUD thread: output frame 640x480, one XFB of
+600 KiB in the SYS arena, HUD cells at full resolution, 640-wide menus. Those are not traded.
+M = measured (ELF or Dolphin log), R = read from code, D = derived, P = planned (not built).
+
+### MEM1 (24 MiB = 24,576 KiB)
+
+Static image on master after the playermove caps (PR 240): 22.35 MiB measured at d23b9c58a
+minus the 360.7 KiB saved = about **22,525 KiB (22.0 MiB)** (M, D). The remaining tail is about
+**2,050 KiB** and holds the malloc heap, the XFB and the stack.
+
+| Pool | KiB | Group | Basis |
+|---|--:|---|---|
+| XFB (one, 640x480 RGB) | 600 | all | M (malloc trace: `GC_AllocXFB` 600.0 KiB) |
+| FileSystem Pool arena | 192 | all | M (`Mem_InitPool` 192 KiB); peak use about 104 KiB |
+| ISO9660 mount | 34 | all | M |
+| `_Mem_Alloc` pool tables | 80 | all | M (32 + 48 KiB) |
+| Durable hot window | 96 | A | M (`R_GCEnsureDurableHotWindow`) |
+| HUD texture pool (3 slots of 128x128) | 96 | C | R (`GC_GX_TEX_HUD_RESERVE` = 3, 32 KiB each) |
+| Hi-res HUD cell arena | up to 64 | C | R (`GC_HUDHI_ARENA_MAX`) |
+| Menu glyph atlas 512x256 I4 | 64 | C, menus only | menu thread |
+| In-match glyph atlas | 64 (ceiling 128) | C | P (branch `hitext-ingame`) |
+| 256 px view-model skin window | 192 | A | R (`GC_SKIN_WINDOW_BYTES`); **gated on free heap >= 704 KiB, so it is never allocated at map active** |
+| World reserves held at Host_Main | 400 | boot | M; released before SV_Init, not resident in a match |
+| Server slot table (5 slots) | about 45 | B | R (about 9 KiB per slot) |
+
+Heap at map active (M, earlier logs, which predate PRs 240/241): heap_free **140-220 KiB**,
+unclaimed 0-56 KiB, on charlie, avalanche, caen and zalec. PR 240 added 360.7 KiB of tail to
+this, but those logs were taken on an image 0.69 MB smaller than master, so the net is not
+yet re-measured.
+
+### BSS by group (M, ELF)
+
+| Group | BSS | Notes |
+|---|--:|---|
+| Map-load arena (`vid`) | 3.69 MiB | holds the BSP, world arrays, texture pool tail |
+| Client entities | 744 KiB + cl 638 KiB | 460 edicts, not idle |
+| Server (`sv_`, edicts, baselines, clipnodes) | about 1.5 MiB | 460 edicts |
+| Studio (`gc_studio_bss`) | 648 KiB | |
+| Network (lwIP memp 218 + mem 192 + `gc_sv_netbuf` 128) | 538 KiB | **B**: another thread is slimming lwIP |
+| Effects pixels (`gc_fx_pixels`) | 208 KiB | **C** (effect sprites) |
+| FIFO, soft 2D buffers, view/Z buffers | about 0.9 MiB | Z is borrowed by bloom |
+| playermove_t x2 | 274 KiB (was 635) | PR 240 |
+
+### ARAM (16 MiB = 15.98 MiB usable)
+
+| Owner | MiB | Group | Basis |
+|---|--:|---|---|
+| audio | 1.00 | A | M |
+| wtstore (world texture ring) | 1.4-3.5 | A | M logs show 6.0; the layout branch sizes it to pack + margin (1.84 on charlie), packs are 1.39-3.22 |
+| world display lists (`worlddl`) | 1.5-3.0 | A | M |
+| light faces (`lightfaces`) | 1.9-3.0 | A | M |
+| props + proptex | 0.12-0.27 | A | M |
+| player animation packs, 2 team classes | 7.1 | A | M (3.55 each; refused today on avalanche and caen, streamed from disc) |
+| player mesh packs (.gcm) | 0.27-0.35 | A | M |
+| asset cache (hi-res HUD cells, skins, studio, HUD sprites) | up to 4.0 | A, C | M ceiling; 1.49 MiB in use at map-ready on charlie |
+| prefetch (menu idle) | 1.03 | menu | M; held for the session on the menu route |
+| 256 px skins (CMPR 256x256, 32 KiB each) | under 1 | A | D, about 10 bodies + viewmodels |
+| sfx / lstyles / saves | 2 / 1 / 4 | not seen in DoD logs | design doc |
+
+**Sum on the worst measured map (caen), full detail:** audio 1.0 + wtstore 3.5 + worlddl 3.0 +
+lightfaces 3.0 + props 0.27 + mesh 0.27 + animation packs 7.1 + cache ceiling 4.0 =
+**22.1 MiB against 15.98**, so about **6.1 MiB over** at the ceiling and about 3.6 MiB over with the
+cache at its measured 1.5 MiB (D). That is why both animation packs cannot be resident today and
+why the 256 px skins have no guaranteed room.
+
+### What does not fit, and the cheapest ways to make it fit (D, ranked by KiB per risk)
+
+MEM1, needed beyond today's free heap: 192 KiB (256 px skin window) + 64-128 KiB (in-match glyph
+atlas) = **256-320 KiB**, against 140-220 KiB free at map active plus the 360.7 KiB from PR 240.
+
+1. **PR 240 BSS saving, 360.7 KiB, done.** Give it to the skin window and the glyph atlas as named
+   pools (a static or boot-arena block, not general heap). Risk: low.
+2. **FS arena 192 to 112-128 KiB: 64-80 KiB.** The pool peaks near 104 KiB. Risk: low to medium
+   (pool setup belongs to the boot-sizing thread).
+3. **Skin window from the map-load arena or the tail instead of a free-heap gate: 192 KiB made
+   reachable.** The current gate (704 KiB of free heap) can never pass in a match. Risk: medium.
+4. **Server packet entities and client slot table trims: 0-45 KiB.** Risk: low, small.
+5. **lwIP buffers (538 KiB static):** owned by the network thread; any cut is added to the pool above.
+
+ARAM, over by 3.6-6.1 MiB, cheapest first:
+
+1. **Cache ceiling 4 MiB to a sized budget (about 2 MiB): 2 MiB.** The cache already evicts. Risk: low.
+2. **Stream one animation pack from disc (keep the other in ARAM): 3.55 MiB.** Already the fallback;
+   costs a seek per new bot sequence. Risk: low for correctness, medium for frame time (unmeasured).
+3. **wtstore sized per map: 2.5-4.6 MiB. In the layout PR (`gc-mem-aram-layout`).** Risk: low; the
+   changelevel realloc path is new and still needs one Dolphin run.
+4. **Drop the menu prefetch after load: 1.03 MiB island.** In the same PR. Risk: low.
+5. **Lightfaces and worlddl partial residency (stream the half not in view): 1-2 MiB each.** Risk:
+   high (render path), not started.
+6. **Share one animation pack across teams where the sequences are identical:** unknown; needs the
+   split tool to report duplicate sequences. Risk: medium.
+
+Per-bot cost (R, M): about 3 edicts per bot (limit is the 460 edicts, not memory), about 9 KiB of
+server slot, and about 0 ARAM per extra bot because packs and meshes are shared by name. Streams
+from disc: animation sequences when a pack is not in ARAM, the 193 KiB sprite that does not fit
+the staging buffer, the world texture pack entries beyond the ring.
+
 ## Runtime markers currently consumed
 
 The existing MEM1 telemetry is useful and is consumed without changing its
