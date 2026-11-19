@@ -1098,6 +1098,7 @@ static qboolean gc_landmark3_configured;
 static qboolean gc_leanpvs_configured;
 static qboolean gc_fullphysics_configured;
 static qboolean gc_worldrender_configured;
+static qboolean gc_nohud_configured;	/* gamecube.cfg 'nohud': the engine's lean HUD is not drawn (spectator footage) */
 static qboolean gc_capfaces_smoke_configured;
 static qboolean gc_tas_configured;
 static qboolean gc_dumpframes_configured;
@@ -1185,6 +1186,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_leanpvs_configured = false;
 	gc_fullphysics_configured = false;
 	gc_worldrender_configured = false;
+	gc_nohud_configured = false;
 	gc_capfaces_smoke_configured = false;
 	gc_tas_configured = false;
 	gc_dumpframes_configured = false;
@@ -1479,6 +1481,17 @@ static void GCube_LoadDiscBootOverrides( void )
 			{
 				gc_menuauto_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override menuauto\n" );
+				continue;
+			}
+		}
+
+		if( !Q_strnicmp( cursor, "nohud", 5 ))
+		{
+			char ch = cursor[5];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_nohud_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override nohud\n" );
 				continue;
 			}
 		}
@@ -2036,6 +2049,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 
 	if( gc_worldrender_configured && !Sys_CheckParm( "-gcworldrender" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcworldrender";
+	if( gc_nohud_configured && !Sys_CheckParm( "-gcnohud" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcnohud";
 	if( gc_capfaces_smoke_configured && !Sys_CheckParm( "-gccapfacessmoke" ) && n + 1 < cap )
 		gc_argv[n++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured && !Sys_CheckParm( "-gcmap" ) && n + 2 < cap )
@@ -2111,6 +2126,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 		gc_argv[fake_argc++] = "-gcmenuauto";
 	if( gc_worldrender_configured )
 		gc_argv[fake_argc++] = "-gcworldrender";
+	if( gc_nohud_configured )
+		gc_argv[fake_argc++] = "-gcnohud";
 	if( gc_capfaces_smoke_configured )
 		gc_argv[fake_argc++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured )
