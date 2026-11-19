@@ -7286,7 +7286,11 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 			}
 		}
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
-			(float)in->ang[1] * k, (float)in->ang[2] * k, cover2 < gc_prop_far_cover * gc_prop_far_cover );
+			(float)in->ang[1] * k, (float)in->ang[2] * k,
+			/* The water mirror is 256x192 under ripples: the far chain
+			 * (already resident) reads the same there, and the full
+			 * chains it asked for no longer compete for the cache. */
+			r_gx_mirror || cover2 < gc_prop_far_cover * gc_prop_far_cover );
 		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
 		return drawn;
@@ -7463,6 +7467,17 @@ void R_GXPropDrawHorizon( const float *org )
 	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
 	static u16 order[GC_PROP_MAX_INST];
 
+	/* The water mirror draws the props first and the main view after it,
+	 * in the same frame. Counted as two frames, each pass saw the other's
+	 * demand as last frame's: no close model was ever held from one frame
+	 * to the next, and they were admitted against the mirror's smaller
+	 * demand. One frame starts with the mirror pass when there is one. */
+	static qboolean mirror_led;
+	const qboolean new_frame = r_gx_mirror || !mirror_led;
+
+	mirror_led = r_gx_mirror;
+	if( new_frame )
+	{
 	if( gc_prop_want_bytes > gc_prop_want_peak )
 		gc_prop_want_peak = gc_prop_want_bytes;
 	gc_prop_want_prev = gc_prop_want_bytes;
@@ -7507,6 +7522,7 @@ void R_GXPropDrawHorizon( const float *org )
 		gc_prop_close_block = gc_prop_cache_frame + 90u;
 	gc_prop_cache_overflow = false;
 	gc_prop_cache_budget = GC_PROP_CACHE_LOAD_BUDGET;
+	}
 	{
 		/* Glints read strongest with the low sun ahead (bearing yaw 137). */
 		vec3_t fw, rt, upv;
