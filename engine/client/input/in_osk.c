@@ -469,7 +469,7 @@ void OSK_Draw( void )
 	const int rows = OSK_ROWS + 1;
 	const int height = OSK_HEADER + rows * ( OSK_CELL + OSK_GAP ) - OSK_GAP + OSK_FOOTER + OSK_PAD * 2;
 	const int left = ( 640 - width ) / 2;
-	int top = 480 - height - 16;
+	int top = 480 - height - 26; // the 2 px border keeps inside the 24 px bottom safe margin
 	const int tabw = 4 * OSK_GLYPH_ADV * OSK_FP;
 	char label[2] = { 0, 0 };
 	int i, j, p;
@@ -483,7 +483,7 @@ void OSK_Draw( void )
 
 		if( Key_GetTextInputEditRect( &ex, &ey, &ew, &eh ) && ew > 0 && eh > 0 && sy > 0.0f
 			&& ey + eh > top * sy && ey + eh / 2 > refState.height / 2 )
-			top = 16;
+			top = 26;
 	}
 
 #if XASH_GAMECUBE
