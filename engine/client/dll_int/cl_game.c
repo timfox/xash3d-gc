@@ -2110,6 +2110,9 @@ some sprite models is exist only at client: HUD sprites,
 tent sprites or overview images
 =============
 */
+#if XASH_GAMECUBE
+static model_t *CL_LoadSpriteModelSlow( const char *name, uint type, uint texFlags );
+#endif
 static model_t *CL_LoadSpriteModel( const char *filename, uint type, uint texFlags )
 {
 	char	name[MAX_QPATH];
@@ -2124,6 +2127,52 @@ static model_t *CL_LoadSpriteModel( const char *filename, uint type, uint texFla
 
 	Q_strncpy( name, filename, sizeof( name ));
 	COM_FixSlashes( name );
+
+#if XASH_GAMECUBE
+	/* The client HUD asks for the same eight sprites every frame. Each ask
+	 * walked the whole sprite table comparing names, and one that is not on
+	 * the disc went on to look for its file again: 0.93 ms a frame on the
+	 * Lost Coast ride. Remember the last answers; a found sprite is checked
+	 * against its slot, a missing one is asked for again after five seconds. */
+	{
+		static struct { char name[MAX_QPATH]; model_t *mod; uint until; } memo[16];
+		static uint memo_next;
+		const uint now = (uint)host.framecount;
+		int m;
+
+		for( m = 0; m < 16; m++ )
+		{
+			if( memo[m].name[0] != name[0] || Q_stricmp( memo[m].name, name ))
+				continue;
+			if( memo[m].mod )
+			{
+				mod = memo[m].mod;
+				if( mod->needload != NL_UNREFERENCED && mod->needload != NL_NEEDS_LOADED
+					&& !Q_stricmp( mod->name, name ))
+				{
+					mod->needload = NL_PRESENT;
+					return mod;
+				}
+			}
+			else if( now < memo[m].until )
+				return NULL;
+			memo[m].name[0] = 0;
+			break;
+		}
+		mod = CL_LoadSpriteModelSlow( name, type, texFlags );
+		m = (int)( memo_next++ & 15u );
+		Q_strncpy( memo[m].name, name, sizeof( memo[m].name ));
+		memo[m].mod = mod;
+		memo[m].until = now + 300u;
+		return mod;
+	}
+}
+
+static model_t *CL_LoadSpriteModelSlow( const char *name, uint type, uint texFlags )
+{
+	model_t	*mod;
+	int	i;
+#endif
 
 	for( i = 0, mod = clgame.sprites; i < MAX_CLIENT_SPRITES; i++, mod++ )
 	{
