@@ -748,6 +748,9 @@ static qboolean Host_FilterTime( double time )
 	else
 		host.frametime = bound( MIN_FRAMETIME, host.frametime, MAX_FRAMETIME );
 
+	// a playing cinematic shot locks game time to its film frame rate
+	CL_CineFrameTime( &host.frametime );
+
 	return true;
 }
 
