@@ -36,6 +36,15 @@ extern void Image_GCReleaseMdlDecode( void );
 
 static gc_skin_stream_t r_skin_stream;
 static byte *r_skin_window;
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
+/* The DoD view-model skin window is a named static pool, not a heap request. The 192 KiB heap
+ * allocation below is gated on 704 KiB of free heap, which a map at map-active never has
+ * (140-220 KiB), so 256 px skins never got a window. This takes part of the 360.7 KiB that
+ * PR 240 freed from the playermove arrays (the DoD image is still 168 KiB smaller than before).
+ * OPT-IN (XASH_GC_SKIN_WINDOW_BSS=1 at configure): 192 KiB of static image is 192 KiB less heap, and a
+ * listen host currently runs out of heap in SV_InitGame, so it stays off until the host has headroom. */
+static byte r_skin_window_bss[GC_SKIN_WINDOW_BYTES] __attribute__(( aligned( 32 )));
+#endif
 static qboolean r_skin_ready;
 static qboolean r_skin_failed;
 static int r_skin_disabled = -1;
@@ -252,6 +261,8 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	u16 *pix;
 	int handle;
 
+	static int attach_logged;
+
 	if( !src || w < 8 || h < 8 || w > GC_SKIN_MAX_DIM || h > GC_SKIN_MAX_DIM || ( w & 3 ) || ( h & 3 ))
 		return;
 	img = R_GetTexture( texnum );
@@ -260,7 +271,13 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	if( !img->pixels[0] || img->gc_packed || img->gc_gx_native || img->gc_skin_handle
 		|| img->width < 8 || img->height < 8
 		|| ( img->width >= w && img->height >= h ))
+	{
+		/* why a viewmodel skin is not streamed (first few only) */
+		if( attach_logged++ < 12 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM no attach %s src=%dx%d img=%dx%d pixels=%d packed=%d native=%d handle=%d\n",
+				img->name, w, h, img->width, img->height, img->pixels[0] != NULL, img->gc_packed, img->gc_gx_native, img->gc_skin_handle );
 		return;
+	}
 	if( !R_GXSkinInit( ))
 		return;
 	/* Scratch is the idle MDL decode buffer (128 KiB, static): no MEM1 heap
@@ -317,9 +334,13 @@ const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean
 	{
 		if( !r_skin_window )
 		{
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
+			r_skin_window = r_skin_window_bss;
+#else
 			/* Never take the last of the heap: the map load still needs it. */
 			r_skin_window = ( GC_MemHeapFreeBytes() >= GC_SKIN_WINDOW_BYTES + 512u * 1024u )
 				? (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES ) : NULL;
+#endif
 			if( !r_skin_window )
 			{
 				static qboolean window_logged;
