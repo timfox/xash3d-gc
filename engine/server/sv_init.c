@@ -97,6 +97,7 @@ never built). Falls back to fewer history frames, then to the static tables.
 */
 extern entity_state_t *sv_gc_frame_scratch;
 extern int sv_gc_visible_cap;
+extern int sv_gc_packet_bound;
 
 int SV_GCEntityCount( void )
 {
@@ -123,7 +124,8 @@ entity_state_t *SV_GCLocalClientRing( int *entries )
 void SV_GCSizePacketEntities( void )
 {
 	static entity_state_t *fallback_scratch;
-	const int visible = MAX_VISIBLE_PACKET;
+	/* Provable per-map bound from the entity lump (sv_game.c): the ring never needs more than it. */
+	const int visible = Q_min( MAX_VISIBLE_PACKET, sv_gc_packet_bound );
 	int frames;
 
 	if( !fallback_scratch )
@@ -160,6 +162,15 @@ void SV_GCSizePacketEntities( void )
 		int count = gap > GC_DOD_ARENA_KEEP ? (int)(( gap - GC_DOD_ARENA_KEEP ) / each ) : 0;
 
 		count = Q_min( count, visible ) & ~7;
+		if( visible <= 128 )
+		{
+			sv_gc_visible_cap = 128;
+			Con_Reportf( "Xash3D GameCube: packet entities map=%s bound=%d fits the static 128 tables\n", sv.name, visible );
+			svs.packet_entities = gc_singleplayer_packet_entities;
+			svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
+			sv_gc_frame_scratch = fallback_scratch;
+			return;
+		}
 		if( count > 128 )
 		{
 			const size_t bytes = each * (size_t)count;

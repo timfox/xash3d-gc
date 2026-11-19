@@ -64,6 +64,38 @@ int sv_gc_visible_cap = 128;
 
 static int	c_fullsend;	// just a debug counter
 static int	c_notsend;
+#if XASH_GAMECUBE
+static int	c_gcswapped;
+
+/* The packet list is full and a non-player entity wants in: when it is nearer
+ * the viewer than the farthest non-player already listed, take that slot. */
+static qboolean SV_GCPacketReplaceFarthest( sv_ents_t *ents, const entity_state_t *state, const vec3_t view )
+{
+	float far2 = -1.0f, d2;
+	int i, far_i = -1;
+	vec3_t d;
+
+	for( i = 0; i < ents->num_entities; i++ )
+	{
+		const entity_state_t *o = &ents->entities[i];
+
+		if( o->number >= 1 && o->number <= svs.maxclients )
+			continue;	/* never a player */
+		VectorSubtract( o->origin, view, d );
+		d2 = DotProduct( d, d );
+		if( d2 > far2 )
+		{
+			far2 = d2;
+			far_i = i;
+		}
+	}
+	VectorSubtract( state->origin, view, d );
+	if( far_i < 0 || DotProduct( d, d ) >= far2 )
+		return false;
+	ents->entities[far_i] = *state;
+	return true;
+}
+#endif
 
 /*
 =======================
@@ -361,6 +393,12 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 				// visibility list is full
 				// continue counting entities,
 				// so we know how many it's ovreflowed
+#if XASH_GAMECUBE
+				/* Stock HL priority: players are never dropped; of the rest the farthest
+				 * from the viewer goes first. The ring cannot grow mid-frame. */
+				if( !player && pViewEnt && SV_GCPacketReplaceFarthest( ents, state, pViewEnt->v.origin ))
+					c_gcswapped++;
+#endif
 				c_notsend++;
 			}
 		}
@@ -934,6 +972,9 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	frame_ents.entities = sv_gc_frame_scratch;
 #endif
 	frame_ents.num_entities = c_fullsend = c_notsend = 0;
+#if XASH_GAMECUBE
+	c_gcswapped = 0;
+#endif
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints
@@ -975,7 +1016,13 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	if( c_notsend != cl->ignored_ents )
 	{
 		if( c_notsend > 0 )
+		{
 			Con_Printf( S_ERROR "Too many entities in visible packet list. Ignored %d entities\n", c_notsend );
+#if XASH_GAMECUBE
+			Con_Reportf( "Xash3D GameCube: packet list overflow cap %d listed %d dropped %d (farthest non-players first, %d swapped in), players kept\n",
+				sv_gc_visible_cap, frame_ents.num_entities, c_notsend, c_gcswapped );
+#endif
+		}
 
 		cl->ignored_ents = c_notsend;
 	}
