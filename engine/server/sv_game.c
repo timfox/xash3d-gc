@@ -996,6 +996,24 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		return 0;
 	}
 
+#if XASH_GAMECUBE
+	/* Scripted shots: why a temp entity does or does not reach a client. */
+	{
+		static int te_logs;
+
+		if( te_logs < 24 && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity )
+		{
+			sv_client_t *c = svs.clients;
+
+			te_logs++;
+			Con_Reportf( "Xash3D GameCube: temp entity multicast dest=%d clients=%d c0 state=%d local=%d fake=%d edict=%d\n",
+				dest, numclients, c ? c->state : -1,
+				c ? NET_IsLocalAddress( c->netchan.remote_address ) : -1,
+				c ? FBitSet( c->flags, FCL_FAKECLIENT ) != 0 : -1, c && c->edict ? 1 : 0 );
+		}
+	}
+#endif
 	// send the data to all relevent clients (or once only)
 	for( j = 0, cl = current; j < numclients; j++, cl++ )
 	{
