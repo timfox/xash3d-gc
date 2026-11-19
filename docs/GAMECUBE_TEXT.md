@@ -97,3 +97,12 @@ non-whitelisted keys, unprintable values). Commands: `gc_card_save`, `gc_card_lo
   `card_art.h` (CI8, GX tiling, RGB5A3 palette; committed so the build does not need Pillow), set with `CARD_SetStatus`. File
   layout inside the one sector: comment 0, banner+icon 64..5184, settings blob at 5632. `gc_card_load silent` is the start-up
   load: no message for no card / no file / needs formatting, and it never asks. Static data: about 5 KiB of const art in the DOL.
+
+## Notices and the fatal panel (retail palette, inside the safe area)
+- **Controller disconnected:** `OSK_DrawNotice` (in_osk.c, drawn with the keyboard) shows a centred panel when no native pad
+  has been present for about 0.75 s (`GC_PadMissingNotice`, never for automated probes). Layout is `osk_notice.h`, host test
+  `tests/test_gamecube_osk_notice.py` (stays inside 32 x 24 px margins). Memory: none (soft FillRGBA + the keyboard's
+  bitmap glyphs, or hi-res glyphs when the atlas is up).
+- **Fatal / Host_Error panel:** the magenta 160x120 panel is now ViewportBG with a ClassMenuLight border on the safe area
+  (x 8..151, y 6..113 of the panel), title "DAY OF DEFEAT - ERROR". It still uses a static 38 KiB panel buffer (unchanged).
+- Not seen in Dolphin: needs a pad-less run to show the notice.
