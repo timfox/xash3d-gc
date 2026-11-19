@@ -103,6 +103,23 @@ int SV_GCEntityCount( void )
 	return svgame.numEntities;
 }
 
+#if XASH_DODGC_NETWORK
+/* Room left in the map arena for what loads there after the rings: the
+ * player body models (us-inf.mdl 86 KB, p_ models) take overflow slices. */
+#define GC_DOD_ARENA_KEEP ( 160u * 1024u )
+static entity_state_t *sv_gc_local_ring;
+static int sv_gc_local_ring_entries;
+
+/* The local client's packet ring for this map, sized with the server's. */
+entity_state_t *SV_GCLocalClientRing( int *entries )
+{
+	if( !sv_gc_local_ring || sv.state == ss_dead )
+		return NULL;
+	*entries = sv_gc_local_ring_entries;
+	return sv_gc_local_ring;
+}
+#endif
+
 void SV_GCSizePacketEntities( void )
 {
 	static entity_state_t *fallback_scratch;
@@ -128,7 +145,45 @@ void SV_GCSizePacketEntities( void )
 	 * 130 visible entities out of every packet (ceres), so objects went
 	 * missing on screen. Bots take no frames, the ring serves real clients. */
 #if XASH_DODGC_NETWORK
-	if( true )
+	/* One block for the server and its local client: the frame list, two
+	 * frames of server ring and two frames of client ring, all at the same
+	 * count. Sized separately, the server took 340 KB for three frames, the
+	 * client then found no room and fell back to 128, and the server cap
+	 * followed it down (ceres, avalanche and charlie: still "Ignored 125").
+	 * The count is what the largest arena gap holds after leaving room for
+	 * the body models that load into the arena later. */
+	sv_gc_local_ring = NULL;
+	sv_gc_local_ring_entries = 0;
+	{
+		const size_t gap = GC_MapArenaLargestGap();
+		const size_t each = sizeof( entity_state_t ) * 5;
+		int count = gap > GC_DOD_ARENA_KEEP ? (int)(( gap - GC_DOD_ARENA_KEEP ) / each ) : 0;
+
+		count = Q_min( count, visible ) & ~7;
+		if( count > 128 )
+		{
+			const size_t bytes = each * (size_t)count;
+			const size_t at = GC_MapArenaFind( bytes );
+			entity_state_t *block = at == (size_t)-1 ? NULL
+				: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+
+			if( block )
+			{
+				memset( block, 0, bytes );
+				svs.packet_entities = block;
+				svs.num_client_entities = count * 2;
+				sv_gc_frame_scratch = block + count * 2;
+				sv_gc_visible_cap = count;
+				sv_gc_local_ring = block + count * 3;
+				sv_gc_local_ring_entries = count * 2;
+				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s\n",
+					count < visible ? "Warning: REDUCED " : "", sv.name, count, visible,
+					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()));
+				return;
+			}
+		}
+	}
+	if( false )
 #else
 	if( GC_MenuRunsServer() && svs.maxclients == 1 )
 #endif

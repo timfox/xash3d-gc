@@ -1442,7 +1442,25 @@ void CL_InitEdicts( int maxclients )
 		 * (the server sized its own copy there first); the 128-entry static
 		 * table could not even hold one frame of c1a2a. DoD matches too. */
 #if XASH_DODGC_NETWORK
-		if( true )
+		/* A match hosted here: the server sized this ring with its own, so
+		 * both hold the same count, and a second call for the same map
+		 * (connect, then the map name arrives) gets the same ring back. */
+		{
+			extern entity_state_t *SV_GCLocalClientRing( int *entries );
+			int entries = 0;
+			entity_state_t *ring = SV_GCLocalClientRing( &entries );
+
+			if( ring )
+			{
+				memset( ring, 0, sizeof( entity_state_t ) * (size_t)entries );
+				cls.packet_entities = ring;
+				cl_gc_arena_packet_entities = ring;
+				cls.num_client_entities = entries;
+				Con_Reportf( "Xash3D GameCube: client packet entities map=%s share the server block, %d entries\n",
+					clgame.mapname, entries );
+			}
+		}
+		if( !cl_gc_arena_packet_entities && !SV_Active( ))
 #else
 		if( GC_MenuRunsServer( ))
 #endif
@@ -1470,10 +1488,6 @@ void CL_InitEdicts( int maxclients )
 			}
 			if( !cl_gc_arena_packet_entities )
 			{
-				extern int sv_gc_visible_cap;
-
-				/* The local server must not send more than this ring holds. */
-				sv_gc_visible_cap = 128;
 				Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client packet entities map=%s 128 entries (static fallback, arena_tail_left=%s)\n",
 					clgame.mapname, Q_memprint( GC_MapArenaLargestGap()));
 			}
