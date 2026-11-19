@@ -24,6 +24,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <ogc/lwp_watchdog.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
@@ -708,6 +709,7 @@ static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
+static byte *gc_wd_cache_heap;	/* the cache when it had to come from the heap */
 static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots this map */
 /* More distinct world textures than full-size slots: distant chunks then
  * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
@@ -768,6 +770,12 @@ static void R_GXWorldDLUnload( void )
 		gEngfuncs.fsapi->Close( gc_wd_file );
 	gc_wd_file = NULL;
 	gc_wd_cache = NULL;
+	if( gc_wd_cache_heap )
+	{
+		GX_DrawDone();	/* a list in it may still be in the FIFO */
+		free( gc_wd_cache_heap );
+		gc_wd_cache_heap = NULL;
+	}
 	gc_wd_slots = NULL;
 	gc_wd_texnum = NULL;
 	gc_wd_pvs = NULL;
@@ -1261,6 +1269,43 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			gc_wd_cache = (byte *)Mod_GCWorldArraySpillTryAlloc( try_sz, "world DL chunk cache" );
 			if( gc_wd_cache )
 				break;
+		}
+		/* The spill can be too full for even the smallest cache: dod_caen's
+		 * hull clipnodes (254 KiB) land in it on some builds and leave
+		 * 48 KiB, and the map then drew no world at all. Take the smallest
+		 * cache from a gap between the world arrays in the map arena, or
+		 * from the heap when that leaves it a working margin. */
+		if( !gc_wd_cache )
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+			const char *from = NULL;
+			size_t at;
+
+			try_sz = cache_lo;
+			at = GC_MapArenaFind( try_sz );
+			if( at != (size_t)-1 )
+			{
+				GC_RetainMapLoadBufferBorrow();
+				gc_wd_cache = (byte *)GC_MapLoadBufferTailAlloc( at, try_sz );
+				if( gc_wd_cache )
+				{
+					gc_wd_cache_in_arena = true;
+					from = "map arena gap";
+				}
+			}
+			if( !gc_wd_cache && GC_MemHeapFreeBytes() >= try_sz + 128u * 1024u )
+			{
+				gc_wd_cache_heap = (byte *)memalign( 32, try_sz );
+				gc_wd_cache = gc_wd_cache_heap;
+				if( gc_wd_cache )
+				{
+					gc_wd_cache_in_arena = true;	/* not in the spill: pin the tables only */
+					from = "heap";
+				}
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL chunk cache %u KiB from %s (spill free %u KiB, arena gap %u, heap free %u)\n",
+				try_sz / 1024u, from ? from : "nowhere", (unsigned)( Mod_GCWorldArraySpillFreeLasting() / 1024u ),
+				(unsigned)GC_MapArenaLargestGap(), (unsigned)GC_MemHeapFreeBytes());
 		}
 	}
 	if( !gc_wd_cache || try_sz < gc_wd_hdr.max_chunk * 2u )
