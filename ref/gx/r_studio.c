@@ -3959,7 +3959,13 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	if(( gEngfuncs.Sys_CheckParm( "-gcnewgame" ) || GC_UseGxWorldDraw())
 		&& !gEngfuncs.Sys_CheckParm( "-gcfullphysics" ))
 	{
+#if XASH_DODGC_NETWORK
+		/* DoD: the view model keeps its studio events, which is where retail
+		 * takes the muzzle flash (5001) and the shell casings (6001/6002). */
+		flags &= STUDIO_RENDER | ( e == tr.viewent ? STUDIO_EVENTS : 0 );
+#else
 		flags &= STUDIO_RENDER;
+#endif
 		if( !flags || !e )
 			return;
 		if( e->player )
@@ -4104,8 +4110,12 @@ void R_RunViewmodelEvents( void )
 {
 	int    i;
 
+#if !XASH_DODGC_NETWORK
+	/* The DoD route leaves r_drawviewmodel at 0 and draws the gun through
+	 * the lean view model path; its events must still run. */
 	if( r_drawviewmodel->value == 0 )
 		return;
+#endif
 
 	if( ENGINE_GET_PARM( PARM_THIRDPERSON ))
 		return;
