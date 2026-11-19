@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 1860; DumpFrames is slower than realtime — default 4 min.
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-240}"
+# Full reel ends ~frame 1520; DumpFrames is slower than realtime — default 3.5 min.
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-210}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -86,8 +86,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through retune + batch 3 (~1860 frames)
-	if (( n > 1880 )); then
+	# Full reel through PBR showcase (~1520 frames)
+	if (( n > 1560 )); then
 		break
 	fi
 done
@@ -112,7 +112,6 @@ cp -f "${FRAMES[$idx]}" "$OUT_DIR/shots/full-frame.png"
 cp -f "${FRAMES[10]:-${FRAMES[0]}}" "$OUT_DIR/shots/early.png"
 cp -f "${FRAMES[-1]}" "$OUT_DIR/shots/late.png"
 
-# Copper parity (~frame 60) then chrome roughness reel (~160 + 60*n)
 pick() {
 	local i="$1" dest="$2"
 	if (( i < ${#FRAMES[@]} )); then
@@ -122,7 +121,7 @@ pick() {
 		cp -f "${FRAMES[-1]}" "$dest"
 	fi
 }
-pick 70  "$OUT_DIR/shots/copper-ref.png"
+pick 70  "$OUT_DIR/shots/rust-pbr.png"
 pick 115 "$OUT_DIR/shots/damascus.png"
 pick 140 "$OUT_DIR/shots/corrugated.png"
 pick 155 "$OUT_DIR/shots/solar.png"
@@ -138,24 +137,18 @@ pick 505 "$OUT_DIR/shots/hw-rim.png"
 pick 545 "$OUT_DIR/shots/stone-indtex.png"
 pick 600 "$OUT_DIR/shots/emboss-lit.png"
 pick 660 "$OUT_DIR/shots/hw-spec.png"
-pick 700 "$OUT_DIR/shots/hw-spec-chrome.png"
+pick 700 "$OUT_DIR/shots/hw-spec-steel.png"
 pick 760 "$OUT_DIR/shots/sky-noon-mirror.png"
-pick 820 "$OUT_DIR/shots/sky-dusk-bloom.png"
+pick 820 "$OUT_DIR/shots/sky-dusk-ibl.png"
 pick 880 "$OUT_DIR/shots/sky-golden-ibl.png"
 pick 960 "$OUT_DIR/shots/clearcoat.png"
 pick 1020 "$OUT_DIR/shots/iridescent.png"
 pick 1080 "$OUT_DIR/shots/sheen-cloth.png"
 pick 1140 "$OUT_DIR/shots/sss-wrap.png"
 pick 1200 "$OUT_DIR/shots/heat-warp.png"
-pick 1280 "$OUT_DIR/shots/toon-ramp.png"
-pick 1340 "$OUT_DIR/shots/hologram.png"
-pick 1400 "$OUT_DIR/shots/aniso-flake.png"
-pick 1460 "$OUT_DIR/shots/chroma-ibl.png"
-pick 1530 "$OUT_DIR/shots/glass-refract.png"
-pick 1590 "$OUT_DIR/shots/neon-emissive.png"
-pick 1650 "$OUT_DIR/shots/parallax-lite.png"
-pick 1710 "$OUT_DIR/shots/car-paint.png"
-pick 1770 "$OUT_DIR/shots/crt-scan.png"
-pick 1830 "$OUT_DIR/shots/force-field.png"
+pick 1280 "$OUT_DIR/shots/parallax-lite.png"
+pick 1340 "$OUT_DIR/shots/car-paint.png"
+pick 1410 "$OUT_DIR/shots/crt-scan.png"
+pick 1480 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

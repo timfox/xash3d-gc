@@ -274,8 +274,8 @@ typedef struct {
 } SkyPack;
 static SkyPack skyPacks[LAB_SKY_COUNT];
 static int skyIndex = 0;
-static int mirrorFloor = 1;
-static int bloomEnabled = 1;
+static int mirrorFloor = 0; /* off — flipped sphere read as a second shell */
+static int bloomEnabled = 0; /* off — outer shell read as a force field */
 static int fogFxEnabled = 0;
 
 /* Lost Coast cliff emboss: sun-tangent UV epsilon (see r_gx_worlddl.c). */
@@ -288,37 +288,24 @@ static u16 sphereIdx[SPHERE_STACKS * SPHERE_SLICES * 6];
 static int sphereIdxCount = 0;
 
 /*
- * Curated A-cycle — TextureCom heroes first, then classic tinted metals.
- * Subtitles are gallery-card copy (Nintendo tech-demo tone).
+ * A-cycle = TextureCom PBR sets only. Every material ships albedo + AO +
+ * metallic + normal + roughness maps (no tinted MAPS_NONE stand-ins).
  */
 static Material materials[] = {
-	{ "RUST",       "Oxidized iron - TextureCom PBR",       { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
-	{ "COPPER",     "Warm metal - Fresnel env approx",      { 158, 132, 102, 255 }, 1.00f, 0.25f, MAPS_NONE },
-	{ "DAMASCUS",   "Folded steel - rainbow anisotropy",    { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
+	{ "RUST",       "Oxidized iron - full PBR maps",        { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
+	{ "DAMASCUS",   "Folded steel - metal/normal/rough",    { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
 	{ "CORRUGATED", "Weathered sheet - ridge normals",      { 255, 255, 255, 255 }, 0.90f, 0.55f, MAPS_CORRUGATED },
 	{ "STEEL",      "Brushed stainless - mid gloss",        { 255, 255, 255, 255 }, 0.85f, 0.50f, MAPS_STEEL },
 	{ "CLADDING",   "Architectural panel - soft metal",     { 255, 255, 255, 255 }, 0.75f, 0.28f, MAPS_CLADDING },
 	{ "CONCRETE",   "Cast dielectric - high roughness",     { 255, 255, 255, 255 }, 0.00f, 0.85f, MAPS_CONCRETE },
-	{ "BRICK",      "Fired clay - albedo + AO",             { 255, 255, 255, 255 }, 0.00f, 0.80f, MAPS_BRICK },
+	{ "BRICK",      "Fired clay - albedo + AO + normal",    { 255, 255, 255, 255 }, 0.00f, 0.80f, MAPS_BRICK },
 	{ "WOOD",       "End-grain timber - organic pore",      { 255, 255, 255, 255 }, 0.00f, 0.78f, MAPS_WOOD },
-	{ "PAINT",      "Automotive clearcoat - dual lobe",    { 255, 255, 255, 255 }, 0.05f, 0.35f, MAPS_PAINT },
+	{ "PAINT",      "Automotive clearcoat - dual lobe",     { 255, 255, 255, 255 }, 0.05f, 0.35f, MAPS_PAINT },
 	{ "SOLAR",      "Photovoltaic grid - sharp glints",     { 255, 255, 255, 255 }, 0.95f, 0.28f, MAPS_SOLAR },
-	{ "STONE",      "Carved wall - high-res normal",       { 255, 255, 255, 255 }, 0.00f, 0.82f, MAPS_STONE },
-	{ "GOLD",       "Conductor tint - low roughness",       { 255, 220, 120, 255 }, 1.00f, 0.20f, MAPS_NONE },
-	{ "IRON",       "Cool ferrous - env LOD mid",           { 180, 185, 195, 255 }, 1.00f, 0.40f, MAPS_NONE },
-	{ "CHROME",     "Mirror metal - sharp env LOD",         { 235, 240, 255, 255 }, 1.00f, 0.08f, MAPS_NONE },
-	{ "PLASTIC",    "SSS wrap dielectric - soft scatter",   { 255, 120,  48, 255 }, 0.00f, 0.45f, MAPS_NONE },
-	{ "OPAL",       "Thin-film iridescence - Flipper hue",  { 210, 230, 255, 255 }, 0.85f, 0.12f, MAPS_NONE },
-	{ "VELVET",     "Cloth sheen - wrap + edge glow",       { 120,  40,  90, 255 }, 0.05f, 0.70f, MAPS_NONE },
-	/* metallic 0 → dielectric Fresnel in vtx alpha (rim-only; metal A washed the shell) */
-	{ "CYBER",      "Hologram shell - scan Fresnel",        { 40,  220, 255, 255 }, 0.00f, 0.15f, MAPS_NONE },
-	{ "FLAKE",      "Aniso metal flake - IndTex stretch",   { 200, 205, 210, 255 }, 1.00f, 0.22f, MAPS_NONE },
-	{ "GLASS",      "Refractive glass - IndTex + Fresnel",  { 160, 200, 220, 255 }, 0.05f, 0.05f, MAPS_NONE },
-	{ "NEON",       "Emissive neon - additive Flipper glow",{ 255,  20, 160, 255 }, 0.15f, 0.35f, MAPS_NONE },
-	{ "SHIELD",     "Force-field rim - energy shell",       { 80,  255, 180, 255 }, 0.00f, 0.20f, MAPS_NONE },
+	{ "STONE",      "Carved wall - high-res normal",        { 255, 255, 255, 255 }, 0.00f, 0.82f, MAPS_STONE },
 };
 static const int materialCount = (int)(sizeof(materials) / sizeof(materials[0]));
-static int materialIndex = 1; /* open on COPPER — hero lighting reference */
+static int materialIndex = 0; /* open on RUST — full map set */
 static int envMapEnabled = 1;
 static int featureIndex = FEAT_HERO_RUST_PBR;
 static f32 roughnessOverride = -1.0f;
@@ -465,8 +452,8 @@ static void tint_sphere_vertices(const Material *mat)
 		v->g = mat->base.g;
 		v->b = mat->base.b;
 		if (mat->metallic > 0.5f) {
-			/* Metals: full-sphere env; mild Fresnel (copper mid ~0.55–0.75) */
-			f32 w = clampf(0.55f + 0.30f * v->fu, 0.0f, 1.0f) * spec_scale;
+			/* Metals: keep center quieter so matcap rim doesn't read as a shell */
+			f32 w = clampf(0.28f + 0.45f * v->fu, 0.0f, 1.0f) * spec_scale;
 			v->a = (u8)(w * 255.0f);
 		} else {
 			/* Dielectrics / rust: Fresnel rim only, still roughness-scaled */
@@ -477,36 +464,51 @@ static void tint_sphere_vertices(const Material *mat)
 }
 
 /*
- * PBR maps: albedo × AO + env×Fresnel (rust dielectric or damascus metal).
- * TEX0 = albedo, TEX1 = AO, TEX2 = env matcap.
+ * Hero PBR: albedo × AO + metal map + roughness map + normal-IndTex env.
+ * Conductors: env × metal map. Dielectrics: env × Fresnel. Roughness picks
+ * env LOD (sharp/mid/blur) and attenuates metal weight via (1−rough)×metal.
+ * TEX0=albedo TEX1=AO TEX2=env TEX3=normal(ind) TEX4=metal TEX5=rough.
  */
 static void setup_tev_hero_pbr(const Material *mat)
 {
 	f32 roughness = current_roughness(mat);
 	PbrSet *set = &pbrSets[mat->maps];
-	GXTexObj *albedo = &set->albedo;
-	GXTexObj *ao = &set->ao;
 	int metal = (mat->metallic > 0.5f);
+	f32 im[2][3];
 
 	GX_SetNumChans(1);
 	GX_SetNumTexGens(2);
-	GX_SetNumTevStages(3);
-	GX_SetNumIndStages(0);
+	GX_SetNumTevStages(4);
+	GX_SetNumIndStages(1);
 	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.55f;
+	im[1][1] = 0.55f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -3);
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
 
-	GX_LoadTexObj(albedo, GX_TEXMAP0);
-	GX_LoadTexObj(ao, GX_TEXMAP1);
+	GX_LoadTexObj(&set->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&set->ao, GX_TEXMAP1);
 	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP2);
+	GX_LoadTexObj(&set->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&set->metal, GX_TEXMAP4);
+	GX_LoadTexObj(&set->rough, GX_TEXMAP5);
 	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
 		roughness * 0.75f, GX_FALSE, GX_TRUE, GX_ANISO_1);
-	GX_InitTexObjWrapMode(albedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&set->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&set->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&set->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&set->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&set->rough, GX_REPEAT, GX_REPEAT);
 
-	/* S0: albedo */
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	/* st0: albedo */
 	GX_SetTevDirect(GX_TEVSTAGE0);
 	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
@@ -515,7 +517,7 @@ static void setup_tev_hero_pbr(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
 
-	/* S1: × AO; carry Fresnel in vertex alpha */
+	/* st1: × AO; Schlick Fresnel in vertex alpha */
 	GX_SetTevDirect(GX_TEVSTAGE1);
 	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLOR0A0);
 	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
@@ -523,25 +525,37 @@ static void setup_tev_hero_pbr(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
-	/* S2: metals tint env by albedo (rainbow bands); dielectrics just add env×A */
+	/* st2: metal map → REG0 (conductor weight); rough map still selects env LOD */
 	GX_SetTevDirect(GX_TEVSTAGE2);
-	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-	if (envMapEnabled && metal) {
-		/* (env * albedo) via: first need env in PREV... use env*A + albedo already in CPREV:
-		 * for damascus: lerp(albedo, env, A) then we'd lose pattern — instead
-		 * albedo + (env * A) with SCALE_2 on add for shine, pattern stays. */
-		GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-		GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	} else if (envMapEnabled) {
-		GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-		GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	} else {
-		GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
-		GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	}
-	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevKAlphaSel(GX_TEVSTAGE2, GX_TEV_KASEL_1);
+	(void)set->rough; /* loaded above; LOD via select_env_tex(roughness) */
+
+	/* st3: normal-warped env × (metal map | Fresnel) + body */
+	if (envMapEnabled) {
+		GX_SetTevIndirect(GX_TEVSTAGE3, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+			GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+		GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+		if (metal)
+			GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_C0, GX_CC_CPREV);
+		else
+			GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+		/* DIVIDE_2 softens matcap limb brightening (was reading as a force-field rim) */
+		GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	} else {
+		GX_SetTevDirect(GX_TEVSTAGE3);
+		GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+		GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+		GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	}
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE3, GX_TEV_KASEL_1);
+	/* rough map still loaded — drives LOD via select_env_tex; visible with B */
+	(void)roughness;
 }
 
 /* Non-rust materials: tinted synthetic env matcap */
@@ -2028,12 +2042,19 @@ static void draw_sky_face(GXTexObj *tex, f32 x0, f32 y0, f32 z0,
 
 static void draw_skybox(const Mtx view)
 {
-	Mtx model, modelview;
+	Mtx skyview, modelview;
 	SkyPack *sky = &skyPacks[skyIndex];
-	const f32 s = 40.0f;
+	const f32 s = 80.0f;
+	int i;
 
-	guMtxIdentity(model);
-	guMtxConcat(view, model, modelview);
+	/* Infinite sky: rotation only — drop camera translation so faces don't
+	 * look like a nearby cube / warped dome. */
+	guMtxCopy(view, skyview);
+	skyview[0][3] = 0.0f;
+	skyview[1][3] = 0.0f;
+	skyview[2][3] = 0.0f;
+	guMtxIdentity(modelview);
+	guMtxConcat(skyview, modelview, modelview);
 	GX_LoadPosMtxImm(modelview, GX_PNMTX0);
 
 	GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){0, 0, 0, 0});
@@ -2053,6 +2074,12 @@ static void draw_skybox(const Mtx view)
 	GX_SetCullMode(GX_CULL_NONE);
 	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+
+	for (i = 0; i < LAB_SKY_SIDES; ++i) {
+		GX_InitTexObjFilterMode(&sky->face[i], GX_LINEAR, GX_LINEAR);
+		GX_InitTexObjLOD(&sky->face[i], GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f,
+			GX_FALSE, GX_FALSE, GX_ANISO_1);
+	}
 
 	/* Y-up remap of GoldSrc sides: ±X=rt/lf, ±Y=up/dn, ±Z=bk/ft */
 	draw_sky_face(&sky->face[0],  s,-s,-s,  s,-s, s,  s, s, s,  s, s,-s); /* rt +X */
@@ -2458,8 +2485,9 @@ static void draw_hud(f32 fb_w, f32 fb_h, const Material *mat)
 			GX_LoadTexObj(&texFont, GX_TEXMAP0);
 			draw_text_centered(320, 330, mat->name, 2.0f, 255, 255, 255, ca);
 			draw_text_centered(320, 366, mat->subtitle, 1.0f, 200, 198, 210, ca);
-			snprintf(line, sizeof(line), "METAL %.2f    ROUGH %.2f",
-				mat->metallic, rough);
+			snprintf(line, sizeof(line), "METAL %.2f  ROUGH %.2f  MAPS %s",
+				mat->metallic, rough,
+				mat->maps != MAPS_NONE ? "ON" : "OFF");
 			draw_text_centered(320, 384, line, 1.0f, 170, 168, 185, ca);
 		}
 
@@ -2691,7 +2719,7 @@ int main(int argc, char **argv)
 
 	load_textures();
 	build_sphere(1.0f);
-	select_material(1, 0); /* COPPER open */
+	select_material(0, 0); /* RUST open — full PBR maps */
 	cardTimer = 4.0f;
 
 	guPerspective(perspective, LAB_FOV_DEG,
@@ -2770,32 +2798,35 @@ int main(int argc, char **argv)
 			orbitYaw += dt * 0.06f;
 
 		/*
-		 * Capture reel (DumpFrames / CI proofs) — only while captureReel:
-		 *  0–90     COPPER @ R=0.25
-		 *  100–160  TextureCom heroes
-		 *  170–350  CHROME roughness 0→1
+		 * Capture reel — TextureCom PBR only (metal/normal/rough on every mat).
+		 * Bloom stays OFF (outer shell read as a force field).
+		 *  0–90     RUST hero PBR
+		 *  100–160  DAMASCUS / CORRUGATED / SOLAR
+		 *  170–350  STEEL roughness 0→1
 		 *  360–420  CORRUGATED + NORMAL INDTEX
 		 *  430–510  BRICK HW KEY / FILL / RIM
-		 *  520–560  STONE + INDTEX
-		 *  570–630  STONE + EMBOSS LIT
-		 *  640–700  DAMASCUS + HW SPEC (then CHROME A/B)
+		 *  520–630  STONE INDTEX + EMBOSS
+		 *  640–700  DAMASCUS / STEEL HW SPEC
+		 *  740–900  sky cycle on STEEL (no bloom)
+		 *  930–1200 clearcoat / sheen / SSS / heat / parallax / car paint / CRT
 		 */
 		if (captureReel) {
 			if (frame == 0 || frame == 1) {
-				select_material(1, 0);
+				select_material(0, 0); /* RUST */
 				featureIndex = FEAT_HERO_RUST_PBR;
-				roughnessOverride = 0.25f;
+				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
+				bloomEnabled = 0;
 				cardTimer = 2.5f;
 			}
-			if (frame == 100) select_material(2, 1);   /* DAMASCUS */
+			if (frame == 100) select_material(1, 1);   /* DAMASCUS */
 			if (frame == 130) {
-				select_material(3, 1); /* CORRUGATED */
+				select_material(2, 1); /* CORRUGATED */
 				featureIndex = FEAT_HERO_RUST_PBR;
 			}
-			if (frame == 150) select_material(10, 1);  /* SOLAR */
+			if (frame == 150) select_material(9, 1);  /* SOLAR */
 			if (frame == 170) {
-				select_material(14, 1); /* CHROME */
+				select_material(3, 1); /* STEEL */
 				featureIndex = FEAT_HERO_RUST_PBR;
 				roughnessOverride = 0.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
@@ -2810,162 +2841,123 @@ int main(int argc, char **argv)
 				}
 			}
 			if (frame == 360) {
-				select_material(3, 1); /* CORRUGATED */
+				select_material(2, 1); /* CORRUGATED */
 				featureIndex = FEAT_INDTEX_BUMP;
 				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 430) {
-				select_material(7, 1); /* BRICK */
+				select_material(6, 1); /* BRICK */
 				featureIndex = FEAT_HW_KEY;
 			}
 			if (frame == 460) featureIndex = FEAT_HW_FILL;
 			if (frame == 490) featureIndex = FEAT_HW_RIM;
 			if (frame == 520) {
-				select_material(11, 1); /* STONE */
+				select_material(10, 1); /* STONE */
 				featureIndex = FEAT_INDTEX_BUMP;
 			}
 			if (frame == 570) {
-				select_material(11, 1); /* STONE */
+				select_material(10, 1); /* STONE */
 				featureIndex = FEAT_EMBOSS_LIT;
 				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 640) {
-				select_material(2, 1); /* DAMASCUS */
+				select_material(1, 1); /* DAMASCUS */
 				featureIndex = FEAT_HW_SPEC;
 				roughnessOverride = 0.12f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 680) {
-				select_material(14, 1); /* CHROME */
+				select_material(3, 1); /* STEEL */
 				featureIndex = FEAT_HW_SPEC;
-				roughnessOverride = 0.05f;
+				roughnessOverride = 0.08f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 740) {
 				skyIndex = 1; /* NOON */
-				mirrorFloor = 1;
-				bloomEnabled = 1;
+				mirrorFloor = 0;
+				bloomEnabled = 0;
+				select_material(3, 1); /* STEEL */
+				featureIndex = FEAT_HERO_RUST_PBR;
+				roughnessOverride = 0.20f;
+				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 800) {
 				skyIndex = 2; /* DUSK */
-				select_material(14, 1); /* CHROME — IBL + bloom */
+				select_material(4, 1); /* CLADDING */
+				featureIndex = FEAT_HERO_RUST_PBR;
 			}
 			if (frame == 860) {
 				skyIndex = 0; /* GOLDEN */
-				mirrorFloor = 1;
-				bloomEnabled = 1;
+				mirrorFloor = 0;
+				bloomEnabled = 0;
+				select_material(1, 1); /* DAMASCUS */
+				featureIndex = FEAT_HERO_RUST_PBR;
 			}
-			/* 2026 Flipper paths — clearcoat / iridescence / sheen / SSS / heat */
 			if (frame == 930) {
-				select_material(9, 1); /* PAINT */
+				select_material(8, 1); /* PAINT */
 				featureIndex = FEAT_CLEARCOAT;
 				roughnessOverride = 0.30f;
 				tint_sphere_vertices(&materials[materialIndex]);
 				skyIndex = 0;
-				bloomEnabled = 1;
+				bloomEnabled = 0;
 			}
 			if (frame == 990) {
-				select_material(16, 1); /* OPAL */
+				select_material(8, 1); /* PAINT */
 				featureIndex = FEAT_IRIDESCENT;
-				roughnessOverride = 0.10f;
+				roughnessOverride = 0.15f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 1050) {
-				select_material(17, 1); /* VELVET */
+				select_material(7, 1); /* WOOD */
 				featureIndex = FEAT_SHEEN_CLOTH;
-				roughnessOverride = 0.65f;
+				roughnessOverride = 0.70f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 1110) {
-				select_material(15, 1); /* PLASTIC */
+				select_material(5, 1); /* CONCRETE */
 				featureIndex = FEAT_SSS_WRAP;
-				roughnessOverride = 0.40f;
+				roughnessOverride = 0.80f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
 			if (frame == 1170) {
-				select_material(11, 1); /* STONE */
+				select_material(10, 1); /* STONE */
 				featureIndex = FEAT_HEAT_WARP;
 				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
-				skyIndex = 2; /* DUSK heat vibe */
-			}
-			if (frame == 1250) {
-				/* Hot orange cel — saturated base makes hard lit/shadow cut read */
-				select_material(15, 1); /* PLASTIC */
-				materials[15].base = (GXColor){ 255, 90, 40, 255 };
-				featureIndex = FEAT_TOON_RAMP;
-				roughnessOverride = 0.35f;
-				tint_sphere_vertices(&materials[materialIndex]);
-				skyIndex = 1;
-				bloomEnabled = 0;
-				mirrorFloor = 0; /* checker doesn't compete with cel read */
-			}
-			if (frame == 1310) {
-				select_material(18, 1); /* CYBER */
-				featureIndex = FEAT_HOLOGRAM;
-				roughnessOverride = 0.12f;
-				tint_sphere_vertices(&materials[materialIndex]);
-				bloomEnabled = 0; /* keep scan/rim readable */
 				skyIndex = 2;
 			}
-			if (frame == 1370) {
-				select_material(19, 1); /* FLAKE */
-				featureIndex = FEAT_ANISO_FLAKE;
-				roughnessOverride = 0.20f;
-				tint_sphere_vertices(&materials[materialIndex]);
-				skyIndex = 0;
-				bloomEnabled = 1;
-			}
-			if (frame == 1430) {
-				select_material(14, 1); /* CHROME */
-				featureIndex = FEAT_CHROMA_IBL;
-				roughnessOverride = 0.08f;
-				tint_sphere_vertices(&materials[materialIndex]);
-			}
-			/* batch 3 — Tim-requested modern Flipper looks */
-			if (frame == 1500) {
-				select_material(20, 1); /* GLASS */
-				featureIndex = FEAT_GLASS_REFRACT;
-				roughnessOverride = 0.05f;
-				tint_sphere_vertices(&materials[materialIndex]);
-				bloomEnabled = 0; /* refraction must read without glow wash */
-			}
-			if (frame == 1560) {
-				select_material(21, 1); /* NEON */
-				featureIndex = FEAT_NEON_EMISSIVE;
-				roughnessOverride = 0.30f;
-				tint_sphere_vertices(&materials[materialIndex]);
-			}
-			if (frame == 1620) {
-				select_material(11, 1); /* STONE */
+			if (frame == 1250) {
+				select_material(10, 1); /* STONE */
 				featureIndex = FEAT_PARALLAX_LITE;
 				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 0;
+				bloomEnabled = 0;
+				mirrorFloor = 0;
 			}
-			if (frame == 1680) {
-				select_material(9, 1); /* PAINT */
+			if (frame == 1320) {
+				select_material(8, 1); /* PAINT */
 				featureIndex = FEAT_CAR_PAINT;
 				roughnessOverride = 0.25f;
 				tint_sphere_vertices(&materials[materialIndex]);
 			}
-			if (frame == 1740) {
-				select_material(2, 1); /* DAMASCUS */
+			if (frame == 1390) {
+				select_material(1, 1); /* DAMASCUS */
 				featureIndex = FEAT_CRT_SCAN;
 				roughnessOverride = 0.20f;
 				tint_sphere_vertices(&materials[materialIndex]);
 				bloomEnabled = 0;
 			}
-			if (frame == 1800) {
-				select_material(22, 1); /* SHIELD */
-				featureIndex = FEAT_FORCE_FIELD;
-				roughnessOverride = 0.15f;
+			if (frame == 1460) {
+				select_material(0, 1); /* RUST — back to hero PBR */
+				featureIndex = FEAT_HERO_RUST_PBR;
+				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
-				bloomEnabled = 1;
-				skyIndex = 2;
+				skyIndex = 0;
 			}
-			if (frame == 1860)
+			if (frame == 1520)
 				captureReel = 0;
 			mat = &materials[materialIndex];
 		} else if (autoShowcase && galleryMode && idleTimer > 7.5f && bootTimer <= 0.0f) {
