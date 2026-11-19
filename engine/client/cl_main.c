@@ -4650,6 +4650,7 @@ void CL_Init( void )
 		return; // nothing running on the client
 
 	CL_InitLocal();
+	CL_CineInit();
 #if XASH_GAMECUBE
 	Con_Reportf( "Xash3D GameCube: client local init ready\n" );
 	GC_MemHeapMark( "client_local_init_ready" );

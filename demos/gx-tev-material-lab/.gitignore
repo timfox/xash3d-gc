@@ -1,0 +1,8 @@
+build/
+*.elf
+*.dol
+*.map
+capture/
+*.tpl
+textures/*.h
+capture*/
