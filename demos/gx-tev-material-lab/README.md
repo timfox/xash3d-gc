@@ -84,6 +84,10 @@ the DumpFrames capture reel so you stay in control.
 | VELVET | Soft wrap nap + rim sheen IndTex |
 | CARBON | Dual-scale weave × metal IndTex glints |
 | PEARL | Soft body + animated nacre Fresnel coat |
+| LIQUID CRYSTAL | LCD rainbow: body + spectral Fresnel stripes |
+| GRAPHENE | Near-black carbon lattice + fine IndTex grid |
+| THERMOCHROME | Warm↔cool heat-tint KONST body |
+| METAMATERIAL | Ultra-matte absorptive dark KONST, low env |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
