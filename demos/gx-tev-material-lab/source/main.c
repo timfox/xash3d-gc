@@ -2860,7 +2860,7 @@ static void setup_tev_chrome_felt(const Material *mat)
 	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
-	GX_LoadTexObj(select_env_tex(0.30f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.40f), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
 	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
@@ -2873,8 +2873,9 @@ static void setup_tev_chrome_felt(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 205, 214, 222, 255 }); /* bright chrome pale */
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 170, 180, 190, 255 }); /* dual pale fleck */
+	/* Keep dual pale chrome under whiteout — no ADDHALF, DIVIDE_2 grit/env (#334). */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 175, 180, 190, 255 }); /* pale chrome body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 140, 145, 155, 255 }); /* dual pale fleck */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
 	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
 
@@ -2913,7 +2914,7 @@ static void setup_tev_chrome_felt(const Material *mat)
 		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
 	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
