@@ -97,6 +97,14 @@ non-whitelisted keys, unprintable values). Commands: `gc_card_save`, `gc_card_lo
   `card_art.h` (CI8, GX tiling, RGB5A3 palette; committed so the build does not need Pillow), set with `CARD_SetStatus`. File
   layout inside the one sector: comment 0, banner+icon 64..5184, settings blob at 5632. `gc_card_load silent` is the start-up
   load: no message for no card / no file / needs formatting, and it never asks. Static data: about 5 KiB of const art in the DOL.
+## Button glyphs in hint rows
+Eight original controller-button glyphs (A, B, X, Y, Start, Z, L, R: solid circle / pill shapes with the letter cut out,
+drawn by `scripts/bake-hitext.py`, no console artwork) live in the hi-res atlas at codes 128..135, after an empty DEL cell,
+so the glyph table is 104 entries (was 96). The caller colours them (A green, B red, X and Y light, Z violet). mainui's
+`CMenuHintRow` (`{A}` `{B}` ... tokens in the hint string) draws them through `pfnDrawCharacter`, which reaches
+`GC_HiTextGlyph`; with `gc_hitext 0` the token prints as `[A]`.
+Memory: the atlas file grows by 112 bytes of glyph table (67 008 bytes, still one 64 KiB I4 texture); nothing else.
+Host test `tests/test_gamecube_hitext_buttons.py` checks the glyph table. Not seen in Dolphin.
 
 ## Notices and the fatal panel (retail palette, inside the safe area)
 - **Controller disconnected:** `OSK_DrawNotice` (in_osk.c, drawn with the keyboard) shows a centred panel when no native pad
