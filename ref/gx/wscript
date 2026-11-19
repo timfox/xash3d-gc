@@ -37,7 +37,7 @@ def build(bld):
 		bld.stlib(source = source,
 			target = 'ref_gx',
 			includes = ['.', '../common', '../../engine/platform/gamecube'],
-			defines = 'REF_DLL=1 XASH_PURE_GX=1',
+			defines = 'REF_DLL=1 XASH_PURE_GX=1 GC_PACK_GX=1',
 			use = gc_libs,
 			install_path = bld.env.LIBDIR)
 		Logs.info('GameCube ref_gx static library (XASH_PURE_GX=1) scheduled')

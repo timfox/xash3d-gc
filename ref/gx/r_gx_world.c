@@ -1883,8 +1883,61 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	pixel_t *tex_pixels;
 	qboolean tex_alpha;
 
+	/* GxBake .gsk studio skins (R_GCBakedGskSkin): GX texels at their final
+	 * size, CI ones with a TLUT. Each bind of a CI skin loads its 512-byte
+	 * TLUT into the next of four slots, so a draw still in the pipe keeps its
+	 * palette while the next skin's is loaded. */
+	if( img->gc_gx_cmpr == R_GC_GSK )
+	{
+		const r_gc_gsk_trailer_t *tr;
+		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+
+		/* Never let these texels reach the RGB565 paths below. */
+		if( !img->pixels[0] || ((uintptr_t)img->pixels[0] & 31 ) || img->size <= sizeof( *tr ))
+			return NULL;
+		tr = (const r_gc_gsk_trailer_t *)((const byte *)img->pixels[0] + img->size - sizeof( *tr ));
+
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != tr->fmt
+			|| r_gx_native_bound_pixels != img->pixels[0] )
+		{
+			static u32 gsk_tlut_next;
+			const u8 wrap = Q_stristr( img->name, "sprites/" ) ? GX_CLAMP : GX_REPEAT;
+			gc_gsk_entry_t e;
+			GXTlutObj tlut;
+
+			memset( &e, 0, sizeof( e ));
+			e.fmt = tr->fmt;
+			e.tlut_fmt = tr->tlut_fmt;
+			e.width = (uint16_t)img->width;
+			e.height = (uint16_t)img->height;
+			e.tlut_entries = tr->tlut_entries;
+			e.texels = (const uint8_t *)img->pixels[0];
+			e.tlut = tr->tlut_entries ? (const uint8_t *)img->pixels[0] + tr->tlut_offset : NULL;
+			if( gc_gsk_bind( &e, &t->obj, &tlut, GX_TLUT12 + ( gsk_tlut_next++ & 3u ), wrap ) != 0 )
+				return NULL;
+			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
+			r_gx_native_bound_pixels = img->pixels[0];
+			t->texnum = texnum;
+			t->w = img->width;
+			t->h = img->height;
+			t->fmt = tr->fmt;
+			t->valid = true;
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_bound_texnum = texnum;
+			r_gx_bound_fmt = tr->fmt;
+			r_gx_tex_loads++;
+		}
+		else
+		{
+			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
+			r_gx_tex_reuses++;
+		}
+		R_GXSetTexAlphaTest( alpha );
+		return t;
+	}
+
 	/* CMPR studio skins (r_gx_cmpr.c): already GX texels at their final size. */
-	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
+	if( img->gc_gx_cmpr == 1 && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
 	{
 		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
 

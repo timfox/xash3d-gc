@@ -531,7 +531,7 @@ typedef struct image_s
 	byte           gc_packed_queued;
 	qboolean       gc_gx_native;                            // pixels[0] now holds GX tiled RGB565 (or RGB5A3), not soft pixels
 	byte           gc_gx_native_alpha;                      // native texels are RGB5A3 with 1-bit alpha (masked skins)
-	byte           gc_gx_cmpr;                              // pixels[0] holds GX CMPR texels (studio skin, r_gx_cmpr.c)
+	byte           gc_gx_cmpr;                              // pixels[0] holds GX CMPR texels (1, r_gx_cmpr.c) or GxBake .gsk texels (R_GC_GSK, format in r_gc_gsk_trailer_t)
 	short          gc_skin_handle;                          // skin_stream handle + 1, 0: no streamed full-resolution skin
 	unsigned       gc_skin_gen;                             // r_gx_skins.c generation the handle belongs to
 #endif
@@ -1422,5 +1422,18 @@ void R_GXCmprSkinSize( int w, int h, int *ow, int *oh );
 size_t R_GXCmprBytes( int w, int h );
 qboolean R_GXEncodeCmprSkin( const byte *src, int sw, int sh, int dw, int dh, qboolean masked, byte *dst );
 int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int height, qboolean masked );
+#include "gc_pack.h"
+/* gc_gx_cmpr value of a GxBake .gsk skin. Its format sits in a trailer at the
+ * end of its texel block (pixels[0] + size), so image_t (x MAX_TEXTURES in
+ * BSS) stays the same size. */
+#define R_GC_GSK 2
+typedef struct
+{
+	byte  fmt;		/* GXTexFmt */
+	byte  tlut_fmt;	/* GXTlutFmt, CI formats only */
+	word  tlut_entries;	/* 0 for direct formats */
+	uint  tlut_offset;	/* from pixels[0], 32-byte aligned */
+} r_gc_gsk_trailer_t;
+int R_GCBakedGskSkin( const char *name, file_t *f, const gc_gsk_entry_t *e, unsigned texel_off, unsigned tlut_off, qboolean masked );
 #endif
 #endif // GL_LOCAL_H

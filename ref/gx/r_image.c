@@ -1727,6 +1727,112 @@ int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int heig
 	return tex - r_images;
 }
 
+/*
+================
+R_GCBakedGskSkin
+
+A studio skin from a GxBake .gsk pack (gc_studio/<model>.gsk): texels already
+GX-tiled in e->fmt (CI4/CI8 with a TLUT, CMPR, I4/I8, ...). They are read from
+the pack straight into the studio skin window, the TLUT right after them; no
+palette decode, no RGB565 build. The texture object is made at bind time with
+gc_gsk_bind (R_GXNativeTexture). Returns the texture number, or 0 so the
+caller falls back to the 8-bit skin in the model.
+================
+*/
+int R_GCBakedGskSkin( const char *name, file_t *f, const gc_gsk_entry_t *e, unsigned texel_off, unsigned tlut_off, qboolean masked )
+{
+	const qboolean ci = ( e->fmt == GX_TF_CI4 || e->fmt == GX_TF_CI8 );
+	const size_t texel_bytes = ( (size_t)e->texel_bytes + 31u ) & ~(size_t)31u;
+	const size_t tlut_bytes = ci ? ( (size_t)e->tlut_bytes + 31u ) & ~(size_t)31u : 0;
+	const size_t bytes = texel_bytes + tlut_bytes + sizeof( r_gc_gsk_trailer_t );
+	const qboolean in_arena = r_gc_studio_skins_in_arena;
+	image_t *tex;
+	byte *dst;
+
+	if( !GL_CheckTexName( name ) || !f || e->width < 8 || e->height < 8
+		|| e->width > 1024 || e->height > 1024 )
+		return 0;
+	switch( e->fmt )
+	{
+	case GX_TF_I4: case GX_TF_I8: case GX_TF_IA4: case GX_TF_IA8:
+	case GX_TF_RGB565: case GX_TF_RGB5A3: case GX_TF_CMPR:
+	case GX_TF_CI4: case GX_TF_CI8:
+		break;
+	default:
+		return 0;
+	}
+	if( e->texel_bytes < GX_GetTexBufferSize( e->width, e->height, e->fmt, GX_FALSE, 0 ))
+		return 0;
+	if( ci && ( !e->tlut_bytes || e->tlut_fmt > GX_TL_RGB5A3 || e->tlut_entries < 16
+		|| e->tlut_entries > 256 || ( e->tlut_entries & 15 ) || e->tlut_bytes < e->tlut_entries * 2u ))
+		return 0;
+	if(( tex = GL_TextureForName( name )) != NULL )
+		return tex - r_images;
+
+	tex = GL_AllocTexture( name, TF_NOMIPMAP );
+	r_gc_studio_skins_in_arena = true;
+	dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+	r_gc_studio_skins_in_arena = in_arena;
+	if( !dst )
+		dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+	if( !dst )
+	{
+		static int gsk_fail_logs;
+
+		if( gsk_fail_logs++ < 4 )
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: gsk skin %s no room (%s, window left %s)\n",
+				name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
+		/* Unlink the slot again so the fallback load can take the name. */
+		{
+			image_t **prev = &r_imagesHashTable[tex->hashValue];
+
+			while( *prev && *prev != tex )
+				prev = &( *prev )->nextHash;
+			if( *prev )
+				*prev = tex->nextHash;
+		}
+		memset( tex, 0, sizeof( *tex ));
+		return 0;
+	}
+	tex->pixels[0] = (pixel_t *)dst;	/* GL_DeleteTexture frees it from here on */
+	DCInvalidateRange( dst, (u32)bytes );
+	if( gEngfuncs.fsapi->Seek( f, (fs_offset_t)texel_off, SEEK_SET ) != 0
+		|| gEngfuncs.fsapi->Read( f, dst, e->texel_bytes ) != (fs_offset_t)e->texel_bytes
+		|| ( ci && ( gEngfuncs.fsapi->Seek( f, (fs_offset_t)tlut_off, SEEK_SET ) != 0
+			|| gEngfuncs.fsapi->Read( f, dst + texel_bytes, e->tlut_bytes ) != (fs_offset_t)e->tlut_bytes )))
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: gsk skin %s short read\n", name );
+		GL_DeleteTexture( tex );
+		return 0;
+	}
+	{
+		r_gc_gsk_trailer_t *tr = (r_gc_gsk_trailer_t *)( dst + bytes - sizeof( r_gc_gsk_trailer_t ));
+
+		tr->fmt = e->fmt;
+		tr->tlut_fmt = ci ? e->tlut_fmt : 0;
+		tr->tlut_entries = ci ? e->tlut_entries : 0;
+		tr->tlut_offset = (uint)texel_bytes;
+	}
+	DCFlushRange( dst, (u32)bytes );
+	tex->width = tex->srcWidth = e->width;
+	tex->height = tex->srcHeight = e->height;
+	tex->depth = 1;
+	tex->alpha_pixels = NULL;
+	tex->gc_gx_native = true;
+	tex->gc_gx_native_alpha = ( masked || FBitSet( e->flags, GC_GSK_FLAG_ALPHA )) ? 1 : 0;
+	tex->gc_gx_cmpr = R_GC_GSK;
+	tex->numMips = 1;
+	tex->size = bytes;
+	{
+		static int gsk_logged;
+
+		if( gsk_logged++ < 8 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: gsk skin %s %dx%d fmt=%d tlut=%d (%s)\n",
+				name, e->width, e->height, e->fmt, ci ? e->tlut_entries : 0, Q_memprint( bytes ));
+	}
+	return tex - r_images;
+}
+
 /* The pack's memory is going: nothing may bind into it. */
 void R_GCPackedRelease( void )
 {

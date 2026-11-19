@@ -4377,6 +4377,106 @@ capfaces_vm_pose:
 	}
 }
 
+#if XASH_GAMECUBE
+/* GxBake skin pack for the model being loaded (gc_studio/<model>.gsk), open
+ * across one Mod_StudioLoadTextures call. Only the header and entry table
+ * are read up front; each skin's texels go from the file straight into the
+ * studio skin window (R_GCBakedGskSkin). gc_gsk_entry wants the whole file
+ * in memory, so the table entries are read here with the same layout
+ * (GxBake docs/packing.md: 16-byte header, 32-byte entries). */
+#define R_GX_GSK_HEADER	16
+#define R_GX_GSK_ENTRY	32
+#define R_GX_GSK_MAX	32	/* HL1 models use fewer; a bigger pack falls back */
+static struct
+{
+	file_t   *f;
+	int      count;
+	fs_offset_t filesize;
+	byte     tbl[R_GX_GSK_HEADER + R_GX_GSK_ENTRY * R_GX_GSK_MAX];
+} r_gx_gsk;
+
+static uint32_t R_GXGskRd32( const byte *p ) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
+static uint16_t R_GXGskRd16( const byte *p ) { return (uint16_t)(( p[0] << 8 ) | p[1] ); }
+
+static void R_GXGskClose( void )
+{
+	if( r_gx_gsk.f )
+		gEngfuncs.fsapi->Close( r_gx_gsk.f );
+	r_gx_gsk.f = NULL;
+	r_gx_gsk.count = 0;
+}
+
+static void R_GXGskOpen( const model_t *mod )
+{
+	char base[64], path[96];
+	size_t table;
+	int count;
+
+	R_GXGskClose();
+	if( gEngfuncs.Sys_CheckParm( "-gcnogsk" ))
+		return;
+	COM_FileBase( mod->name, base, sizeof( base ));
+	Q_snprintf( path, sizeof( path ), "gc_studio/%s.gsk", base );
+	if( !gEngfuncs.fsapi->FileExists( path, false ))
+		return;
+	if(( r_gx_gsk.f = gEngfuncs.fsapi->Open( path, "rb", false )) == NULL )
+		return;
+	r_gx_gsk.filesize = gEngfuncs.fsapi->FileLength( r_gx_gsk.f );
+	if( gEngfuncs.fsapi->Read( r_gx_gsk.f, r_gx_gsk.tbl, R_GX_GSK_HEADER ) != R_GX_GSK_HEADER
+		|| ( count = gc_gsk_parse( r_gx_gsk.tbl, R_GX_GSK_HEADER + R_GX_GSK_ENTRY * R_GX_GSK_MAX )) < 0
+		|| count > R_GX_GSK_MAX )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: %s is not a usable skin pack\n", path );
+		R_GXGskClose();
+		return;
+	}
+	table = (size_t)count * R_GX_GSK_ENTRY;
+	if( (fs_offset_t)( R_GX_GSK_HEADER + table ) > r_gx_gsk.filesize
+		|| gEngfuncs.fsapi->Read( r_gx_gsk.f, r_gx_gsk.tbl + R_GX_GSK_HEADER, table ) != (fs_offset_t)table )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: %s short table\n", path );
+		R_GXGskClose();
+		return;
+	}
+	r_gx_gsk.count = count;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: skin pack %s, %d skins\n", path, count );
+}
+
+/* The pack's entry for skin `skin`, with its file offsets. */
+static qboolean R_GXGskFind( int skin, gc_gsk_entry_t *e, unsigned *texel_off, unsigned *tlut_off )
+{
+	int i;
+
+	for( i = 0; r_gx_gsk.f && i < r_gx_gsk.count; i++ )
+	{
+		const byte *p = r_gx_gsk.tbl + R_GX_GSK_HEADER + i * R_GX_GSK_ENTRY;
+		uint32_t to, tb, lo, lb;
+
+		if( R_GXGskRd16( p ) != skin )
+			continue;
+		to = R_GXGskRd32( p + 12 ); tb = R_GXGskRd32( p + 16 );
+		lo = R_GXGskRd32( p + 20 ); lb = R_GXGskRd32( p + 24 );
+		if( !tb || (fs_offset_t)to + tb > r_gx_gsk.filesize
+			|| ( lb && (fs_offset_t)lo + lb > r_gx_gsk.filesize ))
+			return false;
+		memset( e, 0, sizeof( *e ));
+		e->skin = (uint16_t)skin;
+		e->fmt = p[2];
+		e->tlut_fmt = p[3];
+		e->width = R_GXGskRd16( p + 4 );
+		e->height = R_GXGskRd16( p + 6 );
+		e->tlut_entries = R_GXGskRd16( p + 8 );
+		e->flags = R_GXGskRd16( p + 10 );
+		e->texel_bytes = tb;
+		e->tlut_bytes = lb;
+		*texel_off = to;
+		*tlut_off = lo;
+		return true;
+	}
+	return false;
+}
+#endif
+
 /*
 ====================
 R_StudioLoadTexture
@@ -4408,6 +4508,32 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		if( !ptexture->index )
 			ptexture->index = tr.defaultTexture;
 		return;
+	}
+
+	/* GxBake skin pack: GX texels (CI8/CI4 + TLUT, CMPR, ...) for this skin.
+	 * Remap (DM_Base / remap*) skins keep the 8-bit path, which they need for
+	 * the colour ranges; so does any skin the pack has no room or entry for. */
+	if( r_gx_gsk.f && Q_strnicmp( ptexture->name, "DM_Base", 7 ) && Q_strnicmp( ptexture->name, "remap", 5 ))
+	{
+		const mstudiotexture_t *first = (const mstudiotexture_t *)((const byte *)phdr + phdr->textureindex );
+		gc_gsk_entry_t e;
+		unsigned texel_off, tlut_off;
+		int num;
+
+		if( R_GXGskFind( (int)( ptexture - first ), &e, &texel_off, &tlut_off ))
+		{
+			Q_strncpy( mdlname, mod->name, sizeof( mdlname ));
+			COM_FileBase( ptexture->name, name, sizeof( name ));
+			COM_StripExtension( mdlname );
+			Q_snprintf( texname, sizeof( texname ), "#%s/%s.mdl", mdlname, name );
+			num = R_GCBakedGskSkin( texname, r_gx_gsk.f, &e, texel_off, tlut_off,
+				FBitSet( ptexture->flags, STUDIO_NF_MASKED ));
+			if( num )
+			{
+				ptexture->index = num;
+				return;
+			}
+		}
 	}
 #endif
 
@@ -4558,6 +4684,9 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 		extern void Image_GCPurgeDecodeScratch( void );
 #endif
 
+#if XASH_GAMECUBE
+		R_GXGskOpen( mod );
+#endif
 		for( int i = 0; i < phdr->numtextures; i++ )
 		{
 #if XASH_GAMECUBE
@@ -4590,6 +4719,7 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 #endif
 		}
 #if XASH_GAMECUBE
+		R_GXGskClose();
 		if( gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
 		{
 			extern size_t R_GCStudioSkinOverflowUsed( void );

@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #if XASH_GAMECUBE
 #include "platform/platform.h"
 #include "../../platform/gamecube/mem_gamecube.h"
+#include "../../platform/gamecube/gc_pack.h"
 #endif
 
 static void Sound_Reset( void )
@@ -260,6 +261,102 @@ static MALLOC_LIKE( FS_FreeSound, 1 ) wavdata_t *SoundPackInPlaceFile( byte *f, 
 }
 #endif
 
+#if XASH_GAMECUBE
+/*
+================
+Sound_GCLoadDSP
+
+GxBake twin: when sound/<name>.dsp exists (DSP ADPCM, `gxbake adpcm` /
+`gxbake squeeze --emit`), decode it once to mono s16 PCM here and hand the
+mixer the same wavdata_t a WAV gives it. The disc copy is 3.5x smaller.
+Returns NULL when there is no twin or it is unusable; the caller then loads
+the WAV as before.
+================
+*/
+static wavdata_t *Sound_GCLoadDSP( const char *loadname )
+{
+	gc_dsp_state_t st = { 0, 0 };
+	fs_offset_t filesize = 0;
+	gc_dsp_t dsp;
+	uint samples;
+	size_t pcm_bytes;
+	string path;
+	byte *f;
+
+	Q_snprintf( path, sizeof( path ), DEFAULT_SOUNDPATH "%s.dsp", loadname );
+	if( !FS_FileExists( path, false ))
+		return NULL;
+	f = SND_LOADFILE( path, &filesize );
+	if( !f || filesize <= 0 )
+	{
+		if( f )
+			SND_FREEFILE( f );
+		return NULL;
+	}
+	if( gc_dsp_parse( f, (size_t)filesize, &dsp ) != 0 || !dsp.samples
+		|| dsp.rate < 8000 || dsp.rate > 48000 )
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: bad DSP twin %s, using the WAV\n", path );
+		SND_FREEFILE( f );
+		return NULL;
+	}
+
+	/* A looping sound ends at its loop end: the mixer wraps at the last sample. */
+	samples = dsp.samples;
+	if( dsp.loop && dsp.loop_start < dsp.loop_end && dsp.loop_end < samples )
+		samples = dsp.loop_end + 1;
+	pcm_bytes = (size_t)samples * sizeof( int16_t );
+
+	/* Same caps as the WAV loader (GC_SFX_MAX_FILE_BYTES). */
+	if( GC_MapLoadMemoryOpt() && pcm_bytes > (( GC_MenuRunsServer() ? 48u : 20u ) * 1024u ))
+	{
+		Con_Reportf( "Xash3D GameCube: DSP skipped for map-load memopt %s size=%u\n",
+			path, (uint)pcm_bytes );
+		SND_FREEFILE( f );
+		return NULL;
+	}
+
+	sound.wav = (byte *)Mem_Malloc( host.soundpool, pcm_bytes );
+	if( !sound.wav )
+	{
+		SND_FREEFILE( f );
+		return NULL;
+	}
+	if( gc_dsp_decode( &dsp, 0, samples, &st, (int16_t *)sound.wav ) != samples )
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: short DSP decode %s, using the WAV\n", path );
+		Mem_Free( sound.wav );
+		sound.wav = NULL;
+		SND_FREEFILE( f );
+		return NULL;
+	}
+	SND_FREEFILE( f );
+
+	sound.type = WF_PCMDATA;
+	sound.rate = (int)dsp.rate;
+	sound.width = 2;
+	sound.channels = 1;
+	sound.samples = samples;
+	sound.size = pcm_bytes;
+	sound.flags = 0;
+	sound.loopstart = 0;
+	if( dsp.loop && dsp.loop_start < samples )
+	{
+		SetBits( sound.flags, SOUND_LOOPED );
+		sound.loopstart = dsp.loop_start;
+	}
+	{
+		static int dsp_logs;
+
+		if( dsp_logs++ < 8 )
+			Con_Reportf( "Xash3D GameCube: DSP twin %s %u samples @ %u Hz (file %u, pcm %u)%s\n",
+				path, samples, (uint)dsp.rate, (uint)filesize, (uint)pcm_bytes,
+				FBitSet( sound.flags, SOUND_LOOPED ) ? " looped" : "" );
+	}
+	return SoundPack();
+}
+#endif
+
 /*
 ================
 FS_LoadSound
@@ -294,6 +391,18 @@ wavdata_t *FS_LoadSound( const char *filename, const byte *buffer, size_t size )
 	// special mode: skip any checks, load file from buffer
 	if( filename[0] == '#' && buffer && size )
 		goto load_internal;
+
+#if XASH_GAMECUBE
+	/* GxBake DSP ADPCM twin first; without one nothing changes. */
+	if( anyformat || !Q_stricmp( ext, "wav" ))
+	{
+		wavdata_t *dsp_pack = Sound_GCLoadDSP( loadname );
+
+		if( dsp_pack )
+			return dsp_pack;
+		Sound_Reset();
+	}
+#endif
 
 	// now try all the formats in the selected list
 	for( const loadwavfmt_t *format = sound.loadformats; format && format->ext; format++)
