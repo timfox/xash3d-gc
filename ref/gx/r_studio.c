@@ -4599,6 +4599,16 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 #endif
 		}
 #if XASH_GAMECUBE
+		/* A character body whose skins did not all load draws white: say so, whatever the route. */
+		if( Q_stristr( mod->name, "models/player/" ))
+		{
+			extern size_t R_GCStudioSkinOverflowUsed( void );
+			extern size_t R_GCStudioSkinOverflowCapacity( void );
+
+			gEngfuncs.Con_Reportf( "%sXash3D GameCube: player skins '%s' %d/%d fallback=%d overflow=%u/%u\n",
+				( loaded < phdr->numtextures ) ? S_WARN : "", mod->name, loaded, phdr->numtextures, fallback,
+				(uint)R_GCStudioSkinOverflowUsed(), (uint)R_GCStudioSkinOverflowCapacity());
+		}
 		if( gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
 		{
 			extern size_t R_GCStudioSkinOverflowUsed( void );
