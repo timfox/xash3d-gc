@@ -465,9 +465,14 @@ static void R_GXTevMatAppend( int id, int a, int b )
 	didx = gc_tev_rec[id - 1][1];
 	scale_fp = (u16)( ( gc_tev_rec[id - 1][2] << 8 ) | gc_tev_rec[id - 1][3] );
 	aref = gc_tev_rec[id - 1][4];
-	/* Detail mod2x on top of Source LM punched white voids into harbor
-	 * cliffs. Keep authored detail only when there is no lightmap page. */
-	if( !gc_wd_chunk_lm && ( flags & 0x01 ) && scale_fp && didx < gc_tev_ndet )
+	/* Authored $detail, mod2x over the lit colour, on lightmapped chunks too.
+	 * It was held back to unlit chunks when it punched white voids into the
+	 * harbor cliffs; with the lighting as it is now it does not (checked at
+	 * the harbor, the cliff path, the courtyard and the church), and without
+	 * it the cliff beside the path was a smear: its 256x256 base covers
+	 * 1024 units, four units a texel, and the detail tile is what Source
+	 * puts the rock's grain in. */
+	if( ( flags & 0x01 ) && scale_fp && didx < gc_tev_ndet )
 	{
 		scale = (float)scale_fp / 256.0f;
 		R_GXTevBindDetail( didx );
