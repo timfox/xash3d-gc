@@ -4489,6 +4489,11 @@ void Host_ClientFrame( void )
 		GC_UpdateNewGameIntroAudio();
 		GC_TryG94SaveLoad();
 		GC_ProfMark( "client: packets+state" );
+		{
+			void CL_GCLeanPlayerEffects( void );
+
+			CL_GCLeanPlayerEffects();
+		}
 		/* Changelevel dest re-arms the G36 probe while g36_done stays sticky
 		 * from the source map. Full SCR CapFaces then scored ≈62ms WEAK
 		 * (c4a3→c5a1 probe 20261105-105312). Score presents without a world

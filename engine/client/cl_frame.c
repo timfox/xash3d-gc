@@ -1814,6 +1814,40 @@ static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 	}
 }
 
+/*
+=============
+CL_GCLeanPlayerEffects
+
+The New Game routes run a lean client frame without CL_EmitEntities, where
+retail turns the local player's effects into dynamic lights
+(CL_LinkPlayers -> CL_AddEntityEffects: the flashlight beam, bright light).
+Do that step here from the listen server's player edict.
+=============
+*/
+void CL_GCLeanPlayerEffects( void )
+{
+	edict_t *player;
+	cl_entity_t *lp;
+
+	if( !SV_Active() || cls.state != ca_active || svs.maxclients < 1 )
+		return;
+	player = SV_EdictNum( 1 );
+	if( !player || !SV_IsValidEdict( player )
+		|| !FBitSet( player->v.effects, EF_DIMLIGHT | EF_BRIGHTLIGHT ))
+		return;
+	lp = CL_GetLocalPlayer();
+	if( !lp )
+		return;
+	VectorCopy( player->v.origin, lp->origin );
+	VectorCopy( player->v.angles, lp->angles );
+	lp->curstate.effects = player->v.effects;
+	lp->player = true;
+	lp->index = cl.playernum + 1;
+	if( VectorIsNull( cl.viewheight ))
+		VectorSet( cl.viewheight, 0.0f, 0.0f, player->v.view_ofs[2] );
+	CL_AddEntityEffects( lp );
+}
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -1933,7 +1967,11 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		VectorCopy( ent->angles, ent->latched.prevangles );
 
 		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+		{
 			added++;
+			if( FBitSet( ent->curstate.effects, EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_LIGHT ))
+				CL_AddEntityEffects( ent );
+		}
 	}
 
 	GC_ProfMark( "render: lean emit brush scan" );

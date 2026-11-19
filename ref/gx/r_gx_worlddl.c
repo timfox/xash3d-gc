@@ -2833,6 +2833,214 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 	R_GXWorldDLSoftOff();	/* the decal group is the last one */
 }
 
+/* Dynamic lights on the display-list world (flashlight, muzzle flashes,
+ * explosions). Retail adds each dlight to the lightmap before the texture
+ * multiply: diffuse * ( lightmap + light ) = the world pass + an additive
+ * diffuse * light pass, drawn here over the chunks the world pass drew that
+ * touch a light. Falloff is ( 1 - d / radius ) from one 32x32 I8 radial
+ * texture, sampled in XY and again on its middle row for Z (both from the
+ * vertex position), so no per-face data is needed. Intensity follows the
+ * software renderer: ( radius - dist ) light units on the 0..255 lightmap
+ * scale, times the light's colour. */
+#define GC_WD_DLIGHT_CHUNKS	96
+#define GC_WD_DLIGHT_TEXELS	15.0f	/* falloff radius in texels (edge texels stay 0) */
+static u8 gc_wd_dl_falloff[32 * 32] __attribute__(( aligned( 32 )));
+static GXTexObj gc_wd_dl_obj;
+static qboolean gc_wd_dl_ready;
+static byte *gc_wd_dl_chunk[GC_WD_DLIGHT_CHUNKS];
+static u16 gc_wd_dl_index[GC_WD_DLIGHT_CHUNKS];
+static int gc_wd_dl_nchunks;
+static int gc_wd_dl_lights[MAX_DLIGHTS];
+static int gc_wd_dl_nlights;
+static u32 gc_wd_dl_stat[3];	/* frames with lights, chunk draws, overflow */
+
+static void R_GXWorldDLDynInit( void )
+{
+	int x, y;
+
+	for( y = 0; y < 32; y++ )
+	{
+		for( x = 0; x < 32; x++ )
+		{
+			const float dx = (float)x + 0.5f - 16.0f, dy = (float)y + 0.5f - 16.0f;
+			float v = 1.0f - sqrtf( dx * dx + dy * dy ) / GC_WD_DLIGHT_TEXELS;
+
+			if( v < 0.0f )
+				v = 0.0f;
+			/* I8 tiles are 8x4 texels. */
+			gc_wd_dl_falloff[(( y >> 2 ) * 4 + ( x >> 3 )) * 32 + ( y & 3 ) * 8 + ( x & 7 )] = (u8)( v * 255.0f + 0.5f );
+		}
+	}
+	DCFlushRange( gc_wd_dl_falloff, sizeof( gc_wd_dl_falloff ));
+	GX_InitTexObj( &gc_wd_dl_obj, gc_wd_dl_falloff, 32, 32, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjFilterMode( &gc_wd_dl_obj, GX_LINEAR, GX_LINEAR );
+	gc_wd_dl_ready = true;
+}
+
+/* The lights alive this frame; the world pass then records its chunks that
+ * touch one of them. */
+static void R_GXWorldDLDynBegin( void )
+{
+	int i;
+
+	gc_wd_dl_nchunks = 0;
+	gc_wd_dl_nlights = 0;
+	if( r_gx_mirror || !gp_dlights || !gp_cl )
+		return;
+	for( i = 0; i < MAX_DLIGHTS; i++ )
+	{
+		const dlight_t *l = &gp_dlights[i];
+
+		if( l->die >= gp_cl->time && l->radius > 1.0f && ( l->color.r | l->color.g | l->color.b ))
+			gc_wd_dl_lights[gc_wd_dl_nlights++] = i;
+	}
+}
+
+static void R_GXWorldDLDynNote( u32 i, byte *chunk )
+{
+	int n;
+
+	if( !gc_wd_dl_nlights )
+		return;
+	for( n = 0; n < gc_wd_dl_nlights; n++ )
+	{
+		const dlight_t *l = &gp_dlights[gc_wd_dl_lights[n]];
+		const float r = l->radius;
+
+		if( l->origin[0] + r < gc_wd_chunk_mins[i * 3 + 0] || l->origin[0] - r > gc_wd_chunk_maxs[i * 3 + 0]
+			|| l->origin[1] + r < gc_wd_chunk_mins[i * 3 + 1] || l->origin[1] - r > gc_wd_chunk_maxs[i * 3 + 1]
+			|| l->origin[2] + r < gc_wd_chunk_mins[i * 3 + 2] || l->origin[2] - r > gc_wd_chunk_maxs[i * 3 + 2] )
+			continue;
+		if( gc_wd_dl_nchunks >= GC_WD_DLIGHT_CHUNKS )
+		{
+			gc_wd_dl_stat[2]++;
+			return;
+		}
+		gc_wd_dl_index[gc_wd_dl_nchunks] = (u16)i;
+		gc_wd_dl_chunk[gc_wd_dl_nchunks++] = chunk;
+		return;
+	}
+}
+
+static void R_GXWorldDLDynDraw( void )
+{
+	const u8 scale = ( gc_wd_hdr.flags & GC_WD_FLAG_LIGHT_X1 ) ? GX_CS_SCALE_1 : GX_CS_SCALE_2;
+	int n, c, cur_mat;
+
+	if( !gc_wd_dl_nlights || !gc_wd_dl_nchunks )
+		return;
+	if( !gc_wd_dl_ready )
+		R_GXWorldDLDynInit();
+	gc_wd_dl_stat[0]++;
+
+	GX_LoadTexObj( &gc_wd_dl_obj, GX_TEXMAP7 );
+	GX_SetNumChans( 0 );
+	GX_SetNumIndStages( 0 );
+	GX_SetNumTexGens( 3 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetTexCoordGen( GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX6 );
+	GX_SetTexCoordGen( GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX7 );
+	GX_SetNumTevStages( 4 );
+	/* 0: XY falloff */
+	GX_SetTevDirect( GX_TEVSTAGE0 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD1, GX_TEXMAP7, GX_COLORNULL );
+	GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+	GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	/* 1: x Z falloff */
+	GX_SetTevDirect( GX_TEVSTAGE1 );
+	GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD2, GX_TEXMAP7, GX_COLORNULL );
+	GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+	GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	/* 2: x light colour (konst) */
+	GX_SetTevDirect( GX_TEVSTAGE2 );
+	GX_SetTevOrder( GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+	GX_SetTevKColorSel( GX_TEVSTAGE2, GX_TEV_KCSEL_K0 );
+	GX_SetTevColorIn( GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO );
+	GX_SetTevColorOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	/* 3: x diffuse, the lightmap stage's scale; alpha from the diffuse */
+	GX_SetTevDirect( GX_TEVSTAGE3 );
+	GX_SetTevOrder( GX_TEVSTAGE3, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
+	GX_SetTevColorIn( GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+	GX_SetTevColorOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, scale, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+	GX_SetTevAlphaOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	/* Holes in alpha-tested textures stay unlit. */
+	GX_SetAlphaCompare( GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetZCompLoc( GX_FALSE );
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_CLEAR );
+	GX_SetZMode( GX_TRUE, GX_EQUAL, GX_FALSE );
+
+	for( n = 0; n < gc_wd_dl_nlights; n++ )
+	{
+		const dlight_t *l = &gp_dlights[gc_wd_dl_lights[n]];
+		const float r = l->radius;
+		const float k = GC_WD_DLIGHT_TEXELS / ( 32.0f * r );
+		const float lum = r > 255.0f ? 1.0f : r / 255.0f;
+		Mtx tm;
+		GXColor kc;
+
+		memset( tm, 0, sizeof( tm ));
+		tm[0][0] = k; tm[0][3] = 0.5f - l->origin[0] * k;
+		tm[1][1] = k; tm[1][3] = 0.5f - l->origin[1] * k;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX6, GX_MTX2x4 );
+		memset( tm, 0, sizeof( tm ));
+		tm[0][2] = k; tm[0][3] = 0.5f - l->origin[2] * k;
+		tm[1][3] = 0.5f;
+		GX_LoadTexMtxImm( tm, GX_TEXMTX7, GX_MTX2x4 );
+		kc.r = (u8)( l->color.r * lum );
+		kc.g = (u8)( l->color.g * lum );
+		kc.b = (u8)( l->color.b * lum );
+		kc.a = 255;
+		GX_SetTevKColor( GX_KCOLOR0, kc );
+
+		cur_mat = -1;
+		for( c = 0; c < gc_wd_dl_nchunks; c++ )
+		{
+			const u32 i = gc_wd_dl_index[c];
+			byte *chunk = gc_wd_dl_chunk[c];
+			const gc_wd_batch_t *b;
+			u32 nb, kk;
+
+			if( l->origin[0] + r < gc_wd_chunk_mins[i * 3 + 0] || l->origin[0] - r > gc_wd_chunk_maxs[i * 3 + 0]
+				|| l->origin[1] + r < gc_wd_chunk_mins[i * 3 + 1] || l->origin[1] - r > gc_wd_chunk_maxs[i * 3 + 1]
+				|| l->origin[2] + r < gc_wd_chunk_mins[i * 3 + 2] || l->origin[2] - r > gc_wd_chunk_maxs[i * 3 + 2] )
+				continue;
+			nb = *(const u16 *)( chunk + 2 );
+			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
+			b = (const gc_wd_batch_t *)( chunk + 16 );
+			for( kk = 0; kk < nb; kk++, b++ )
+			{
+				if( b->mat >= gc_wd_hdr.n_mats || gc_wd_texnum[b->mat] <= 0 )
+					continue;
+				if( (int)b->mat != cur_mat )
+				{
+					if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+						continue;
+					cur_mat = (int)b->mat;
+				}
+				GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+			}
+			gc_wd_dl_stat[1]++;
+		}
+	}
+
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetZCompLoc( GX_TRUE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetNumChans( 1 );
+	R_GXWorldDLSetupLit( 0 );
+	if(( gc_wd_dl_stat[0] & 255 ) == 1 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: world dlights frames=%u chunk draws=%u overflow=%u lights=%d chunks=%d\n",
+			gc_wd_dl_stat[0], gc_wd_dl_stat[1], gc_wd_dl_stat[2], gc_wd_dl_nlights, gc_wd_dl_nchunks );
+}
+
 int R_GXWorldDLDraw( void )
 {
 	static qboolean logged;
@@ -2964,6 +3172,7 @@ int R_GXWorldDLDraw( void )
 
 	gc_wd_envq_n = 0;
 	gc_wd_defer_n = 0;
+	R_GXWorldDLDynBegin();
 	if( gc_wd_defer_on < 0 )
 		gc_wd_defer_on = gEngfuncs.Sys_CheckParm( "-gcnomatsort" ) ? 0 : 1;
 	/* Full world first: draw every PVS-visible chunk. Frustum cull is a later
@@ -3149,7 +3358,11 @@ int R_GXWorldDLDraw( void )
 				continue;
 			}
 			if( !forced )
+			{
 				gc_wd_slots[i].used_frame = gc_wd_frame;
+				/* A forced chunk's buffer is reused right away. */
+				R_GXWorldDLDynNote( i, chunk );
+			}
 			gc_wd_pf_bytes += gc_wd_chunk_bytes[i];
 			nb = *(const u16 *)( chunk + 2 );
 			GX_SetArray( GX_VA_POS, chunk + *(const u32 *)( chunk + 4 ), 6 );
@@ -3328,6 +3541,7 @@ int R_GXWorldDLDraw( void )
 	}
 	R_GXCmprSetFar( false );
 	R_GXFogEnd();
+	R_GXWorldDLDynDraw();
 	if( gc_wd_pf_bytes > gc_wd_pf_bytes_max )
 		gc_wd_pf_bytes_max = gc_wd_pf_bytes;
 	gc_wd_pf_bytes = 0;
