@@ -6134,6 +6134,11 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 	{
 		static int kept, skipped;
 		const int tier = SV_GCParityTier( classname );
+		if( !kept && !skipped )
+		{
+			extern void GC_HeapCensusReport( const char *stage );
+			GC_HeapCensusReport( "first parity entity" );
+		}
 		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget
 			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
 

@@ -295,6 +295,8 @@ void GC_MemSample( const char *stage )
 	/* Per-map budget: spawning is done, so move map-lifetime heap blocks into
 	 * the map's leftover memory (runs every map, unchanged totals or not).
 	 * From here on, arena carves must avoid the world's arrays. */
+	if( !Q_strcmp( stage, "bsp-buffer-release" ) || !Q_strcmp( stage, "entity spawn" ) || !Q_strcmp( stage, "pre-SV_Init" ))
+		GC_HeapCensusReport( stage );
 	if( !Q_strcmp( stage, "map active" ))
 	{
 		extern void Mod_GCMoveWorldEntitiesToArena( void );
