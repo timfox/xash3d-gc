@@ -30,7 +30,7 @@ static struct
 {
 	qboolean   tried, ready;
 	int        tex_w, tex_h, line_h, first, count;
-	ht_glyph_t glyph[96];
+	ht_glyph_t glyph[104];
 	byte      *tex;
 	GXTexObj   obj;
 } ht;
@@ -74,7 +74,7 @@ static qboolean HT_Load( void )
 	ht.first = HT_U16( file + 12 );
 	ht.count = HT_U16( file + 14 );
 	tex_bytes = ht.tex_w * ht.tex_h / 2;
-	if( ht.count < 1 || ht.count > 96 || len < 16 + ht.count * 14 + tex_bytes )
+	if( ht.count < 1 || ht.count > 104 || len < 16 + ht.count * 14 + tex_bytes )
 	{
 		Con_Reportf( "Xash3D GameCube: hitext atlas malformed\n" );
 		Mem_Free( file );

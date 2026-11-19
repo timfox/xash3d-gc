@@ -79,6 +79,15 @@ kill feed, scoreboard, console and the team/class text menus all end up there) t
 (inside the 64-128 KiB target; no ARAM paging needed at this size). If the queue (900 glyphs) fills, glyphs fall back to
 the soft path. Not measured: frame time with it on, heap on the heaviest maps.
 
+## Button glyphs in hint rows
+Eight original controller-button glyphs (A, B, X, Y, Start, Z, L, R: solid circle / pill shapes with the letter cut out,
+drawn by `scripts/bake-hitext.py`, no console artwork) live in the hi-res atlas at codes 128..135, after an empty DEL cell,
+so the glyph table is 104 entries (was 96). The caller colours them (A green, B red, X and Y light, Z violet). mainui's
+`CMenuHintRow` (`{A}` `{B}` ... tokens in the hint string) draws them through `pfnDrawCharacter`, which reaches
+`GC_HiTextGlyph`; with `gc_hitext 0` the token prints as `[A]`.
+Memory: the atlas file grows by 112 bytes of glyph table (67 008 bytes, still one 64 KiB I4 texture); nothing else.
+Host test `tests/test_gamecube_hitext_buttons.py` checks the glyph table. Not seen in Dolphin.
+
 ## Notices and the fatal panel (retail palette, inside the safe area)
 - **Controller disconnected:** `OSK_DrawNotice` (in_osk.c, drawn with the keyboard) shows a centred panel when no native pad
   has been present for about 0.75 s (`GC_PadMissingNotice`, never for automated probes). Layout is `osk_notice.h`, host test
