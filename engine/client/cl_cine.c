@@ -32,6 +32,12 @@ static CVAR_DEFINE_AUTO( cine_viewmodel, "0", 0, "draw the weapon during a cinem
 static CVAR_DEFINE_AUTO( cine_stamp, "1", 0, "draw the frame-number stamp during a cinematic shot" );
 static CVAR_DEFINE_AUTO( cine_capture, "0", 0, "write a screenshot for every frame of a cinematic shot" );
 static CVAR_DEFINE_AUTO( cine_onend, "", 0, "console text to run when a cinematic shot ends" );
+/* The shot clock for the game: a listen server's scripted actors and effects
+ * follow it instead of server time, which on a slow machine (the GameCube
+ * under Dolphin) can run behind the locked film clock. CINE_NO_CLOCK when no
+ * shot is loaded. */
+#define CINE_NO_CLOCK	-100000.0f
+static CVAR_DEFINE_AUTO( cine_clock, "-100000", 0, "seconds into the current cinematic shot (negative in preroll), -100000 when none" );
 
 typedef enum
 {
@@ -88,6 +94,7 @@ static void CL_CineEnd( qboolean finished )
 	else
 		Con_Printf( "CINE STOP %s frame=%d\n", cine.name, cine.frame );
 	cine.state = CINE_IDLE;
+	Cvar_DirectSetValue( &cine_clock, CINE_NO_CLOCK );
 	if( finished && cine_onend.string[0] )
 	{
 		Cbuf_AddText( cine_onend.string );
@@ -117,6 +124,7 @@ static void CL_CinePlay_f( void )
 	cine.clock = Cmd_Argc() > 2 ? -fabs( Q_atof( Cmd_Argv( 2 ))) : 0.0;
 	cine.frame = -1;
 	cine.state = CINE_WAITING;
+	Cvar_DirectSetValue( &cine_clock, (float)cine.clock );
 	Con_Printf( "cine: %s loaded, %d keys, %.2f s\n", name, cine.path.count, Cine_Duration( &cine.path ));
 }
 
@@ -177,6 +185,7 @@ void CL_CineInit( void )
 	Cvar_RegisterVariable( &cine_stamp );
 	Cvar_RegisterVariable( &cine_capture );
 	Cvar_RegisterVariable( &cine_onend );
+	Cvar_RegisterVariable( &cine_clock );
 	Cmd_AddCommand( "cine_play", CL_CinePlay_f, "play a cinematic camera path from cine/<name>.cam" );
 	Cmd_AddCommand( "cine_stop", CL_CineStop_f, "stop the cinematic camera" );
 	Cmd_AddCommand( "cine_mark", CL_CineMark_f, "print a camera key for the current view and append it to cine/marks.cam" );
@@ -231,6 +240,7 @@ void CL_CineFrameTime( double *frametime )
 		cine.clock = 0.0;
 		cine.state = CINE_PLAYING;
 	}
+	Cvar_DirectSetValue( &cine_clock, (float)cine.clock );
 	if( cine.state != CINE_PLAYING )
 		return;
 
