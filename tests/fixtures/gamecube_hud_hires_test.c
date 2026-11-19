@@ -147,6 +147,44 @@ int main( void )
 		assert( GC_HudHiRegister( &hh2, "#HUD/sprites/clip_clips(frame:00).spr", 256, 256, sheet, pal ) >= 0 );
 		assert( cache.stores == stores );
 	}
+	/* The colour sheet above is RGB5A3; a grey sheet is IA8 with all 256
+	 * levels, the same hole and near-black rules, and its own cache entry. */
+	assert( !GC_HudHiSheetIA8( &hh, h ));
+	assert( GC_HudHiPaletteEntryIA8( 0, 0 ) == 0x0001 );           /* hole */
+	assert( GC_HudHiPaletteEntryIA8( 15, 255 ) == 0 );             /* punched near-black */
+	assert( GC_HudHiPaletteEntryIA8( 201, 255 ) == 0xffc9 );
+	assert( GC_HudHiPaletteEntryIA8( 202, 128 ) == 0x80ca );
+	{
+		static gc_hudhi_t hg;
+		int g;
+
+		for( i = 0; i < 256; i++ )
+			pal[i * 4 + 0] = pal[i * 4 + 1] = pal[i * 4 + 2] = (unsigned char)i;
+		pal[255 * 4 + 3] = 0;
+		GC_HudHiInit( &hg, &cache, gpu_idle );
+		g = GC_HudHiRegister( &hg, "#HUD/sprites/640hud7(frame:00).spr", 256, 256, sheet, pal );
+		assert( g >= 0 && GC_HudHiSheetIA8( &hg, g ));
+		GC_HudHiSetArena( &hg, arena, sizeof( arena ));
+		GC_HudHiBeginFrame( &hg );
+		/* Row 10: 100, then the hole run 20..23, then 200. */
+		t = GC_HudHiCell( &hg, g, 16, 10, 16, 1, &tw, &th, &fresh );
+		assert( t && fresh && tw == 16 );
+		assert( texel( t, tw, 3, 0 ) == 0xff64 );                  /* 100, opaque */
+		assert( texel( t, tw, 4, 0 ) == 0x0064 && texel( t, tw, 5, 0 ) == 0x0064 );
+		assert( texel( t, tw, 6, 0 ) == 0x00c8 && texel( t, tw, 7, 0 ) == 0x00c8 );
+		assert( texel( t, tw, 8, 0 ) == 0xffc8 );                  /* 200, opaque */
+		/* Levels 201 and 202 stay apart (RGB5A3 merges them). */
+		assert( GC_HudHiPaletteEntryIA8( 201, 255 ) != GC_HudHiPaletteEntryIA8( 202, 255 ));
+		assert( GC_HudHiPaletteEntry( 201, 201, 201, 255 ) == GC_HudHiPaletteEntry( 202, 202, 202, 255 ));
+		/* One colour index used anywhere keeps the sheet RGB5A3. */
+		{
+			static gc_hudhi_t hc;
+			pal[7 * 4 + 1] = 0;
+			GC_HudHiInit( &hc, &cache, gpu_idle );
+			g = GC_HudHiRegister( &hc, "#HUD/sprites/640hud8(frame:00).spr", 256, 256, sheet, pal );
+			assert( g >= 0 && !GC_HudHiSheetIA8( &hc, g ));
+		}
+	}
 	GC_HudHiSetArena( &hh, NULL, 0 );
 	assert( !GC_HudHiCell( &hh, h, 0, 0, 8, 8, &tw, &th, &fresh ));
 	printf( "hud hires ok\n" );

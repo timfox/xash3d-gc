@@ -766,6 +766,7 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
 {
 	image_t *img;
 	int handle, x0, y0, x1, y1, fresh;
+	u8 fmt;
 	uint16_t sw, sh, tw, th;
 	const uint16_t *texels;
 	float smin, smax, tmin, tmax;
@@ -819,7 +820,8 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
 		r_gx_tex_invalidates++;
 		r_gx_tex_uploads++;
 	}
-	GX_InitTexObj( &r_hudhi_tex.obj, (void *)texels, tw, th, GX_TF_RGB5A3, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	fmt = GC_HudHiSheetIA8( &r_hudhi, handle ) ? GX_TF_IA8 : GX_TF_RGB5A3;
+	GX_InitTexObj( &r_hudhi_tex.obj, (void *)texels, tw, th, fmt, GX_CLAMP, GX_CLAMP, GX_FALSE );
 	/* The HUD is laid out at 640 and shown on a 320-wide framebuffer:
 	 * bilinear averages the two source columns behind each pixel instead of
 	 * dropping one (holes carry their neighbours' colour, so edges stay clean). */
@@ -835,7 +837,7 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
 	r_hudhi_tex.texnum = (unsigned)texnum;
 	r_hudhi_tex.w = tw;
 	r_hudhi_tex.h = th;
-	r_hudhi_tex.fmt = GX_TF_RGB5A3;
+	r_hudhi_tex.fmt = fmt;
 	r_hudhi_tex.tiled = (u16 *)texels;
 	r_hudhi_tex.valid = true;
 	/* The quad that samples this cell is queued next: its token is the

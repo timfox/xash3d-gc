@@ -47,7 +47,16 @@ uint16_t GC_HudHiPaletteEntry( uint8_t r, uint8_t g, uint8_t b, uint8_t a )
 	return (uint16_t)(( a3 << 12 ) | (( r >> 4 ) << 8 ) | (( g >> 4 ) << 4 ) | ( b >> 4 ));
 }
 
-static void HH_Key( char *out, size_t size, const char *name, uint16_t w, uint16_t h )
+uint16_t GC_HudHiPaletteEntryIA8( uint8_t i, uint8_t a )
+{
+	if( a == 0 )
+		return HH_HOLE;
+	if( a == 255 && ( i >> 3 ) <= 1u )
+		return 0;
+	return (uint16_t)(( a << 8 ) | i );
+}
+
+static void HH_Key( char *out, size_t size, const char *name, uint16_t w, uint16_t h, int ia8 )
 {
 	uint32_t hash = 2166136261u;
 	const unsigned char *p = (const unsigned char *)name;
@@ -57,7 +66,7 @@ static void HH_Key( char *out, size_t size, const char *name, uint16_t w, uint16
 		hash ^= *p++;
 		hash *= 16777619u;
 	}
-	snprintf( out, size, "hudhi:%08x:%ux%u", (unsigned)hash, (unsigned)w, (unsigned)h );
+	snprintf( out, size, "hudhi:%08x:%ux%u%s", (unsigned)hash, (unsigned)w, (unsigned)h, ia8 ? ":ia" : "" );
 }
 
 int GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
@@ -65,7 +74,8 @@ int GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
 {
 	char key[GC_ARAM_NAME_LEN];
 	uint16_t table[256];
-	int i, slot = -1, index;
+	uint8_t present[256];
+	int i, slot = -1, index, ia8 = 1;
 	const uint32_t idx_bytes = HH_Align( (uint32_t)w * h );
 
 	if( !s->cache || !name || !name[0] || !indices || !rgba_palette
@@ -87,12 +97,23 @@ int GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
 		return -1;
 	}
 
-	HH_Key( key, sizeof( key ), name, w, h );
+	/* Grey when every colour the sheet uses has r == g == b. */
+	memset( present, 0, sizeof( present ));
+	for( i = 0; i < (int)w * h; i++ )
+		present[indices[i]] = 1;
+	for( i = 0; i < 256 && ia8; i++ )
+		if( present[i] && rgba_palette[i * 4 + 3] != 0
+			&& ( rgba_palette[i * 4 + 0] != rgba_palette[i * 4 + 1]
+			|| rgba_palette[i * 4 + 0] != rgba_palette[i * 4 + 2] ))
+			ia8 = 0;
+
+	HH_Key( key, sizeof( key ), name, w, h, ia8 );
 	index = GC_AramCacheFind( s->cache, key );
 	if( index < 0 )
 	{
 		for( i = 0; i < 256; i++ )
-			table[i] = GC_HudHiPaletteEntry( rgba_palette[i * 4 + 0], rgba_palette[i * 4 + 1],
+			table[i] = ia8 ? GC_HudHiPaletteEntryIA8( rgba_palette[i * 4 + 0], rgba_palette[i * 4 + 3] )
+				: GC_HudHiPaletteEntry( rgba_palette[i * 4 + 0], rgba_palette[i * 4 + 1],
 				rgba_palette[i * 4 + 2], rgba_palette[i * 4 + 3] );
 		index = GC_AramCacheBegin( s->cache, key, idx_bytes + sizeof( table ));
 		if( index < 0 )
@@ -116,8 +137,14 @@ int GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
 	s->sheets[slot].w = w;
 	s->sheets[slot].h = h;
 	s->sheets[slot].aram_index = index;
+	s->sheets[slot].ia8 = (uint8_t)ia8;
 	s->sheets[slot].used = 1;
 	return slot;
+}
+
+int GC_HudHiSheetIA8( const gc_hudhi_t *s, int handle )
+{
+	return handle >= 0 && handle < GC_HUDHI_SHEETS && s->sheets[handle].used && s->sheets[handle].ia8;
 }
 
 void GC_HudHiSetTexnum( gc_hudhi_t *s, int handle, int texnum )
@@ -224,7 +251,12 @@ static uint16_t HH_Rgb12( uint16_t v )
 }
 
 /* Holes take the colour of the nearest texel that is not a hole, alpha 0. */
-static void HH_CarryHoles( uint16_t *line, int n )
+static uint16_t HH_Clear( uint16_t v, int ia8 )
+{
+	return ia8 ? (uint16_t)( v & 0x00ffu ) : HH_Rgb12( v );
+}
+
+static void HH_CarryHoles( uint16_t *line, int n, int ia8 )
 {
 	int dist[GC_HUDHI_MAX_DIM];
 	uint16_t col[GC_HUDHI_MAX_DIM];
@@ -235,7 +267,7 @@ static void HH_CarryHoles( uint16_t *line, int n )
 	{
 		if( line[i] != HH_HOLE )
 		{
-			c = HH_Rgb12( line[i] );
+			c = HH_Clear( line[i], ia8 );
 			d = 0;
 		}
 		else if( d >= 0 )
@@ -248,7 +280,7 @@ static void HH_CarryHoles( uint16_t *line, int n )
 	{
 		if( line[i] != HH_HOLE )
 		{
-			c = HH_Rgb12( line[i] );
+			c = HH_Clear( line[i], ia8 );
 			d = 0;
 			continue;
 		}
@@ -354,7 +386,7 @@ const uint16_t *GC_HudHiCell( gc_hudhi_t *s, int handle, int x, int y, int w, in
 			}
 			for( c = 0; c < w; c++ )
 				line[c] = s->pal[row[c]];
-			HH_CarryHoles( line, w );
+			HH_CarryHoles( line, w, sh->ia8 );
 			for( c = w; c < tws; c++ )
 				line[c] = line[w - 1];
 		}

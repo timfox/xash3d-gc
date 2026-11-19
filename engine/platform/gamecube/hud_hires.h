@@ -29,8 +29,9 @@ typedef struct
 	char     name[GC_HUDHI_NAME_LEN]; /* texture name, e.g. #HUD/sprites/x(frame:00).spr */
 	uint16_t w, h;
 	int      texnum;                  /* renderer texture of the shrunk upload, 0 if none */
-	int      aram_index;              /* indices, then the 256-entry RGB5A3 table */
+	int      aram_index;              /* indices, then the 256-entry texel table */
 	uint8_t  used;
+	uint8_t  ia8;                     /* grey sheet: IA8 texels (8-bit intensity and alpha) */
 } gc_hudhi_sheet_t;
 
 typedef struct
@@ -63,6 +64,12 @@ void GC_HudHiInit( gc_hudhi_t *s, gc_aram_cache_t *cache, void (*gpu_idle)( void
  * is opaque with near-black punched out (TransAlpha / additive HUD art), and
  * anything between uses RGB5A3's 3-bit alpha mode. */
 uint16_t GC_HudHiPaletteEntry( uint8_t r, uint8_t g, uint8_t b, uint8_t a );
+/* Same rules for a grey entry as an IA8 texel (alpha high byte, intensity
+ * low): the HUD sheets are grey (the HUD colour is the draw's tint), so
+ * their ramps keep all 256 levels instead of RGB5A3's 32. */
+uint16_t GC_HudHiPaletteEntryIA8( uint8_t i, uint8_t a );
+/* Nonzero when the sheet's cells are IA8 rather than RGB5A3. */
+int  GC_HudHiSheetIA8( const gc_hudhi_t *s, int handle );
 
 /* Store a sheet's full-resolution indices (w*h bytes) and its RGBA palette
  * (256 * 4 bytes). Registering a name again reuses its ARAM copy. Returns a
