@@ -1032,6 +1032,15 @@ static void GC_UpdateProbeSyntheticAxes( void )
  * response already consumed and returned PAD_ERR_TRANSFER for every port,
  * so a real controller was never seen as ready ("no GameCube controller
  * detected"). Take the scanned state instead. */
+static int gc_pads_missing_frames;
+
+/* The "controller disconnected" prompt (drawn by OSK_Draw): no native pad on any port for about 0.75 s. Not shown for
+ * automated probes, which have no real pad packets. */
+qboolean GC_PadMissingNotice( void )
+{
+	return gc_pads_missing_frames > 45 && !GC_ShouldUseProbeInputFallback();
+}
+
 static void GC_ReadPads( void )
 {
 	const u32 connected_mask = PAD_ScanPads();
@@ -1055,6 +1064,7 @@ static void GC_ReadPads( void )
 		gc_pad[port].triggerL = PAD_TriggerL( port );
 		gc_pad[port].triggerR = PAD_TriggerR( port );
 	}
+	gc_pads_missing_frames = connected_mask & (( 1u << PAD_CHANMAX ) - 1u ) ? 0 : gc_pads_missing_frames + 1;
 }
 
 void Platform_RunEvents( void )

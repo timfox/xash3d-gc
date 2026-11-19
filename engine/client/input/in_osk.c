@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "input.h"
+#include "osk_notice.h"
 #include "client.h"
 
 #if XASH_GAMECUBE
@@ -452,6 +453,27 @@ static void OSK_DrawKey( float sx, float sy, int x, int y, int w, int h, qboolea
 	OSK_TextCentered( sx, sy, x, y, w, h, label, selected ? gold : normal );
 }
 
+#if XASH_GAMECUBE
+extern qboolean GC_PadMissingNotice( void );
+
+/* Controller disconnected: a retail-palette panel in the middle of the screen, inside the safe area. */
+static void OSK_DrawNotice( float sx, float sy )
+{
+	static const rgba_t gold = { 255, 176, 0, 255 };
+	static const rgba_t white = { 255, 255, 255, 255 };
+	static const char *lines[] = { "Controller disconnected", "Connect a controller", "to port 1 to continue" };
+	const int fp = 2, n = 3, chars = 23;
+	const osk_notice_rect_t r = OSK_NoticeRect( n, chars, fp );
+	int i;
+
+	OSK_Fill( sx, sy, r.x - 2, r.y - 2, r.w + 4, r.h + 4, 175, 127, 1, 255 );
+	OSK_Fill( sx, sy, r.x, r.y, r.w, r.h, 55, 43, 29, 250 );
+	for( i = 0; i < n; i++ )
+		OSK_TextFp( sx, sy, r.x + OSK_NOTICE_PAD, r.y + OSK_NOTICE_PAD + i * ( OSK_NOTICE_GLYPH_H + 2 ) * fp,
+			lines[i], i ? white : gold, fp );
+}
+#endif
+
 /*
 =============
 OSK_Draw
@@ -474,6 +496,10 @@ void OSK_Draw( void )
 	char label[2] = { 0, 0 };
 	int i, j, p;
 
+#if XASH_GAMECUBE
+	if( GC_PadMissingNotice( ))
+		OSK_DrawNotice( sx, sy );
+#endif
 	if( !osk.enable || !osk_enable.value )
 		return;
 
