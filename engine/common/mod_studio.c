@@ -1762,12 +1762,23 @@ qboolean Mod_GCIsSoundScratch( const void *ptr )
 	return ptr == (void *)gc_studio_tex_scratch;
 }
 
+/* A companion too big to stage whole (DoD view-model skins, 233-406 KB) is read through its header only; its
+ * textures are streamed one at a time by Mod_GCStudioLoadTextures. */
+static struct
+{
+	qboolean     active;
+	const void   *hdr;
+	char         path[MAX_QPATH];
+	size_t       s0;      /* header + texture table + skin table, the file offset of the first pixels */
+} gc_texstream;
+
 static void Mod_GCReleaseStudioTexBuf( void *ptr )
 {
 	if( !ptr )
 		return;
 	if( Mod_GCIsStudioTexScratch( ptr ))
 	{
+		gc_texstream.active = false;
 		if( ptr == gc_studio_tex_staged )
 			Mod_GCStudioArenaUnstage( gc_studio_tex_staged, gc_studio_tex_staged_size, gc_studio_tex_staged_prev );
 		gc_studio_tex_scratch_busy = false;
@@ -1776,6 +1787,56 @@ static void Mod_GCReleaseStudioTexBuf( void *ptr )
 		return;
 	}
 	Mem_Free( ptr );
+}
+
+#define GC_STUDIO_TEX_STREAM_MIN ( 96 * 1024 )
+
+/* Read just the header, texture table and skin table of a big gc_studio companion into the 16 KB scratch and
+ * remember where the pixels are. The in-memory header length is made to match, so the callers' checks pass. */
+static qboolean Mod_GCStudioTexStreamHeader( file_t *f, const char *path, fs_offset_t sz, fs_offset_t *size_out )
+{
+	byte *dst = gc_studio_tex_scratch;
+	size_t first = (size_t)-1, s0;
+	int i, n, tex_off, skin_off, nskin;
+
+	if( !Q_stristr( path, "gc_studio/" ) || sz <= (fs_offset_t)GC_STUDIO_TEX_STREAM_MIN )
+		return false;
+	if( FS_Seek( f, 0, SEEK_SET ) != 0 || FS_Read( f, dst, 244 ) != 244 )
+		return false;
+	n = LittleLong( *(int *)( dst + 180 ));
+	tex_off = LittleLong( *(int *)( dst + 184 ));
+	nskin = LittleLong( *(int *)( dst + 192 )) * LittleLong( *(int *)( dst + 196 ));
+	skin_off = LittleLong( *(int *)( dst + 200 ));
+	if( n <= 0 || n > 64 || tex_off < 244 || nskin < 0 || skin_off < 0 )
+		return false;
+	s0 = (size_t)tex_off + (size_t)n * sizeof( mstudiotexture_t );
+	if( nskin > 0 && (size_t)skin_off + (size_t)nskin * 2u > s0 )
+		s0 = (size_t)skin_off + (size_t)nskin * 2u;
+	if( s0 > GC_STUDIO_TEX_SCRATCH_BYTES || s0 + 768 > (size_t)sz )
+		return false;
+	if( FS_Seek( f, 0, SEEK_SET ) != 0 || FS_Read( f, dst, s0 ) != (fs_offset_t)s0 )
+		return false;
+	for( i = 0; i < n; i++ )
+	{
+		const byte *t = dst + tex_off + i * sizeof( mstudiotexture_t );
+		size_t idx = (size_t)LittleLong( *(int *)( t + 76 ));
+
+		if( idx < first )
+			first = idx;
+	}
+	if( first < s0 )
+		return false;
+	*(int *)( dst + 72 ) = LittleLong( (int)s0 );	/* length: this is now a header-only file */
+	gc_texstream.active = true;
+	gc_texstream.hdr = dst;
+	gc_texstream.s0 = s0;
+	Q_strncpy( gc_texstream.path, path, sizeof( gc_texstream.path ));
+	gc_studio_tex_scratch_busy = true;
+	if( size_out )
+		*size_out = (fs_offset_t)s0;
+	Con_Reportf( "Xash3D GameCube: G381 studio T.mdl streamed '%s' (%s file, %u textures, header %s)\n",
+		path, Q_memprint( (size_t)sz ), (unsigned)n, Q_memprint( s0 ));
+	return true;
 }
 
 static void *Mod_GCLoadFileToStudioTexScratch( const char *path, fs_offset_t *size_out )
@@ -1791,6 +1852,13 @@ static void *Mod_GCLoadFileToStudioTexScratch( const char *path, fs_offset_t *si
 	if( !f )
 		return NULL;
 	sz = FS_FileLength( f );
+#if XASH_DODGC_NETWORK
+	if( Mod_GCStudioTexStreamHeader( f, path, sz, size_out ))
+	{
+		FS_Close( f );
+		return dst;
+	}
+#endif
 	if( sz > (fs_offset_t)GC_STUDIO_TEX_SCRATCH_BYTES )
 	{
 		/* Larger companions (scientistT 173 KiB, barneyT) stage in the free
@@ -1864,6 +1932,91 @@ static void *Mod_GCLoadStudioTexFile( const char *modname, fs_offset_t *size_out
 		*size_out = 0;
 	return NULL;
 }
+#endif
+
+#if XASH_GAMECUBE
+/* Upload the textures of a companion header. A streamed one (Mod_GCStudioTexStreamHeader) has no pixels in memory:
+ * each texture's pixels are read from the file into one reusable window together with a copy of the header and table
+ * (the loader finds the pixels at header + index), the loader is pointed at that single texture, and the resulting
+ * texture handle goes back into the table, which is all the callers use afterwards. */
+static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
+{
+	extern void *R_GCHotBorrow( unsigned bytes );
+	mstudiotexture_t *table, *wtex;
+	size_t s0, maxpix = 0, win_size, prev = 0;
+	byte *win;
+	qboolean in_arena = true;
+	studiohdr_t *whdr;
+	file_t *f;
+	int i, loaded = 0;
+
+	if( !gc_texstream.active || (const void *)hdr != gc_texstream.hdr || hdr->numtextures <= 0 )
+	{
+		ref.dllFuncs.Mod_StudioLoadTextures( mod, hdr );
+		return;
+	}
+	s0 = gc_texstream.s0;
+	table = (mstudiotexture_t *)((byte *)hdr + hdr->textureindex );
+	for( i = 0; i < hdr->numtextures; i++ )
+	{
+		const size_t pix = (size_t)table[i].width * (size_t)table[i].height + 768u;
+
+		if( table[i].width <= 0 || table[i].height <= 0 || pix > 1024u * 1024u )
+			return;
+		maxpix = Q_max( maxpix, pix );
+	}
+	win_size = ( s0 + maxpix + 31u ) & ~31u;
+	f = FS_Open( gc_texstream.path, "rb", false );
+	win = Mod_GCStudioArenaStage( win_size, &prev );
+	if( !win )
+	{
+		in_arena = false;
+		win = (byte *)R_GCHotBorrow( (unsigned)win_size );
+	}
+	if( !f || !win )
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: streamed skins '%s' no window (%s)\n", gc_texstream.path, Q_memprint( win_size ));
+		if( f )
+			FS_Close( f );
+		if( win && in_arena )
+			Mod_GCStudioArenaUnstage( win, win_size, prev );
+		return;
+	}
+	memcpy( win, hdr, s0 );
+	whdr = (studiohdr_t *)win;
+	wtex = (mstudiotexture_t *)( win + hdr->textureindex );
+	for( i = 0; i < hdr->numtextures; i++ )
+	{
+		const size_t pix = (size_t)table[i].width * (size_t)table[i].height + 768u;
+
+		if( FS_Seek( f, table[i].index, SEEK_SET ) != 0 || FS_Read( f, win + s0, pix ) != (fs_offset_t)pix )
+		{
+			Con_Reportf( S_WARN "Xash3D GameCube: streamed skin %d of '%s' unreadable\n", i, gc_texstream.path );
+			table[i].index = 0;
+			continue;
+		}
+		wtex[i].index = (int)s0;
+		whdr->numtextures = 1;
+		whdr->textureindex = hdr->textureindex + i * (int)sizeof( mstudiotexture_t );
+		ref.dllFuncs.Mod_StudioLoadTextures( mod, whdr );
+		table[i].index = wtex[i].index;
+		if( table[i].index )
+			loaded++;
+	}
+	FS_Close( f );
+	if( in_arena )
+		Mod_GCStudioArenaUnstage( win, win_size, prev );
+	{
+		static int stream_logs;
+
+		if( stream_logs++ < 12 )
+			Con_Reportf( "Xash3D GameCube: streamed skins '%s' %d/%d, window %s\n", gc_texstream.path, loaded,
+				hdr->numtextures, Q_memprint( win_size ));
+	}
+}
+#define Mod_GCLoadTextures( mod, hdr ) Mod_GCStudioLoadTextures(( mod ), ( hdr ))
+#else
+#define Mod_GCLoadTextures( mod, hdr ) ref.dllFuncs.Mod_StudioLoadTextures(( mod ), ( hdr ))
 #endif
 
 /*
@@ -2227,7 +2380,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 		{
 			// TODO: Mod_StudioLoadTextures will crash if passed a merged studio model!
 			Mod_GCForceVmChromakeyMasks( thdr );
-			ref.dllFuncs.Mod_StudioLoadTextures( mod, thdr );
+			Mod_GCLoadTextures( mod, thdr );
 			textures_loaded = true;
 
 			// give space for textures and skinrefs
@@ -2287,7 +2440,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				&& (size_t)src->texturedataindex <= buffersize )
 			{
 				Mod_GCForceVmChromakeyMasks( src );
-				ref.dllFuncs.Mod_StudioLoadTextures( mod, src );
+				Mod_GCLoadTextures( mod, src );
 				mesh = (size_t)src->texturedataindex;
 			}
 			else if( !skip_studio_textures && !Host_IsDedicated( )
@@ -2320,7 +2473,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 					}
 					Image_GCPurgeDecodeScratch();
 					Mod_GCForceVmChromakeyMasks( thdr );
-					ref.dllFuncs.Mod_StudioLoadTextures( mod, thdr );
+					Mod_GCLoadTextures( mod, thdr );
 					textures_loaded = true;
 					if( !mod->cache.data )
 					{
@@ -2539,7 +2692,7 @@ gc_mesh_only_done: ;
 
 #if !XASH_DEDICATED
 		if( !gc_mesh_only && !skip_studio_textures && !Host_IsDedicated( ))
-			ref.dllFuncs.Mod_StudioLoadTextures( mod, phdr );
+			Mod_GCLoadTextures( mod, phdr );
 #endif
 	}
 
@@ -2776,7 +2929,7 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 		{
 			Image_GCPurgeDecodeScratch();
 			Mod_GCForceVmChromakeyMasks( phdr );
-			ref.dllFuncs.Mod_StudioLoadTextures( mod, phdr );
+			Mod_GCLoadTextures( mod, phdr );
 			if( Mod_GCStudioSkinsBound( phdr ))
 			{
 				gc_force_studio_skins = false;
@@ -2805,7 +2958,7 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 			return false;
 		}
 		Mod_GCForceVmChromakeyMasks( src_hdr );
-		ref.dllFuncs.Mod_StudioLoadTextures( mod, src_hdr );
+		Mod_GCLoadTextures( mod, src_hdr );
 		src_tex = (mstudiotexture_t *)((byte *)src_hdr + src_hdr->textureindex );
 		dst_tex = (mstudiotexture_t *)((byte *)phdr + phdr->textureindex );
 		for( i = 0; i < phdr->numtextures && i < src_hdr->numtextures; i++ )
@@ -2859,7 +3012,7 @@ qboolean Mod_GCAttachStudioSkins( model_t *mod )
 			slot = Mod_GCStudioBssGrowLast( mod->cache.data, mesh, merged );
 		Image_GCPurgeDecodeScratch();
 		Mod_GCForceVmChromakeyMasks( src_hdr );
-		ref.dllFuncs.Mod_StudioLoadTextures( mod, src_hdr );
+		Mod_GCLoadTextures( mod, src_hdr );
 		if( !slot && Mod_GCIsWorldArraySpillCache( mod->cache.data ))
 		{
 			slot = (byte *)Mod_GCWorldArraySpillTryGrow(
