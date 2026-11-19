@@ -2904,6 +2904,9 @@ void R_GXPreallocCmprBounce( void )
  * the LRU slot being replaced is waited for (its own last draw), never the one
  * the previous bind is sampling. Returns the slot's MEM1 address.
  */
+/* r_gx_cmpr_clock at the start of the frame: a slot used after it is in
+ * this frame's picture. */
+static unsigned r_gx_cmpr_frame_clock;
 static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
@@ -2913,7 +2916,10 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	const int lo = r_gx_cmpr_use_big ? big_lo : r_gx_cmpr_want_far ? near_n : 0;
 	const int hi = r_gx_cmpr_use_big ? r_gx_cmpr_nslots : r_gx_cmpr_want_far ? big_lo : near_n;
 
-	for( i = lo; i < hi; i++ )
+	const qboolean far_req = r_gx_cmpr_want_far && !r_gx_cmpr_use_big;
+
+	/* A far chain may live in a near slot (see below): look there too. */
+	for( i = far_req ? 0 : lo; i < hi; i++ )
 	{
 		if( r_gx_cmpr_slot[i].valid && r_gx_cmpr_slot[i].aram == aram
 			&& r_gx_cmpr_slot[i].skip == skip && r_gx_cmpr_slot[i].bytes == bytes )
@@ -2933,6 +2939,31 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 		}
 		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
 			pick = i;
+	}
+	/* Every far slot is already in this frame's picture: taking one would
+	 * be taken back next frame. From inside the Lost Coast wreck the water
+	 * mirror, the far chunks and the far props want about 200 far chains
+	 * for 128 slots, and 100 of them were read from ARAM again every frame
+	 * (35 ms a frame standing still). A near slot that this frame has not
+	 * touched takes the chain instead; it is found again above. */
+	if( far_req && near_n > 1 && r_gx_cmpr_slot[pick].valid
+		&& r_gx_cmpr_slot[pick].used > r_gx_cmpr_frame_clock )
+	{
+		int np = -1;
+
+		for( i = 0; i < near_n; i++ )
+		{
+			if( !r_gx_cmpr_slot[i].valid )
+			{
+				np = i;
+				break;
+			}
+			if( np < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[np].used )
+				np = i;
+		}
+		if( np >= 0 && np != r_gx_cmpr_cur_slot
+			&& ( !r_gx_cmpr_slot[np].valid || r_gx_cmpr_slot[np].used <= r_gx_cmpr_frame_clock ))
+			pick = np;
 	}
 	/* Never replace the slot the texture bound right now is sampling when
 	 * another is free to take: with >1 slot the LRU is not it, but be exact. */
@@ -6057,6 +6088,13 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
  * 3000-triangle model from ARAM every frame. */
 #define GC_PROP_FAR_COVER_OVER	0.30f
 static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
+/* How much of the view a prop fills before it may take its close model
+ * (bounding radius over distance). At 0.40 the church altar, 260 units away
+ * and inside Source's own LOD 0 range, stayed a 286-triangle box until the
+ * player stood over it. The chain cache admits a close model only while it
+ * fits and stands them down when it does not, so the harbor no longer needs
+ * the tighter gate. */
+#define GC_PROP_CLOSE_COVER	0.15f
 #define GC_PROP_DRAW_TRIS	6000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
 #define GC_PROP_TEX_SLOTS	16
@@ -7331,7 +7369,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		 * which the frame does not have. Never in the water mirror. */
 		if( bm->close_model && bm->close_model <= gc_prop_nmodels && !r_gx_mirror
 			&& gc_prop_cache_frame >= gc_prop_close_block
-			&& cover2 > 0.40f * 0.40f )
+			&& cover2 > GC_PROP_CLOSE_COVER * GC_PROP_CLOSE_COVER )
 		{
 			const float cd = (float)bm->close_dist8 * 8.0f;
 
@@ -9370,6 +9408,7 @@ static void R_GXWaterMirrorPass( void )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
 	/* Flythrough stage timing: where the frame goes, every 120 frames. */
 	static u64 st_acc[6], st_last;
 	static int st_n, st_on = -1;
