@@ -261,6 +261,8 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	u16 *pix;
 	int handle;
 
+	static int attach_logged;
+
 	if( !src || w < 8 || h < 8 || w > GC_SKIN_MAX_DIM || h > GC_SKIN_MAX_DIM || ( w & 3 ) || ( h & 3 ))
 		return;
 	img = R_GetTexture( texnum );
@@ -269,7 +271,13 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	if( !img->pixels[0] || img->gc_packed || img->gc_gx_native || img->gc_skin_handle
 		|| img->width < 8 || img->height < 8
 		|| ( img->width >= w && img->height >= h ))
+	{
+		/* why a viewmodel skin is not streamed (first few only) */
+		if( attach_logged++ < 12 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM no attach %s src=%dx%d img=%dx%d pixels=%d packed=%d native=%d handle=%d\n",
+				img->name, w, h, img->width, img->height, img->pixels[0] != NULL, img->gc_packed, img->gc_gx_native, img->gc_skin_handle );
 		return;
+	}
 	if( !R_GXSkinInit( ))
 		return;
 	/* Scratch is the idle MDL decode buffer (128 KiB, static): no MEM1 heap
