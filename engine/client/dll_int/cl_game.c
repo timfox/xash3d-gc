@@ -2047,6 +2047,7 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
 				used_sys = buf != NULL;
 			}
+			}
 			if( buf == NULL )
 				buf = FS_LoadFile( loadname, &size, false );
 			if( buf == NULL && ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
