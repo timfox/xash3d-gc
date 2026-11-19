@@ -18,6 +18,12 @@ class CapFacesHudGateTests(unittest.TestCase):
         self.assertIn('"HP 100"', block)
         self.assertIn('"TEAM: %s"', block)
 
+    def test_flag_is_registered_by_the_engine(self):
+        # registered at engine start so the client DLL's lookup finds it (no "non-existent cvar" warning at boot)
+        src = (ROOT / "engine/client/input/in_osk.c").read_text()
+        self.assertIn('CVAR_DEFINE_AUTO( gc_hud_retail, "0"', src)
+        self.assertIn("Cvar_RegisterVariable( &gc_hud_retail )", src)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,9 @@ GNU General Public License for more details.
 #define OSK_DEFAULT_ENABLE "0"
 #endif
 
+#if XASH_GAMECUBE
+static CVAR_DEFINE_AUTO( gc_hud_retail, "0", 0, "set by the DoD client while its retail HUD draws; the lean route then skips its own TEAM/HP/AMMO bars" );
+#endif
 CVAR_DEFINE_AUTO( osk_enable, OSK_DEFAULT_ENABLE, FCVAR_ARCHIVE | FCVAR_FILTERABLE, "enable built-in on-screen keyboard" );
 
 /* On-screen keyboard, GameCube controller layout.
@@ -794,6 +797,11 @@ void OSK_Init( void )
 
 	GC_HiTextInit();
 	GC_CardInit();
+#endif
+#if XASH_GAMECUBE
+	/* shared with the game's client DLL (it sets it each frame the retail HUD draws); registered here so the client's lookup
+	 * at start-up finds it instead of warning about a non-existent cvar */
+	Cvar_RegisterVariable( &gc_hud_retail );
 #endif
 	Cvar_RegisterVariable( &osk_enable );
 }
