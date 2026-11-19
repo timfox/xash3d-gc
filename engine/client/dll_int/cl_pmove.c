@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #if XASH_GAMECUBE
 #include <ogc/system.h>
 extern int gc_menu_step_frames;
+#include "server.h"	/* SV_ModelHandle: static brush models on the local route */
 #endif
 
 #define MAX_FORWARD			6	// forward probes for set idealpitch
@@ -536,8 +537,14 @@ static void CL_GCAddStaticBrushes( void )
 	for( int i = 0; i < count; i++ )
 	{
 		const qboolean solid = ( list[i] & 0x8000 ) != 0;
-		model_t *mod = CL_ModelHandle(( list[i] & 0x7fff ) + 1 );
+		const int index = ( list[i] & 0x7fff ) + 1;
+		model_t *mod = CL_ModelHandle( index );
 
+		/* The local route skips the resource list, so the client binds a
+		 * model only once an entity using it arrived, and these never do:
+		 * take it from the server in the same process. */
+		if( !mod && SV_Active( ))
+			mod = SV_ModelHandle( index );
 		if( !mod )
 		{
 			unloaded++;	/* signon: the client has not bound its models yet */
