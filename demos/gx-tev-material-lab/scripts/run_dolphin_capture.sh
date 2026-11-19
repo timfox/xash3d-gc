@@ -121,10 +121,11 @@ pick() {
 	fi
 }
 pick 70  "$OUT_DIR/shots/copper-ref.png"
-pick 180 "$OUT_DIR/shots/rough-00.png"
-pick 240 "$OUT_DIR/shots/rough-25.png"
-pick 300 "$OUT_DIR/shots/rough-50.png"
-pick 360 "$OUT_DIR/shots/rough-75.png"
-pick 420 "$OUT_DIR/shots/rough-100.png"
+pick 130 "$OUT_DIR/shots/damascus.png"
+pick 190 "$OUT_DIR/shots/rough-00.png"
+pick 250 "$OUT_DIR/shots/rough-25.png"
+pick 310 "$OUT_DIR/shots/rough-50.png"
+pick 370 "$OUT_DIR/shots/rough-75.png"
+pick 430 "$OUT_DIR/shots/rough-100.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

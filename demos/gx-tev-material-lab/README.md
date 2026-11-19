@@ -14,8 +14,9 @@ export DEVKITPRO=/opt/devkitpro
 export DEVKITPPC=/opt/devkitpro/devkitPPC
 export PATH="$DEVKITPPC/bin:$DEVKITPRO/tools/bin:$PATH"
 
-python3 scripts/import_rust_maps.py   # from ~/Desktop/pbr-gc/rust → textures/rust_*.png
-python3 scripts/gen_assets.py         # synthetic env + **drawn** HUD sprites (no ref crops)
+python3 scripts/import_rust_maps.py       # ~/Desktop/pbr-gc/rust → textures/rust_*.png
+python3 scripts/import_damascus_maps.py   # ~/Desktop/pbr-gc/metal_damascus → damascus_*.png
+python3 scripts/gen_assets.py             # synthetic env + **drawn** HUD sprites (no ref crops)
 make -j$(nproc)
 ```
 
@@ -28,7 +29,7 @@ sprites in `gen_assets.py` — do **not** run `bake_from_reference.py` (retired)
 
 | Button | Action |
 |--------|--------|
-| A | Cycle material (RUST / copper / gold / iron / chrome / plastic) |
+| A | Cycle material (RUST / copper / damascus / gold / iron / chrome / plastic) |
 | B | Step roughness |
 | X | Toggle env map |
 | Y | Cycle TEV feature path |
