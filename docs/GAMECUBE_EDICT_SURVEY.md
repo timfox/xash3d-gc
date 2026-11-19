@@ -99,3 +99,29 @@ BSS.
 2. Static env_sprite and ambient_generic lists: 4 to 12 edicts per map, low risk.
 3. Static brush list for unnamed func_wall: 51 to 231 edicts per map, the real fix for avalanche and
    caen, medium to high risk, engine and client.
+
+## 7. Design note: edict-free static brush list for unnamed func_wall (not implemented)
+
+What each consumer of a func_wall needs today, from `sv_pmove.c` and the area-node code (R):
+
+| Consumer | Source today | Needs from a static entry |
+|---|---|---|
+| Player move (server) | `SV_AddLinksToPmove` walks `node->solid_edicts` and copies each edict with `SV_CopyEdictToPhysEnt` into `physents[]` / `visents[]` | a physent fed from a static table, same bounds test (`BoundsIntersect`); `info` must not map to a live edict (the touch pass in `SV_FinishPMove` indexes `SV_EdictNum( physent.info )`) |
+| Player move (client prediction) | `CL_SetSolidEntities` builds physents from the packet entities | the same static table on the client, from the map, not from packets |
+| Bullets, monsters, `UTIL_TraceLine` | `SV_Move` clips against edicts linked in the area nodes (`SV_ClipMoveToEntity( edict_t *... )`) | a thin wrapper that clips against the brush model's hull at its origin, called from the area walk |
+| Drawing | the lean emit draws brush entities from the packet | draw the static brush models from the same table (the way static props draw from the pack) |
+| Game logic | none (unnamed, `named 0` on all five maps) | nothing: nobody can target or touch it usefully |
+
+Findings:
+- All func_wall on charlie, caen, avalanche, zalec and flash are unnamed, so no game code reaches them by name.
+- The cap pressure is real: `MAX_PHYSENTS` / `MAX_VISENTS` are now 256 on DoD; a map with 231 func_wall in one area would also crowd that array unless the static entries are folded per area.
+- Four code paths change together (server pmove, client prediction, server traces, render), so it needs a Dolphin check of walking into a wall, shooting a wall, and seeing it from a client. It is an engine and client change in `sv_pmove.c`, `cl_pmove.c`, `world.c` and the lean emit, plus the game DLL still spawning no edict for the entity. Estimated saving: 55 / 231 / 148 / 51 / 79 edicts on charlie / avalanche / caen / zalec / flash.
+- Cheaper first step: the lazy bot weapons branch already gives 2 to 3 edicts per bot.
+
+## 8. Props audit (M from logs, R from source)
+
+`dod_charlie` 144, `dod_avalanche` 20, `dod_caen` 77, `dod_zalec` 116 and `dod_flash` 75 static props are all in the baked prop pack and all are drawn: the logs say `0 without a model` and the pack `inst=` equals the BSP count of unnamed `env_model` + `dod_object` on each map (144 / 20 / 77 / 116 / 75).
+
+For all 22 maps the BSP holds at most 170 static props (dod_sturm), under `GC_STATIC_PROPS_MAX` (192). Gaps found:
+- **Named `env_model` entities stay edicts** and are subject to the game's env_model cap: charlie 33, vicenza 28, flugplatz 20, glider 13, escape 12, kraftstoff 11, kalt 10, zalec 10. These are the props that can be left unloaded.
+- **Without a baked pack** (`media/gp_<map>.gcp`), static props use the model path and only the first `GC_STATIC_PROP_MODELS` (6) unique model files load, while the maps use 8 to 40 unique props (dod_saints 40, dod_glider 34, dod_falaise 33, dod_sturm 34, dod_escape 32). The packs are baked per map at disc-build time, so a map staged without its pack loses most props. Check that every staged map has its pack.
