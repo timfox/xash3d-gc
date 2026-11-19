@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
 # Full reel ends ~frame 4100 (batch59 rhenium/kelp/citrine/slate); DumpFrames slower than realtime.
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-1200}"
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-1400}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -89,7 +89,7 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l || true)
 	echo "  t=${i}s frames=${n}"
 	# Full reel through rhenium/kelp/citrine/slate (~4100 frames)
-	if (( n > 4080 )); then
+	if (( n > 4100 )); then
 		break
 	fi
 done
