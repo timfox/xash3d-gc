@@ -1718,6 +1718,12 @@ static qboolean Mod_GCMapNeedsStudio( const char *path )
 		}
 		return false;
 	}
+	/* Lost Coast: a viewmodel no map entity names (the grenades the HL1 game
+	 * code precaches with every weapon) waits until it is held, like the ones
+	 * above. Preloading v_grenade took 133 KB of the studio arena at spawn,
+	 * room the prop chain cache needs in the harbor. */
+	if( Sys_CheckParm( "-gccapfacessmoke" ) && !Q_strnicmp( path, "models/v_", 9 ))
+		return false;
 	return true;	/* unknown model: keep the old behaviour */
 }
 
