@@ -86,7 +86,7 @@ DPID=$!
 for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	# Dolphin nests under DumpPath/Frames/ on some builds
-	n=$(find "$OUT_DIR/frames" "$OUT_DIR/Frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
+	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l || true)
 	echo "  t=${i}s frames=${n}"
 	# Full reel through osmium/coral/emerald/ash (~3540 frames)
 	if (( n > 3750 )); then
@@ -102,7 +102,7 @@ wait "$DPID" 2>/dev/null || true
 pkill -f 'org.DolphinEmu.dolphin-emu.*gx-tev-material-lab' 2>/dev/null || true
 pkill -f 'dolphin-emu -e /tmp/gx-tev-material-lab.dol' 2>/dev/null || true
 
-mapfile -t FRAMES < <(find "$OUT_DIR/frames" "$OUT_DIR/Frames" -name 'framedump_*.png' 2>/dev/null | sort -V)
+mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | sort -V || true)
 echo "==> captured ${#FRAMES[@]} frames"
 if ((${#FRAMES[@]} == 0)); then
 	echo "error: no frames" >&2
