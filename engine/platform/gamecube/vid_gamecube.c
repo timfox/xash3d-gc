@@ -19,6 +19,7 @@ Ported from Division-Zero-GX/xash3d-wii with libogc GX output for GameCube.
 #include "gamecube/mem_gamecube.h"
 #include "cl_tent.h"
 #include "platform/gamecube/tas_gamecube.h"
+#include "platform/gamecube/spec_cam.h"
 
 qboolean CL_GCSeedFlipperEfxProof( const float *org );
 
@@ -16882,9 +16883,65 @@ static void GC_SpectatorEye( edict_t *player, vec3_t eye, vec3_t angles )
 		angles[PITCH] = -30.0f;
 	AngleVectors( angles, forward, NULL, NULL );
 	VectorMA( target_eye, -96.0f, forward, back );
-	tr = SV_Move( target_eye, vec3_origin, vec3_origin, back, MOVE_NOMONSTERS, target, false );
-	/* Stay a few units off the wall the trace hit. */
-	VectorMA( tr.endpos, tr.fraction < 1.0f ? 4.0f : 0.0f, forward, eye );
+
+	/* dod_spec_cine 1: cinematic mode. Moving shots around the followed player
+	 * (orbit, track, crane, flyby, low push-in; spec_cam.h) cutting every 6 s or
+	 * when the director switches player. */
+	{
+		static convar_t *cine_cvar;
+		static DodCamCine cine;
+		static DodCamState smooth;
+		static double last_time;
+		qboolean cine_on;
+		vec3_t want, want_ang, aim;
+
+		if( !cine_cvar )
+			cine_cvar = Cvar_FindVar( "dod_spec_cine" );
+		cine_on = cine_cvar && cine_cvar->value != 0.0f && mode != GC_OBS_MAP_CHASE;
+		/* coming back to a chase camera after in-eye or free-fly: snap, don't swoop */
+		if( sv.time - last_time > 0.25 || sv.time < last_time )
+			DodCam_Reset( &smooth );
+		last_time = sv.time;
+
+		if( cine_on )
+		{
+			vec3_t feet;
+			float t;
+
+			if( DodCam_CineStep( &cine, player->v.iuser2, (float)sv.time, &t ))
+			{
+				cine.yaw = target->v.angles[YAW];
+				DodCam_Reset( &smooth );
+			}
+			VectorCopy( target->v.origin, feet );
+			feet[2] -= 36.0f;
+			DodCam_ShotPose( cine.shot, t, feet, cine.yaw, player->v.iuser2 + cine.shot, want, want_ang );
+		}
+		else
+		{
+			VectorCopy( back, want );
+			VectorCopy( angles, want_ang );
+		}
+		/* The target moves on server frames: glide the camera. The key folds in
+		 * the camera kind so switching between them snaps (spec_cam.h also snaps
+		 * on a new target, a respawn or a hitch). */
+		DodCam_Smooth( &smooth, DODCAM_CHASE_FREE,
+			player->v.iuser2 * 4 + ( cine_on ? 1 : 0 ) + ( mode == GC_OBS_CHASE_LOCKED ? 2 : 0 ),
+			want, want_ang, (float)host.frametime, want, want_ang );
+
+		/* Never through the world: trace from the target's eye to the camera and
+		 * stop a few units short of whatever it hits. */
+		tr = SV_Move( target_eye, vec3_origin, vec3_origin, want, MOVE_NOMONSTERS, target, false );
+		DodCam_PullIn( target_eye, want, tr.fraction, 6.0f, eye );
+		if( cine_on )
+		{
+			VectorCopy( target->v.origin, aim );
+			aim[2] += 20.0f;
+			DodCam_LookAt( eye, aim, angles );
+		}
+		else
+			VectorCopy( want_ang, angles );
+	}
 }
 
 /*
