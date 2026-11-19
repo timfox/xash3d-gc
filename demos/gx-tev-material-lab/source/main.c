@@ -309,6 +309,10 @@ static Material materials[] = {
 	{ "PAINT",      "Automotive clearcoat - dual lobe",     { 255, 255, 255, 255 }, 0.05f, 0.35f, MAPS_PAINT },
 	{ "SOLAR",      "Photovoltaic grid - sharp glints",     { 255, 255, 255, 255 }, 0.95f, 0.28f, MAPS_SOLAR },
 	{ "STONE",      "Carved wall - metal/normal/rough",     { 255, 255, 255, 255 }, 0.00f, 0.82f, MAPS_STONE },
+	/* Named Flipper-path cards (reuse TCom maps; material title matches Y path) */
+	{ "GOLD LEAF",  "Gilded foil - metal/normal/rough",     { 255, 255, 255, 255 }, 1.00f, 0.18f, MAPS_DAMASCUS },
+	{ "FROST ICE",  "Crystalline frost - metal/normal/rough",{ 255, 255, 255, 255 }, 0.00f, 0.30f, MAPS_STONE },
+	{ "CAUSTICS",   "Underwater pools - metal/normal/rough",{ 255, 255, 255, 255 }, 0.00f, 0.45f, MAPS_BRICK },
 };
 static const int materialCount = (int)(sizeof(materials) / sizeof(materials[0]));
 static int materialIndex = 0; /* open on RUST — full map set */
@@ -3528,7 +3532,7 @@ int main(int argc, char **argv)
 				skyIndex = 1;
 			}
 			if (frame == 1670) {
-				select_material(1, 1); /* DAMASCUS — gold leaf foil */
+				select_material(11, 1); /* GOLD LEAF card + path */
 				featureIndex = FEAT_GOLD_LEAF;
 				roughnessOverride = 0.18f;
 				tint_sphere_vertices(&materials[materialIndex]);
@@ -3536,14 +3540,14 @@ int main(int argc, char **argv)
 				bloomEnabled = 0;
 			}
 			if (frame == 1740) {
-				select_material(10, 1); /* STONE — frost */
+				select_material(12, 1); /* FROST ICE card + path */
 				featureIndex = FEAT_FROST_ICE;
 				roughnessOverride = 0.30f;
 				tint_sphere_vertices(&materials[materialIndex]);
 				skyIndex = 1; /* NOON */
 			}
 			if (frame == 1810) {
-				select_material(6, 1); /* BRICK — caustics */
+				select_material(13, 1); /* CAUSTICS card + path */
 				featureIndex = FEAT_CAUSTICS;
 				roughnessOverride = 0.45f;
 				tint_sphere_vertices(&materials[materialIndex]);
