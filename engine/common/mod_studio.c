@@ -2602,6 +2602,17 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				{
 					mod->cache.data = NULL; /* taken below, as spill-resident */
 				}
+#if XASH_DODGC_NETWORK
+				/* A DoD view model read into its studio-region slice stays there. The heap copy below succeeded or
+				 * failed with the heap's state at that moment (caen: v_stick's 57 KB copy fit by 1.3 KB, five such
+				 * copies took 76 KB before the entities spawned, and the entity gate then skipped all 289 func_walls
+				 * at 14 KB free). The slice is pinned either way, so the copy only cost MEM1. */
+				else if( Sys_CheckParm( "-gclistenserver" ) && Q_stristr( mod->name, "/v_" )
+					&& Mod_GCIsStudioBssCache( buffer ) && mesh <= buffersize )
+				{
+					mod->cache.data = NULL; /* taken below, as BSS-resident (G289) */
+				}
+#endif
 				else
 				{
 					mod->cache.data = calloc( 1, mesh + pad );
