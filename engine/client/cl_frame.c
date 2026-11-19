@@ -1681,6 +1681,59 @@ static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want )
 
 /* Keep the nearest `cap` candidates: id is an edict number, or -(prop + 1)
  * for a static prop. */
+/*
+ * The model index of a third-person weapon (p_*.mdl) for curstate.weaponmodel, or 0
+ * while it is not resident. Not resident yet: load it (lean mesh + skin companion,
+ * then from the ARAM asset cache on later maps). A failed load waits before it tries
+ * again, and gives up after a few. Players and scripted film actors both carry one.
+ */
+static int CL_GCLeanWeaponIndex( const char *wpath )
+{
+	extern qboolean Mod_GCPromoteStudioPath( const char *path );
+	static double next_try[64];	/* by model index & 63: BSS is MEM1 */
+	static byte fails[64];
+	static int fails_spawn = -1;
+	static int noload = -1;
+	int widx = ( wpath && wpath[0] ) ? SV_ModelIndex( wpath ) : 0;
+	model_t *wm = ( widx > 0 && widx < MAX_MODELS ) ? SV_ModelHandle( widx ) : NULL;
+
+	if( widx <= 0 || widx >= MAX_MODELS )
+		return 0;
+	if( !( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data ))
+	{
+		const int wk = widx & 63;
+
+		if( fails_spawn != svs.spawncount )
+		{
+			memset( next_try, 0, sizeof( next_try ));
+			memset( fails, 0, sizeof( fails ));
+			fails_spawn = svs.spawncount;
+		}
+		if( noload < 0 )
+			noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
+		if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
+		{
+			if( Mod_GCPromoteStudioPath( wpath ))
+			{
+				wm = Mod_FindName( wpath, false );
+				if( wm )
+					sv.models[widx] = wm;
+			}
+			else
+			{
+				fails[wk]++;
+				next_try[wk] = host.realtime + 5.0;
+			}
+		}
+	}
+	if( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data )
+	{
+		cl.models[widx] = wm;
+		return widx;
+	}
+	return 0;
+}
+
 static void CL_GCLeanPick( int *picks, float *dists, int *n, int cap, int id, float dist )
 {
 	int slot, worst = 0;
@@ -2365,6 +2418,20 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->curstate.skin = ed->v.skin;
 			ent->curstate.scale = ed->v.scale > 0.0f ? ed->v.scale : 1.0f;
 			ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
+			/* A scripted film actor carries its class's p_ weapon like a player; the
+			 * renderer merges it onto the hand bones (R_StudioDrawModel). */
+			if( ed->v.iuser4 == GC_FILM_ACTOR_TAG && ed->v.weaponmodel )
+			{
+				static int film_wlogs;
+
+				ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( SV_GetString( ed->v.weaponmodel ));
+				if( film_wlogs < 4 )
+				{
+					film_wlogs++;
+					Con_Reportf( "Xash3D GameCube: film actor %d weapon %s index %d\n", picks[slot],
+						SV_GetString( ed->v.weaponmodel ), ent->curstate.weaponmodel );
+				}
+			}
 			/* G377: edict animtime is 0 under lean StrikeThink. Snapping to
 			 * cl.time every emit made EstimateFrame dfdt=0 (frozen pose). */
 			ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : 0.0f;
@@ -2721,57 +2788,14 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				if( ed->v.weaponmodel && !dead )
 				{
 					const char *wpath = SV_GetString( ed->v.weaponmodel );
-					int widx = ( wpath && wpath[0] ) ? SV_ModelIndex( wpath ) : 0;
-					model_t *wm = ( widx > 0 && widx < MAX_MODELS ) ? SV_ModelHandle( widx ) : NULL;
 					static int wlogs;
 
-					/* Not resident yet: load it (lean mesh + skin companion,
-					 * then from the ARAM asset cache on later maps). A failed
-					 * load waits before it tries again, and gives up after a few. */
-					if( widx > 0 && widx < MAX_MODELS && !( wm && wm->type == mod_studio
-						&& wm->needload == NL_PRESENT && wm->cache.data ))
-					{
-						extern qboolean Mod_GCPromoteStudioPath( const char *path );
-						static double next_try[64];	/* by model index & 63: BSS is MEM1 */
-						static byte fails[64];
-						static int fails_spawn = -1;
-						const int wk = widx & 63;
-
-						if( fails_spawn != svs.spawncount )
-						{
-							memset( next_try, 0, sizeof( next_try ));
-							memset( fails, 0, sizeof( fails ));
-							fails_spawn = svs.spawncount;
-						}
-						static int noload = -1;
-
-						if( noload < 0 )
-							noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
-						if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
-						{
-							if( Mod_GCPromoteStudioPath( wpath ))
-							{
-								wm = Mod_FindName( wpath, false );
-								if( wm )
-									sv.models[widx] = wm;
-							}
-							else
-							{
-								fails[wk]++;
-								next_try[wk] = host.realtime + 5.0;
-							}
-						}
-					}
-					if( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data )
-					{
-						cl.models[widx] = wm;
-						ent->curstate.weaponmodel = widx;
-					}
+					ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( wpath );
 					if( wlogs < 4 )
 					{
 						wlogs++;
 						Con_Reportf( "Xash3D GameCube: lean player %d weapon %s index %d %s\n",
-							e, wpath ? wpath : "?", widx, ent->curstate.weaponmodel ? "attached" : "not resident" );
+							e, wpath ? wpath : "?", ent->curstate.weaponmodel, ent->curstate.weaponmodel ? "attached" : "not resident" );
 					}
 				}
 				ent->curstate.rendermode = ed->v.rendermode;
