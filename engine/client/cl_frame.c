@@ -2124,6 +2124,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					bodies[n_bodies++] = e;
 				continue;
 			}
+			{
+				extern qboolean SV_GCEdictIsPackNamed( const edict_t *ent );
+
+				/* Named map props are drawn from the prop pack: no studio load. */
+				if( SV_GCEdictIsPackNamed( ed ))
+					continue;
+			}
 			mod = SV_ModelHandle( ed->v.modelindex );
 			/* Before the type test: an unloaded handle is not mod_studio yet. */
 			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]

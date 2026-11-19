@@ -2290,7 +2290,7 @@ def build_prop_packs(
 			continue
 		st = bsp.stat()
 		gcp, gct, stamp = cache / f"gp_{stem}.gcp", cache / f"pt_{stem}.gct", cache / f"gp_{stem}.stamp"
-		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-10"
+		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-11named"
 		if not (stamp.is_file() and stamp.read_text() == key):
 			for stale in (gcp, gct):
 				stale.unlink(missing_ok=True)

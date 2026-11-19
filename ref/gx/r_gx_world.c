@@ -7359,6 +7359,16 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	const float *eye = RI.rvp.vieworigin;
 	float dx, dy, dz, r2, d2, cover2;
 
+	/* Named map props (high byte of the model word: ordinal + 1) are drawn
+	 * while their edict is drawable, so the good/destroyed pairs that
+	 * env_render swaps show and hide as in retail (sv_game.c). */
+	if( in->model >> 8 )
+	{
+		extern int SV_GCNamedPropVisible( int ord );
+
+		if( !SV_GCNamedPropVisible(( in->model >> 8 ) - 1 ))
+			return 0;
+	}
 	mid[0] = 0.5f * ( (float)in->mins[0] + (float)in->maxs[0] );
 	mid[1] = 0.5f * ( (float)in->mins[1] + (float)in->maxs[1] );
 	mid[2] = (float)in->mins[2] + 8.0f; /* sample near the feet */
@@ -7394,7 +7404,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 
 		gc_prop_tex_far = cover2 < 0.30f * 0.30f;
 		gc_prop_cur_light = gc_prop_light[in - gc_prop_inst];
-		unsigned model = in->model;
+		unsigned model = in->model & 0xffu;
 		const gc_prop_model_t *bm = &gc_prop_models[model];
 
 		/* Inside Source's LOD 0 range, and only while the prop fills the
@@ -7437,12 +7447,12 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 							gc_prop_want_bytes -= cb;
 						}
 						gc_prop_cache_overflow = overflow;
-						model = in->model;
+						model = in->model & 0xffu;
 					}
 				}
 			}
 		}
-		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == in->model;
+		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == ( in->model & 0xffu );
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
