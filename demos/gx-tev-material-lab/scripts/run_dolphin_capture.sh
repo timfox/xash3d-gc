@@ -86,8 +86,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through velvet/carbon/pearl (~2140 frames)
-	if (( n > 2200 )); then
+	# Full reel through batch28 paths (~2420 frames)
+	if (( n > 2500 )); then
 		break
 	fi
 done
