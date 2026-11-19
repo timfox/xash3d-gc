@@ -36,6 +36,24 @@ typedef struct
 /* Frame build list and packet history are sized per map from the World DL
  * route's free map-arena tail (sv_init.c). This static list is the fallback
  * when a map leaves no room for the full retail 256. */
+#if XASH_GAMECUBE
+/* Per-frame listen-server trace lines: the first 20 at each site and every 2000th after, so a long run stays under
+ * the host log cap (~5 MB) instead of 1 line in 6 being one of these. */
+static unsigned gc_log_n_83935;
+static unsigned gc_log_n_54873;
+static unsigned gc_log_n_13057;
+static unsigned gc_log_n_56299;
+static unsigned gc_log_n_6344;
+static unsigned gc_log_n_1895;
+static qboolean SV_GCLogSite( unsigned *n )
+{
+	if( !Sys_CheckParm( "-gclistenserver" ))
+		return false;
+	++*n;
+	return *n <= 20 || !( *n % 2000 );
+}
+#endif
+
 static entity_state_t sv_gc_frame_ents_static[128];
 entity_state_t *sv_gc_frame_scratch = sv_gc_frame_ents_static;
 int sv_gc_visible_cap = 128;
@@ -927,7 +945,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 
 		if( !cl->pViewEntity && cl->edict )
 			cl->pViewEntity = cl->edict;
-		if( Sys_CheckParm( "-gclistenserver" ))
+		if( SV_GCLogSite( &gc_log_n_83935 ))
 			Con_Reportf( "Xash3D GameCube: AddEntitiesToPacket begin view=%d client=%d\n",
 				view ? NUM_FOR_EDICT( view ) : -1,
 				cl->edict ? NUM_FOR_EDICT( cl->edict ) : -1 );
@@ -938,7 +956,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 #endif
 #if XASH_GAMECUBE
 	GC_ProfMark( "sv send: add entities (AddToFullPack)" );
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_54873 ))
 		Con_Reportf( "Xash3D GameCube: AddEntitiesToPacket ready ents=%d\n",
 			frame_ents.num_entities );
 #endif
@@ -957,7 +975,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	// of an entity being included twice.
 	qsort( frame_ents.entities, frame_ents.num_entities, sizeof( frame_ents.entities[0] ), SV_EntityNumbers );
 #if XASH_GAMECUBE
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_13057 ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities sorted ents=%d frames=%p packet=%p num_pe=%d next=%d\n",
 			frame_ents.num_entities, (void *)cl->frames, (void *)svs.packet_entities,
 			svs.num_client_entities, svs.next_client_entities );
@@ -995,7 +1013,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 		frame->num_entities++;
 	}
 #if XASH_GAMECUBE
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_56299 ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities copied ents=%d next=%d\n",
 			frame->num_entities, svs.next_client_entities );
 #endif
@@ -1016,14 +1034,14 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 		if( frames % 600 == 0 )
 			sv_gc_emit_delta = sv_gc_emit_new = sv_gc_emit_removed = sv_gc_emit_full = 0;
 	}
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_6344 ))
 		Con_Reportf( "Xash3D GameCube: EmitPacketEntities ready\n" );
 #endif
 	SV_EmitEvents( cl, frame, msg );
 	if( send_pings ) SV_EmitPings( msg );
 #if XASH_GAMECUBE
 	GC_ProfMark( "sv send: events+pings" );
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_1895 ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities complete\n" );
 #endif
 }

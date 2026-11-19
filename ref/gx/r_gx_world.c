@@ -531,7 +531,11 @@ static u16 R_GXSoftToRGB5A3PunchBlack( pixel_t soft )
 static void R_GXReserveHudPool( void )
 {
 	int i;
-	const size_t bytes = (size_t)GC_GX_TEX_MAX_DIM * (size_t)GC_GX_TEX_MAX_DIM * sizeof( u16 );
+	/* A DoD match draws only the retail HUD (ammo/health icons, shrunk to 64x64 on upload): slabs of 128x128 held
+	 * 96 KB of heap for it. 64x64 slabs are 24 KB; a bigger sprite grows its slot from the bounded on-demand
+	 * share (R_GXHudAllocBacking), as before. */
+	const size_t dim = gEngfuncs.Sys_CheckParm( "-gclistenserver" ) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+	const size_t bytes = dim * dim * sizeof( u16 );
 
 	if( r_gx_hud_pool_ready )
 		return;

@@ -923,7 +923,9 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		byte *dst = NULL;
 
 		R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
-		while(( cw > 128 || ch > 128 ) && cw > 8 && ch > 8 )
+		const int vm_cmpr_cap = gEngfuncs.Sys_CheckParm( "-gcvm128" ) ? 128 : 256;
+
+		while(( cw > vm_cmpr_cap || ch > vm_cmpr_cap ) && cw > 8 && ch > 8 )
 		{
 			cw >>= 1;
 			ch >>= 1;
@@ -1009,7 +1011,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			{
 				static int cmpr_logged;
 
-				if( cmpr_logged++ < 4 )
+				if( cmpr_logged++ < 4 || Q_stristr( tex->name, "models/player" ))
 					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s %dx%d -> %dx%d (%s)\n",
 						tex->name, pic->width, pic->height, cw, ch, Q_memprint( bytes ));
 			}
@@ -1018,7 +1020,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		{
 			static int cmpr_fail_logs;
 
-			if( cmpr_fail_logs++ < 4 )
+			if( cmpr_fail_logs++ < 4 || Q_stristr( tex->name, "models/player" ))
 				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s no room (%s, window left %s)\n",
 					tex->name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
 		}
