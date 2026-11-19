@@ -775,6 +775,47 @@ void CL_TempEntUpdate( void )
 #if XASH_GAMECUBE
 /*
 ==============
+CL_GCDrainLocalTempEnts
+
+Parse the temp entities the listen server handed this client directly
+(SV_GCQueueLocalTempEnt): each is svc_temp_entity, a size word, the payload.
+==============
+*/
+static void CL_GCDrainLocalTempEnts( void )
+{
+	extern int SV_GCTakeLocalTempEnts( byte *out, int size );
+	extern unsigned gc_local_tent_queued, gc_local_tent_dropped;
+	static byte data[8192];
+	static int logs;
+	static double next_log;
+	sizebuf_t buf;
+	int bytes = SV_GCTakeLocalTempEnts( data, sizeof( data ));
+	int parsed = 0;
+
+	if( bytes > 0 )
+	{
+		MSG_Init( &buf, "GCLocalTempEnts", data, bytes );
+		while( MSG_GetNumBytesLeft( &buf ) > 2 )
+		{
+			const int cmd = MSG_ReadByte( &buf );
+
+			if( cmd != svc_temp_entity )
+				break;
+			CL_ParseTempEntity( &buf, PROTO_CURRENT );
+			parsed++;
+		}
+	}
+	if(( parsed || gc_local_tent_dropped ) && logs < 40 && host.realtime >= next_log )
+	{
+		logs++;
+		next_log = host.realtime + 2.0;
+		Con_Reportf( "Xash3D GameCube: local temp entities parsed %d (queued %u, dropped %u in all)\n",
+			parsed, gc_local_tent_queued, gc_local_tent_dropped );
+	}
+}
+
+/*
+==============
 CL_GCRelinkTempEnts
 
 The lean emit clears the scene CL_EmitEntities filled. Link this frame's
@@ -791,6 +832,8 @@ int CL_GCRelinkTempEnts( void )
 	int i, ran = 0;
 
 	CL_GCEnsureTempEntPool();
+	if( cl_tempents )
+		CL_GCDrainLocalTempEnts();
 	/* gc_fxtest 1: a muzzle flash sprite 64 units in front of the view every
 	 * second, living a second, so a capture can prove the sprite path draws
 	 * without having to catch a 0.1 s flash. */

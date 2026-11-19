@@ -1687,7 +1687,7 @@ static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want )
  * then from the ARAM asset cache on later maps). A failed load waits before it tries
  * again, and gives up after a few. Players and scripted film actors both carry one.
  */
-static int CL_GCLeanWeaponIndex( const char *wpath )
+static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 {
 	extern qboolean Mod_GCPromoteStudioPath( const char *path );
 	static double next_try[64];	/* by model index & 63: BSS is MEM1 */
@@ -1711,6 +1711,36 @@ static int CL_GCLeanWeaponIndex( const char *wpath )
 		}
 		if( noload < 0 )
 			noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
+		/* A scripted cast of 24 asked for every class's gun at once: a 198 KB
+		 * read failed in the file pool and every later shot's cast file with it
+		 * (ceres short-charlie-a). Film actors load at most two guns per map
+		 * (256 KB or less each); past that an actor carries a gun only if a player's
+		 * already brought it in. */
+		if( film && !noload )
+		{
+			static int film_spawn = -1, film_loads;
+			static int film_logs;
+			const fs_offset_t size = FS_FileSize( wpath, false );
+
+			if( film_spawn != svs.spawncount )
+			{
+				film_spawn = svs.spawncount;
+				film_loads = 0;
+			}
+			if( film_loads >= 2 || size <= 0 || size > 262144 )
+			{
+				if( film_logs < 8 && fails[wk] < 3 )
+				{
+					film_logs++;
+					Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) not loaded: %d of 2 loads used\n",
+						wpath, (long)size, film_loads );
+				}
+				fails[wk] = 3;
+				return 0;
+			}
+			if( fails[wk] < 3 && host.realtime >= next_try[wk] )
+				film_loads++;
+		}
 		if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
 		{
 			if( Mod_GCPromoteStudioPath( wpath ))
@@ -2424,7 +2454,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			{
 				static int film_wlogs;
 
-				ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( SV_GetString( ed->v.weaponmodel ));
+				ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( SV_GetString( ed->v.weaponmodel ), true );
 				if( film_wlogs < 4 )
 				{
 					film_wlogs++;
@@ -2790,7 +2820,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					const char *wpath = SV_GetString( ed->v.weaponmodel );
 					static int wlogs;
 
-					ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( wpath );
+					ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( wpath, false );
 					if( wlogs < 4 )
 					{
 						wlogs++;
