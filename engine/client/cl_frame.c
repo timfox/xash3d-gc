@@ -1757,6 +1757,13 @@ static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
 	return mod;
 }
 
+/* A studio prop the game puts in a film (dod-gc's film actors: the soldiers of a
+ * cine_play shot, props wearing the team player models) carries this in
+ * pev->iuser4. The lean emitter's model allowlist leaves out player bodies, so
+ * these are admitted by the tag, ahead of the map's props. Keep the value in step
+ * with DODGC_FILM_ACTOR_TAG in dod-gc's src/dod_film.h. */
+#define GC_FILM_ACTOR_TAG	0x46494C4D	/* 'FILM' */
+
 /* The lean emitter rebuilds each studio entity from its edict every frame, so
  * the client-side latch that crossfades a sequence change (0.2 s in
  * R_StudioSetupBones) never survives. Keep it here, per edict. */
@@ -1887,8 +1894,10 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	/* Prefer dump/bake eye so Xen boss picks use the CapFaces camera, not
 	 * info_player_start (c4a3 EmitBrush view=(436,-376) while dump eye was
 	 * (240,-396)). */
+	/* A cinematic camera (cine_play) looks from far across the map: what is
+	 * near it is what the shot sees, not what is near the player. */
 	if( !VectorIsNull( refState.vieworg )
-		&& ( Sys_CheckParm( "-gcdumpframes" ) || Sys_CheckParm( "-gcdump" )))
+		&& ( Sys_CheckParm( "-gcdumpframes" ) || Sys_CheckParm( "-gcdump" ) || CL_CineActive( )))
 		VectorCopy( refState.vieworg, view_org );
 	else if( player && SV_IsValidEdict( player ) && !VectorIsNull( player->v.origin ))
 		VectorCopy( player->v.origin, view_org );
@@ -2001,6 +2010,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			vec3_t delta;
 			float dist;
 			qboolean allow;
+			qboolean is_film;
 
 			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex )
 				continue;
@@ -2092,6 +2102,45 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					}
 				}
 			}
+			is_film = ( ed->v.iuser4 == GC_FILM_ACTOR_TAG );
+			if( is_film && ( !mod || mod->needload != NL_PRESENT || !mod->cache.data )
+				&& ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS && sv.model_precache[ed->v.modelindex][0] )
+			{
+				/* The team body is precached by the game while the map loads,
+				 * which on this route registers the name without loading it
+				 * (the bots' bodies go through CL_GCLeanPlayerBody the same way).
+				 * Load it once per model index and map. */
+				static byte film_tried[MAX_MODELS / 8];
+				static int film_spawn = -1;
+				const int mi = ed->v.modelindex;
+
+				if( film_spawn != svs.spawncount )
+				{
+					memset( film_tried, 0, sizeof( film_tried ));
+					film_spawn = svs.spawncount;
+				}
+				if( !CHECKVISBIT( film_tried, mi ))
+				{
+					model_t *found;
+
+					SETVISBIT( film_tried, mi );
+					found = Mod_ForName( sv.model_precache[mi], false, false );
+					Con_Reportf( "Xash3D GameCube: lean film actor body %s %s\n", sv.model_precache[mi],
+						found && found->cache.data ? "loaded" : "load failed" );
+					if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+					{
+						sv.models[mi] = found;
+						mod = found;
+					}
+				}
+				else
+				{
+					model_t *found = Mod_FindName( sv.model_precache[mi], false );
+
+					if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+						mod = found;
+				}
+			}
 			if( !mod || mod->type != mod_studio )
 				continue;
 			/* A weapon a player carries keeps its w_ model at the player's
@@ -2122,6 +2171,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			 * Skip v_* / player. The answer only depends on the model name,
 			 * and it took up to twenty case-insensitive substring searches
 			 * per studio entity per frame: remember it per model. */
+			if( is_film )
+				allow = true;
+			else
 			{
 				static struct { const model_t *mod; char name[40]; signed char ok; } memo[8];
 				const unsigned mi = ( (unsigned)(size_t)mod >> 4 ) & 7u;
@@ -2207,8 +2259,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 						ed->v.movetype, ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] );
 				}
 			}
-			/* Insert into nearest-N picks. */
-			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, dist );
+			/* Insert into nearest-N picks. A film actor is what the shot is
+			 * about: it goes ahead of every map prop. */
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, is_film ? dist * 0.001f : dist );
 		}
 		/* Static props (unnamed env_model / dod_object, no edict). */
 		for( e = 0; e < gc_num_static_props; e++ )
