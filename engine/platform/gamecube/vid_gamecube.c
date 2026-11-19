@@ -18366,30 +18366,35 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 						if( ( live_hud_frames & 255 ) == 1 )
 							Con_Reportf( "Xash3D GameCube: CapFaces live HUD frames=%d team=%d class=%d\n",
 								live_hud_frames, gc_capfaces_team_sel, gc_capfaces_class_sel );
-						Q_snprintf( picked, sizeof( picked ), "TEAM: %s",
-							teams[gc_capfaces_team_sel] + 3 ); /* skip "N  " */
-						ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 18,
-							64, 52, 36, 200 );
-						ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 1,
-							175, 127, 1, 255 );
-						GC_CapFacesDrawText( 24, 6, picked, text_scale, 175, 127, 1, 255 );
-						/* CapFaces Flipper lean HUD — sprites Guru after densify;
-						 * paint DoD-colored health/ammo bars without SPR_Load. */
+						/* The lean route's own TEAM / HP / AMMO bars are only for a client that has no retail HUD: when the
+						 * DoD client drew its readout this frame (gc_hud_retail), a second ammo/health display would overlap it. */
+						if( Cvar_VariableValue( "gc_hud_retail" ) == 0.0f )
 						{
-							const int hud_y = scr_h - 28;
-							const int hp = 100;
-							const int hp_w = ( scr_w * 120 ) / 640;
+							Q_snprintf( picked, sizeof( picked ), "TEAM: %s",
+								teams[gc_capfaces_team_sel] + 3 ); /* skip "N  " */
+							ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 18,
+								64, 52, 36, 200 );
+							ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 1,
+								175, 127, 1, 255 );
+							GC_CapFacesDrawText( 24, 6, picked, text_scale, 175, 127, 1, 255 );
+							/* CapFaces Flipper lean HUD — sprites Guru after densify;
+							 * paint DoD-colored health/ammo bars without SPR_Load. */
+							{
+								const int hud_y = scr_h - 28;
+								const int hp = 100;
+								const int hp_w = ( scr_w * 120 ) / 640;
 
-							ref.dllFuncs.FillRGBA( kRenderTransTexture, 12, hud_y, hp_w + 4, 16,
-								48, 40, 28, 220 );
-							ref.dllFuncs.FillRGBA( kRenderTransTexture, 14, hud_y + 2,
-								( hp_w * hp ) / 100, 12,
-								192, 28, 0, 230 );
-							GC_CapFacesDrawText( 18, hud_y + 3, "HP 100", text_scale,
-								255, 255, 255, 255 );
-							Q_snprintf( ammo_txt, sizeof( ammo_txt ), "AMMO %d", live_ammo );
-							GC_CapFacesDrawText( scr_w - 12 - 6 * 8 * text_scale, hud_y + 3,
-								ammo_txt, text_scale, 255, 176, 0, 255 );
+								ref.dllFuncs.FillRGBA( kRenderTransTexture, 12, hud_y, hp_w + 4, 16,
+									48, 40, 28, 220 );
+								ref.dllFuncs.FillRGBA( kRenderTransTexture, 14, hud_y + 2,
+									( hp_w * hp ) / 100, 12,
+									192, 28, 0, 230 );
+								GC_CapFacesDrawText( 18, hud_y + 3, "HP 100", text_scale,
+									255, 255, 255, 255 );
+								Q_snprintf( ammo_txt, sizeof( ammo_txt ), "AMMO %d", live_ammo );
+								GC_CapFacesDrawText( scr_w - 12 - 6 * 8 * text_scale, hud_y + 3,
+									ammo_txt, text_scale, 255, 176, 0, 255 );
+							}
 						}
 						if( !gc_team_fire_logged )
 						{
