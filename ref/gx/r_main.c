@@ -1342,6 +1342,10 @@ static void R_DrawEntitiesOnList( void )
 						&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" ))))
 			{
 				R_AllowFog( false );
+				{
+					extern void R_GXDecalRingDraw( void );
+					R_GXDecalRingDraw();
+				}
 				gEngfuncs.CL_DrawEFX( tr.frametime, true );
 				R_AllowFog( true );
 				if( !lean_efx_draw_logged )
