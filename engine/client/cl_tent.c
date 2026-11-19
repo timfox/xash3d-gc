@@ -773,7 +773,6 @@ void CL_TempEntUpdate( void )
 }
 
 #if XASH_GAMECUBE
-#if XASH_GAMECUBE
 /*
 ==============
 CL_GCDrainLocalTempEnts
