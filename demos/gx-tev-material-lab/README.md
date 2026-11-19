@@ -26,14 +26,27 @@ Produces `gx-tev-material-lab.dol`.
 HUD chrome (logo, purple banner, GC A/B/X/Y buttons, FPS) is generated as
 sprites in `gen_assets.py` — do **not** run `bake_from_reference.py` (retired).
 
+## Presentation
+
+Opens in **Gallery** mode (title card, soft letterbox, idle camera orbit).
+**START** flips to **Lab** (full Flipper engineer HUD). Any pad input cancels
+the DumpFrames capture reel so you stay in control.
+
+```bash
+./scripts/run_dolphin.sh          # interactive Flatpak Dolphin
+```
+
 ## Controls
 
 | Button | Action |
 |--------|--------|
-| A | Cycle material (RUST / copper / damascus / corrugated / steel / cladding / concrete / brick / wood / paint / solar / gold / iron / chrome / plastic) |
+| A / D-pad / L R | Cycle material |
 | B | Step roughness |
 | X | Toggle env map |
 | Y | Cycle TEV feature path |
+| START | Gallery ↔ Lab |
+| Z | Toggle idle auto-showcase |
+| Stick X | Orbit camera |
 
 ### TEV feature paths (Y)
 

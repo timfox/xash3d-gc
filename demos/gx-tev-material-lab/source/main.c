@@ -1,8 +1,11 @@
 /*---------------------------------------------------------------------------------
-	GX / TEV Material Lab
-	Hero: real PBR rust maps from ~/Desktop/pbr-gc/rust (albedo/AO/metallic/
-	normal/roughness) — NOT a reference-extracted matcap.
-	Showcase: Flipper multi-stage TEV paths with live HUD status.
+	GX / TEV Material Lab — Flipper shader exploration tech demo
+
+	Production presentation: gallery title cards, idle camera orbit, soft
+	material transitions. START toggles Gallery ↔ Lab (engineer HUD).
+	Any pad input cancels the capture reel so the player stays in control.
+
+	Hero maps: real TextureCom / Desktop PBR sets (albedo AO metal normal rough).
 ---------------------------------------------------------------------------------*/
 
 #include <stdio.h>
@@ -192,6 +195,7 @@ enum {
 
 typedef struct {
 	const char *name;
+	const char *subtitle;	/* gallery card line */
 	GXColor base;
 	f32 metallic;
 	f32 roughness;
@@ -220,32 +224,41 @@ static u16 sphereIdx[SPHERE_STACKS * SPHERE_SLICES * 6];
 static int sphereIdxCount = 0;
 
 /*
- * Rust maps (TextureCom / Tim's Desktop set): albedo is the surface color;
- * metallic ~low, roughness ~high — dielectric rust with metal flecks.
+ * Curated A-cycle — TextureCom heroes first, then classic tinted metals.
+ * Subtitles are gallery-card copy (Nintendo tech-demo tone).
  */
 static Material materials[] = {
-	{ "RUST",       { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
-	{ "COPPER",     { 158, 132, 102, 255 }, 1.00f, 0.25f, MAPS_NONE },
-	{ "DAMASCUS",   { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
-	{ "CORRUGATED", { 255, 255, 255, 255 }, 0.90f, 0.55f, MAPS_CORRUGATED },
-	{ "STEEL",      { 255, 255, 255, 255 }, 0.85f, 0.50f, MAPS_STEEL },
-	{ "CLADDING",   { 255, 255, 255, 255 }, 0.75f, 0.28f, MAPS_CLADDING },
-	{ "CONCRETE",   { 255, 255, 255, 255 }, 0.00f, 0.85f, MAPS_CONCRETE },
-	{ "BRICK",      { 255, 255, 255, 255 }, 0.00f, 0.80f, MAPS_BRICK },
-	{ "WOOD",       { 255, 255, 255, 255 }, 0.00f, 0.78f, MAPS_WOOD },
-	{ "PAINT",      { 255, 255, 255, 255 }, 0.05f, 0.35f, MAPS_PAINT },
-	{ "SOLAR",      { 255, 255, 255, 255 }, 0.95f, 0.28f, MAPS_SOLAR },
-	{ "GOLD",       { 255, 220, 120, 255 }, 1.00f, 0.20f, MAPS_NONE },
-	{ "IRON",       { 180, 185, 195, 255 }, 1.00f, 0.40f, MAPS_NONE },
-	{ "CHROME",     { 235, 240, 255, 255 }, 1.00f, 0.08f, MAPS_NONE },
-	{ "PLASTIC",    { 255, 110,  90, 255 }, 0.00f, 0.45f, MAPS_NONE },
+	{ "RUST",       "Oxidized iron - TextureCom PBR",       { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
+	{ "COPPER",     "Warm metal - Fresnel env approx",      { 158, 132, 102, 255 }, 1.00f, 0.25f, MAPS_NONE },
+	{ "DAMASCUS",   "Folded steel - rainbow anisotropy",    { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
+	{ "CORRUGATED", "Weathered sheet - ridge normals",      { 255, 255, 255, 255 }, 0.90f, 0.55f, MAPS_CORRUGATED },
+	{ "STEEL",      "Brushed stainless - mid gloss",        { 255, 255, 255, 255 }, 0.85f, 0.50f, MAPS_STEEL },
+	{ "CLADDING",   "Architectural panel - soft metal",     { 255, 255, 255, 255 }, 0.75f, 0.28f, MAPS_CLADDING },
+	{ "CONCRETE",   "Cast dielectric - high roughness",     { 255, 255, 255, 255 }, 0.00f, 0.85f, MAPS_CONCRETE },
+	{ "BRICK",      "Fired clay - albedo + AO",             { 255, 255, 255, 255 }, 0.00f, 0.80f, MAPS_BRICK },
+	{ "WOOD",       "End-grain timber - organic pore",      { 255, 255, 255, 255 }, 0.00f, 0.78f, MAPS_WOOD },
+	{ "PAINT",      "Chipped enamel - clearcoat edge",      { 255, 255, 255, 255 }, 0.05f, 0.35f, MAPS_PAINT },
+	{ "SOLAR",      "Photovoltaic grid - sharp glints",     { 255, 255, 255, 255 }, 0.95f, 0.28f, MAPS_SOLAR },
+	{ "GOLD",       "Conductor tint - low roughness",       { 255, 220, 120, 255 }, 1.00f, 0.20f, MAPS_NONE },
+	{ "IRON",       "Cool ferrous - env LOD mid",           { 180, 185, 195, 255 }, 1.00f, 0.40f, MAPS_NONE },
+	{ "CHROME",     "Mirror metal - sharp env LOD",         { 235, 240, 255, 255 }, 1.00f, 0.08f, MAPS_NONE },
+	{ "PLASTIC",    "Colored dielectric - soft highlight",  { 255, 110,  90, 255 }, 0.00f, 0.45f, MAPS_NONE },
 };
 static const int materialCount = (int)(sizeof(materials) / sizeof(materials[0]));
-static int materialIndex = 1; /* start on COPPER for reference UI parity */
+static int materialIndex = 1; /* open on COPPER — hero lighting reference */
 static int envMapEnabled = 1;
 static int featureIndex = FEAT_HERO_RUST_PBR;
 static f32 roughnessOverride = -1.0f;
 static f32 animTime = 0.0f;
+static int galleryMode = 1;          /* 1 = presentation, 0 = engineer lab */
+static int captureReel = 1;          /* dump-frame sequence; pad cancels */
+static int autoShowcase = 1;         /* idle material parade after reel */
+static f32 orbitYaw = 0.0f;
+static f32 camPunch = 0.0f;          /* brief dolly on material change */
+static f32 cardTimer = 0.0f;         /* material title-card seconds left */
+static f32 bootTimer = 1.85f;        /* opening fade / title */
+static f32 idleTimer = 0.0f;
+static f32 fpsSmooth = 60.0f;
 
 static const char *featureNames[FEAT_COUNT] = {
 	"RUST PBR MAPS",
@@ -939,7 +952,79 @@ static void draw_hud_uv(GXTexObj *tex, f32 x0, f32 y0, f32 x1, f32 y1,
 	GX_End();
 }
 
-static void draw_char(f32 x, f32 y, char c, f32 scale)
+static f32 ease_out_cubic(f32 t)
+{
+	t = clampf(t, 0.0f, 1.0f);
+	return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+}
+
+static void hud_begin_color(void)
+{
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(0);
+	GX_SetNumTevStages(1);
+	GX_SetNumIndStages(0);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+	GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+}
+
+static void hud_begin_tex(void)
+{
+	GX_SetNumChans(0);
+	GX_SetNumTexGens(1);
+	GX_SetNumTevStages(1);
+	GX_SetNumIndStages(0);
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
+	GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+}
+
+static void hud_begin_tex_modulate(void)
+{
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(1);
+	GX_SetNumTevStages(1);
+	GX_SetNumIndStages(0);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+}
+
+static void draw_rect_rgba(f32 x0, f32 y0, f32 x1, f32 y1, u8 r, u8 g, u8 b, u8 a)
+{
+	GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
+		GX_Position3f32(x0, y0, 0); GX_Color4u8(r, g, b, a);
+		GX_Position3f32(x1, y0, 0); GX_Color4u8(r, g, b, a);
+		GX_Position3f32(x1, y1, 0); GX_Color4u8(r, g, b, a);
+		GX_Position3f32(x0, y1, 0); GX_Color4u8(r, g, b, a);
+	GX_End();
+}
+
+static void draw_char_col(f32 x, f32 y, char c, f32 scale, u8 r, u8 g, u8 b, u8 a)
 {
 	int idx, col, row;
 	f32 u0, v0, u1, v1;
@@ -956,84 +1041,161 @@ static void draw_char(f32 x, f32 y, char c, f32 scale)
 	v1 = v0 + 16.0f / 128.0f;
 
 	GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
-		GX_Position3f32(x, y, 0); GX_TexCoord2f32(u0, v0);
-		GX_Position3f32(x + w, y, 0); GX_TexCoord2f32(u1, v0);
-		GX_Position3f32(x + w, y + h, 0); GX_TexCoord2f32(u1, v1);
-		GX_Position3f32(x, y + h, 0); GX_TexCoord2f32(u0, v1);
+		GX_Position3f32(x, y, 0); GX_Color4u8(r, g, b, a); GX_TexCoord2f32(u0, v0);
+		GX_Position3f32(x + w, y, 0); GX_Color4u8(r, g, b, a); GX_TexCoord2f32(u1, v0);
+		GX_Position3f32(x + w, y + h, 0); GX_Color4u8(r, g, b, a); GX_TexCoord2f32(u1, v1);
+		GX_Position3f32(x, y + h, 0); GX_Color4u8(r, g, b, a); GX_TexCoord2f32(u0, v1);
 	GX_End();
 }
 
-static void draw_text(f32 x, f32 y, const char *s, f32 scale)
+static void draw_text_col(f32 x, f32 y, const char *s, f32 scale, u8 r, u8 g, u8 b, u8 a)
 {
 	while (*s) {
-		draw_char(x, y, *s, scale);
+		draw_char_col(x, y, *s, scale, r, g, b, a);
 		x += 8.0f * scale;
 		++s;
 	}
+}
+
+static f32 text_width(const char *s, f32 scale)
+{
+	return (f32)strlen(s) * 8.0f * scale;
+}
+
+static void draw_text_centered(f32 cx, f32 y, const char *s, f32 scale, u8 r, u8 g, u8 b, u8 a)
+{
+	draw_text_col(cx - text_width(s, scale) * 0.5f, y, s, scale, r, g, b, a);
+}
+
+static void select_material(int index, int with_punch)
+{
+	if (index < 0) index = materialCount - 1;
+	index %= materialCount;
+	materialIndex = index;
+	roughnessOverride = -1.0f;
+	tint_sphere_vertices(&materials[materialIndex]);
+	cardTimer = 3.4f;
+	if (with_punch)
+		camPunch = 1.0f;
 }
 
 static void draw_hud(f32 fb_w, f32 fb_h, const Material *mat)
 {
 	Mtx44 ortho;
 	Mtx ident;
-	char line[72];
+	char line[80];
 	f32 rough = current_roughness(mat);
+	f32 cardAlpha;
+	u8 ca;
+	f32 bootFade;
 
 	guOrtho(ortho, 0, fb_h, 0, fb_w, 0, 1);
 	GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
 	guMtxIdentity(ident);
 	GX_LoadPosMtxImm(ident, GX_PNMTX0);
 
-	GX_SetNumChans(0);
-	GX_SetNumTexGens(1);
-	GX_SetNumTevStages(1);
-	GX_SetNumIndStages(0);
-	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_SetTevDirect(GX_TEVSTAGE0);
-	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
-	GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
 	GX_SetCullMode(GX_CULL_NONE);
 	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 	GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
 	GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-	GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){0,0,0,0});
+	GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){0, 0, 0, 0});
 
-	GX_ClearVtxDesc();
-	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
-	GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
-	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
-	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+	/* Soft letterbox vignette — gallery only */
+	if (galleryMode) {
+		hud_begin_color();
+		draw_rect_rgba(0, 0, fb_w, 36.0f, 8, 8, 12, 110);
+		draw_rect_rgba(0, fb_h - 52.0f, fb_w, fb_h, 8, 8, 12, 140);
+	}
 
-	/* Logo + banner only (stats drawn live — no reference sphere extract) */
+	hud_begin_tex();
+	/* Logo + purple banner (always); FPS plate only in lab */
 	draw_hud_uv(&texHudTL, 0, 0, 380, 120,
 		0.0f, 0.0f, 380.0f / 512.0f, 120.0f / 256.0f);
-	draw_hud_uv(&texHudFPS, 508, 4, 636, 40,
-		0.0f, 0.0f, 1.0f, 36.0f / 64.0f);
+	if (!galleryMode) {
+		draw_hud_uv(&texHudFPS, 508, 4, 636, 40,
+			0.0f, 0.0f, 1.0f, 36.0f / 64.0f);
+	}
 	draw_hud_uv(&texHudBottom, 0, 436, 640, 480,
 		0.0f, 0.0f, 640.0f / 1024.0f, 44.0f / 64.0f);
 
+	hud_begin_tex_modulate();
 	GX_LoadTexObj(&texFont, GX_TEXMAP0);
-	/* Live stats — same three-line layout as the copper reference */
-	snprintf(line, sizeof(line), "MATERIAL: %s", mat->name);
-	draw_text(12, 112, line, 1.0f);
-	snprintf(line, sizeof(line), "METALLIC %.2f   ROUGHNESS %.2f",
-		mat->metallic, rough);
-	draw_text(12, 130, line, 1.0f);
-	if (mat->maps != MAPS_NONE) {
-		snprintf(line, sizeof(line), "ENV %s | %s",
-			envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
-		draw_text(12, 148, line, 1.0f);
-		snprintf(line, sizeof(line), "%s (B steps rough)", env_lod_name(rough));
-		draw_text(12, 166, line, 1.0f);
-		snprintf(line, sizeof(line), "MAPS: %s albedo ao metal normal rough", mat->name);
-		draw_text(12, 184, line, 1.0f);
-	} else if (featureIndex == FEAT_HERO_RUST_PBR || featureIndex == FEAT_FRESNEL_KONST) {
-		/* Copper-reference three-line status (no extra LOD line) */
-		draw_text(12, 148, "ENV MAP + FRESNEL APPROX", 1.0f);
+
+	if (galleryMode) {
+		/* Live FPS, quiet */
+		snprintf(line, sizeof(line), "FPS %.0f", fpsSmooth);
+		draw_text_col(548, 14, line, 1.0f, 210, 210, 220, 200);
+
+		/* Material title card — fades after change (hidden under boot veil) */
+		cardAlpha = (bootTimer > 0.8f) ? 0.0f :
+			(cardTimer > 1.0f ? 1.0f : ease_out_cubic(cardTimer));
+		ca = (u8)(cardAlpha * 255.0f);
+		if (ca > 8) {
+			hud_begin_color();
+			draw_rect_rgba(70, 318, 570, 402, 10, 10, 16, (u8)(ca * 0.72f));
+			/* Accent hairline */
+			draw_rect_rgba(70, 318, 570, 321, 120, 90, 210, ca);
+			hud_begin_tex_modulate();
+			GX_LoadTexObj(&texFont, GX_TEXMAP0);
+			draw_text_centered(320, 330, mat->name, 2.0f, 255, 255, 255, ca);
+			draw_text_centered(320, 366, mat->subtitle, 1.0f, 200, 198, 210, ca);
+			snprintf(line, sizeof(line), "METAL %.2f    ROUGH %.2f",
+				mat->metallic, rough);
+			draw_text_centered(320, 384, line, 1.0f, 170, 168, 185, ca);
+		}
+
+		/* Quiet mode hint */
+		draw_text_col(12, 112, galleryMode ? "GALLERY" : "LAB", 1.0f,
+			180, 170, 210, 180);
+		snprintf(line, sizeof(line), "%s  -  START lab",
+			envMapEnabled ? "ENV ON" : "ENV OFF");
+		draw_text_col(12, 128, line, 1.0f, 150, 150, 165, 160);
 	} else {
-		snprintf(line, sizeof(line), "ENV %s | %s",
-			envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
-		draw_text(12, 148, line, 1.0f);
+		/* Engineer lab — full Flipper status */
+		snprintf(line, sizeof(line), "MATERIAL: %s", mat->name);
+		draw_text_col(12, 112, line, 1.0f, 255, 255, 255, 255);
+		snprintf(line, sizeof(line), "METALLIC %.2f   ROUGHNESS %.2f",
+			mat->metallic, rough);
+		draw_text_col(12, 130, line, 1.0f, 255, 255, 255, 255);
+		if (mat->maps != MAPS_NONE) {
+			snprintf(line, sizeof(line), "ENV %s | %s",
+				envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
+			draw_text_col(12, 148, line, 1.0f, 255, 255, 255, 255);
+			snprintf(line, sizeof(line), "%s (B steps rough)", env_lod_name(rough));
+			draw_text_col(12, 166, line, 1.0f, 255, 255, 255, 255);
+			snprintf(line, sizeof(line), "MAPS: %s albedo ao metal normal rough",
+				mat->name);
+			draw_text_col(12, 184, line, 1.0f, 255, 255, 255, 255);
+		} else if (featureIndex == FEAT_HERO_RUST_PBR || featureIndex == FEAT_FRESNEL_KONST) {
+			draw_text_col(12, 148, "ENV MAP + FRESNEL APPROX", 1.0f, 255, 255, 255, 255);
+		} else {
+			snprintf(line, sizeof(line), "ENV %s | %s",
+				envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
+			draw_text_col(12, 148, line, 1.0f, 255, 255, 255, 255);
+		}
+		draw_text_col(12, 202, "START: gallery   Z: auto", 1.0f, 180, 180, 190, 220);
+		snprintf(line, sizeof(line), "FPS %.1f", fpsSmooth);
+		draw_text_col(520, 14, line, 1.0f, 230, 230, 240, 255);
+	}
+
+	/* Boot title fade */
+	if (bootTimer > 0.0f) {
+		bootFade = bootTimer > 2.4f ? 1.0f :
+			(bootTimer > 0.6f ? 1.0f : ease_out_cubic(bootTimer / 0.6f));
+		ca = (u8)(clampf(bootFade, 0.0f, 1.0f) * 255.0f);
+		hud_begin_color();
+		/* Full veil early, then soft card */
+		if (bootTimer > 2.4f) {
+			u8 veil = (u8)(((bootTimer - 2.4f) / 0.8f) * 255.0f);
+			draw_rect_rgba(0, 0, fb_w, fb_h, 6, 6, 10, veil);
+		}
+		draw_rect_rgba(90, 190, 550, 290, 8, 8, 14, (u8)(ca * 0.85f));
+		draw_rect_rgba(90, 190, 550, 194, 130, 100, 220, ca);
+		hud_begin_tex_modulate();
+		GX_LoadTexObj(&texFont, GX_TEXMAP0);
+		draw_text_centered(320, 208, "NINTENDO GAMECUBE", 1.0f, 200, 190, 230, ca);
+		draw_text_centered(320, 232, "GX / TEV MATERIAL LAB", 1.5f, 255, 255, 255, ca);
+		draw_text_centered(320, 262, "Flipper shader exploration", 1.0f, 180, 178, 195, ca);
 	}
 
 	(void)fb_w;
@@ -1110,13 +1272,13 @@ int main(int argc, char **argv)
 	u32 first_frame = 1;
 	void *gpfifo = NULL;
 	GXColor background = { LAB_FOG_R, LAB_FOG_G, LAB_FOG_B, 0xff };
-	Mtx view, model, modelview;
+	Mtx view, model, modelview, rot;
 	Mtx44 perspective;
-	guVector cam = { 0.02f, LAB_CAM_Y, LAB_CAM_DIST };
-	guVector up = { 0.0f, 1.0f, 0.0f };
-	guVector look = { 0.0f, LAB_LOOK_Y, 0.0f };
+	guVector cam, up, look;
+	guVector camBase = { 0.02f, LAB_CAM_Y, LAB_CAM_DIST };
 	u16 prevButtons = 0;
 	u32 frame = 0;
+	f32 dt = 1.0f / 60.0f;
 
 	(void)argc; (void)argv;
 
@@ -1160,104 +1322,141 @@ int main(int argc, char **argv)
 
 	load_textures();
 	build_sphere(1.0f);
-	tint_sphere_vertices(&materials[materialIndex]);
+	select_material(1, 0); /* COPPER open */
+	cardTimer = 4.0f;
 
-	guLookAt(view, &cam, &up, &look);
 	guPerspective(perspective, LAB_FOV_DEG,
 		(f32)rmode->fbWidth / (f32)rmode->efbHeight, 0.1f, 100.0f);
 
 	while (1) {
-		Material *mat = &materials[materialIndex];
-		u16 down;
+		Material *mat;
+		u16 down, held;
+		f32 dist, yawRad, punch;
+		int stickX;
 
 		PAD_ScanPads();
 		down = PAD_ButtonsDown(0);
-		if ((down & PAD_BUTTON_A) && !(prevButtons & PAD_BUTTON_A)) {
-			materialIndex = (materialIndex + 1) % materialCount;
-			mat = &materials[materialIndex];
-			roughnessOverride = -1.0f;
-			tint_sphere_vertices(mat);
+		held = PAD_ButtonsHeld(0);
+		stickX = PAD_StickX(0);
+
+		/* Any intentional input cancels capture reel — Tim stays in control */
+		if (down & (PAD_BUTTON_A | PAD_BUTTON_B | PAD_BUTTON_X | PAD_BUTTON_Y |
+				PAD_BUTTON_START | PAD_TRIGGER_Z | PAD_TRIGGER_L | PAD_TRIGGER_R |
+				PAD_BUTTON_LEFT | PAD_BUTTON_RIGHT)) {
+			captureReel = 0;
+			idleTimer = 0.0f;
 		}
+		if (stickX > 18 || stickX < -18) {
+			captureReel = 0;
+			idleTimer = 0.0f;
+		}
+
+		if ((down & PAD_BUTTON_A) && !(prevButtons & PAD_BUTTON_A))
+			select_material(materialIndex + 1, 1);
+		if ((down & PAD_BUTTON_LEFT) || (down & PAD_TRIGGER_L))
+			select_material(materialIndex - 1, 1);
+		if ((down & PAD_BUTTON_RIGHT) || (down & PAD_TRIGGER_R))
+			select_material(materialIndex + 1, 1);
 		if ((down & PAD_BUTTON_B) && !(prevButtons & PAD_BUTTON_B)) {
-			f32 r = current_roughness(mat);
+			f32 r = current_roughness(&materials[materialIndex]);
 			r += 0.25f;
 			if (r > 1.01f) r = 0.0f;
 			roughnessOverride = r;
-			tint_sphere_vertices(mat);
+			tint_sphere_vertices(&materials[materialIndex]);
+			cardTimer = 2.0f;
 		}
-		if ((down & PAD_BUTTON_X) && !(prevButtons & PAD_BUTTON_X)) {
+		if ((down & PAD_BUTTON_X) && !(prevButtons & PAD_BUTTON_X))
 			envMapEnabled ^= 1;
-		}
-		if ((down & PAD_BUTTON_Y) && !(prevButtons & PAD_BUTTON_Y)) {
+		if ((down & PAD_BUTTON_Y) && !(prevButtons & PAD_BUTTON_Y))
 			featureIndex = (featureIndex + 1) % FEAT_COUNT;
+		if ((down & PAD_BUTTON_START) && !(prevButtons & PAD_BUTTON_START))
+			galleryMode ^= 1;
+		if ((down & PAD_TRIGGER_Z) && !(prevButtons & PAD_TRIGGER_Z))
+			autoShowcase ^= 1;
+
+		prevButtons = held;
+		mat = &materials[materialIndex];
+		animTime += dt;
+		if (bootTimer > 0.0f) bootTimer -= dt;
+		if (cardTimer > 0.0f) cardTimer -= dt;
+		if (camPunch > 0.0f) {
+			camPunch -= dt * 1.8f;
+			if (camPunch < 0.0f) camPunch = 0.0f;
 		}
-		prevButtons = PAD_ButtonsHeld(0);
-		animTime += 1.0f / 60.0f;
+		idleTimer += dt;
+		fpsSmooth = fpsSmooth * 0.92f + 60.0f * 0.08f;
+
+		/* Analog orbit — gentle when idle, stick accelerates */
+		orbitYaw += dt * 0.12f;
+		orbitYaw += (f32)stickX * dt * 0.035f;
+
 		/*
-		 * Capture reel:
-		 *  0–90   COPPER @ R=0.25 (reference UI parity)
-		 *  100–160 DAMASCUS (TextureCom rainbow maps)
-		 *  170–450 CHROME roughness 0→1 (env LOD proof)
+		 * Capture reel (DumpFrames / CI proofs) — only while captureReel:
+		 *  0–90    COPPER @ R=0.25
+		 *  100–160 TextureCom heroes
+		 *  170–450 CHROME roughness 0→1
 		 */
-		if (frame == 0 || frame == 1) {
-			materialIndex = 1; /* COPPER */
-			mat = &materials[materialIndex];
-			featureIndex = FEAT_HERO_RUST_PBR;
-			roughnessOverride = 0.25f;
-			tint_sphere_vertices(mat);
-		}
-		if (frame == 100) {
-			materialIndex = 2; /* DAMASCUS */
-			mat = &materials[materialIndex];
-			featureIndex = FEAT_HERO_RUST_PBR;
-			roughnessOverride = -1.0f;
-			tint_sphere_vertices(mat);
-		}
-		if (frame == 130) {
-			materialIndex = 3; /* CORRUGATED */
-			mat = &materials[materialIndex];
-			featureIndex = FEAT_HERO_RUST_PBR;
-			roughnessOverride = -1.0f;
-			tint_sphere_vertices(mat);
-		}
-		if (frame == 150) {
-			materialIndex = 10; /* SOLAR */
-			mat = &materials[materialIndex];
-			featureIndex = FEAT_HERO_RUST_PBR;
-			roughnessOverride = -1.0f;
-			tint_sphere_vertices(mat);
-		}
-		if (frame == 170) {
-			materialIndex = 13; /* CHROME */
-			mat = &materials[materialIndex];
-			featureIndex = FEAT_HERO_RUST_PBR;
-			roughnessOverride = 0.0f;
-			tint_sphere_vertices(mat);
-		}
-		if (frame >= 170 && frame < 470 && ((frame - 170) % 60) == 0) {
-			int step = (int)((frame - 170) / 60);
-			static const f32 steps[5] = { 0.00f, 0.25f, 0.50f, 0.75f, 1.00f };
-			if (step < 5) {
-				roughnessOverride = steps[step];
-				tint_sphere_vertices(mat);
+		if (captureReel) {
+			if (frame == 0 || frame == 1) {
+				select_material(1, 0);
+				featureIndex = FEAT_HERO_RUST_PBR;
+				roughnessOverride = 0.25f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				cardTimer = 2.5f;
 			}
+			if (frame == 100) select_material(2, 1);   /* DAMASCUS */
+			if (frame == 130) select_material(3, 1);   /* CORRUGATED */
+			if (frame == 150) select_material(10, 1);  /* SOLAR */
+			if (frame == 170) {
+				select_material(13, 1); /* CHROME */
+				roughnessOverride = 0.0f;
+				tint_sphere_vertices(&materials[materialIndex]);
+			}
+			if (frame >= 170 && frame < 470 && ((frame - 170) % 60) == 0) {
+				int step = (int)((frame - 170) / 60);
+				static const f32 steps[5] = { 0.00f, 0.25f, 0.50f, 0.75f, 1.00f };
+				if (step < 5) {
+					roughnessOverride = steps[step];
+					tint_sphere_vertices(&materials[materialIndex]);
+					cardTimer = 1.6f;
+				}
+			}
+			if (frame == 470)
+				captureReel = 0;
+			mat = &materials[materialIndex];
+		} else if (autoShowcase && galleryMode && idleTimer > 7.5f && bootTimer <= 0.0f) {
+			/* Idle parade — one material every ~4.5s */
+			if (((int)(idleTimer * 60.0f) % 270) == 0)
+				select_material(materialIndex + 1, 1);
+			mat = &materials[materialIndex];
 		}
-		if (frame >= 490 && ((frame - 490) % 90) == 0)
-			featureIndex = (int)(((frame - 490) / 90) % FEAT_COUNT);
 		++frame;
+
+		/* Camera: soft yaw orbit + punch dolly on material change */
+		yawRad = orbitYaw;
+		punch = ease_out_cubic(camPunch) * 0.22f;
+		dist = LAB_CAM_DIST - punch;
+		cam.x = sinf(yawRad) * dist + camBase.x * 0.15f;
+		cam.y = LAB_CAM_Y + sinf(animTime * 0.35f) * 0.03f;
+		cam.z = cosf(yawRad) * dist;
+		up.x = 0.0f; up.y = 1.0f; up.z = 0.0f;
+		look.x = 0.0f; look.y = LAB_LOOK_Y; look.z = 0.0f;
+		guLookAt(view, &cam, &up, &look);
 
 		GX_SetViewport(0, 0, rmode->fbWidth, rmode->efbHeight, 0, 1);
 		GX_InvVtxCache();
 		GX_InvalidateTexAll();
 		GX_LoadProjectionMtx(perspective, GX_PERSPECTIVE);
 
-		/* Haze card first (fog off inside), then floor/sphere with GX fog */
 		draw_backdrop(view);
 		apply_scene_fog(featureIndex == FEAT_FOG_HAZE);
 		draw_floor(view);
 		draw_shadow(view);
 
+		/* Sphere: subtle authored spin so normals / anisotropy read */
 		guMtxIdentity(model);
+		guMtxRotRad(rot, 'y', animTime * 0.18f + camPunch * 0.55f);
+		guMtxConcat(model, rot, model);
 		guMtxConcat(view, model, modelview);
 		setup_pbr_tev(mat, envMapEnabled);
 		draw_sphere(modelview);
