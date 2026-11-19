@@ -65,6 +65,14 @@
 #define LAB_CAM_DIST		5.15f
 #define LAB_LOOK_Y			0.00f
 #define LAB_CAM_Y			0.28f
+/* Reference grey haze — clear + GX fog that starts behind the sphere */
+#define LAB_FOG_R			46
+#define LAB_FOG_G			44
+#define LAB_FOG_B			52
+#define LAB_FOG_START		5.8f	/* just past sphere front; thickens behind */
+#define LAB_FOG_END			12.0f
+#define LAB_FOG_START_DENSE	4.0f	/* Y-feature showcase denser */
+#define LAB_FOG_END_DENSE	11.0f
 
 enum {
 	FEAT_HERO_RUST_PBR = 0,
@@ -678,6 +686,79 @@ static void draw_sphere(Mtx modelview)
 	GX_SetTevDirect(GX_TEVSTAGE0);
 }
 
+/*
+ * Soft vertical haze card behind the sphere (z = -2.4). Drawn with fog off so
+ * the reference gradient survives: darker crown → grey fog shelf → lighter
+ * near the horizon. Floor/sphere keep GX fog so far checkers melt into haze.
+ */
+static void draw_backdrop(const Mtx view)
+{
+	Mtx model, modelview;
+	const f32 z = -2.40f;
+	const f32 x = 14.0f;
+	const f32 y0 = -1.10f;
+	const f32 y1 = 7.00f;
+	const f32 y_lo = 0.15f;
+	const f32 y_hi = 2.10f;
+	/* Cool greys sampled from the copper reference void */
+	GXColor top = { 30, 28, 34, 255 };
+	GXColor hi = { 40, 38, 46, 255 };
+	GXColor shelf = { 52, 50, 58, 255 };
+	GXColor bot = { LAB_FOG_R, LAB_FOG_G, LAB_FOG_B, 255 };
+
+	guMtxIdentity(model);
+	guMtxConcat(view, model, modelview);
+	GX_LoadPosMtxImm(modelview, GX_PNMTX0);
+
+	GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){0, 0, 0, 0});
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(0);
+	GX_SetNumTevStages(1);
+	GX_SetNumIndStages(0);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+	GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+	GX_SetCullMode(GX_CULL_NONE);
+	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+	GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+
+	GX_Begin(GX_QUADS, GX_VTXFMT0, 12);
+		/* Crown → upper haze */
+		GX_Position3f32(-x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
+		GX_Position3f32( x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
+		GX_Position3f32( x, y1, z);   GX_Color4u8(top.r, top.g, top.b, top.a);
+		GX_Position3f32(-x, y1, z);   GX_Color4u8(top.r, top.g, top.b, top.a);
+		/* Fog shelf behind the sphere */
+		GX_Position3f32(-x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
+		GX_Position3f32( x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
+		GX_Position3f32( x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
+		GX_Position3f32(-x, y_hi, z); GX_Color4u8(hi.r, hi.g, hi.b, hi.a);
+		/* Near-horizon band */
+		GX_Position3f32(-x, y0, z);   GX_Color4u8(bot.r, bot.g, bot.b, bot.a);
+		GX_Position3f32( x, y0, z);   GX_Color4u8(bot.r, bot.g, bot.b, bot.a);
+		GX_Position3f32( x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
+		GX_Position3f32(-x, y_lo, z); GX_Color4u8(shelf.r, shelf.g, shelf.b, shelf.a);
+	GX_End();
+}
+
+static void apply_scene_fog(int dense)
+{
+	GXColor fogc = { LAB_FOG_R, LAB_FOG_G, LAB_FOG_B, 255 };
+	f32 start = dense ? LAB_FOG_START_DENSE : LAB_FOG_START;
+	f32 end = dense ? LAB_FOG_END_DENSE : LAB_FOG_END;
+	GX_SetFog(GX_FOG_PERSP_LIN, start, end, 0.1f, 100.0f, fogc);
+}
+
 static void draw_floor(const Mtx view)
 {
 	Mtx model, modelview;
@@ -940,7 +1021,7 @@ int main(int argc, char **argv)
 	u32 fb = 0;
 	u32 first_frame = 1;
 	void *gpfifo = NULL;
-	GXColor background = { 22, 20, 24, 0xff };
+	GXColor background = { LAB_FOG_R, LAB_FOG_G, LAB_FOG_B, 0xff };
 	Mtx view, model, modelview;
 	Mtx44 perspective;
 	guVector cam = { 0.02f, LAB_CAM_Y, LAB_CAM_DIST };
@@ -1068,13 +1149,9 @@ int main(int argc, char **argv)
 		GX_InvalidateTexAll();
 		GX_LoadProjectionMtx(perspective, GX_PERSPECTIVE);
 
-		if (featureIndex == FEAT_FOG_HAZE) {
-			GXColor fogc = { 40, 36, 48, 255 };
-			GX_SetFog(GX_FOG_PERSP_LIN, 4.0f, 14.0f, 0.1f, 100.0f, fogc);
-		} else {
-			GX_SetFog(GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){0,0,0,0});
-		}
-
+		/* Haze card first (fog off inside), then floor/sphere with GX fog */
+		draw_backdrop(view);
+		apply_scene_fog(featureIndex == FEAT_FOG_HAZE);
 		draw_floor(view);
 		draw_shadow(view);
 
