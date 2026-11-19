@@ -6540,6 +6540,13 @@ static qboolean R_GXPropPoolResident( u8 mat, int pool )
 		&& r_gx_cmpr_slot[hs].used + 4096u > r_gx_cmpr_clock;
 }
 
+/* Set for an instance of building-sized scenery (a close model that shows
+ * out to 800 units or more: the monastery) while it is drawn from its
+ * ordinary model. Its 256x256 texture takes a big slot only with the close
+ * model: the building is in sight from the whole harbor, where the two big
+ * slots belong to the coast rocks in front of the eye. */
+static qboolean gc_prop_tex_nobig;
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6589,6 +6596,7 @@ static int R_GXPropBind( u8 mat )
 		 * when it is already there. */
 		use_big = r_gx_cmpr_big_n && r_gx_cmpr_big_for_props
 			&& remain > r_gx_cmpr_bounce_cap && remain <= r_gx_cmpr_big_cap
+			&& !gc_prop_tex_nobig
 			&& ( !asked_far || R_GXPropPoolResident( mat, 2 ));
 		near_resident = !use_big && asked_far && R_GXPropPoolResident( mat, 0 );
 		if( near_resident )
@@ -7360,6 +7368,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 				}
 			}
 		}
+		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == in->model;
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
@@ -7368,6 +7377,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 			r_gx_mirror || cover2 < gc_prop_far_cover * gc_prop_far_cover );
 		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
+		gc_prop_tex_nobig = false;
 		return drawn;
 	}
 }

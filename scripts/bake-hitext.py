@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bake the GameCube hi-res text atlas: gfx/gc_hitext.bin
 
-ASCII 32..126 rendered from a TrueType font into one 4-bit intensity (GX_TF_I4) texture, tiled the way GX
+ASCII 32..126 plus eight controller button glyphs (128..135) rendered from a TrueType font into one 4-bit intensity (GX_TF_I4) texture, tiled the way GX
 reads it (8x8 texels per 32-byte tile), plus a glyph table. The engine draws these as GX quads at 640x480,
 so menu text is not limited by the 320x240 soft 2D buffer.
 
@@ -21,7 +21,10 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-FIRST, LAST = 32, 126
+FIRST, LAST = 32, 135
+# Controller button glyphs for hint rows, original art drawn here (no console artwork): codes 128..135. The atlas is
+# intensity only, so a glyph is a solid shape with its letter cut out; the caller colours it (A green, B red, ...).
+BUTTONS = {128: "A", 129: "B", 130: "X", 131: "Y", 132: "START", 133: "Z", 134: "L", 135: "R"}
 
 
 def main():
@@ -32,6 +35,7 @@ def main():
 	ap.add_argument("--width", type=int, default=512)
 	ap.add_argument("--height", type=int, default=256)
 	ap.add_argument("--out", default="gc_hitext.bin")
+	ap.add_argument("--preview", help="also write the atlas as a PNG")
 	args = ap.parse_args()
 
 	font = ImageFont.truetype(args.font, args.size)
@@ -43,6 +47,34 @@ def main():
 	x = y = 1
 	row_h = 0
 	for ch in range(FIRST, LAST + 1):
+		if ch == 127:  # DEL: an empty cell so the table stays contiguous
+			glyphs.append((0, 0, 0, 0, 0, 0, 0))
+			continue
+		if ch in BUTTONS:
+			label = BUTTONS[ch]
+			h = int(args.size * 0.9)
+			w = int(h * (2.4 if label == "START" else 1.35 if label in "LRZ" else 1.0))
+			if x + w + 2 > args.width:
+				x = 1
+				y += row_h + 2
+				row_h = 0
+			if y + h + 1 > args.height:
+				sys.exit("atlas too small for the button glyphs")
+			shape = Image.new("L", (w, h), 0)
+			sd = ImageDraw.Draw(shape)
+			if label in "ABXY" and len(label) == 1:
+				sd.ellipse((0, 0, w - 1, h - 1), fill=255)
+			else:
+				sd.rounded_rectangle((0, 0, w - 1, h - 1), radius=h // 3, fill=255)
+			lf = ImageFont.truetype(args.font, int(h * (0.34 if label == "START" else 0.62)))
+			bb = sd.textbbox((0, 0), label, font=lf)
+			sd.text(((w - (bb[2] - bb[0])) // 2 - bb[0], (h - (bb[3] - bb[1])) // 2 - bb[1]), label, font=lf, fill=0)
+			atlas.paste(shape, (x, y))
+			# sit on the baseline like a capital letter
+			glyphs.append((x, y, w, h, 1, max(0, ascent - h), w + 4))
+			x += w + 2
+			row_h = max(row_h, h)
+			continue
 		c = chr(ch)
 		adv = int(round(font.getlength(c))) + args.stroke
 		bbox = font.getbbox(c, stroke_width=args.stroke)  # relative to the pen at the line top
@@ -74,6 +106,8 @@ def main():
 					a = px[tx + xx, ty + yy] >> 4
 					b = px[tx + xx + 1, ty + yy] >> 4
 					out.append((a << 4) | b)
+	if args.preview:
+		atlas.save(args.preview)
 	with open(args.out, "wb") as f:
 		f.write(out)
 	print("wrote %s: %dx%d I4, line_h=%d, %d bytes, %d glyphs" % (args.out, args.width, args.height, line_h, len(out), len(glyphs)))
