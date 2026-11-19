@@ -3068,7 +3068,10 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			else if( vmi > 0 && vmi < MAX_MODELS && sv.model_precache[vmi][0] )
 				Q_strncpy( vpath, sv.model_precache[vmi], sizeof( vpath ));
 
-			if( vpath[0] && Q_stristr( vpath, ".mdl" )
+			/* A cinematic shot that hides the weapon (cine_viewmodel 0) never
+			 * draws it, so it does not load it either: the 30-120 KB studio
+			 * and its skins stay free for the scripted actors and effects. */
+			if( vpath[0] && Q_stristr( vpath, ".mdl" ) && !CL_CineHideViewModel()
 				&& ( !held || held->type != mod_studio || !held->cache.data ))
 			{
 				/* A failed load is retried once a second, not every frame:
