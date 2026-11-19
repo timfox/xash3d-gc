@@ -304,6 +304,25 @@ class DropToFloorTests(unittest.TestCase):
 		self.assertEqual(mdl.sequence_index("TREE_high_origin"), 1)
 		self.assertEqual(mdl.sequence_index("missing"), -1)
 
+	def test_motion_bone_is_held_on_the_axes_the_sequence_moves_along(self):
+		# One bone at z=-365, no animation data. A sequence whose motion type
+		# has the Z bit holds it at 0, as R_StudioCalcRotations does.
+		import struct
+		bp = self.props
+		mdl = bp.StudioModel.__new__(bp.StudioModel)
+		bone = bytearray(bp.BONE_SZ)
+		struct.pack_into("<i", bone, 32, -1)
+		struct.pack_into("<6f", bone, 64, 5.0, 6.0, -365.0, 0.0, 0.0, 0.0)
+		seqs = bytearray(bp.SEQ_SZ * 2)
+		struct.pack_into("<ii", seqs, bp.SEQ_SZ + 68, 4, 0)
+		mdl.data = bytes(bone) + bytes(seqs)
+		mdl.numbones, mdl.boneindex = 1, 0
+		mdl.numseq, mdl.seqindex = 2, bp.BONE_SZ
+		self.assertAlmostEqual(mdl.bone_matrices(0)[0][2][3], -365.0)
+		held = mdl.bone_matrices(1)[0]
+		self.assertAlmostEqual(held[2][3], 0.0)
+		self.assertAlmostEqual(held[0][3], 5.0)
+
 	def test_named_props_get_their_ordinal_in_lump_order(self):
 		ents = [
 			{"classname": "env_model", "model": "models/a.mdl"},

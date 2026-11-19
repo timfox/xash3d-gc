@@ -173,8 +173,13 @@ class StudioModel:
 		pose when the sequence is not in this file)."""
 		d = self.data
 		anim = None
+		motiontype, motionbone = 0, -1
 		if 0 <= sequence < self.numseq:
 			so = self.seqindex + sequence * SEQ_SZ
+			# The engine holds the motion bone at zero on the axes the
+			# sequence moves along (R_StudioCalcRotations): that travel is
+			# the entity's, not the mesh's.
+			motiontype, motionbone = struct.unpack_from("<ii", d, so + 68)
 			animindex, = struct.unpack_from("<i", d, so + 124)
 			seqgroup, = struct.unpack_from("<i", d, so + 156)
 			if seqgroup == 0 and 0 < animindex < len(d):
@@ -193,6 +198,10 @@ class StudioModel:
 						vo = ao + offs[j]
 						if offs[j] and vo + 4 <= len(d) and d[vo] > 0:
 							value[j] += struct.unpack_from("<h", d, vo + 2)[0] * scale[j]
+			if b == motionbone:
+				for j in range(3):
+					if motiontype & (1 << j):
+						value[j] = 0.0
 			local = _mat_quat_origin(_quat(value[3:6]), value[0:3])
 			mats.append(local if parent < 0 or parent >= len(mats) else _mat_concat(mats[parent], local))
 		return mats
