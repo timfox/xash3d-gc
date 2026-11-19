@@ -141,17 +141,47 @@ static bool GCube_DVDReadSectors( sec_t sector, sec_t count, void *buffer )
 	u8 *output = buffer;
 	sec_t i;
 
-	/* libiso9660 3.1.0 always requests a 32 KiB cache fill even when it
-	 * calculated that one sector is sufficient. Split that transfer because
-	 * __io_gcdvd can otherwise complete with a zero-filled DMA buffer. */
+	/* __io_gcdvd.readSectors (DVD_ReadPrio) can return before its DMA has
+	 * landed in the buffer. The caller then copied the previous request's
+	 * data: zero or 0x20 fill, or sector 834 of the path table in place of
+	 * 835, and the mount failed in two boots of three (Dolphin, ceres).
+	 * The drive status is already idle at that point, so the buffer itself
+	 * is the only signal: fill the sector with a marker, flush, read, then
+	 * wait until its head and tail have left the marker. One re-issue on
+	 * timeout. libiso9660 asks for 32 KiB fills: keep the single-sector
+	 * split. */
 	for( i = 0; i < count; i++ )
 	{
-		if( !__io_gcdvd.readSectors( sector + i, 1, output + i * 0x800 ))
+		u8 *o = output + i * 0x800;
+		int attempt, wait = 0;
+		bool rc = false;
+
+		for( attempt = 0; attempt < 2; attempt++ )
+		{
+			memset( o, 0xEE, 0x800 );
+			DCFlushRange( o, 0x800 );
+			DCInvalidateRange( o, 0x800 );
+			rc = __io_gcdvd.readSectors( sector + i, 1, o );
+			for( wait = 0; wait < 400; wait++ )
+			{
+				const u32 *w = (const u32 *)o;
+
+				DCInvalidateRange( o, 0x800 );
+				if(( w[0] & w[1] ) != 0xEEEEEEEEu && ( w[0x1FE] & w[0x1FF] ) != 0xEEEEEEEEu
+					&& DVD_GetDriveStatus() != DVD_STATE_BUSY )
+					break;
+				usleep( 250 );
+			}
+			if( wait < 400 )
+				break;
+		}
+		DCInvalidateRange( o, 0x800 );
+		if( !rc )
 			return false;
 		if( gc_mem_watch_enabled )
 		{
 			char tag[48];
-			Q_snprintf( tag, sizeof( tag ), "dvd sector %u to %p", (unsigned)( sector + i ), (void *)( output + i * 0x800 ));
+			Q_snprintf( tag, sizeof( tag ), "dvd sector %u to %p", (unsigned)( sector + i ), (void *)o );
 			GC_MemWatch( tag );
 		}
 	}
