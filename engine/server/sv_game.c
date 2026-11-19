@@ -6186,7 +6186,7 @@ void SV_GCParityReport( void )
 	memset( gc_parity_tally, 0, sizeof( gc_parity_tally ));
 }
 
-/* gc_static_walls: 0 off, 1 unnamed plain func_walls become static records with no edict (collision only until the
+/* gc_static_walls: 0 off, 3 records without edict and without the draw path (diagnostic), 1 unnamed plain func_walls become static records with no edict (collision only until the
  * client side draws them), 2 records AND edicts (the self test compares them at spawn complete). */
 int SV_GCStaticWallsMode( void )
 {
@@ -6217,7 +6217,7 @@ static qboolean SV_GCStaticWallRecord( edict_t *ent )
 		return false;
 	/* In mode 1 this wall never gets an edict: its tier-0 slot in the edict budget is free for the map logic (tier 1),
 	 * which the census sized as if every wall were an edict. */
-	if( SV_GCStaticWallsMode() == 1 && gc_parity_tier_budget[1] < gc_parity_tier_count[1] )
+	if(( SV_GCStaticWallsMode() == 1 || SV_GCStaticWallsMode() == 3 ) && gc_parity_tier_budget[1] < gc_parity_tier_count[1] )
 	{
 		gc_parity_tier_budget[1]++;
 		gc_parity_budget++;
@@ -6347,8 +6347,8 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 		return true;
 	if( ent && !Q_strcmp( classname, "func_wall" ) && SV_GCStaticWallsMode() >= 1 && SV_GCStaticWallRecord( (edict_t *)ent ))
 	{
-		if( SV_GCStaticWallsMode() == 1 )
-			return true;	/* record only: no edict, no networked entity */
+		if( SV_GCStaticWallsMode() == 1 || SV_GCStaticWallsMode() == 3 )
+			return true;	/* record only: no edict, no networked entity (3: and no draw path, to see what the world bake shows) */
 	}
 	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
 	{
