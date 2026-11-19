@@ -8178,6 +8178,9 @@ void GC_ShrinkEarlyXFBForMatch( void )
 }
 #endif
 
+static qboolean gc_boot_progressive;	/* the player's answer, kept for the session */
+static qboolean GC_BootProgressivePrompt( void );
+
 void GC_EarlyBootSplash( void )
 {
 #if XASH_GAMECUBE
@@ -8199,6 +8202,23 @@ void GC_EarlyBootSplash( void )
 	GC_AllocXFB( 0, rmode );
 	if( !xfb[0] )
 		return;
+	/* Progressive scan, as GameCube releases offer it: only with a component cable on an NTSC console and B held at boot. */
+	if( GC_BootProgressivePrompt( ))
+	{
+		GXRModeObj *prog = &TVNtsc480Prog;
+#if XASH_DODGC_NETWORK
+		prog = GC_NetworkVideoMode( prog );
+#endif
+		/* the same 640x480 frame: no new allocation. A mode that needed a bigger XFB is refused. */
+		if( prog && VIDEO_GetFrameBufferSize( prog ) <= xfb_bytes[0] )
+		{
+			rmode = prog;
+			gc_boot_progressive = true;
+			VIDEO_Configure( rmode );
+		}
+		else
+			SYS_Report( "Xash3D GameCube: progressive scan needs a larger XFB; staying interlaced\n" );
+	}
 
 	dst = (unsigned short *)xfb[0];
 	/* Retail parity: boot shows black until the startup video. The XFB is
@@ -8246,6 +8266,11 @@ static GXRModeObj *GC_ResolveVideoMode( const char **out_tag )
 	GXRModeObj *pref = VIDEO_GetPreferredMode( NULL );
 	const char *tag = "preferred";
 
+	if( gc_boot_progressive )
+	{
+		tag = "ntsc480p";
+		pref = &TVNtsc480Prog;
+	}
 	if( Sys_GetParmFromCmdLine( "-gcvideo", mode ) && mode[0] )
 	{
 		if( !Q_stricmp( mode, "ntsc" ) || !Q_stricmp( mode, "ntsc480i" )
@@ -10254,6 +10279,76 @@ static void GC_FatalDrawWrapped( unsigned short *dst, int stride, int width, int
 			text++;
 		line++;
 	}
+}
+
+/* One 160x120 RGB565 panel shared by the fatal breadcrumb and the boot prompt (38 KiB of .bss that already existed). */
+static unsigned short gc_text_panel[160 * 120];
+
+/*
+ * Progressive scan prompt, drawn on the boot splash before the video mode is final. Shown only when a component cable is
+ * detected on an NTSC console and B is held at boot; A = yes, B / Start / a 10 s timeout = no (the safe answer).
+ * Returns true for yes. The frame is the same 640x480 XFB, so nothing is allocated.
+ */
+static qboolean GC_BootProgressivePrompt( void )
+{
+	int frame, sec, last_sec = -1, row, col;
+	qboolean held = false;
+	char line[32];
+
+	if( !rmode || !xfb[0] || VIDEO_GetCurrentTvMode() != VI_NTSC || !VIDEO_HaveComponentCable())
+		return false;
+	PAD_Init();
+	/* give the pads a few frames to answer, then look for B */
+	for( frame = 0; frame < 12; frame++ )
+	{
+		PAD_ScanPads();
+		if( PAD_ButtonsHeld( 0 ) & PAD_BUTTON_B )
+			held = true;
+		VIDEO_WaitVSync();
+	}
+	if( !held )
+		return false;
+
+	for( frame = 0; frame < 60 * 10 + 1; frame++ )
+	{
+		u16 down;
+		unsigned int *dst;
+
+		PAD_ScanPads();
+		down = PAD_ButtonsDown( 0 );
+		if( down & PAD_BUTTON_A )
+			return true;
+		if( down & ( PAD_BUTTON_B | PAD_BUTTON_START ))
+			return false;
+		sec = 10 - frame / 60;
+		if( sec != last_sec )
+		{
+			last_sec = sec;
+			/* retail palette, 1 px border on the 5% safe area (x 8..151, y 6..113 of the 160x120 panel) */
+			for( row = 0; row < 120; row++ )
+				for( col = 0; col < 160; col++ )
+				{
+					const int edge = (( row == 6 || row == 113 ) && col >= 8 && col <= 151 )
+						|| (( col == 8 || col == 151 ) && row >= 6 && row <= 113 );
+
+					gc_text_panel[row * 160 + col] = edge ? 0xABE0 : 0x3143;
+				}
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 10, "PROGRESSIVE SCAN (480P)", 0xFD80, 1, 22 );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 28, "Use 480p? Your TV and", 0xFFFF, 1, 22 );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 37, "cable must support it.", 0xFFFF, 1, 22 );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 62, "A  Yes       B  No", 0xFFE0, 1, 22 );
+			Q_snprintf( line, sizeof( line ), "No in %d s", sec );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 98, line, 0x07E0, 1, 22 );
+			dst = (unsigned int *)MEM_K1_TO_K0( xfb[0] );
+			GC_BlitSoftwareBufferScaled( gc_text_panel, 160, 120, 160, dst, rmode->fbWidth, rmode->xfbHeight,
+				rmode->fbWidth / 2 );
+			DCFlushRange( dst, (u32)( rmode->fbWidth * rmode->xfbHeight * sizeof( unsigned short )));
+			VIDEO_SetNextFramebuffer( xfb[0] );
+			VIDEO_Flush();
+		}
+		VIDEO_WaitVSync();
+	}
+	return false;
 }
 
 static unsigned short GC_RGB8To565( int r, int g, int b )
@@ -13102,8 +13197,7 @@ void GC_DrawFatalBreadcrumb( const char *message, const char *details )
 	const int panel_w = 160;
 	const int panel_h = 120;
 	const int row_pairs = rmode ? ( rmode->fbWidth / 2 ) : 0;
-	/* Static panel — never Mem_Alloc during fatal (MEM1 is already exhausted). */
-	static unsigned short fatal_panel[160 * 120];
+	/* Static panel (shared with the boot prompt) — never Mem_Alloc during fatal (MEM1 is already exhausted). */
 
 	if( !gc.initialized )
 		return;
@@ -13112,7 +13206,7 @@ void GC_DrawFatalBreadcrumb( const char *message, const char *details )
 
 	/* Retail palette (ViewportBG 55 43 29, ClassMenuLight 175 127 1, gold title) and a 1 px border on the 5% title-safe
 	 * area of the 160x120 panel (x 8..151, y 6..113): nothing is drawn nearer the screen edge than that. */
-	panel = fatal_panel;
+	panel = gc_text_panel;
 	for( row = 0; row < panel_h; row++ )
 	{
 		unsigned short *rowdst = panel + row * panel_w;
