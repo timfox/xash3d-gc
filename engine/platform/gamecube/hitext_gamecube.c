@@ -11,13 +11,13 @@ switches it off).
 */
 #include "common.h"
 #include "client.h"
+#include "hitext_queue.h"
 
 #if XASH_GAMECUBE
 #include <gccore.h>
 #include <malloc.h>
 #include <string.h>
 
-#define HT_MAX_QUEUE 900
 
 typedef struct
 {
@@ -35,14 +35,7 @@ static struct
 	GXTexObj   obj;
 } ht;
 
-static struct
-{
-	float x, y, h;     // 640x480 space: the cell's top left and its height
-	float w;           // cell width
-	unsigned short ch; // index into ht.glyph
-	unsigned int rgba; // 0xRRGGBBAA
-} ht_queue[HT_MAX_QUEUE];
-static int ht_count;
+static ht_queue_t ht_q;
 
 static CVAR_DEFINE_AUTO( gc_hitext, "1", FCVAR_ARCHIVE, "draw menu text at 640x480 with GX quads (0 = soft 320x240 text)" );
 // set by the main menu while it draws: its labels keep the original text
@@ -125,7 +118,7 @@ void GC_HiTextRelease( void )
 	}
 	ht.ready = false;
 	ht.tried = false;
-	ht_count = 0;
+	ht_q.count = 0;
 }
 
 qboolean GC_HiTextActive( void )
@@ -150,36 +143,13 @@ qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA 
 
 	ch &= 255;
 	i = ch - ht.first;
-	if( i < 0 || i >= ht.count || ht_count >= HT_MAX_QUEUE )
-		return false;
-
-	ht_queue[ht_count].x = x;
-	ht_queue[ht_count].y = y;
-	ht_queue[ht_count].w = w;
-	ht_queue[ht_count].h = h;
-	ht_queue[ht_count].ch = (unsigned short)i;
-	ht_queue[ht_count].rgba = ( (unsigned)( ulRGBA & 0x00FFFFFF ) << 8 ) | (unsigned)(( ulRGBA >> 24 ) & 0xFF );
-	ht_count++;
-	return true;
+	return htq_push( &ht_q, i, ht.count, x, y, w, h, ulRGBA ) ? true : false;
 }
 
 /* A filled box drawn after some text covers it: drop the glyphs under it (dialogs over a page). */
 void GC_HiTextOcclude( int x, int y, int w, int h, int alpha )
 {
-	const float x0 = x, y0 = y, x1 = x + w, y1 = y + h;
-	int i, out = 0;
-
-	if( !ht_count || alpha < 160 )
-		return;
-	for( i = 0; i < ht_count; i++ )
-	{
-		const float cx = ht_queue[i].x + ht_queue[i].w * 0.5f, cy = ht_queue[i].y + ht_queue[i].h * 0.5f;
-
-		if( cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 )
-			continue;
-		ht_queue[out++] = ht_queue[i];
-	}
-	ht_count = out;
+	htq_occlude( &ht_q, x, y, w, h, alpha );
 }
 
 /* At the end of a frame, before CopyDisp: set the whole GX pipe for a 640x480 ortho quad stream (the renderer
@@ -193,11 +163,11 @@ qboolean GC_HiTextFlush( float fb_w, float fb_h )
 	// the EFB is fb_w x fb_h (320x480 on this video mode, 640x480 on the preferred one); the menu lays out in refState
 	const float sx = fb_w / (float)refState.width, sy = fb_h / (float)refState.height;
 
-	if( !ht_count )
+	if( !ht_q.count )
 		return false;
 	if( !ht.ready )
 	{
-		ht_count = 0;
+		ht_q.count = 0;
 		return false;
 	}
 
@@ -242,18 +212,18 @@ qboolean GC_HiTextFlush( float fb_w, float fb_h )
 	GX_InvalidateTexAll();
 	GX_LoadTexObj( &ht.obj, GX_TEXMAP0 );
 
-	for( i = 0; i < ht_count; i++ )
+	for( i = 0; i < ht_q.count; i++ )
 	{
-		const ht_glyph_t *g = &ht.glyph[ht_queue[i].ch];
+		const ht_glyph_t *g = &ht.glyph[ht_q.quad[i].ch];
 		// height sets the size; a pixel is sx/sy as wide as it is tall, so the glyph is that much narrower
-		const float scale_y = ht_queue[i].h * sy / (float)ht.line_h, scale_x = scale_y * sx / sy;
+		const float scale_y = ht_q.quad[i].h * sy / (float)ht.line_h, scale_x = scale_y * sx / sy;
 		const float gw = g->w * scale_x, gh = g->h * scale_y;
 		// centre the natural glyph in the cell the menu laid out
-		const float gx = ht_queue[i].x * sx + ( ht_queue[i].w * sx - g->adv * scale_x ) * 0.5f + g->xoff * scale_x;
-		const float gy = ht_queue[i].y * sy + g->yoff * scale_y;
+		const float gx = ht_q.quad[i].x * sx + ( ht_q.quad[i].w * sx - g->adv * scale_x ) * 0.5f + g->xoff * scale_x;
+		const float gy = ht_q.quad[i].y * sy + g->yoff * scale_y;
 		const float s0 = g->x * inv_w, s1 = ( g->x + g->w ) * inv_w;
 		const float t0 = g->y * inv_h, t1 = ( g->y + g->h ) * inv_h;
-		const unsigned int c = ht_queue[i].rgba;
+		const unsigned int c = ht_q.quad[i].rgba;
 
 		if( !g->w || !g->h )
 			continue;
@@ -272,7 +242,7 @@ qboolean GC_HiTextFlush( float fb_w, float fb_h )
 		GX_TexCoord2f32( s0, t1 );
 		GX_End();
 	}
-	ht_count = 0;
+	ht_q.count = 0;
 	return true;
 }
 

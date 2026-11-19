@@ -378,8 +378,31 @@ static int OSK_TextWidth( const char *s )
 	return OSK_TextWidthFp( s, OSK_FP );
 }
 
+#if XASH_GAMECUBE
+extern qboolean GC_HiTextActive( void );
+extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
+extern void GC_HiTextOcclude( int x, int y, int w, int h, int alpha );
+#endif
+
 static void OSK_TextFp( float sx, float sy, int x, int y, const char *s, const rgba_t color, int fp )
 {
+#if XASH_GAMECUBE
+	/* hardware resolution: the same cell the bitmap glyph fills, as a GX glyph quad from the menu atlas */
+	if( GC_HiTextActive( ))
+	{
+		const int argb = ( color[3] << 24 ) | ( color[0] << 16 ) | ( color[1] << 8 ) | color[2];
+
+		for( ; *s; s++, x += OSK_GLYPH_ADV * fp )
+		{
+			if( *s <= 32 || *s > 126 )
+				continue;
+			if( !GC_HiTextGlyph( *s, x * sx, y * sy - fp * sy, OSK_GLYPH_ADV * fp * sx, ( OSK_GLYPH_H + 2 ) * fp * sy, argb ))
+				break; // queue full or glyph missing: the rest stays a bitmap below
+		}
+		if( !*s )
+			return;
+	}
+#endif
 	for( ; *s; s++, x += OSK_GLYPH_ADV * fp )
 	{
 		const byte *glyph;
@@ -463,6 +486,10 @@ void OSK_Draw( void )
 			top = 16;
 	}
 
+#if XASH_GAMECUBE
+	// menu text already queued under the keyboard panel must not show through it
+	GC_HiTextOcclude( (int)(( left - 2 ) * sx ), (int)(( top - 2 ) * sy ), (int)(( width + 4 ) * sx ) + 1, (int)(( height + 4 ) * sy ) + 1, 255 );
+#endif
 	// panel, olive drab like the retail menus
 	OSK_Fill( sx, sy, left - 2, top - 2, width + 4, height + 4, 175, 127, 1, 255 ); // retail ClassMenuLight
 	OSK_Fill( sx, sy, left, top, width, height, 55, 43, 29, 250 ); // retail ViewportBG
