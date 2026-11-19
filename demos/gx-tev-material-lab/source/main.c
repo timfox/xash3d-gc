@@ -146,8 +146,8 @@
 
 #define LAB_FOV_DEG			36.0f
 #define LAB_CAM_DIST		5.15f
-#define LAB_LOOK_Y			0.00f
-#define LAB_CAM_Y			0.28f
+#define LAB_LOOK_Y			-0.08f
+#define LAB_CAM_Y			0.52f
 /* Reference grey haze — flat cool charcoal void + GX fog behind sphere */
 #define LAB_FOG_R			44
 #define LAB_FOG_G			43
@@ -865,51 +865,72 @@ static void apply_scene_fog(int dense)
 
 static void draw_floor(const Mtx view)
 {
+	/*
+	 * Vertex-colored plaza: even cell count so a checker CROSS sits on
+	 * world origin under the sphere, with equal cells on every side.
+	 */
 	Mtx model, modelview;
-	f32 y = -1.12f;
-	f32 s = 8.0f;
+	const f32 y = -1.12f;
+	const f32 s = 6.0f;
+	const int cells = 12; /* even → origin on a 4-way tile corner */
+	const f32 cell = (2.0f * s) / (f32)cells;
+	const GXColor dark = { 58, 48, 48, 255 };
+	const GXColor mid = { 118, 102, 100, 255 };
+	int ix, iz;
+	u16 nverts;
 
 	guMtxIdentity(model);
 	guMtxConcat(view, model, modelview);
 	GX_LoadPosMtxImm(modelview, GX_PNMTX0);
 
-	GX_SetNumChans(0);
-	GX_SetNumTexGens(1);
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(0);
 	GX_SetNumTevStages(1);
 	GX_SetNumIndStages(0);
-	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_LoadTexObj(&texChecker, GX_TEXMAP0);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 	GX_SetTevDirect(GX_TEVSTAGE0);
-	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
-	GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+	GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
 
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
-	GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
 	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
-	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
 	GX_SetCullMode(GX_CULL_NONE);
 	GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 	GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
 	GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 
-	GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
-		GX_Position3f32(-s, y, -s); GX_TexCoord2f32(0, 0);
-		GX_Position3f32( s, y, -s); GX_TexCoord2f32(3.0f, 0);
-		GX_Position3f32( s, y,  s); GX_TexCoord2f32(3.0f, 3.0f);
-		GX_Position3f32(-s, y,  s); GX_TexCoord2f32(0, 3.0f);
+	nverts = (u16)(cells * cells * 4);
+	GX_Begin(GX_QUADS, GX_VTXFMT0, nverts);
+	for (iz = 0; iz < cells; ++iz) {
+		f32 z0 = -s + (f32)iz * cell;
+		f32 z1 = z0 + cell;
+		for (ix = 0; ix < cells; ++ix) {
+			f32 x0 = -s + (f32)ix * cell;
+			f32 x1 = x0 + cell;
+			GXColor c = (((ix + iz) & 1) == 0) ? dark : mid;
+			GX_Position3f32(x0, y, z0); GX_Color4u8(c.r, c.g, c.b, c.a);
+			GX_Position3f32(x1, y, z0); GX_Color4u8(c.r, c.g, c.b, c.a);
+			GX_Position3f32(x1, y, z1); GX_Color4u8(c.r, c.g, c.b, c.a);
+			GX_Position3f32(x0, y, z1); GX_Color4u8(c.r, c.g, c.b, c.a);
+		}
+	}
 	GX_End();
+	(void)texChecker;
 }
 
 static void draw_shadow(const Mtx view)
 {
 	Mtx model, modelview;
 	f32 y = -1.115f;
-	f32 sx = 1.45f;
-	f32 sz = 1.05f;
+	/* Circular contact shadow centered under the sphere */
+	f32 sx = 1.28f;
+	f32 sz = 1.28f;
 
 	guMtxIdentity(model);
-	guMtxTransApply(model, model, 0.05f, 0.0f, 0.12f);
 	guMtxConcat(view, model, modelview);
 	GX_LoadPosMtxImm(modelview, GX_PNMTX0);
 
@@ -1275,7 +1296,6 @@ int main(int argc, char **argv)
 	Mtx view, model, modelview, rot;
 	Mtx44 perspective;
 	guVector cam, up, look;
-	guVector camBase = { 0.02f, LAB_CAM_Y, LAB_CAM_DIST };
 	u16 prevButtons = 0;
 	u32 frame = 0;
 	f32 dt = 1.0f / 60.0f;
@@ -1386,9 +1406,11 @@ int main(int argc, char **argv)
 		idleTimer += dt;
 		fpsSmooth = fpsSmooth * 0.92f + 60.0f * 0.08f;
 
-		/* Analog orbit — gentle when idle, stick accelerates */
-		orbitYaw += dt * 0.12f;
-		orbitYaw += (f32)stickX * dt * 0.035f;
+		/* Stick orbits; slow drift only during idle auto-showcase */
+		if (stickX > 18 || stickX < -18)
+			orbitYaw += (f32)stickX * dt * 0.040f;
+		else if (autoShowcase && galleryMode && idleTimer > 7.5f && bootTimer <= 0.0f)
+			orbitYaw += dt * 0.06f;
 
 		/*
 		 * Capture reel (DumpFrames / CI proofs) — only while captureReel:
@@ -1432,11 +1454,11 @@ int main(int argc, char **argv)
 		}
 		++frame;
 
-		/* Camera: soft yaw orbit + punch dolly on material change */
+		/* Camera: soft yaw orbit about sphere center + punch dolly */
 		yawRad = orbitYaw;
 		punch = ease_out_cubic(camPunch) * 0.22f;
 		dist = LAB_CAM_DIST - punch;
-		cam.x = sinf(yawRad) * dist + camBase.x * 0.15f;
+		cam.x = sinf(yawRad) * dist;
 		cam.y = LAB_CAM_Y + sinf(animTime * 0.35f) * 0.03f;
 		cam.z = cosf(yawRad) * dist;
 		up.x = 0.0f; up.y = 1.0f; up.z = 0.0f;
