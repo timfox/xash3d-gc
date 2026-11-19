@@ -884,9 +884,38 @@ static qboolean Mod_GCAnimPackRead( gc_animpack_t *pk, unsigned off, byte *dst, 
 		GC_AramTransfer( pk->aram + off, dst, len, false );
 		return true;
 	}
-	if( !pk->file || FS_Seek( pk->file, off, SEEK_SET ) != 0 )
-		return false;
-	return FS_Read( pk->file, dst, len ) > 0;
+	{
+		/* Disc-streamed sequences (a pack that did not fit ARAM): time every read and report the worst one per
+		 * window of frames, so a crowd of bots on a disc-streamed team shows what it costs a frame. */
+		static double worst_ms, total_ms;
+		static unsigned reads, bytes, window_start;
+		const double t0 = Sys_DoubleTime();
+		qboolean ok;
+
+		if( !pk->file || FS_Seek( pk->file, off, SEEK_SET ) != 0 )
+			return false;
+		ok = FS_Read( pk->file, dst, len ) > 0;
+		{
+			const double ms = ( Sys_DoubleTime() - t0 ) * 1000.0;
+
+			reads++;
+			bytes += len;
+			total_ms += ms;
+			if( ms > worst_ms )
+				worst_ms = ms;
+			if( window_start == 0 )
+				window_start = host.framecount;
+			if( host.framecount - window_start >= 300 )
+			{
+				Con_Reportf( "Xash3D GameCube: animpack disc reads over %u frames: %u reads, %s, worst %.2f ms, total %.1f ms\n",
+					host.framecount - window_start, reads, Q_memprint( bytes ), worst_ms, total_ms );
+				worst_ms = total_ms = 0.0;
+				reads = bytes = 0;
+				window_start = host.framecount;
+			}
+		}
+		return ok;
+	}
 }
 
 static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )

@@ -5155,6 +5155,16 @@ static int pfnStudio_IsHardware( void )
 	return 1;
 }
 
+#if XASH_GAMECUBE
+/* The client DLL's studio renderer asks for a sequence's animation here when its seqgroup file is an animation pack. */
+void *R_StudioGetAnim( studiohdr_t *m_pStudioHeader, model_t *m_pSubModel, mstudioseqdesc_t *pseqdesc );
+
+static void *pfnStudio_GCGetAnim( void *phdr, void *submodel, void *pseqdesc )
+{
+	return R_StudioGetAnim( (studiohdr_t *)phdr, (model_t *)submodel, (mstudioseqdesc_t *)pseqdesc );
+}
+#endif
+
 static engine_studio_api_t gStudioAPI =
 {
 	.Mem_Calloc              = Mod_Calloc,
@@ -5169,6 +5179,9 @@ static engine_studio_api_t gStudioAPI =
 	.StudioGetAliasTransform = pfnStudio_GetAliasTransform,
 	.GetViewEntity           = CL_GetViewModel,
 	.IsHardware              = pfnStudio_IsHardware,
+#if XASH_GAMECUBE
+	.GCGetAnim               = pfnStudio_GCGetAnim,
+#endif
 };
 
 static void CL_InitStudioAPI( void )
