@@ -2722,6 +2722,7 @@ static struct
 	qboolean valid;
 	unsigned texnum;		/* texture whose object is cached below, 0 = none */
 	GXTexObj obj;			/* ready to load: a resident hit is one GX call */
+	u8       far;			/* holds a far (small) chain, whichever pool the slot is in */
 } r_gx_cmpr_slot[GC_CMPR_SLOTS_MAX];
 /* texnum -> slot + 1. A bind of a resident texture skips the mip walk, the
  * slot search and GX_InitTexObj (about 1000 binds a frame in the harbor). */
@@ -2973,6 +2974,14 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 		r_gx_cmpr_bounce_stalls++;
 	GC_AramTransfer( aram + skip, R_GXCmprSlotPtr( pick ),
 		bytes, false );
+	/* A near chain that takes back a slot lent to a far chain is not a sign
+	 * that the near textures outgrew their pool: counted as one, it pushed
+	 * the far-texture distance in (see far_level in the world draw), which
+	 * asked for more far chains, which borrowed more near slots. Distant
+	 * mip levels crept toward the camera. */
+	if( !r_gx_cmpr_want_far && !( r_gx_cmpr_slot[pick].valid && r_gx_cmpr_slot[pick].far ))
+		r_gx_cmpr_near_miss_total++;
+	r_gx_cmpr_slot[pick].far = far_req ? 1 : 0;
 	r_gx_cmpr_slot[pick].texnum = 0;
 	r_gx_cmpr_slot[pick].aram = aram;
 	r_gx_cmpr_slot[pick].skip = skip;
@@ -2980,8 +2989,6 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 	r_gx_cmpr_slot[pick].valid = true;
 	r_gx_cmpr_slot[pick].used = ++r_gx_cmpr_clock;
 	r_gx_cmpr_misses++;
-	if( !r_gx_cmpr_want_far )
-		r_gx_cmpr_near_miss_total++;
 	r_gx_cmpr_dma_bytes += bytes;
 	*slot_out = pick;
 	return R_GXCmprSlotPtr( pick );
@@ -3017,8 +3024,12 @@ static gc_gx_tex_t *R_GXPackedTexture( image_t *img, unsigned texnum )
 	{
 		const int hs = r_gx_cmpr_hint[r_gx_cmpr_want_far][texnum] - 1;
 
+		/* The slot must hold the size asked for: a far chain lent a near
+		 * slot keeps the texture's number, and a near surface that found
+		 * it through an old hint drew from the 64x64 copy. */
 		if( hs < r_gx_cmpr_nslots && r_gx_cmpr_slot[hs].valid
-			&& r_gx_cmpr_slot[hs].texnum == texnum )
+			&& r_gx_cmpr_slot[hs].texnum == texnum
+			&& r_gx_cmpr_slot[hs].far == ( r_gx_cmpr_want_far ? 1 : 0 ))
 		{
 			if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR )
 			{
