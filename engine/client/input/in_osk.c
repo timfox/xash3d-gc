@@ -587,6 +587,10 @@ void OSK_Draw( void )
 	char label[2] = { 0, 0 };
 	int i, j, p;
 
+	// a cinematic shot is being filmed: no keyboard or controller prompt in the picture
+	if( CL_CineActive( ))
+		return;
+
 #if XASH_GAMECUBE
 	if( GC_PadMissingNotice( ))
 		OSK_DrawNotice( sx, sy );
