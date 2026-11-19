@@ -5804,6 +5804,42 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 	Mod_GCWorldPackInitStub();
 	start = Sys_DoubleTime( );
 	size = FS_FileLength( f );
+#if XASH_DODGC_NETWORK
+	/* DoD: every measured map pack is 1.4-3.2 MiB, so a fixed 6 MiB ring held 2.8-4.6 MiB of ARAM the
+	 * match never touched, and the two 3.55 MiB player animation packs did not fit beside it. The ring
+	 * is this map's pack plus margin for the per-tag duplicates (full 6 MiB when that does not fit).
+	 * It is recomputed at every pack open: a later, larger pack must not wrap a smaller ring (the
+	 * wrap would overwrite textures of the same pack that gc_wt.aram[] still points at), so the ring is
+	 * released and reserved again at the larger size. The previous world's textures are already gone
+	 * here (the pack state was reset above) and the store entries are cleared with it. */
+	if( size > 0 && !Sys_CheckParm( "-gccapfacessmoke" ))
+	{
+		const uint32_t margin = Q_max( 512u * 1024u, (uint32_t)size / 8u );
+		const uint64_t want64 = (( (uint64_t)size + margin + 32767u ) & ~(uint64_t)32767u );
+		const uint32_t want = want64 < GC_WT_ARAM_BYTES ? (uint32_t)want64 : GC_WT_ARAM_BYTES;
+
+		if( gc_wt_store_base && gc_wt_store_bytes < want )
+		{
+			if( GC_AramFree( gc_wt_store_base ))
+			{
+				Con_Reportf( "Xash3D GameCube: world texture store ring %s too small for pack %s, reserving %s\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( want ));
+				gc_wt_store_base = 0;
+				gc_wt_store_head = gc_wt_store_next = 0;
+				memset( gc_wt_store, 0, sizeof( gc_wt_store ));
+			}
+			else
+				Con_Reportf( S_WARN "Xash3D GameCube: world texture store ring %s too small for pack %s and could not be released\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ));
+		}
+		if( !gc_wt_store_base )
+		{
+			gc_wt_store_bytes = want;
+			Con_Reportf( "Xash3D GameCube: world texture store ring %s for pack %s (full ring %s)\n",
+				Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( GC_WT_ARAM_BYTES ));
+		}
+	}
+#endif
 	if( !gc_wt_store_base )
 	{
 		/* Size the ring to this pack when the map never changelevels into a
@@ -5827,6 +5863,12 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 		if( size_to_pack )
 			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
 		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		/* A reserve that fails at the right-sized ring retries at the full ring before giving up. */
+		if( !gc_wt_store_base && gc_wt_store_bytes < GC_WT_ARAM_BYTES )
+		{
+			gc_wt_store_bytes = GC_WT_ARAM_BYTES;
+			gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		}
 	}
 	if( !gc_wt_store_base )
 	{

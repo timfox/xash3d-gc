@@ -2243,6 +2243,25 @@ void GC_PrefetchResetForMenu( void )
 	gc_prefetch_initialized = false;
 }
 
+/* The menu-idle first-map prefetch window is dead weight once the map is loaded (1 MiB of ARAM
+ * in a DoD match). Drop its entries first so no reader can see freed ARAM, then free the block;
+ * the next menu idle reserves a fresh one (GC_PrefetchResetForMenu clears the init flag). */
+void GC_PrefetchReleaseForMatch( void )
+{
+	unsigned int base = gc_prefetch_aram;
+
+	if( !base )
+		return;
+	memset( gc_prefetch, 0, sizeof( gc_prefetch ));
+	gc_prefetch_count = 0;
+	gc_prefetch_next = 0;
+	gc_prefetch_used = 0;
+	gc_prefetch_capacity = 0;
+	gc_prefetch_manifest_ready = true;
+	gc_prefetch_aram = 0;
+	GC_AramFree( base );
+}
+
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )
 {
 	if( used ) *used = gc_prefetch_used;
