@@ -210,6 +210,10 @@ enum {
 	FEAT_VELVET,		/* nap cloth: soft wrap body + rim sheen IndTex */
 	FEAT_CARBON,		/* carbon fiber: dual-scale weave × metal IndTex */
 	FEAT_PEARL,		/* pearl / nacre: soft body + iridescent Fresnel coat */
+	FEAT_PLASMA_FOIL,	/* hot metal film: fine IndTex × warm dual KONST */
+	FEAT_LUNAR_DUST,	/* dry regolith matte: coarse IndTex grain × cool gray KONST */
+	FEAT_FERN_GLASS,	/* organic refraction: scrolled IndTex ribs × green KONST */
+	FEAT_QUARK_GEL,		/* soft particulate gel: sparse IndTex × cool violet KONST */
 	FEAT_MOD2X_DETAIL,
 	FEAT_SPEC_MASK,
 	FEAT_FOG_HAZE,
@@ -319,6 +323,10 @@ static Material materials[] = {
 	{ "VELVET",     "Nap cloth - metal/normal/rough",       { 255, 255, 255, 255 }, 0.00f, 0.75f, MAPS_WOOD },
 	{ "CARBON",     "Carbon weave - metal/normal/rough",    { 255, 255, 255, 255 }, 0.95f, 0.35f, MAPS_CORRUGATED },
 	{ "PEARL",      "Nacre coat - metal/normal/rough",      { 255, 255, 255, 255 }, 0.15f, 0.28f, MAPS_PAINT },
+	{ "PLASMA FOIL", "Hot metal film - metal/normal/rough", { 255, 255, 255, 255 }, 0.95f, 0.16f, MAPS_DAMASCUS },
+	{ "LUNAR DUST",  "Dry regolith - metal/normal/rough",   { 255, 255, 255, 255 }, 0.02f, 0.88f, MAPS_STONE },
+	{ "FERN GLASS",  "Organic refraction - metal/normal/rough", { 255, 255, 255, 255 }, 0.08f, 0.32f, MAPS_PAINT },
+	{ "QUARK GEL",   "Soft particulate - metal/normal/rough", { 255, 255, 255, 255 }, 0.05f, 0.55f, MAPS_WOOD },
 };
 static const int materialCount = (int)(sizeof(materials) / sizeof(materials[0]));
 static int materialIndex = 0; /* open on RUST — full map set */
@@ -370,6 +378,10 @@ static const char *featureNames[FEAT_COUNT] = {
 	"VELVET",
 	"CARBON",
 	"PEARL",
+	"PLASMA FOIL",
+	"LUNAR DUST",
+	"FERN GLASS",
+	"QUARK GEL",
 	"MOD2X DETAIL",
 	"SPEC MASK ADD",
 	"FOG HAZE",
@@ -2619,6 +2631,391 @@ static void setup_tev_pearl(const Material *mat)
 }
 
 /*
+ * FEAT_PLASMA_FOIL — hot metal film: fine IndTex × warm dual KONST.
+ * No force-field shell; bloom stays off.
+ */
+static void setup_tev_plasma_foil(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.08f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.12f; /* fine hot-foil grain */
+	im[1][1] = 0.14f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 14.0f;
+	scroll[1][1] = 15.5f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.52f) - (f32)(int)(phase * 0.52f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.18f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 255, 140, 55, 255 }); /* warm plasma amber */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 255, 85, 35, 255 }); /* hot foil glint */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* warm dual-KONST metal film body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* fine hot foil flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* fine IndTex (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_LUNAR_DUST — dry regolith matte: coarse IndTex grain × cool gray KONST.
+ */
+static void setup_tev_lunar_dust(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.022f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.48f; /* coarse regolith grain */
+	im[1][1] = 0.52f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -3);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 8.0f;
+	scroll[1][1] = 9.0f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.40f) - (f32)(int)(phase * 0.40f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.75f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 150, 155, 165, 255 }); /* cool lunar gray */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 110, 115, 125, 255 }); /* dust shade */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* cool gray regolith body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* coarse dust grain */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* coarse IndTex (matte, no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_FERN_GLASS — organic refraction: scrolled IndTex ribs × green KONST.
+ */
+static void setup_tev_fern_glass(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.06f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.25f; /* asymmetric leaf ribs */
+	im[1][1] = 0.55f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 6.0f;
+	scroll[1][1] = 18.0f; /* tall scrolled ribs */
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.62f) - (f32)(int)(phase * 0.62f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.35f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 70, 160, 95, 255 }); /* fern green */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 40, 120, 70, 255 }); /* rib shadow */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* green glass body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* scrolled rib detail */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* rib IndTex refraction (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_QUARK_GEL — soft particulate gel: sparse IndTex × cool violet KONST.
+ */
+static void setup_tev_quark_gel(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.03f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.04f; /* sparse particulate */
+	im[1][1] = 0.05f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -8);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 5.0f;
+	scroll[1][1] = 5.5f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.38f) - (f32)(int)(phase * 0.38f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.55f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 140, 95, 190, 255 }); /* cool violet gel */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 100, 70, 160, 255 }); /* particulate tint */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* soft violet gel body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* sparse particulate flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* sparse IndTex (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
  * FEAT_ANISO_FLAKE — brushed / flake metal: asymmetric IndTex stretches sharp IBL.
  */
 static void setup_tev_aniso_flake(const Material *mat)
@@ -2770,7 +3167,9 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 		&& featureIndex != FEAT_PORCELAIN && featureIndex != FEAT_GOLD_LEAF
 		&& featureIndex != FEAT_FROST_ICE && featureIndex != FEAT_CAUSTICS
 		&& featureIndex != FEAT_VELVET && featureIndex != FEAT_CARBON
-		&& featureIndex != FEAT_PEARL) {
+		&& featureIndex != FEAT_PEARL
+		&& featureIndex != FEAT_PLASMA_FOIL && featureIndex != FEAT_LUNAR_DUST
+		&& featureIndex != FEAT_FERN_GLASS && featureIndex != FEAT_QUARK_GEL) {
 		setup_tev_flat_lit(mat);
 		return;
 	}
@@ -2807,6 +3206,10 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 	case FEAT_VELVET:        setup_tev_velvet(mat); break;
 	case FEAT_CARBON:        setup_tev_carbon(mat); break;
 	case FEAT_PEARL:         setup_tev_pearl(mat); break;
+	case FEAT_PLASMA_FOIL:   setup_tev_plasma_foil(mat); break;
+	case FEAT_LUNAR_DUST:    setup_tev_lunar_dust(mat); break;
+	case FEAT_FERN_GLASS:    setup_tev_fern_glass(mat); break;
+	case FEAT_QUARK_GEL:     setup_tev_quark_gel(mat); break;
 	case FEAT_MOD2X_DETAIL:  setup_tev_mod2x(mat); break;
 	case FEAT_SPEC_MASK:     setup_tev_spec_mask(mat); break;
 	case FEAT_SCALE2_LIGHT:  setup_tev_scale2_light(mat); break;
@@ -3866,13 +4269,45 @@ int main(int argc, char **argv)
 				skyIndex = 2;
 			}
 			if (frame == 2090) {
+				select_material(17, 1); /* PLASMA FOIL card + path */
+				featureIndex = FEAT_PLASMA_FOIL;
+				roughnessOverride = 0.16f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 0;
+				bloomEnabled = 0;
+			}
+			if (frame == 2160) {
+				select_material(18, 1); /* LUNAR DUST card + path */
+				featureIndex = FEAT_LUNAR_DUST;
+				roughnessOverride = 0.88f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 1;
+				bloomEnabled = 0;
+			}
+			if (frame == 2230) {
+				select_material(19, 1); /* FERN GLASS card + path */
+				featureIndex = FEAT_FERN_GLASS;
+				roughnessOverride = 0.32f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 2;
+				bloomEnabled = 0;
+			}
+			if (frame == 2300) {
+				select_material(20, 1); /* QUARK GEL card + path */
+				featureIndex = FEAT_QUARK_GEL;
+				roughnessOverride = 0.55f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 0;
+				bloomEnabled = 0;
+			}
+			if (frame == 2370) {
 				select_material(0, 1); /* RUST — back to hero PBR */
 				featureIndex = FEAT_HERO_RUST_PBR;
 				roughnessOverride = -1.0f;
 				tint_sphere_vertices(&materials[materialIndex]);
 				skyIndex = 0;
 			}
-			if (frame == 2140)
+			if (frame == 2420)
 				captureReel = 0;
 			mat = &materials[materialIndex];
 		} else if (autoShowcase && galleryMode && idleTimer > 7.5f && bootTimer <= 0.0f) {
