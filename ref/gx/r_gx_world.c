@@ -8056,6 +8056,10 @@ static void R_GXSmokeLoad( void );
  * ending on a polygon edge. 16 KB from the map arena. */
 static byte *gc_wdepth_tex;
 static GXTexObj gc_wdepth_obj;
+/* A second I4 map on the same grid (file header word 5 = 1): 15 where the
+ * sun reaches the water, 0 in shadow. The sun's glint is multiplied by it. */
+static GXTexObj gc_wsunmap_obj;
+static qboolean gc_wsunmap_ready;
 static int gc_wdepth_state;	/* 0 untried, 1 ready, -1 absent */
 static float gc_wdepth_x0, gc_wdepth_y0, gc_wdepth_w, gc_wdepth_h;
 
@@ -8085,11 +8089,20 @@ static qboolean R_GXWaterDepthReady( void )
 		memcpy( &cell, &hdr[4], 4 );
 		if( w >= 8 && h >= 8 && !( w & 7u ) && !( h & 7u ) && bytes <= 64u * 1024u && cell > 0.0f )
 		{
+			const u32 maps = hdr[5] == 1u ? 2u : 1u;
+
 			gc_wdepth_tex = (byte *)GC_MapLoadBufferTailAlloc(
-				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes );
-			if( gc_wdepth_tex && gEngfuncs.fsapi->Read( f, gc_wdepth_tex, bytes ) == (fs_offset_t)bytes )
+				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes * maps );
+			if( gc_wdepth_tex && gEngfuncs.fsapi->Read( f, gc_wdepth_tex, bytes * maps ) == (fs_offset_t)( bytes * maps ))
 			{
-				DCFlushRange( gc_wdepth_tex, bytes );
+				DCFlushRange( gc_wdepth_tex, bytes * maps );
+				if( maps == 2u )
+				{
+					GX_InitTexObj( &gc_wsunmap_obj, gc_wdepth_tex + bytes, (u16)w, (u16)h, GX_TF_I4,
+						GX_CLAMP, GX_CLAMP, GX_FALSE );
+					GX_InitTexObjFilterMode( &gc_wsunmap_obj, GX_LINEAR, GX_LINEAR );
+					gc_wsunmap_ready = true;
+				}
 				GX_InitTexObj( &gc_wdepth_obj, gc_wdepth_tex, (u16)w, (u16)h, GX_TF_I4,
 					GX_CLAMP, GX_CLAMP, GX_FALSE );
 				GX_InitTexObjFilterMode( &gc_wdepth_obj, GX_LINEAR, GX_LINEAR );
@@ -8519,6 +8532,29 @@ static void R_GXDrawPackedWater( void )
 					memset( im, 0, sizeof( im ));
 					im[0][0] = im[1][1] = 0.75f * (float)gc_wsun_side / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
 					GX_SetIndTexMatrix( GX_ITM_0, im, -3 );
+					/* The glint only where the sun reaches the water: a
+					 * fourth stage multiplies by the baked sun map, looked
+					 * up by the vertex's world position. */
+					if( gc_wsunmap_ready )
+					{
+						Mtx wm;
+
+						memset( wm, 0, sizeof( wm ));
+						wm[0][0] = 1.0f / gc_wdepth_w; wm[0][3] = -gc_wdepth_x0 / gc_wdepth_w;
+						wm[1][1] = 1.0f / gc_wdepth_h; wm[1][3] = -gc_wdepth_y0 / gc_wdepth_h;
+						wm[2][3] = 1.0f;
+						GX_LoadTexMtxImm( wm, GX_TEXMTX8, GX_MTX2x4 );
+						GX_LoadTexObj( &gc_wsunmap_obj, GX_TEXMAP4 );
+						GX_SetNumTexGens( 6 );
+						GX_SetTexCoordGen( GX_TEXCOORD5, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX8 );
+						GX_SetNumTevStages( 4 );
+						GX_SetTevDirect( GX_TEVSTAGE3 );
+						GX_SetTevOrder( GX_TEVSTAGE3, GX_TEXCOORD5, GX_TEXMAP4, GX_COLORNULL );
+						GX_SetTevColorIn( GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+						GX_SetTevColorOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+						GX_SetTevAlphaIn( GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+						GX_SetTevAlphaOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					}
 				}
 			}
 		}
