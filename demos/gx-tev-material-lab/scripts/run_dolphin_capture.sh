@@ -85,8 +85,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Copper hold + chrome roughness + emboss/spec reel (~730 guest frames)
-	if (( n > 720 )); then
+	# Copper hold + chrome roughness + emboss/spec reel (~740 guest frames)
+	if (( n > 760 )); then
 		break
 	fi
 done

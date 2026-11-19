@@ -653,40 +653,58 @@ static PbrSet *active_pbr(const Material *mat)
 	return &pbrSets[MAPS_RUST];
 }
 
+/* World → view (s_view). Specular dirs use the 3×3 only. */
+static void view_xform_pos(f32 x, f32 y, f32 z, f32 *ox, f32 *oy, f32 *oz)
+{
+	*ox = s_view[0][0] * x + s_view[0][1] * y + s_view[0][2] * z + s_view[0][3];
+	*oy = s_view[1][0] * x + s_view[1][1] * y + s_view[1][2] * z + s_view[1][3];
+	*oz = s_view[2][0] * x + s_view[2][1] * y + s_view[2][2] * z + s_view[2][3];
+}
+
+static void view_xform_dir(f32 x, f32 y, f32 z, f32 *ox, f32 *oy, f32 *oz)
+{
+	*ox = s_view[0][0] * x + s_view[0][1] * y + s_view[0][2] * z;
+	*oy = s_view[1][0] * x + s_view[1][1] * y + s_view[1][2] * z;
+	*oz = s_view[2][0] * x + s_view[2][1] * y + s_view[2][2] * z;
+}
+
 /* mode: 0=key, 1=key+fill, 2=key+rim — lights in view space.
  * with_spec: GX_AF_SPEC + shininess from roughness (FEAT_HW_SPEC). */
 static void load_hw_lights(int mode, int with_spec, f32 roughness)
 {
 	GXLightObj lo;
-	GXColor amb = { 16, 16, 22, 255 };
+	GXColor amb = { 28, 28, 38, 255 };
 	GXColor matc = { 255, 255, 255, 255 };
 	GXColor key = { 255, 236, 210, 255 };
-	GXColor fill = { 48, 64, 110, 255 };
+	GXColor fill = { 72, 88, 140, 255 };
 	GXColor rim = { 160, 190, 255, 255 };
 	/* Key — upper-right front (matches emboss sun offset) */
 	const f32 kx = 3.5f, ky = 4.5f, kz = 5.0f;
-	f32 klen, shininess;
+	f32 px, py, pz, dx, dy, dz, klen, shininess;
 
 	GX_SetChanAmbColor(GX_COLOR0A0, amb);
 	GX_SetChanMatColor(GX_COLOR0A0, matc);
 
-	GX_InitLightPos(&lo, kx, ky, kz);
 	GX_InitLightColor(&lo, key);
 	if (with_spec) {
 		/* Roughness 0 → tight lobe; 1 → broad / dim (min shininess ~4). */
 		shininess = 4.0f + (1.0f - clampf(roughness, 0.0f, 1.0f)) * 60.0f;
-		klen = sqrtf(kx * kx + ky * ky + kz * kz);
+		view_xform_dir(kx, ky, kz, &dx, &dy, &dz);
+		klen = sqrtf(dx * dx + dy * dy + dz * dz);
 		if (klen < 1e-4f) klen = 1.0f;
-		/* Specular dir toward light; Flipper assumes view ≈ +Z in view space. */
-		GX_InitSpecularDir(&lo, kx / klen, ky / klen, kz / klen);
+		/* Specular parallel light only — InitLightPos would destroy this. */
+		GX_InitSpecularDir(&lo, dx / klen, dy / klen, dz / klen);
 		GX_InitLightShininess(&lo, shininess);
 	} else {
+		view_xform_pos(kx, ky, kz, &px, &py, &pz);
+		GX_InitLightPos(&lo, px, py, pz);
 		GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 	}
 	GX_LoadLightObj(&lo, GX_LIGHT0);
 
 	if (mode >= 1) {
-		GX_InitLightPos(&lo, -4.0f, 1.0f, 3.0f);
+		view_xform_pos(-4.0f, 1.0f, 3.0f, &px, &py, &pz);
+		GX_InitLightPos(&lo, px, py, pz);
 		GX_InitLightColor(&lo, fill);
 		GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 		GX_LoadLightObj(&lo, GX_LIGHT1);
@@ -696,7 +714,8 @@ static void load_hw_lights(int mode, int with_spec, f32 roughness)
 	}
 
 	if (mode >= 2) {
-		GX_InitLightPos(&lo, -1.5f, 2.5f, -5.5f);
+		view_xform_pos(-1.5f, 2.5f, -5.5f, &px, &py, &pz);
+		GX_InitLightPos(&lo, px, py, pz);
 		GX_InitLightColor(&lo, rim);
 		GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 		GX_LoadLightObj(&lo, GX_LIGHT2);
@@ -704,7 +723,6 @@ static void load_hw_lights(int mode, int with_spec, f32 roughness)
 		GX_InitLightColor(&lo, (GXColor){0, 0, 0, 255});
 		GX_LoadLightObj(&lo, GX_LIGHT2);
 	}
-	(void)s_view;
 }
 
 static GXTexObj *select_height_tex(const Material *mat)
@@ -767,8 +785,9 @@ static void setup_tev_hw_spec(const Material *mat)
 	GX_SetNumTexGens(1);
 	GX_SetNumTevStages(1);
 	GX_SetNumIndStages(0);
+	/* Specular-only light → DF_NONE + AF_SPEC (actor pattern). */
 	GX_SetChanCtrl(GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
-		GX_LIGHT0, GX_DF_CLAMP, GX_AF_SPEC);
+		GX_LIGHT0, GX_DF_NONE, GX_AF_SPEC);
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	if (mat->maps != MAPS_NONE) {
@@ -781,7 +800,8 @@ static void setup_tev_hw_spec(const Material *mat)
 	GX_SetTevDirect(GX_TEVSTAGE0);
 	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
 	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	/* SCALE_2 so the roughness→shininess lobe reads hot on chrome/damascus */
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
@@ -798,12 +818,12 @@ static void setup_tev_emboss_lit(const Material *mat)
 	Mtx tm;
 	u8 tc0, tc1, st;
 
-	load_hw_lights(0, 0, current_roughness(mat));
+	load_hw_lights(1, 0, current_roughness(mat)); /* key+fill so carved relief reads */
 
 	GX_SetNumChans(1);
 	GX_SetNumIndStages(0);
 	GX_SetChanCtrl(GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
-		GX_LIGHT0, GX_DF_CLAMP, GX_AF_NONE);
+		GX_LIGHT0 | GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE);
 
 	/* TEXCOORD0 = albedo UV; TEXCOORD1/2 = height at uv and uv+d */
 	memset(tm, 0, sizeof(tm));
@@ -830,12 +850,12 @@ static void setup_tev_emboss_lit(const Material *mat)
 	GX_InitTexObjWrapMode(height, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjFilterMode(height, GX_LINEAR, GX_LINEAR);
 
-	/* Stage 0: albedo × HW diffuse → PREV */
+	/* Stage 0: albedo × HW diffuse → PREV (SCALE_2 for proof readability) */
 	GX_SetNumTevStages(5);
 	GX_SetTevDirect(GX_TEVSTAGE0);
 	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
 	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
@@ -1023,8 +1043,12 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 static void draw_sphere(Mtx modelview)
 {
 	int i;
+	Mtx nrm;
 
 	GX_LoadPosMtxImm(modelview, GX_PNMTX0);
+	/* HW lights need view-space normals (match view_xform_* lights) */
+	guMtxInvXpose(modelview, nrm);
+	GX_LoadNrmMtxImm(nrm, GX_PNMTX0);
 
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
