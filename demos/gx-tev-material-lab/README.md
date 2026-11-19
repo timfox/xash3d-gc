@@ -18,6 +18,7 @@ python3 scripts/import_rust_maps.py       # ~/Desktop/pbr-gc/rust → textures/r
 python3 scripts/import_damascus_maps.py   # ~/Desktop/pbr-gc/metal_damascus → damascus_*.png
 python3 scripts/import_tcom_sets.py       # Storage/Extra/Stream TCom packs → textures/<slug>_*.png
 python3 scripts/gen_assets.py             # synthetic env + **drawn** HUD sprites (no ref crops)
+python3 scripts/bake_height_from_normals.py  # stone/brick/concrete height for EMBOSS LIT
 make -j$(nproc)
 ```
 
@@ -55,16 +56,30 @@ the DumpFrames capture reel so you stay in control.
 | PBR MAPS + ENV | albedo × AO + synthetic env × Fresnel |
 | FRESNEL+KONST | albedo + env × konst F0 |
 | NORMAL INDTEX | active-material normal IndTex-warps env into albedo |
-| HW KEY LIGHT | `GX_LIGHT0` key diffuse × albedo |
+| HW KEY LIGHT | `GX_LIGHT0` key diffuse × albedo (diffuse-only A/B) |
 | HW KEY+FILL | key + cool fill (`GX_LIGHT0\|1`) |
 | HW KEY+RIM | key + fill + rim backlight |
+| EMBOSS LIT | Lost Coast dual-sample height emboss under HW key (`lit×(0.5+h0−h1)×2`) |
+| HW SPEC | `GX_DF_CLAMP` + `GX_AF_SPEC`; shininess from roughness |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
 | SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
-Maps import at **192²** (TCom) / **256²** (rust·damascus) — GC-safe DOL size.
+Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²** — GC-safe DOL size.
+
+### Dolphin proofs (emboss / specular)
+
+Capture reel frames ~570–700 lock **STONE + EMBOSS LIT** then **DAMASCUS/CHROME + HW SPEC**.
+If this environment has no Dolphin/devkit, build on a machine with `DEVKITPRO` and run:
+
+```bash
+./scripts/run_dolphin_capture.sh /tmp/gx-tev-material-lab-cap
+# → shots/emboss-lit.png, shots/hw-spec.png
+```
+
+Sibling self-hosted worker [GX TEV Material Lab](bc-bf36fe5e-1557-50c8-9093-12a29316f14e) can Dolphin-prove when available.
 
 ## Roughness on Flipper
 

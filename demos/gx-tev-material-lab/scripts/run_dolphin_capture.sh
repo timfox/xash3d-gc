@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-36}"
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-50}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -85,8 +85,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Copper hold + chrome roughness reel (~460 guest frames)
-	if (( n > 480 )); then
+	# Copper hold + chrome roughness + emboss/spec reel (~730 guest frames)
+	if (( n > 720 )); then
 		break
 	fi
 done
@@ -134,5 +134,8 @@ pick 445 "$OUT_DIR/shots/hw-key.png"
 pick 475 "$OUT_DIR/shots/hw-fill.png"
 pick 505 "$OUT_DIR/shots/hw-rim.png"
 pick 545 "$OUT_DIR/shots/stone-indtex.png"
+pick 600 "$OUT_DIR/shots/emboss-lit.png"
+pick 660 "$OUT_DIR/shots/hw-spec.png"
+pick 700 "$OUT_DIR/shots/hw-spec-chrome.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

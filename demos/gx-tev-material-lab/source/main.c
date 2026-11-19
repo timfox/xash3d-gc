@@ -148,6 +148,12 @@
 #include "stone_normal.h"
 #include "stone_roughness_tpl.h"
 #include "stone_roughness.h"
+#include "height_stone_tpl.h"
+#include "height_stone.h"
+#include "height_brick_tpl.h"
+#include "height_brick.h"
+#include "height_concrete_tpl.h"
+#include "height_concrete.h"
 
 #define DEFAULT_FIFO_SIZE	(256 * 1024)
 #define SPHERE_SLICES		72
@@ -171,9 +177,11 @@ enum {
 	FEAT_HERO_RUST_PBR = 0,
 	FEAT_FRESNEL_KONST,
 	FEAT_INDTEX_BUMP,	/* IndTex normal → env warp (active material) */
-	FEAT_HW_KEY,		/* GX_LIGHT0 key diffuse × albedo */
+	FEAT_HW_KEY,		/* GX_LIGHT0 key diffuse × albedo (diffuse-only A/B) */
 	FEAT_HW_FILL,		/* key + cool fill */
 	FEAT_HW_RIM,		/* key + rim backlight */
+	FEAT_EMBOSS_LIT,	/* Lost Coast dual-sample height emboss under HW key */
+	FEAT_HW_SPEC,		/* GX_AF_SPEC lobe; shininess from roughness */
 	FEAT_MOD2X_DETAIL,
 	FEAT_SPEC_MASK,
 	FEAT_FOG_HAZE,
@@ -228,10 +236,17 @@ static GXTexObj texEnvSharp, texEnvMid, texEnvBlur;
 static GXTexObj texChecker, texShadow;
 static GXTexObj texHudTL, texHudFPS, texHudBottom;
 static GXTexObj texFont, texDetail, texSpec;
+static GXTexObj texHeightStone, texHeightBrick, texHeightConcrete;
 static TPLFile tplEnvSharp, tplEnvMid, tplEnvBlur, tplChecker, tplShadow;
 static TPLFile tplHudTL, tplHudFPS, tplHudBottom;
 static TPLFile tplFont, tplDetail, tplSpec;
+static TPLFile tplHeightStone, tplHeightBrick, tplHeightConcrete;
 static PbrSet pbrSets[MAPS_COUNT];
+
+/* Lost Coast cliff emboss: sun-tangent UV epsilon (see r_gx_worlddl.c). */
+#define LAB_EMBOSS_EPS		(6.0f / 64.0f)
+static const f32 lab_emboss_ds = -0.7206f * LAB_EMBOSS_EPS;
+static const f32 lab_emboss_dt = -0.6716f * LAB_EMBOSS_EPS;
 
 static SphereVert sphereVerts[(SPHERE_STACKS + 1) * (SPHERE_SLICES + 1)];
 static u16 sphereIdx[SPHERE_STACKS * SPHERE_SLICES * 6];
@@ -283,6 +298,8 @@ static const char *featureNames[FEAT_COUNT] = {
 	"HW KEY LIGHT",
 	"HW KEY+FILL",
 	"HW KEY+RIM",
+	"EMBOSS LIT",
+	"HW SPEC",
 	"MOD2X DETAIL",
 	"SPEC MASK ADD",
 	"FOG HAZE",
@@ -636,8 +653,9 @@ static PbrSet *active_pbr(const Material *mat)
 	return &pbrSets[MAPS_RUST];
 }
 
-/* mode: 0=key, 1=key+fill, 2=key+rim — lights in view space */
-static void load_hw_lights(int mode)
+/* mode: 0=key, 1=key+fill, 2=key+rim — lights in view space.
+ * with_spec: GX_AF_SPEC + shininess from roughness (FEAT_HW_SPEC). */
+static void load_hw_lights(int mode, int with_spec, f32 roughness)
 {
 	GXLightObj lo;
 	GXColor amb = { 16, 16, 22, 255 };
@@ -645,18 +663,29 @@ static void load_hw_lights(int mode)
 	GXColor key = { 255, 236, 210, 255 };
 	GXColor fill = { 48, 64, 110, 255 };
 	GXColor rim = { 160, 190, 255, 255 };
+	/* Key — upper-right front (matches emboss sun offset) */
+	const f32 kx = 3.5f, ky = 4.5f, kz = 5.0f;
+	f32 klen, shininess;
 
 	GX_SetChanAmbColor(GX_COLOR0A0, amb);
 	GX_SetChanMatColor(GX_COLOR0A0, matc);
 
-	/* Key — upper-right front */
-	GX_InitLightPos(&lo, 3.5f, 4.5f, 5.0f);
+	GX_InitLightPos(&lo, kx, ky, kz);
 	GX_InitLightColor(&lo, key);
-	GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+	if (with_spec) {
+		/* Roughness 0 → tight lobe; 1 → broad / dim (min shininess ~4). */
+		shininess = 4.0f + (1.0f - clampf(roughness, 0.0f, 1.0f)) * 60.0f;
+		klen = sqrtf(kx * kx + ky * ky + kz * kz);
+		if (klen < 1e-4f) klen = 1.0f;
+		/* Specular dir toward light; Flipper assumes view ≈ +Z in view space. */
+		GX_InitSpecularDir(&lo, kx / klen, ky / klen, kz / klen);
+		GX_InitLightShininess(&lo, shininess);
+	} else {
+		GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+	}
 	GX_LoadLightObj(&lo, GX_LIGHT0);
 
 	if (mode >= 1) {
-		/* Cool fill — lower-left */
 		GX_InitLightPos(&lo, -4.0f, 1.0f, 3.0f);
 		GX_InitLightColor(&lo, fill);
 		GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
@@ -667,7 +696,6 @@ static void load_hw_lights(int mode)
 	}
 
 	if (mode >= 2) {
-		/* Rim — behind / above */
 		GX_InitLightPos(&lo, -1.5f, 2.5f, -5.5f);
 		GX_InitLightColor(&lo, rim);
 		GX_InitLightAttn(&lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
@@ -679,6 +707,16 @@ static void load_hw_lights(int mode)
 	(void)s_view;
 }
 
+static GXTexObj *select_height_tex(const Material *mat)
+{
+	switch (mat->maps) {
+	case MAPS_BRICK:    return &texHeightBrick;
+	case MAPS_CONCRETE: return &texHeightConcrete;
+	case MAPS_STONE:
+	default:            return &texHeightStone;
+	}
+}
+
 static void setup_tev_hw_lit(const Material *mat, int mode)
 {
 	PbrSet *pbr = active_pbr(mat);
@@ -687,7 +725,7 @@ static void setup_tev_hw_lit(const Material *mat, int mode)
 	if (mode >= 1) lights |= GX_LIGHT1;
 	if (mode >= 2) lights |= GX_LIGHT2;
 
-	load_hw_lights(mode);
+	load_hw_lights(mode, 0, current_roughness(mat));
 
 	GX_SetNumChans(1);
 	GX_SetNumTexGens(1);
@@ -712,6 +750,131 @@ static void setup_tev_hw_lit(const Material *mat, int mode)
 	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
 	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
+}
+
+/*
+ * FEAT_HW_SPEC — hardware specular channel (GX_DF_CLAMP + GX_AF_SPEC).
+ * Shininess from roughness; clearly brighter lobe than diffuse-only HW KEY.
+ */
+static void setup_tev_hw_spec(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 roughness = current_roughness(mat);
+
+	load_hw_lights(0, 1, roughness);
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(1);
+	GX_SetNumTevStages(1);
+	GX_SetNumIndStages(0);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+		GX_LIGHT0, GX_DF_CLAMP, GX_AF_SPEC);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	if (mat->maps != MAPS_NONE) {
+		GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+		GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	} else {
+		GX_LoadTexObj(&texEnvMid, GX_TEXMAP0);
+	}
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
+}
+
+/*
+ * FEAT_EMBOSS_LIT — Lost Coast cliff emboss under HW key light.
+ * lit × (0.5 + h(uv) − h(uv+d)) × 2  (r_gx_worlddl.c dual-sample height).
+ */
+static void setup_tev_emboss_lit(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	GXTexObj *height = select_height_tex(mat);
+	Mtx tm;
+	u8 tc0, tc1, st;
+
+	load_hw_lights(0, 0, current_roughness(mat));
+
+	GX_SetNumChans(1);
+	GX_SetNumIndStages(0);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+		GX_LIGHT0, GX_DF_CLAMP, GX_AF_NONE);
+
+	/* TEXCOORD0 = albedo UV; TEXCOORD1/2 = height at uv and uv+d */
+	memset(tm, 0, sizeof(tm));
+	tm[0][0] = 1.0f; tm[1][1] = 1.0f; tm[2][2] = 1.0f;
+	GX_LoadTexMtxImm(tm, GX_TEXMTX1, GX_MTX2x4);
+	tm[0][3] = lab_emboss_ds;
+	tm[1][3] = lab_emboss_dt;
+	GX_LoadTexMtxImm(tm, GX_TEXMTX2, GX_MTX2x4);
+
+	tc0 = GX_TEXCOORD1;
+	tc1 = GX_TEXCOORD2;
+	GX_SetNumTexGens(3);
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(tc0, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX1);
+	GX_SetTexCoordGen(tc1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX2);
+
+	if (mat->maps != MAPS_NONE) {
+		GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+		GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	} else {
+		GX_LoadTexObj(&texEnvMid, GX_TEXMAP0);
+	}
+	GX_LoadTexObj(height, GX_TEXMAP3);
+	GX_InitTexObjWrapMode(height, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjFilterMode(height, GX_LINEAR, GX_LINEAR);
+
+	/* Stage 0: albedo × HW diffuse → PREV */
+	GX_SetNumTevStages(5);
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_1);
+
+	/* Stage 1: save lit → REG0 */
+	st = GX_TEVSTAGE1;
+	GX_SetTevDirect(st);
+	GX_SetTevOrder(st, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+	GX_SetTevColorOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
+	GX_SetTevAlphaIn(st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* Stage 2: h(uv) → PREV */
+	st = GX_TEVSTAGE2;
+	GX_SetTevDirect(st);
+	GX_SetTevOrder(st, tc0, GX_TEXMAP3, GX_COLORNULL);
+	GX_SetTevColorIn(st, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+	GX_SetTevColorOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* Stage 3: h0 − h(uv+d) + 0.5  (TB_ADDHALF avoids 8-bit mid-grey overflow) */
+	st = GX_TEVSTAGE3;
+	GX_SetTevDirect(st);
+	GX_SetTevOrder(st, tc1, GX_TEXMAP3, GX_COLORNULL);
+	GX_SetTevColorIn(st, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_CPREV);
+	GX_SetTevColorOp(st, GX_TEV_SUB, GX_TB_ADDHALF, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* Stage 4: lit × factor × 2 */
+	st = GX_TEVSTAGE4;
+	GX_SetTevDirect(st);
+	GX_SetTevOrder(st, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(st, GX_CC_ZERO, GX_CC_CPREV, GX_CC_C0, GX_CC_ZERO);
+	GX_SetTevColorOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(st, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(st, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 }
 
 static void setup_tev_indtex_bump(const Material *mat)
@@ -826,7 +989,8 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 	if (!use_env && featureIndex != FEAT_MOD2X_DETAIL && featureIndex != FEAT_SCALE2_LIGHT
 		&& featureIndex != FEAT_HERO_RUST_PBR
 		&& featureIndex != FEAT_HW_KEY && featureIndex != FEAT_HW_FILL
-		&& featureIndex != FEAT_HW_RIM && featureIndex != FEAT_INDTEX_BUMP) {
+		&& featureIndex != FEAT_HW_RIM && featureIndex != FEAT_INDTEX_BUMP
+		&& featureIndex != FEAT_EMBOSS_LIT && featureIndex != FEAT_HW_SPEC) {
 		setup_tev_flat_lit(mat);
 		return;
 	}
@@ -837,6 +1001,8 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 	case FEAT_HW_KEY:        setup_tev_hw_lit(mat, 0); break;
 	case FEAT_HW_FILL:       setup_tev_hw_lit(mat, 1); break;
 	case FEAT_HW_RIM:        setup_tev_hw_lit(mat, 2); break;
+	case FEAT_EMBOSS_LIT:    setup_tev_emboss_lit(mat); break;
+	case FEAT_HW_SPEC:       setup_tev_hw_spec(mat); break;
 	case FEAT_MOD2X_DETAIL:  setup_tev_mod2x(mat); break;
 	case FEAT_SPEC_MASK:     setup_tev_spec_mask(mat); break;
 	case FEAT_SCALE2_LIGHT:  setup_tev_scale2_light(mat); break;
@@ -1385,6 +1551,13 @@ static void load_textures(void)
 	LOAD_PBR_SET(MAPS_SOLAR, solar);
 	LOAD_PBR_SET(MAPS_STONE, stone);
 
+	TPL_OpenTPLFromMemory(&tplHeightStone, (void *)height_stone_tpl, height_stone_tpl_size);
+	TPL_GetTexture(&tplHeightStone, height_stone, &texHeightStone);
+	TPL_OpenTPLFromMemory(&tplHeightBrick, (void *)height_brick_tpl, height_brick_tpl_size);
+	TPL_GetTexture(&tplHeightBrick, height_brick, &texHeightBrick);
+	TPL_OpenTPLFromMemory(&tplHeightConcrete, (void *)height_concrete_tpl, height_concrete_tpl_size);
+	TPL_GetTexture(&tplHeightConcrete, height_concrete, &texHeightConcrete);
+
 	GX_InitTexObjWrapMode(&texEnvSharp, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texEnvMid, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texEnvBlur, GX_CLAMP, GX_CLAMP);
@@ -1396,6 +1569,9 @@ static void load_textures(void)
 	GX_InitTexObjWrapMode(&texFont, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&texSpec, GX_CLAMP, GX_CLAMP);
+	GX_InitTexObjWrapMode(&texHeightStone, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texHeightBrick, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texHeightConcrete, GX_REPEAT, GX_REPEAT);
 }
 
 int main(int argc, char **argv)
@@ -1533,6 +1709,8 @@ int main(int argc, char **argv)
 		 *  360–420  CORRUGATED + NORMAL INDTEX
 		 *  430–510  BRICK HW KEY / FILL / RIM
 		 *  520–560  STONE + INDTEX
+		 *  570–630  STONE + EMBOSS LIT
+		 *  640–700  DAMASCUS + HW SPEC (then CHROME A/B)
 		 */
 		if (captureReel) {
 			if (frame == 0 || frame == 1) {
@@ -1579,7 +1757,25 @@ int main(int argc, char **argv)
 				select_material(11, 1); /* STONE */
 				featureIndex = FEAT_INDTEX_BUMP;
 			}
-			if (frame == 570)
+			if (frame == 570) {
+				select_material(11, 1); /* STONE */
+				featureIndex = FEAT_EMBOSS_LIT;
+				roughnessOverride = -1.0f;
+				tint_sphere_vertices(&materials[materialIndex]);
+			}
+			if (frame == 640) {
+				select_material(2, 1); /* DAMASCUS */
+				featureIndex = FEAT_HW_SPEC;
+				roughnessOverride = 0.12f;
+				tint_sphere_vertices(&materials[materialIndex]);
+			}
+			if (frame == 680) {
+				select_material(14, 1); /* CHROME */
+				featureIndex = FEAT_HW_SPEC;
+				roughnessOverride = 0.05f;
+				tint_sphere_vertices(&materials[materialIndex]);
+			}
+			if (frame == 730)
 				captureReel = 0;
 			mat = &materials[materialIndex];
 		} else if (autoShowcase && galleryMode && idleTimer > 7.5f && bootTimer <= 0.0f) {
