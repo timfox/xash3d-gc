@@ -2404,7 +2404,7 @@ void GCube_ApplyCfgCvars( void )
 	gc_cvars_up = true;
 	for( i = 0; i < gc_cfg_cvar_count; i++ )
 	{
-		Cvar_Get( gc_cfg_cvars[i].name, gc_cfg_cvars[i].value, FCVAR_SERVER, "disc cfg" );
+		Cvar_Get( gc_cfg_cvars[i].name, gc_cfg_cvars[i].value, FCVAR_TEMPORARY, "disc cfg" );
 		Cvar_DirectSet( Cvar_FindVar( gc_cfg_cvars[i].name ), gc_cfg_cvars[i].value );
 		SYS_Report( "Xash3D GameCube: disc cfg cvar set\n" );
 	}
