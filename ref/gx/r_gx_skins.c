@@ -36,11 +36,13 @@ extern void Image_GCReleaseMdlDecode( void );
 
 static gc_skin_stream_t r_skin_stream;
 static byte *r_skin_window;
-#if XASH_DODGC_NETWORK
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
 /* The DoD view-model skin window is a named static pool, not a heap request. The 192 KiB heap
  * allocation below is gated on 704 KiB of free heap, which a map at map-active never has
  * (140-220 KiB), so 256 px skins never got a window. This takes part of the 360.7 KiB that
- * PR 240 freed from the playermove arrays (the DoD image is still 168 KiB smaller than before). */
+ * PR 240 freed from the playermove arrays (the DoD image is still 168 KiB smaller than before).
+ * OPT-IN (XASH_GC_SKIN_WINDOW_BSS=1 at configure): 192 KiB of static image is 192 KiB less heap, and a
+ * listen host currently runs out of heap in SV_InitGame, so it stays off until the host has headroom. */
 static byte r_skin_window_bss[GC_SKIN_WINDOW_BYTES] __attribute__(( aligned( 32 )));
 #endif
 static qboolean r_skin_ready;
@@ -324,7 +326,7 @@ const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean
 	{
 		if( !r_skin_window )
 		{
-#if XASH_DODGC_NETWORK
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
 			r_skin_window = r_skin_window_bss;
 #else
 			/* Never take the last of the heap: the map load still needs it. */

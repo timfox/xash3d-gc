@@ -660,6 +660,10 @@ def configure(conf):
 			Logs.info('GameCube slim client slots: table %s, default %s' % (max_slots, default_slots))
 		if os.environ.get('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', 1)
+		# DoD view-model skin window as a 192 KiB static block (ref/gx/r_gx_skins.c). Off by default:
+		# it comes out of the heap a listen host is short of.
+		if os.environ.get('XASH_GC_SKIN_WINDOW_BSS', '').lower() in ('1', 'yes', 'true', 'on'):
+			conf.define('XASH_GC_SKIN_WINDOW_BSS', 1)
 		# Broadband / eth2sp1: link -lbba and enable GC net headers when requested.
 		if os.environ.get('XASH_GAMECUBE_LINK_BBA', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_HAVE_LIBBBA', 1)
