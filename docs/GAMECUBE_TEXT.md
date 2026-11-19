@@ -71,3 +71,10 @@ should be done and verified in Dolphin before anything depends on it.
 | Menu pages, panels, build stamp | no allocations | | |
 | In-game glyph atlas (planned) | 64-128 KiB target | | rest of the atlas |
 Measured in Dolphin on dod_charlie / avalanche / flash / caen: no `mem FAIL` at 320 or 640 XFB; heap_free on charlie 328.9 KB vs 328.2 KB. Console hardware headroom is not measured.
+
+## Hi-res text in a match (phase 3, behind a cvar, not yet verified in Dolphin)
+`gc_hitext_ingame 1` keeps the same 64 KiB I4 atlas resident during a match and routes `CL_DrawCharacter` (HUD, chat,
+kill feed, scoreboard, console and the team/class text menus all end up there) to the GX glyph queue, flushed before
+`CopyDisp`. Default 0: the atlas is freed when the match starts, as before. **Memory when on: +64 KiB MEM1 resident**
+(inside the 64-128 KiB target; no ARAM paging needed at this size). If the queue (900 glyphs) fills, glyphs fall back to
+the soft path. Not measured: frame time with it on, heap on the heaviest maps.

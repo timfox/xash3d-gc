@@ -82,8 +82,16 @@ void CL_SetFontRendermode( cl_font_t *font )
 	ref.dllFuncs.GL_SetRenderMode( CL_FontRenderMode( font->rendermode ));
 }
 
+#if XASH_GAMECUBE
+/* the colour the current string was started with: per-character draws pass NULL and the GX glyph queue needs it */
+static rgba_t cl_font_last_color = { 255, 255, 255, 255 };
+#endif
+
 void CL_SetFontColor( cl_font_t *font, const rgba_t color )
 {
+#if XASH_GAMECUBE
+	memcpy( cl_font_last_color, color, sizeof( rgba_t ));
+#endif
 	ref.dllFuncs.Color4ub( color[0], color[1], color[2], color[3] );
 }
 
@@ -452,6 +460,20 @@ int CL_DrawCharacter( float x, float y, int number, const rgba_t color, cl_font_
 
 	if( FBitSet( flags, FONT_DRAW_HUD ))
 		SPR_AdjustSize( &x, &y, &w, &h );
+
+#if XASH_GAMECUBE
+	/* hardware resolution text in a match (gc_hitext_ingame 1): queue the glyph for the GX layer instead of the soft quad.
+	 * HUD, chat, kill feed, scoreboard and the team/class text menus all arrive here (pfnDrawCharacter / DrawConsoleString). */
+	{
+		extern qboolean GC_HiTextActive( void );
+		extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
+		const byte *c = color ? color : cl_font_last_color;
+
+		if( cls.state == ca_active && GC_HiTextActive( )
+			&& GC_HiTextGlyph( number, x, y, w, h, ( c[3] << 24 ) | ( c[0] << 16 ) | ( c[1] << 8 ) | c[2] ))
+			return font->charWidths[number];
+	}
+#endif
 
 	if( !FBitSet( flags, FONT_DRAW_NORENDERMODE ))
 		CL_SetFontRendermode( font );

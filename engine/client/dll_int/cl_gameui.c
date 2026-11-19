@@ -1460,14 +1460,14 @@ static void GAME_EXPORT pfnDrawCharacter( int ix, int iy, int iwidth, int iheigh
 	{
 		cl_font_t *font = &cls.creditsFont;
 
-		/* hardware resolution text: a quad at 640x480 over the presented soft frame; the keyboard is drawn
-		 * into the soft frame, so while it is up the text stays soft and under it */
+		/* hardware resolution text: a quad at 640x480 over the presented soft frame; the keyboard queues its own
+		 * glyphs and occludes this text under its panel (GC_HiTextOcclude) */
 		{
 			extern qboolean GC_HiTextActive( void );
 			extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
 			float cx = x, cy = y, cw = width, chh = height, u0 = 0, v0 = 0, u1 = 1, v1 = 1;
 
-			if( !OSK_IsOpen() && GC_HiTextActive()
+			if( GC_HiTextActive()
 				&& CL_Scissor( &gameui.ds.scissor, &cx, &cy, &cw, &chh, &u0, &v0, &u1, &v1 )
 				&& GC_HiTextGlyph( ch, x, y, width, height, ulRGBA ))
 				return;
