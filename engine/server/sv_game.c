@@ -6219,7 +6219,7 @@ void SV_GCStaticWallsSelfTest( void )
 		SV_GCStaticWallBounds( i, amin, amax, &mi );
 		for( j = 1; j < svgame.numEntities; j++ )
 		{
-			edict_t *e = EDICT_NUM( j );
+			edict_t *e = SV_EdictNum( j );
 
 			if( !e->free && e->v.modelindex == mi && e->v.solid == SOLID_BSP && !Q_strcmp( SV_ClassName( e ), "func_wall" ))
 			{
