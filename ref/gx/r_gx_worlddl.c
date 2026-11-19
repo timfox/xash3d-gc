@@ -24,6 +24,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <ogc/lwp_watchdog.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
