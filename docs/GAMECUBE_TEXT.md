@@ -78,3 +78,18 @@ kill feed, scoreboard, console and the team/class text menus all end up there) t
 `CopyDisp`. Default 0: the atlas is freed when the match starts, as before. **Memory when on: +64 KiB MEM1 resident**
 (inside the 64-128 KiB target; no ARAM paging needed at this size). If the queue (900 glyphs) fills, glyphs fall back to
 the soft path. Not measured: frame time with it on, heap on the heaviest maps.
+
+## Memory card: name and settings (design and code; not run on a card or in Dolphin yet)
+`card_gamecube.c` + `settings_blob.c`: one file, `DayOfDefeat_Settings`, one card sector, on slot A. The blob (name,
+sensitivity, volume, MP3Volume, gamma, brightness; whitelist, printable ASCII, CRC32, version) is host-tested
+(`tests/test_gamecube_settings_blob.py`: round trip, every flipped bit rejected, truncation, bad magic/version,
+non-whitelisted keys, unprintable values). Commands: `gc_card_save`, `gc_card_load`, `gc_card_format confirmed`; cvar
+`gc_card_status` holds the last result text.
+- **Never formats on its own.** Save and load answer "the card must be formatted first" for a blank, foreign-region or
+  broken card. `gc_card_format` refuses unless the argument is `confirmed` AND the previous save/load answered exactly that,
+  and it does nothing if the card mounts fine. The menu must show a dialog first that says what it erases.
+- Never touches another file on the card; never writes unless the player's action called `gc_card_save`.
+- Memory: a 40 KiB (5 x 8 KiB) libogc work area and one sector buffer, both allocated only while a card operation runs and
+  freed after; resident cost zero. SYS arena and ARAM: none.
+- Still to do (needs a decision): the menu wiring (Options > Player page "Save to memory card" / load at start, and the
+  format dialog) and a Dolphin run with a GCI memory card image. No banner or icon is set, so the IPL shows a blank icon.

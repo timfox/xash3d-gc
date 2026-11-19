@@ -677,8 +677,10 @@ void OSK_Init( void )
 {
 #if XASH_GAMECUBE
 	extern void GC_HiTextInit( void );
+	extern void GC_CardInit( void );
 
 	GC_HiTextInit();
+	GC_CardInit();
 #endif
 	Cvar_RegisterVariable( &osk_enable );
 }
