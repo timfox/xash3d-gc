@@ -43,23 +43,28 @@ the DumpFrames capture reel so you stay in control.
 | A / D-pad / L R | Cycle material |
 | B | Step roughness |
 | X | Toggle env map |
-| Y | Cycle TEV feature path |
+| Y | Cycle TEV / lighting feature path |
 | START | Gallery ↔ Lab |
 | Z | Toggle idle auto-showcase |
 | Stick X | Orbit camera |
 
-### TEV feature paths (Y)
+### TEV / lighting paths (Y)
 
 | Path | What Flipper is doing |
 |------|------------------------|
-| RUST PBR MAPS | albedo × AO + synthetic env × Fresnel |
+| PBR MAPS + ENV | albedo × AO + synthetic env × Fresnel |
 | FRESNEL+KONST | albedo + env × konst F0 |
-| MOD2X DETAIL | rust albedo × detail `GX_CS_SCALE_2` |
+| NORMAL INDTEX | active-material normal IndTex-warps env into albedo |
+| HW KEY LIGHT | `GX_LIGHT0` key diffuse × albedo |
+| HW KEY+FILL | key + cool fill (`GX_LIGHT0\|1`) |
+| HW KEY+RIM | key + fill + rim backlight |
+| MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
-| INDTEX BUMP | rust normal IndTex warps env into albedo |
-| FOG HAZE | denser `GX_FOG_PERSP_LIN` (base grey fog is always on) |
+| FOG HAZE | denser `GX_FOG_PERSP_LIN` |
 | SCALE2 LIGHT | albedo × vtx `GX_CS_SCALE_2` |
 | ALPHA CLIP | `GX_SetAlphaCompare` |
+
+Maps import at **192²** (TCom) / **256²** (rust·damascus) — GC-safe DOL size.
 
 ## Roughness on Flipper
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Import Tim's Rainbow Damascus PBR set into textures/damascus_*.png."""
 from __future__ import annotations
+# GC-safe default 256² (512² blows the DOL past MEM1).
 
 import os
 from pathlib import Path
@@ -42,7 +43,7 @@ def main() -> None:
 	TEX.mkdir(parents=True, exist_ok=True)
 	for name, fn in MAPS.items():
 		im = Image.open(SRC / fn).convert("RGB").resize(
-			(512, 512), Image.Resampling.LANCZOS
+			(256, 256), Image.Resampling.LANCZOS
 		)
 		write_rgba(name, np.asarray(im))
 	# No AO in the TextureCom set — flat white so the rust TEV path still works

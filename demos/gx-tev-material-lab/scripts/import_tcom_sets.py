@@ -13,7 +13,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 TEX = ROOT / "textures"
-SIZE = 128
+SIZE = 192
 
 STORAGE = Path("/run/media/tim/Storage/NewOld/New folder (3)")
 EXTRA = Path("/run/media/tim/Extra")
@@ -61,6 +61,11 @@ SETS = {
 		"dir": STREAM,
 		"prefix": "TCom_SolarCells_4K_",
 		"maps": ("albedo", "ao", "metallic", "normal", "roughness"),
+	},
+	"stone": {
+		"dir": STREAM,
+		"prefix": "TCom_Wall_Stone3_2x2_8K_",
+		"maps": ("albedo", "ao", "normal", "roughness"),
 	},
 }
 
