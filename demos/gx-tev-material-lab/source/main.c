@@ -55,6 +55,86 @@
 #include "damascus_normal.h"
 #include "damascus_roughness_tpl.h"
 #include "damascus_roughness.h"
+#include "corrugated_albedo_tpl.h"
+#include "corrugated_albedo.h"
+#include "corrugated_ao_tpl.h"
+#include "corrugated_ao.h"
+#include "corrugated_metallic_tpl.h"
+#include "corrugated_metallic.h"
+#include "corrugated_normal_tpl.h"
+#include "corrugated_normal.h"
+#include "corrugated_roughness_tpl.h"
+#include "corrugated_roughness.h"
+#include "cladding_albedo_tpl.h"
+#include "cladding_albedo.h"
+#include "cladding_ao_tpl.h"
+#include "cladding_ao.h"
+#include "cladding_metallic_tpl.h"
+#include "cladding_metallic.h"
+#include "cladding_normal_tpl.h"
+#include "cladding_normal.h"
+#include "cladding_roughness_tpl.h"
+#include "cladding_roughness.h"
+#include "steel_albedo_tpl.h"
+#include "steel_albedo.h"
+#include "steel_ao_tpl.h"
+#include "steel_ao.h"
+#include "steel_metallic_tpl.h"
+#include "steel_metallic.h"
+#include "steel_normal_tpl.h"
+#include "steel_normal.h"
+#include "steel_roughness_tpl.h"
+#include "steel_roughness.h"
+#include "concrete_albedo_tpl.h"
+#include "concrete_albedo.h"
+#include "concrete_ao_tpl.h"
+#include "concrete_ao.h"
+#include "concrete_metallic_tpl.h"
+#include "concrete_metallic.h"
+#include "concrete_normal_tpl.h"
+#include "concrete_normal.h"
+#include "concrete_roughness_tpl.h"
+#include "concrete_roughness.h"
+#include "brick_albedo_tpl.h"
+#include "brick_albedo.h"
+#include "brick_ao_tpl.h"
+#include "brick_ao.h"
+#include "brick_metallic_tpl.h"
+#include "brick_metallic.h"
+#include "brick_normal_tpl.h"
+#include "brick_normal.h"
+#include "brick_roughness_tpl.h"
+#include "brick_roughness.h"
+#include "wood_albedo_tpl.h"
+#include "wood_albedo.h"
+#include "wood_ao_tpl.h"
+#include "wood_ao.h"
+#include "wood_metallic_tpl.h"
+#include "wood_metallic.h"
+#include "wood_normal_tpl.h"
+#include "wood_normal.h"
+#include "wood_roughness_tpl.h"
+#include "wood_roughness.h"
+#include "paint_albedo_tpl.h"
+#include "paint_albedo.h"
+#include "paint_ao_tpl.h"
+#include "paint_ao.h"
+#include "paint_metallic_tpl.h"
+#include "paint_metallic.h"
+#include "paint_normal_tpl.h"
+#include "paint_normal.h"
+#include "paint_roughness_tpl.h"
+#include "paint_roughness.h"
+#include "solar_albedo_tpl.h"
+#include "solar_albedo.h"
+#include "solar_ao_tpl.h"
+#include "solar_ao.h"
+#include "solar_metallic_tpl.h"
+#include "solar_metallic.h"
+#include "solar_normal_tpl.h"
+#include "solar_normal.h"
+#include "solar_roughness_tpl.h"
+#include "solar_roughness.h"
 
 #define DEFAULT_FIFO_SIZE	(256 * 1024)
 #define SPHERE_SLICES		72
@@ -98,7 +178,16 @@ typedef struct {
 enum {
 	MAPS_NONE = 0,
 	MAPS_RUST,
-	MAPS_DAMASCUS
+	MAPS_DAMASCUS,
+	MAPS_CORRUGATED,
+	MAPS_CLADDING,
+	MAPS_STEEL,
+	MAPS_CONCRETE,
+	MAPS_BRICK,
+	MAPS_WOOD,
+	MAPS_PAINT,
+	MAPS_SOLAR,
+	MAPS_COUNT
 };
 
 typedef struct {
@@ -109,6 +198,11 @@ typedef struct {
 	int maps;	/* MAPS_* — imported PBR set, or NONE for tinted env */
 } Material;
 
+typedef struct {
+	GXTexObj albedo, ao, metal, normal, rough;
+	TPLFile tplA, tplAO, tplM, tplN, tplR;
+} PbrSet;
+
 static GXRModeObj *rmode = NULL;
 static void *frameBuffer[2] = { NULL, NULL };
 
@@ -116,13 +210,10 @@ static GXTexObj texEnvSharp, texEnvMid, texEnvBlur;
 static GXTexObj texChecker, texShadow;
 static GXTexObj texHudTL, texHudFPS, texHudBottom;
 static GXTexObj texFont, texDetail, texSpec;
-static GXTexObj texRustAlbedo, texRustAO, texRustMetal, texRustNormal, texRustRough;
-static GXTexObj texDamAlbedo, texDamAO, texDamMetal, texDamNormal, texDamRough;
 static TPLFile tplEnvSharp, tplEnvMid, tplEnvBlur, tplChecker, tplShadow;
 static TPLFile tplHudTL, tplHudFPS, tplHudBottom;
 static TPLFile tplFont, tplDetail, tplSpec;
-static TPLFile tplRustAlbedo, tplRustAO, tplRustMetal, tplRustNormal, tplRustRough;
-static TPLFile tplDamAlbedo, tplDamAO, tplDamMetal, tplDamNormal, tplDamRough;
+static PbrSet pbrSets[MAPS_COUNT];
 
 static SphereVert sphereVerts[(SPHERE_STACKS + 1) * (SPHERE_SLICES + 1)];
 static u16 sphereIdx[SPHERE_STACKS * SPHERE_SLICES * 6];
@@ -133,15 +224,21 @@ static int sphereIdxCount = 0;
  * metallic ~low, roughness ~high — dielectric rust with metal flecks.
  */
 static Material materials[] = {
-	{ "RUST",     { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
-	/* Warm copper — SCALE_2 env×tint; R kept lower so peach not scarlet */
-	{ "COPPER",   { 158, 132, 102, 255 }, 1.00f, 0.25f, MAPS_NONE },
-	/* TextureCom Rainbow Damascus — real albedo/metal/normal/rough maps */
-	{ "DAMASCUS", { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
-	{ "GOLD",     { 255, 220, 120, 255 }, 1.00f, 0.20f, MAPS_NONE },
-	{ "IRON",     { 180, 185, 195, 255 }, 1.00f, 0.40f, MAPS_NONE },
-	{ "CHROME",   { 235, 240, 255, 255 }, 1.00f, 0.08f, MAPS_NONE },
-	{ "PLASTIC",  { 255, 110,  90, 255 }, 0.00f, 0.45f, MAPS_NONE },
+	{ "RUST",       { 255, 255, 255, 255 }, 0.08f, 0.85f, MAPS_RUST },
+	{ "COPPER",     { 158, 132, 102, 255 }, 1.00f, 0.25f, MAPS_NONE },
+	{ "DAMASCUS",   { 255, 255, 255, 255 }, 1.00f, 0.15f, MAPS_DAMASCUS },
+	{ "CORRUGATED", { 255, 255, 255, 255 }, 0.90f, 0.55f, MAPS_CORRUGATED },
+	{ "STEEL",      { 255, 255, 255, 255 }, 0.85f, 0.50f, MAPS_STEEL },
+	{ "CLADDING",   { 255, 255, 255, 255 }, 0.75f, 0.28f, MAPS_CLADDING },
+	{ "CONCRETE",   { 255, 255, 255, 255 }, 0.00f, 0.85f, MAPS_CONCRETE },
+	{ "BRICK",      { 255, 255, 255, 255 }, 0.00f, 0.80f, MAPS_BRICK },
+	{ "WOOD",       { 255, 255, 255, 255 }, 0.00f, 0.78f, MAPS_WOOD },
+	{ "PAINT",      { 255, 255, 255, 255 }, 0.05f, 0.35f, MAPS_PAINT },
+	{ "SOLAR",      { 255, 255, 255, 255 }, 0.95f, 0.28f, MAPS_SOLAR },
+	{ "GOLD",       { 255, 220, 120, 255 }, 1.00f, 0.20f, MAPS_NONE },
+	{ "IRON",       { 180, 185, 195, 255 }, 1.00f, 0.40f, MAPS_NONE },
+	{ "CHROME",     { 235, 240, 255, 255 }, 1.00f, 0.08f, MAPS_NONE },
+	{ "PLASTIC",    { 255, 110,  90, 255 }, 0.00f, 0.45f, MAPS_NONE },
 };
 static const int materialCount = (int)(sizeof(materials) / sizeof(materials[0]));
 static int materialIndex = 1; /* start on COPPER for reference UI parity */
@@ -279,8 +376,9 @@ static void tint_sphere_vertices(const Material *mat)
 static void setup_tev_hero_pbr(const Material *mat)
 {
 	f32 roughness = current_roughness(mat);
-	GXTexObj *albedo = (mat->maps == MAPS_DAMASCUS) ? &texDamAlbedo : &texRustAlbedo;
-	GXTexObj *ao = (mat->maps == MAPS_DAMASCUS) ? &texDamAO : &texRustAO;
+	PbrSet *set = &pbrSets[mat->maps];
+	GXTexObj *albedo = &set->albedo;
+	GXTexObj *ao = &set->ao;
 	int metal = (mat->metallic > 0.5f);
 
 	GX_SetNumChans(1);
@@ -381,11 +479,11 @@ static void setup_tev_fresnel_konst(const Material *mat)
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
-	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].albedo, GX_TEXMAP0);
 	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP1);
 	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
 		roughness * 0.75f, GX_FALSE, GX_TRUE, GX_ANISO_1);
-	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].albedo, GX_REPEAT, GX_REPEAT);
 
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ f0, f0, f0, 255 });
 	GX_SetTevKColorSel(GX_TEVSTAGE1, GX_TEV_KCSEL_K0);
@@ -427,11 +525,11 @@ static void setup_tev_mod2x(const Material *mat)
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].albedo, GX_TEXMAP0);
 	GX_LoadTexObj(&texDetail, GX_TEXMAP1);
-	GX_InitTexObjLOD(&texRustAlbedo, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+	GX_InitTexObjLOD(&pbrSets[MAPS_RUST].albedo, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
 		roughness * 0.10f, GX_FALSE, GX_TRUE, GX_ANISO_1);
-	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].albedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
 
 	GX_SetTevDirect(GX_TEVSTAGE0);
@@ -464,10 +562,10 @@ static void setup_tev_spec_mask(const Material *mat)
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
-	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].albedo, GX_TEXMAP0);
 	GX_LoadTexObj(&texSpec, GX_TEXMAP1);
-	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjLOD(&texRustAlbedo, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjLOD(&pbrSets[MAPS_RUST].albedo, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
 		roughness * 0.15f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 255, 220, 180, 255 });
@@ -526,11 +624,11 @@ static void setup_tev_indtex_bump(const Material *mat)
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
 	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
-	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
-	GX_LoadTexObj(&texRustNormal, GX_TEXMAP1);
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].normal, GX_TEXMAP1);
 	GX_LoadTexObj(select_env_tex(roughness), GX_TEXMAP2);
-	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&texRustNormal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].normal, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjLOD(select_env_tex(roughness), GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
 		roughness * 0.75f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 
@@ -568,9 +666,9 @@ static void setup_tev_scale2_light(const Material *mat)
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
-	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjLOD(&texRustAlbedo, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].albedo, GX_TEXMAP0);
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjLOD(&pbrSets[MAPS_RUST].albedo, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f,
 		roughness * 0.20f, GX_FALSE, GX_TRUE, GX_ANISO_1);
 
 	GX_SetTevDirect(GX_TEVSTAGE0);
@@ -592,8 +690,8 @@ static void setup_tev_flat_lit(const Material *mat)
 	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_LoadTexObj(&texRustAlbedo, GX_TEXMAP0);
-	GX_InitTexObjWrapMode(&texRustAlbedo, GX_REPEAT, GX_REPEAT);
+	GX_LoadTexObj(&pbrSets[MAPS_RUST].albedo, GX_TEXMAP0);
+	GX_InitTexObjWrapMode(&pbrSets[MAPS_RUST].albedo, GX_REPEAT, GX_REPEAT);
 	GX_SetTevDirect(GX_TEVSTAGE0);
 	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
 	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO);
@@ -921,20 +1019,14 @@ static void draw_hud(f32 fb_w, f32 fb_h, const Material *mat)
 	snprintf(line, sizeof(line), "METALLIC %.2f   ROUGHNESS %.2f",
 		mat->metallic, rough);
 	draw_text(12, 130, line, 1.0f);
-	if (mat->maps == MAPS_RUST) {
+	if (mat->maps != MAPS_NONE) {
 		snprintf(line, sizeof(line), "ENV %s | %s",
 			envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
 		draw_text(12, 148, line, 1.0f);
 		snprintf(line, sizeof(line), "%s (B steps rough)", env_lod_name(rough));
 		draw_text(12, 166, line, 1.0f);
-		draw_text(12, 184, "MAPS: rust albedo ao metal normal rough", 1.0f);
-	} else if (mat->maps == MAPS_DAMASCUS) {
-		snprintf(line, sizeof(line), "ENV %s | %s",
-			envMapEnabled ? "ON " : "OFF", featureNames[featureIndex]);
-		draw_text(12, 148, line, 1.0f);
-		snprintf(line, sizeof(line), "%s (B steps rough)", env_lod_name(rough));
-		draw_text(12, 166, line, 1.0f);
-		draw_text(12, 184, "MAPS: damascus albedo metal normal rough", 1.0f);
+		snprintf(line, sizeof(line), "MAPS: %s albedo ao metal normal rough", mat->name);
+		draw_text(12, 184, line, 1.0f);
 	} else if (featureIndex == FEAT_HERO_RUST_PBR || featureIndex == FEAT_FRESNEL_KONST) {
 		/* Copper-reference three-line status (no extra LOD line) */
 		draw_text(12, 148, "ENV MAP + FRESNEL APPROX", 1.0f);
@@ -972,27 +1064,30 @@ static void load_textures(void)
 	TPL_OpenTPLFromMemory(&tplSpec, (void *)specmask_tpl, specmask_tpl_size);
 	TPL_GetTexture(&tplSpec, specmask, &texSpec);
 
-	TPL_OpenTPLFromMemory(&tplRustAlbedo, (void *)rust_albedo_tpl, rust_albedo_tpl_size);
-	TPL_GetTexture(&tplRustAlbedo, rust_albedo, &texRustAlbedo);
-	TPL_OpenTPLFromMemory(&tplRustAO, (void *)rust_ao_tpl, rust_ao_tpl_size);
-	TPL_GetTexture(&tplRustAO, rust_ao, &texRustAO);
-	TPL_OpenTPLFromMemory(&tplRustMetal, (void *)rust_metallic_tpl, rust_metallic_tpl_size);
-	TPL_GetTexture(&tplRustMetal, rust_metallic, &texRustMetal);
-	TPL_OpenTPLFromMemory(&tplRustNormal, (void *)rust_normal_tpl, rust_normal_tpl_size);
-	TPL_GetTexture(&tplRustNormal, rust_normal, &texRustNormal);
-	TPL_OpenTPLFromMemory(&tplRustRough, (void *)rust_roughness_tpl, rust_roughness_tpl_size);
-	TPL_GetTexture(&tplRustRough, rust_roughness, &texRustRough);
 
-	TPL_OpenTPLFromMemory(&tplDamAlbedo, (void *)damascus_albedo_tpl, damascus_albedo_tpl_size);
-	TPL_GetTexture(&tplDamAlbedo, damascus_albedo, &texDamAlbedo);
-	TPL_OpenTPLFromMemory(&tplDamAO, (void *)damascus_ao_tpl, damascus_ao_tpl_size);
-	TPL_GetTexture(&tplDamAO, damascus_ao, &texDamAO);
-	TPL_OpenTPLFromMemory(&tplDamMetal, (void *)damascus_metallic_tpl, damascus_metallic_tpl_size);
-	TPL_GetTexture(&tplDamMetal, damascus_metallic, &texDamMetal);
-	TPL_OpenTPLFromMemory(&tplDamNormal, (void *)damascus_normal_tpl, damascus_normal_tpl_size);
-	TPL_GetTexture(&tplDamNormal, damascus_normal, &texDamNormal);
-	TPL_OpenTPLFromMemory(&tplDamRough, (void *)damascus_roughness_tpl, damascus_roughness_tpl_size);
-	TPL_GetTexture(&tplDamRough, damascus_roughness, &texDamRough);
+#define LOAD_PBR_SET(slot, slug) do { \
+	TPL_OpenTPLFromMemory(&pbrSets[slot].tplA, (void *)slug##_albedo_tpl, slug##_albedo_tpl_size); \
+	TPL_GetTexture(&pbrSets[slot].tplA, slug##_albedo, &pbrSets[slot].albedo); \
+	TPL_OpenTPLFromMemory(&pbrSets[slot].tplAO, (void *)slug##_ao_tpl, slug##_ao_tpl_size); \
+	TPL_GetTexture(&pbrSets[slot].tplAO, slug##_ao, &pbrSets[slot].ao); \
+	TPL_OpenTPLFromMemory(&pbrSets[slot].tplM, (void *)slug##_metallic_tpl, slug##_metallic_tpl_size); \
+	TPL_GetTexture(&pbrSets[slot].tplM, slug##_metallic, &pbrSets[slot].metal); \
+	TPL_OpenTPLFromMemory(&pbrSets[slot].tplN, (void *)slug##_normal_tpl, slug##_normal_tpl_size); \
+	TPL_GetTexture(&pbrSets[slot].tplN, slug##_normal, &pbrSets[slot].normal); \
+	TPL_OpenTPLFromMemory(&pbrSets[slot].tplR, (void *)slug##_roughness_tpl, slug##_roughness_tpl_size); \
+	TPL_GetTexture(&pbrSets[slot].tplR, slug##_roughness, &pbrSets[slot].rough); \
+} while (0)
+
+	LOAD_PBR_SET(MAPS_RUST, rust);
+	LOAD_PBR_SET(MAPS_DAMASCUS, damascus);
+	LOAD_PBR_SET(MAPS_CORRUGATED, corrugated);
+	LOAD_PBR_SET(MAPS_CLADDING, cladding);
+	LOAD_PBR_SET(MAPS_STEEL, steel);
+	LOAD_PBR_SET(MAPS_CONCRETE, concrete);
+	LOAD_PBR_SET(MAPS_BRICK, brick);
+	LOAD_PBR_SET(MAPS_WOOD, wood);
+	LOAD_PBR_SET(MAPS_PAINT, paint);
+	LOAD_PBR_SET(MAPS_SOLAR, solar);
 
 	GX_InitTexObjWrapMode(&texEnvSharp, GX_CLAMP, GX_CLAMP);
 	GX_InitTexObjWrapMode(&texEnvMid, GX_CLAMP, GX_CLAMP);
@@ -1118,8 +1213,22 @@ int main(int argc, char **argv)
 			roughnessOverride = -1.0f;
 			tint_sphere_vertices(mat);
 		}
+		if (frame == 130) {
+			materialIndex = 3; /* CORRUGATED */
+			mat = &materials[materialIndex];
+			featureIndex = FEAT_HERO_RUST_PBR;
+			roughnessOverride = -1.0f;
+			tint_sphere_vertices(mat);
+		}
+		if (frame == 150) {
+			materialIndex = 10; /* SOLAR */
+			mat = &materials[materialIndex];
+			featureIndex = FEAT_HERO_RUST_PBR;
+			roughnessOverride = -1.0f;
+			tint_sphere_vertices(mat);
+		}
 		if (frame == 170) {
-			materialIndex = 5; /* CHROME */
+			materialIndex = 13; /* CHROME */
 			mat = &materials[materialIndex];
 			featureIndex = FEAT_HERO_RUST_PBR;
 			roughnessOverride = 0.0f;
