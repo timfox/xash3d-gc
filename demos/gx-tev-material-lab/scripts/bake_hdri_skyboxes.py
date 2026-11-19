@@ -2,8 +2,9 @@
 """Bake HDRI / equirect panoramas → Material Lab skybox faces + IBL matcaps.
 
 Uses gxbake's skybox sampler (same orientation as R_GXDrawSkyBox) so Flipper
-sky cubes match the engine. Lab embeds 256² RGB faces (CMPR TPL) — highest
-res that keeps the DOL MEM1-safe with three skies.
+sky cubes match the engine. Lab embeds 512² RGB sky faces (CMPR TPL) with
+256² IBL matcaps — highest sky face size that keeps the DOL ~≤16MB MEM1-safe
+with three skies (measured ~15.6MB).
 
 Usage:
   PYTHONPATH=/path/to/gxbake python3 scripts/bake_hdri_skyboxes.py
@@ -26,8 +27,8 @@ SOURCES = [
 	("dusk", Path("/home/tim/proceduralsky-maya-demo/output/hdr/cycle_0056.png")),
 ]
 
-SKY_SIZE = 256  # lab skybox (engine sky_*.cmp is 128; we are not that path)
-IBL_SIZE = 256
+SKY_SIZE = 512  # lab skybox (engine sky_*.cmp is 128; we are not that path)
+IBL_SIZE = 256  # keep IBL at 256 so 512²×18 faces still fit MEM1
 SIDES = ("rt", "bk", "lf", "ft", "up", "dn")
 
 
@@ -71,9 +72,15 @@ def bake_matcap(equirect: np.ndarray, size: int) -> np.ndarray:
 	sy = (0.5 - lat / np.pi) * (h - 1)
 	sx = np.clip(sx, 0, w - 1).astype(np.int32)
 	sy = np.clip(sy, 0, h - 1).astype(np.int32)
-	out = equirect[sy, sx].copy()
+	out = equirect[sy, sx].astype(np.float32)
+	# Soften matcap limb (outer disk) so sphere silhouettes don't read as a glowing rim
+	rad = np.sqrt(r2)
+	limb = np.clip((rad - 0.50) / 0.50, 0.0, 1.0)
+	gain = 1.0 - 0.65 * limb
+	out *= gain[..., None]
+	out = np.clip(out, 0, 255).astype(np.uint8)
 	out[~inside] = 0
-	return out.astype(np.uint8)
+	return out
 
 
 def write_png_scf(path: Path, arr: np.ndarray, tex_id: str):

@@ -74,6 +74,16 @@ the DumpFrames capture reel so you stay in control.
 | PARALLAX LITE | Emboss-cousin dual-height relief on stone |
 | CAR PAINT | MatCap body + sharp flake × Fresnel (PAINT maps) |
 | CRT SCAN | Dense scrolled scanline overlay |
+| FORCE FIELD | Inverse Fresnel energy shell (lab only; bloom/mirror default OFF) |
+| WET SURFACE | Darkened albedo×AO + sharp Fresnel glaze (metal/normal/rough) |
+| OXIDE PATINA | Scrolled detail × albedo + metal IndTex glints |
+| PORCELAIN | Soft wrap body + normal-warped dielectric coat |
+| GOLD LEAF | Warm gold tint × metal IndTex foil glints |
+| FROST ICE | Cool frost tint + crystalline Fresnel coat |
+| CAUSTICS | Scrolled underwater light pools × PBR maps |
+| VELVET | Soft wrap nap + rim sheen IndTex |
+| CARBON | Dual-scale weave × metal IndTex glints |
+| PEARL | Soft body + animated nacre Fresnel coat |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
@@ -81,7 +91,7 @@ the DumpFrames capture reel so you stay in control.
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
 Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²**;
-HDRI sky faces + IBL matcaps **256² CMPR** (gxbake equirect→sides) — DOL ~15MB MEM1-safe.
+HDRI sky faces **512² CMPR** + IBL matcaps **256²** (gxbake equirect→sides) — DOL ~≤16MB MEM1-safe.
 
 ### HDRI / FX
 
