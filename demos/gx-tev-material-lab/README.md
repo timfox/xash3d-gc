@@ -81,6 +81,9 @@ the DumpFrames capture reel so you stay in control.
 | GOLD LEAF | Warm gold tint × metal IndTex foil glints |
 | FROST ICE | Cool frost tint + crystalline Fresnel coat |
 | CAUSTICS | Scrolled underwater light pools × PBR maps |
+| VELVET | Soft wrap nap + rim sheen IndTex |
+| CARBON | Dual-scale weave × metal IndTex glints |
+| PEARL | Soft body + animated nacre Fresnel coat |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
