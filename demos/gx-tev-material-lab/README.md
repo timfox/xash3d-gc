@@ -84,6 +84,10 @@ the DumpFrames capture reel so you stay in control.
 | VELVET | Soft wrap nap + rim sheen IndTex |
 | CARBON | Dual-scale weave × metal IndTex glints |
 | PEARL | Soft body + animated nacre Fresnel coat |
+| ASPHALT | Dark road body + sparse wet IndTex glints |
+| RUBBER | Soft wrap tire rubber, muted Fresnel |
+| PLASTIC ABS | Cool-tinted injection plastic + soft dielectric coat |
+| LEATHER | Warm hide grain + soft sheen IndTex |
 | NEON RIM | Solid albedo×AO body + thin KONST Fresnel accent (not force-field) |
 | THIN FILM OIL | Dark body + low-sat rainbow on Fresnel only (not IRIDESCENT bloom) |
 | BRUSHED TITANIUM | Cool Ti tint + directional IndTex brush streaks (not ANISO FLAKE) |
