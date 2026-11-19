@@ -124,7 +124,14 @@ void SV_GCSizePacketEntities( void )
 				memset( svs.clients[i].frames, 0, sizeof( client_frame_t ) * SV_UPDATE_BACKUP );
 		}
 	}
+	/* DoD listen server too: at the 128 fallback dod_avalanche left 125 to
+	 * 130 visible entities out of every packet (ceres), so objects went
+	 * missing on screen. Bots take no frames, the ring serves real clients. */
+#if XASH_DODGC_NETWORK
+	if( true )
+#else
 	if( GC_MenuRunsServer() && svs.maxclients == 1 )
+#endif
 	{
 		for( frames = SV_UPDATE_BACKUP - 1; frames >= 2; frames-- )
 		{
@@ -151,7 +158,9 @@ void SV_GCSizePacketEntities( void )
 	svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
 	sv_gc_frame_scratch = fallback_scratch;
 	sv_gc_visible_cap = 128;
+#if !XASH_DODGC_NETWORK
 	if( GC_MenuRunsServer( ))
+#endif
 		Con_Reportf( S_WARN "Xash3D GameCube: REDUCED server packet entities map=%s visible=128 frames=1/%d (static fallback, arena_tail_left=%s)\n",
 			sv.name, SV_UPDATE_BACKUP,
 			Q_memprint( GC_MapArenaLargestGap()));
