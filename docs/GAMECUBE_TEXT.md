@@ -79,6 +79,24 @@ kill feed, scoreboard, console and the team/class text menus all end up there) t
 (inside the 64-128 KiB target; no ARAM paging needed at this size). If the queue (900 glyphs) fills, glyphs fall back to
 the soft path. Not measured: frame time with it on, heap on the heaviest maps.
 
+## Memory card: name and settings (design and code; not run on a card or in Dolphin yet)
+`card_gamecube.c` + `settings_blob.c`: one file, `DayOfDefeat_Settings`, one card sector, on slot A. The blob (name,
+sensitivity, volume, MP3Volume, gamma, brightness; whitelist, printable ASCII, CRC32, version) is host-tested
+(`tests/test_gamecube_settings_blob.py`: round trip, every flipped bit rejected, truncation, bad magic/version,
+non-whitelisted keys, unprintable values). Commands: `gc_card_save`, `gc_card_load`, `gc_card_format confirmed`; cvar
+`gc_card_status` holds the last result text.
+- **Never formats on its own.** Save and load answer "the card must be formatted first" for a blank, foreign-region or
+  broken card. `gc_card_format` refuses unless the argument is `confirmed` AND the previous save/load answered exactly that,
+  and it does nothing if the card mounts fine. The menu must show a dialog first that says what it erases.
+- Never touches another file on the card; never writes unless the player's action called `gc_card_save`.
+- Memory: a 40 KiB (5 x 8 KiB) libogc work area and one sector buffer, both allocated only while a card operation runs and
+  freed after; resident cost zero. SYS arena and ARAM: none.
+- Still to do (needs a decision): the menu wiring (Options > Player page "Save to memory card" / load at start, and the
+  format dialog) and a Dolphin run with a GCI memory card image.
+- Banner and icon: original art (gold star badge, game name) in the retail palette, `scripts/bake-card-art.py` ->
+  `card_art.h` (CI8, GX tiling, RGB5A3 palette; committed so the build does not need Pillow), set with `CARD_SetStatus`. File
+  layout inside the one sector: comment 0, banner+icon 64..5184, settings blob at 5632. `gc_card_load silent` is the start-up
+  load: no message for no card / no file / needs formatting, and it never asks. Static data: about 5 KiB of const art in the DOL.
 ## Button glyphs in hint rows
 Eight original controller-button glyphs (A, B, X, Y, Start, Z, L, R: solid circle / pill shapes with the letter cut out,
 drawn by `scripts/bake-hitext.py`, no console artwork) live in the hi-res atlas at codes 128..135, after an empty DEL cell,
@@ -108,3 +126,9 @@ session and makes `GC_ResolveVideoMode` pick `TVNtsc480Prog`.
   had (it moved to file scope as `gc_text_panel`).
 - Not verified: the 480p presentation path (GX copy filter, vfilter) beyond what `-gcvideo prog` already exercised, and the
   prompt on screen (Dolphin needs a component cable setting: Config > GameCube > progressive scan, plus B held).
+
+## Keyboard footer hints with button glyphs
+The on-screen keyboard's footer ("{A} type  {B} delete  {X} space", "{Y} page  {S} OK  {Z} cancel") uses the same
+`{A}`-style tokens: with the hi-res atlas up they are GX glyph quads (cell about 12 px at the keyboard's text scale), without
+it the bitmap font prints `[A]`. Width-aware (`OSK_TextWidthFp`), so centred labels stay centred. No memory cost.
+Not seen in Dolphin; no host test (the routine lives in in_osk.c next to the engine's draw calls).
