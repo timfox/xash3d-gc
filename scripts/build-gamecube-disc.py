@@ -2975,8 +2975,16 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 				*GC_STUDIO_PWEAPONS,
 			}
 			edge = 64 if stem in prop_tex64 else 128
+			companion_cap = 96 * 1024
+			# View models (v_*): the skins are 256 px in the retail MDLs, and the ARAM skin stream
+			# (R_GXSkinAttachVM, ref/gx/r_gx_skins.c) streams any palettised source above the 128 px decode in
+			# full resolution. GC_VM_SKIN_EDGE=256 keeps them at 256 (one skin is 64 KiB of palette indices; the
+			# companion is read through the studio scratch, so raise GC_VM_COMPANION_KB with it).
+			if stem.startswith("v_") and stem not in prop_tex64:
+				edge = int(os.environ.get("GC_VM_SKIN_EDGE", "") or edge)
+				companion_cap = int(os.environ.get("GC_VM_COMPANION_KB", "") or 96) * 1024
 			tex_payload = lean_studio_tex_companion_bytes(src, max_edge=edge)
-			if tex_payload and len(tex_payload) > 96 * 1024:
+			if tex_payload and len(tex_payload) > companion_cap:
 				tex_payload = lean_studio_tex_companion_bytes(src, max_edge=64)
 			if tex_payload:
 				archive.writestr(tex_arc, tex_payload, compress_type=zipfile.ZIP_STORED)
