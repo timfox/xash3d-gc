@@ -20,7 +20,34 @@ Commands: gc_card_save, gc_card_load, gc_card_format confirmed. Cvar gc_card_sta
 #include "settings_blob.h"
 #include "card_art.h"
 
-#define GC_CARD_FILE "DayOfDefeat_Settings"
+/* Per-game identity.  The card file name, the IPL comment and CARD_Init's
+ * game/maker codes were Day of Defeat's in every build, so the Half-Life
+ * disc saved as "Day of Defeat GameCube".  The codes now come from the disc
+ * header the IPL copies to 0x80000000; the name and comment from the game's
+ * gameinfo title.  Day of Defeat keeps its original file name so existing
+ * saves still load. */
+static char gc_card_file[CARD_FILENAMELEN + 1];
+static char gc_card_comment[33];
+
+static void GC_CardIdentity( void )
+{
+	const char *title = ( GI && GI->title[0] ) ? GI->title : "Xash3D";
+	char *d;
+	const char *s;
+
+	if( GI && !Q_stricmp( GI->gamefolder, "dod" ))
+		Q_strncpy( gc_card_file, "DayOfDefeat_Settings", sizeof( gc_card_file ));
+	else
+	{
+		/* "Half-Life" -> "Half-Life_Settings": keep the title's own letters. */
+		for( d = gc_card_file, s = title; *s && d < gc_card_file + sizeof( gc_card_file ) - 10; s++ )
+			if( *s != ' ' )
+				*d++ = *s;
+		Q_strncpy( d, "_Settings", sizeof( gc_card_file ) - ( d - gc_card_file ));
+	}
+	Q_snprintf( gc_card_comment, sizeof( gc_card_comment ), "%s GameCube", title );
+}
+#define GC_CARD_FILE ( GC_CardIdentity(), gc_card_file )
 
 /* File layout inside the one sector (what the IPL card manager reads, see CARD_SetStatus below):
  *   0     comment block, 64 bytes (two 32 character lines)
@@ -98,7 +125,8 @@ static void GC_CardFillArt( unsigned char *sector )
 	unsigned char *p = sector + GC_CARD_OFF_ART;
 	int i;
 
-	Q_strncpy( (char *)sector + GC_CARD_OFF_COMMENT, "Day of Defeat GameCube", 32 );
+	GC_CardIdentity();
+	Q_strncpy( (char *)sector + GC_CARD_OFF_COMMENT, gc_card_comment, 32 );
 	Q_strncpy( (char *)sector + GC_CARD_OFF_COMMENT + 32, "Name and settings", 32 );
 	memcpy( p, gc_card_banner_pixels, sizeof( gc_card_banner_pixels ));
 	p += sizeof( gc_card_banner_pixels );
@@ -285,7 +313,16 @@ void GC_CardInit( void )
 	if( done )
 		return;
 	done = true;
-	CARD_Init( "DODG", "01" );
+	{
+		/* Game and maker codes of the disc in the drive (IPL boot info). */
+		char game[5], maker[3];
+
+		memcpy( game, (const void *)0x80000000, 4 );
+		game[4] = 0;
+		memcpy( maker, (const void *)0x80000004, 2 );
+		maker[2] = 0;
+		CARD_Init( game, maker );
+	}
 	Cvar_RegisterVariable( &gc_card_status );
 	Cmd_AddCommand( "gc_card_save", GC_CardSave_f, "save name and settings to the memory card in slot A" );
 	Cmd_AddCommand( "gc_card_load", GC_CardLoad_f, "load name and settings from the memory card in slot A" );
