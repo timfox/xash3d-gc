@@ -1058,6 +1058,8 @@ static qboolean gc_vm256_configured;
 #define GC_CFG_CVARS_MAX 8
 static struct { char name[48]; char value[64]; } gc_cfg_cvars[GC_CFG_CVARS_MAX];
 static int gc_cfg_cvar_count;
+static qboolean gc_cvars_up;	/* Cvar_Init has run: a cfg re-read applies its cvar lines at once */
+void GCube_ApplyCfgCvars( void );
 static qboolean gc_connect_configured;
 static qboolean gc_newgame_configured;
 static qboolean gc_menu_newgame_configured;
@@ -1966,6 +1968,8 @@ static void GCube_LoadDiscBootOverrides( void )
 	}
 
 	fclose( file );
+	if( gc_cvars_up )
+		GCube_ApplyCfgCvars();
 #endif
 }
 
@@ -2397,6 +2401,7 @@ void GCube_ApplyCfgCvars( void )
 {
 	int i;
 
+	gc_cvars_up = true;
 	for( i = 0; i < gc_cfg_cvar_count; i++ )
 	{
 		Cvar_Get( gc_cfg_cvars[i].name, gc_cfg_cvars[i].value, FCVAR_SERVER, "disc cfg" );
