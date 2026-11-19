@@ -71,10 +71,16 @@ the DumpFrames capture reel so you stay in control.
 | SHEEN CLOTH | Wrap diffuse (`TB_ADDHALF`) + edge sheen IBL |
 | SSS WRAP | Subsurface-ish: lit albedo + scatter konst wrap |
 | HEAT WARP | IndTex animated detail warps IBL (heat-haze vibe) |
-| TOON RAMP | NPR cel: `GX_DF_SIGN` hard lit + white Fresnel rim |
-| HOLOGRAM | Scrolled scan detail × cyan IBL + Fresnel shell |
+| TOON RAMP | NPR cel: flat konst × `GX_DF_CLAMP` hard lit (REG amb fill) |
+| HOLOGRAM | Scrolled scan × dim tint + cyber Fresnel rim |
 | ANISO FLAKE | Asymmetric IndTex stretches sharp IBL flakes |
 | CHROMA IBL | Warped IBL with red/blue fringe (chromatic vibe) |
+| GLASS REFRACT | Deep tint body + IndTex refraction × Fresnel |
+| NEON EMISSIVE | Pulsing emissive tint + hot rim |
+| PARALLAX LITE | HW-lit albedo × height(uv+d) relief |
+| CAR PAINT | MatCap body + sharp flake × Fresnel |
+| CRT SCAN | Dense scrolled scanline overlay |
+| FORCE FIELD | Dark core + SCALE_2 energy rim |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |

@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-50}"
+# Full reel ends ~frame 1860; DumpFrames is slower than realtime — default 4 min.
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-240}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -85,8 +86,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through modern Flipper paths batch 2 (~1500 frames)
-	if (( n > 1520 )); then
+	# Full reel through retune + batch 3 (~1860 frames)
+	if (( n > 1880 )); then
 		break
 	fi
 done
@@ -117,6 +118,7 @@ pick() {
 	if (( i < ${#FRAMES[@]} )); then
 		cp -f "${FRAMES[$i]}" "$dest"
 	else
+		echo "warn: pick $i past ${#FRAMES[@]} frames → using last for $(basename "$dest")" >&2
 		cp -f "${FRAMES[-1]}" "$dest"
 	fi
 }
@@ -149,5 +151,11 @@ pick 1280 "$OUT_DIR/shots/toon-ramp.png"
 pick 1340 "$OUT_DIR/shots/hologram.png"
 pick 1400 "$OUT_DIR/shots/aniso-flake.png"
 pick 1460 "$OUT_DIR/shots/chroma-ibl.png"
+pick 1530 "$OUT_DIR/shots/glass-refract.png"
+pick 1590 "$OUT_DIR/shots/neon-emissive.png"
+pick 1650 "$OUT_DIR/shots/parallax-lite.png"
+pick 1710 "$OUT_DIR/shots/car-paint.png"
+pick 1770 "$OUT_DIR/shots/crt-scan.png"
+pick 1830 "$OUT_DIR/shots/force-field.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"
