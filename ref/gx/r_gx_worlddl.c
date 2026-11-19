@@ -1669,19 +1669,50 @@ static void R_GXWorldDLFrustum( vec3_t normals[4] )
 	}
 }
 
-static qboolean R_GXWorldDLBoxVisible( u32 i, vec3_t normals[4], const float *org )
+/* The frustum test for chunk boxes, in integers. The boxes are s16, and the
+ * float version converted up to twelve of them per chunk for the ~1200
+ * chunks of a harbor PVS, twice a frame (the Gekko has no int-to-float
+ * instruction: each one goes through the stack). Normals at 12 fraction
+ * bits against whole-unit boxes: the products stay under 2^29. */
+static struct
+{
+	s32 n[4][3];
+	s32 org[3];
+	u8 ofs[4][3];	/* 0 = mins, 3 = maxs: the corner furthest along the normal */
+} gc_wd_boxtest;
+
+static void R_GXWorldDLBoxTestSet( vec3_t normals[4], const float *org )
 {
 	int p, a;
-	const s16 *mins = &gc_wd_chunk_mins[i * 3];
-	const s16 *maxs = &gc_wd_chunk_maxs[i * 3];
+
+	for( a = 0; a < 3; a++ )
+		gc_wd_boxtest.org[a] = (s32)org[a];
+	for( p = 0; p < 4; p++ )
+	{
+		for( a = 0; a < 3; a++ )
+		{
+			gc_wd_boxtest.n[p][a] = (s32)( normals[p][a] * 4096.0f );
+			gc_wd_boxtest.ofs[p][a] = normals[p][a] >= 0.0f ? 3 : 0;
+		}
+	}
+}
+
+/* mins and maxs are separate arrays: box[0] = mins, box[1] = maxs. */
+static inline qboolean R_GXWorldDLBoxVisible( u32 i )
+{
+	const s16 *const box[2] = { &gc_wd_chunk_mins[i * 3], &gc_wd_chunk_maxs[i * 3] };
+	int p;
 
 	for( p = 0; p < 4; p++ )
 	{
-		float dist = 0.0f;
+		const s32 *n = gc_wd_boxtest.n[p];
+		const u8 *o = gc_wd_boxtest.ofs[p];
+		const s32 dist = n[0] * ( (s32)box[o[0] != 0][0] - gc_wd_boxtest.org[0] )
+			+ n[1] * ( (s32)box[o[1] != 0][1] - gc_wd_boxtest.org[1] )
+			+ n[2] * ( (s32)box[o[2] != 0][2] - gc_wd_boxtest.org[2] );
 
-		for( a = 0; a < 3; a++ )
-			dist += normals[p][a] * (( normals[p][a] >= 0.0f ? (float)maxs[a] : (float)mins[a] ) - org[a] );
-		if( dist < -8.0f )
+		/* -8 units as before, and one more for the eye rounded to a unit. */
+		if( dist < -9 * 4096 )
 			return false;
 	}
 	return true;
@@ -2944,6 +2975,7 @@ int R_GXWorldDLDraw( void )
 		u32 tower_budget = 288u * 1024u;
 		u32 tower_grant, shore_budget;
 
+		R_GXWorldDLBoxTestSet( normals, r_gx_mirror ? RI.rvp.vieworigin : org );
 		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
 		{
 			const u16 cl = gc_wd_chunk_cluster[i];
@@ -2954,8 +2986,7 @@ int R_GXWorldDLDraw( void )
 			/* Nothing under the water reflects in it. */
 			if( r_gx_mirror && (float)gc_wd_chunk_maxs[i * 3 + 2] <= r_gx_mirror_z )
 				continue;
-			if( frustum_cull && !R_GXWorldDLBoxVisible( i, normals,
-				r_gx_mirror ? RI.rvp.vieworigin : org ))
+			if( frustum_cull && !R_GXWorldDLBoxVisible( i ))
 			{
 				frustum_drop++;
 				continue;
