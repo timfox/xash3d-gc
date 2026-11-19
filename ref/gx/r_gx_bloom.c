@@ -83,9 +83,9 @@ qboolean R_GXBloomEnabled( void )
  * scale, which is why it blows out white behind dark cliffs and goes deep
  * blue over a sunlit yard.
  *
- * Samples at full white are left out of the histogram, as in Source, whose
- * luminance buckets end at 1: what is already blown out has no say. Without
- * that the sun's glare alone holds the scale at its minimum.
+ * The sky and whatever is blown out count in the top bucket: Source's frame
+ * is clamped at white before it is measured, so a bright sky holds the scale
+ * down. That is retail's look in the cove (a white sky over dark ground).
  */
 #define GC_EXPO_MAX_VOLUMES 16
 
@@ -245,11 +245,15 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 					if( gc_expo_zbuf && bw == 320 && zx >= 0 && zy >= 0 && zx < GC_EXPO_ZW && zy < GC_EXPO_ZH
 						&& gc_expo_zbuf[(( zy >> 2 ) * ( GC_EXPO_ZW >> 3 ) + ( zx >> 3 )) * 32 + ( zy & 3 ) * 8 + ( zx & 7 )] == 0xff )
 					{
-						nsky++;
-						continue;	/* sky */
+						/* The sky counts, like any other pixel. Left out
+						 * (as blown-out samples were too), the ground alone
+						 * set the exposure and the cove sat at the map's
+						 * maximum of 3: pale sand, a rusty hull at 82 of 255
+						 * where retail has 33, a grey sky. Retail's frame
+						 * there is a white sky over dark ground: the bright
+						 * sky holds the scale down. */
+						nsky++;	/* counted below, at what it is drawn at */
 					}
-					if( l >= 250 )
-						continue;	/* blown out: above the top bucket */
 				}
 				hist[l >> 3]++;
 				n++;

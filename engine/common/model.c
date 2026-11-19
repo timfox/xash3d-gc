@@ -2907,6 +2907,93 @@ void Mod_FreeUnused( void )
 	}
 }
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/*
+================
+GC_StaticBrushes
+
+media/wd_<map>_sb.gcd (scripts/bake_worlddl_goldsrc.py): the brush entities
+whose faces are baked into the world DL because nothing can ever change them
+(unnamed opaque func_wall / func_illusionary at the lump origin).  The server
+keeps them out of the packets (dod_avalanche has 252 entities in view and
+190 of them are such walls), the client collides with them from this list.
+Entry: model number of "*N", bit 15 set when solid.  The list only counts
+when the world DL on the disc is the one it was baked with.
+================
+*/
+#define GC_SB_MAX	256
+#define GC_SB_MODELS	1024
+#define GC_SB_SOLID	0x8000
+
+static word gc_sb_list[GC_SB_MAX];
+static byte gc_sb_bits[GC_SB_MODELS / 8];
+static int gc_sb_count;
+static int gc_sb_serial;
+static char gc_sb_map[64];
+
+const word *GC_StaticBrushes( const char *mapname, int *count, int *serial )
+{
+	char base[64];
+
+	if( mapname && mapname[0] )
+	{
+		COM_FileBase( mapname, base, sizeof( base ));
+		if( Q_stricmp( base, gc_sb_map ))
+		{
+			char path[MAX_SYSPATH];
+			fs_offset_t len = 0;
+			byte *buf;
+
+			Q_strncpy( gc_sb_map, base, sizeof( gc_sb_map ));
+			memset( gc_sb_bits, 0, sizeof( gc_sb_bits ));
+			gc_sb_count = 0;
+			gc_sb_serial++;
+
+			Q_snprintf( path, sizeof( path ), "media/wd_%s_sb.gcd", base );
+			buf = FS_LoadFile( path, &len, false );
+			if( buf )
+			{
+				if( len >= 12 && !memcmp( buf, "GCsb", 4 ) && (( buf[4] << 8 ) | buf[5] ) == 1 )
+				{
+					const int n = ( buf[6] << 8 ) | buf[7];
+					const fs_offset_t wd_want = ((fs_offset_t)buf[8] << 24 ) | ( buf[9] << 16 ) | ( buf[10] << 8 ) | buf[11];
+					fs_offset_t wd_have;
+
+					Q_snprintf( path, sizeof( path ), "media/wd_%s.gcd", base );
+					wd_have = FS_FileSize( path, false );
+					if( wd_have == wd_want && n <= GC_SB_MAX && len >= 12 + n * 2 )
+					{
+						for( int i = 0; i < n; i++ )
+						{
+							const word v = (word)(( buf[12 + i * 2] << 8 ) | buf[13 + i * 2] );
+							const int num = v & ~GC_SB_SOLID;
+
+							if( num < 1 || num >= GC_SB_MODELS )
+								continue;
+							gc_sb_bits[num >> 3] |= (byte)( 1 << ( num & 7 ));
+							gc_sb_list[gc_sb_count++] = v;
+						}
+					}
+					Con_Reportf( "Xash3D GameCube: static brushes map=%s listed=%d used=%d world DL %d of %d bytes\n",
+						base, n, gc_sb_count, (int)wd_have, (int)wd_want );
+				}
+				Mem_Free( buf );
+			}
+		}
+	}
+	if( count ) *count = gc_sb_count;
+	if( serial ) *serial = gc_sb_serial;
+	return gc_sb_list;
+}
+
+qboolean GC_StaticBrushModel( int num )
+{
+	if( num < 1 || num >= GC_SB_MODELS )
+		return false;
+	return ( gc_sb_bits[num >> 3] & ( 1 << ( num & 7 ))) != 0;
+}
+#endif
+
 #if XASH_GAMECUBE
 /*
 ================

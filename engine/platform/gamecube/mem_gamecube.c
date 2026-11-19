@@ -1884,10 +1884,10 @@ unsigned int GC_AramAllocTagged( unsigned int size, qboolean stream, const char 
 			stream ? "stream" : "reserve", tag ? tag : "?", Q_memprint( size ), base,
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )));
 	else
-		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s\n",
+		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s segs=%d/%d\n",
 			tag ? tag : "?", stream ? "stream" : "reserve", Q_memprint( size ),
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )),
-			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )));
+			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )), (int)gc_aram_heap.count, GC_ARAM_MAX_SEGS );
 	return base;
 }
 

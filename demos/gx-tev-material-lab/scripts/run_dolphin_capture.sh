@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 2420 (batch8 common materials); DumpFrames slower than realtime.
+# Full reel ends ~frame 2420 (batch7 common materials); DumpFrames slower than realtime.
 TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-400}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
@@ -70,8 +70,12 @@ WriteToConsole = True
 WriteToFile = True
 EOF
 
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
-pkill -f dolphin-emu 2>/dev/null || true
+# Only stop Flatpak Material Lab DumpFrames — never kill sibling xash-gc-dolphin /
+# film / batch agents. If Flatpak is already busy, exit so the caller can retry.
+if pgrep -f 'org.DolphinEmu.dolphin-emu' >/dev/null 2>&1; then
+	echo "error: Flatpak Dolphin already running — wait/retry, do not steal" >&2
+	exit 75
+fi
 sleep 1
 
 echo "==> Flatpak Dolphin OpenGL dump (${TIMEOUT_SEC}s)"
@@ -86,8 +90,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through concrete/wood-plank/brick/ceramic-tile (~2420 frames)
-	if (( n > 2550 )); then
+	# Full reel through batch4 toon/mercury/jade/holo (~2420 frames)
+	if (( n > 2480 )); then
 		break
 	fi
 done
@@ -96,7 +100,7 @@ kill "$DPID" 2>/dev/null || true
 sleep 1
 kill -9 "$DPID" 2>/dev/null || true
 wait "$DPID" 2>/dev/null || true
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
+# Only our DumpFrames PID — do not pkill other Flatpak instances.
 
 mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' | sort -V)
 echo "==> captured ${#FRAMES[@]} frames"
@@ -162,6 +166,14 @@ pick 2120 "$OUT_DIR/shots/concrete.png"
 pick 2190 "$OUT_DIR/shots/wood-plank.png"
 pick 2260 "$OUT_DIR/shots/brick.png"
 pick 2330 "$OUT_DIR/shots/ceramic-tile.png"
+pick 2120 "$OUT_DIR/shots/neon-rim.png"
+pick 2190 "$OUT_DIR/shots/thin-film-oil.png"
+pick 2260 "$OUT_DIR/shots/brushed-titanium.png"
+pick 2320 "$OUT_DIR/shots/rust-hero-end.png"
+pick 2120 "$OUT_DIR/shots/toon-ink-rim.png"
+pick 2190 "$OUT_DIR/shots/liquid-mercury.png"
+pick 2260 "$OUT_DIR/shots/jade-glaze.png"
+pick 2330 "$OUT_DIR/shots/holo-foil.png"
 pick 2390 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"
