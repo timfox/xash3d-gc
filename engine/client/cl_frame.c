@@ -1713,8 +1713,8 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 			noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
 		/* A scripted cast of 24 asked for every class's gun at once: a 198 KB
 		 * read failed in the file pool and every later shot's cast file with it
-		 * (ceres short-charlie-a). Film actors load at most two guns per map,
-		 * small ones only; past that an actor carries a gun only if a player's
+		 * (ceres short-charlie-a). Film actors load at most two guns per map
+		 * (256 KB or less each); past that an actor carries a gun only if a player's
 		 * already brought it in. */
 		if( film && !noload )
 		{
@@ -1727,7 +1727,7 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 				film_spawn = svs.spawncount;
 				film_loads = 0;
 			}
-			if( film_loads >= 2 || size <= 0 || size > 131072 )
+			if( film_loads >= 2 || size <= 0 || size > 262144 )
 			{
 				if( film_logs < 8 && fails[wk] < 3 )
 				{
