@@ -6104,9 +6104,12 @@ static int SV_GCParityTier( const char *classname )
 /* Which condition tripped, for the per-class tally (heap, slab, edicts, budget). */
 static int gc_parity_why[4];
 
-static qboolean SV_GCEntityPressure( void )
+static qboolean SV_GCEntityPressure( int tier )
 {
-	const qboolean heap = GC_MemHeapFreeBytes() < 16u * 1024u;
+	/* Tier 0 (func_wall family) is solid geometry players walk into and shoot at: it costs an edict and a 112-byte slab
+	 * entry, almost no heap, so it only gives way at 4 KB. The rest keeps the 16 KB guard. (Charlie sat at 13-16 KB
+	 * when the entities spawned: whether ALL its parity entities, walls included, were dropped depended on noise.) */
+	const qboolean heap = GC_MemHeapFreeBytes() < ( tier == 0 ? 4u : 16u ) * 1024u;
 	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
 	const qboolean ents = svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
 
@@ -6334,7 +6337,7 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 			extern void GC_HeapCensusReport( const char *stage );
 			GC_HeapCensusReport( "first parity entity" );
 		}
-		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget
+		const qboolean skip = SV_GCEntityPressure( tier ) || gc_parity_kept >= gc_parity_budget
 			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
 
 		if( !skip )
