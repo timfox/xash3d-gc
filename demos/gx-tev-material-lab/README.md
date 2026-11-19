@@ -66,6 +66,15 @@ the DumpFrames capture reel so you stay in control.
 | HW KEY+RIM | key + fill + rim backlight |
 | EMBOSS LIT | Lost Coast dual-sample height emboss under HW key (`lit×(0.5+h0−h1)×2`) |
 | HW SPEC | `GX_DF_CLAMP` + `GX_AF_SPEC`; shininess from roughness |
+| CLEARCOAT | Dual-lobe lacquer: base albedo + sharp IBL × Fresnel |
+| IRIDESCENT | Thin-film: IBL × animated hue konst |
+| SHEEN CLOTH | Wrap diffuse (`TB_ADDHALF`) + edge sheen IBL |
+| SSS WRAP | Subsurface-ish: lit albedo + scatter konst wrap |
+| HEAT WARP | IndTex animated detail warps IBL (heat-haze vibe) |
+| TOON RAMP | NPR cel: `GX_DF_SIGN` hard lit + white Fresnel rim |
+| HOLOGRAM | Scrolled scan detail × cyan IBL + Fresnel shell |
+| ANISO FLAKE | Asymmetric IndTex stretches sharp IBL flakes |
+| CHROMA IBL | Warped IBL with red/blue fringe (chromatic vibe) |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
