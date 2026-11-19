@@ -66,7 +66,7 @@ def main():
 				sd.ellipse((0, 0, w - 1, h - 1), fill=255)
 			else:
 				sd.rounded_rectangle((0, 0, w - 1, h - 1), radius=h // 3, fill=255)
-			lf = ImageFont.truetype(args.font, int(h * (0.34 if label == "START" else 0.62)))
+			lf = ImageFont.truetype(args.font, int(h * (0.5 if label == "START" else 0.62)))
 			bb = sd.textbbox((0, 0), label, font=lf)
 			sd.text(((w - (bb[2] - bb[0])) // 2 - bb[0], (h - (bb[3] - bb[1])) // 2 - bb[1]), label, font=lf, fill=0)
 			atlas.paste(shape, (x, y))
