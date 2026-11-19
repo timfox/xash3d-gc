@@ -1440,8 +1440,12 @@ void CL_InitEdicts( int maxclients )
 		/* Retail sends up to 256 visible entities a frame. Hold CL_UPDATE_BACKUP
 		 * frames of them in the map arena tail the World DL route leaves free
 		 * (the server sized its own copy there first); the 128-entry static
-		 * table could not even hold one frame of c1a2a. */
+		 * table could not even hold one frame of c1a2a. DoD matches too. */
+#if XASH_DODGC_NETWORK
+		if( true )
+#else
 		if( GC_MenuRunsServer( ))
+#endif
 		{
 			int frames;
 
@@ -1465,8 +1469,14 @@ void CL_InitEdicts( int maxclients )
 				break;
 			}
 			if( !cl_gc_arena_packet_entities )
+			{
+				extern int sv_gc_visible_cap;
+
+				/* The local server must not send more than this ring holds. */
+				sv_gc_visible_cap = 128;
 				Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client packet entities map=%s 128 entries (static fallback, arena_tail_left=%s)\n",
 					clgame.mapname, Q_memprint( GC_MapArenaLargestGap()));
+			}
 		}
 		clgame.entities = gc_gcmap_bootstrap_entities;
 		clgame.static_entities = NULL;
