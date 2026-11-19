@@ -101,6 +101,7 @@ typedef struct
 // net_encode.c
 //
 void Delta_Init( void );
+qboolean Delta_IsInitialized( void );
 void Delta_InitClient( void );
 void Delta_Shutdown( void );
 void Delta_AddEncoder( char *name, pfnDeltaEncode encodeFunc );

@@ -946,6 +946,11 @@ static void Delta_InitFields( void )
 	Mem_Free( afile );
 }
 
+qboolean Delta_IsInitialized( void )
+{
+	return delta_init;
+}
+
 void Delta_Init( void )
 {
 	// shutdown it first

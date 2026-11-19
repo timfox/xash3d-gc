@@ -1463,8 +1463,13 @@ static char *SV_ReadEntityScript( const char *filename, int *flags )
 		/* The 64 KiB entity text can fail on the fragmented heap at a
 		 * changelevel. Validation is brief and the GX world does not use the
 		 * soft surface cache, so borrow its store (the transition save takes
-		 * it next anyway). */
+		 * it next anyway). DoD too: the 50 KB text failed at a level change
+		 * with 93 KB of heap free (ceres soak run 7). */
+#if XASH_DODGC_NETWORK
+		if( true )
+#else
 		if( GC_MenuRunsServer())
+#endif
 		{
 			extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
 			extern void R_GCReleaseSurfaceCacheStore( const char *owner );
