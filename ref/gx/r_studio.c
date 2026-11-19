@@ -4154,6 +4154,15 @@ void R_DrawViewModel( void )
 	 * also not resident on this route, so it drew as a white hook. */
 	if( gEngfuncs.Sys_CheckParm( "-gcvst" ))
 		return;
+	/* A cinematic camera owns the view (cine_play) and cine_viewmodel is 0.
+	 * Checked before lean_vm below, which draws a held weapon whatever
+	 * r_drawviewmodel says, so the gun showed in every film shot. */
+	{
+		extern qboolean CL_CineHideViewModel( void );
+
+		if( CL_CineHideViewModel( ))
+			return;
+	}
 #endif
 
 	R_GatherPlayerLight( view );
