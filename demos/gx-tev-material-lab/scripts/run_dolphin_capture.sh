@@ -121,7 +121,9 @@ pick() {
 	fi
 }
 pick 70  "$OUT_DIR/shots/copper-ref.png"
-pick 130 "$OUT_DIR/shots/damascus.png"
+pick 115 "$OUT_DIR/shots/damascus.png"
+pick 140 "$OUT_DIR/shots/corrugated.png"
+pick 155 "$OUT_DIR/shots/solar.png"
 pick 190 "$OUT_DIR/shots/rough-00.png"
 pick 250 "$OUT_DIR/shots/rough-25.png"
 pick 310 "$OUT_DIR/shots/rough-50.png"
