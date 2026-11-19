@@ -88,6 +88,10 @@ the DumpFrames capture reel so you stay in control.
 | WOOD PLANK | Warm oak tint × anisotropic grain scroll + soft sheen |
 | BRICK | Fired clay tint × AO×2 mortar + IndTex bumps |
 | CERAMIC TILE | Cool glaze × tile grid detail + sharp dielectric coat |
+| OLED VOID | Near-black OLED × dual dark KONST IndTex |
+| ANODIZED MG | Dyed Mg metal × dual cool-green KONST IndTex |
+| FROST POLY | Frosted polycarb × dual cool KONST IndTex |
+| HOLO VINYL | Peel holo vinyl × dual chroma KONST IndTex |
 | ASPHALT | Dark road body + sparse wet IndTex glints |
 | RUBBER | Soft wrap tire rubber, muted Fresnel |
 | PLASTIC ABS | Cool-tinted injection plastic + soft dielectric coat |
