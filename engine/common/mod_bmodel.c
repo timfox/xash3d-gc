@@ -8719,8 +8719,13 @@ size_t Mod_GCWorldEntityTextHeapBytes( void )
 {
 	model_t *mod = worldmodel;
 
-	if( !mod || mod->type != mod_brush || !mod->entities || !gc_entities_malloc_block
-		|| mod->entities != (char *)gc_entities_malloc_block )
+	if( !mod || mod->type != mod_brush || !mod->entities )
+		return 0;
+#if XASH_DODGC_NETWORK
+	if( gc_entities_static_block && gc_static_entities && mod->entities == gc_static_entities )
+		return Q_strlen( mod->entities ) + 1;
+#endif
+	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
 		return 0;
 	return Q_strlen( mod->entities ) + 1;
 }
@@ -8733,6 +8738,30 @@ void Mod_GCMoveWorldEntitiesToArena( void )
 
 	if( !mod || mod->type != mod_brush || !mod->entities )
 		return;
+#if XASH_DODGC_NETWORK
+	/* The 128 KB entity reserve is a permanent heap block a DoD listen map holds
+	 * its small lump in (avalanche). Once the text sits in the arena the reserve
+	 * goes back to the heap; the next map load takes it again if it is needed. */
+	if( gc_entities_static_block && gc_static_entities && mod->entities == gc_static_entities )
+	{
+		size_t n = Q_strlen( mod->entities ) + 1, pos = GC_MapArenaFind( n );
+		char *to;
+
+		if( pos != (size_t)-1 && ( to = (char *)GC_MapLoadBufferTailAlloc( pos, n )) != NULL )
+		{
+			memcpy( to, mod->entities, n );
+			mod->entities = to;
+			free( gc_static_entities );
+			gc_static_entities = NULL;
+			gc_entities_static_block = false;
+			gc_entities_arena_tail = true;
+			Con_Reportf( "Xash3D GameCube: budget moved entity text to map leftover (%s), entity reserve returned, heap free %s\n",
+				Q_memprint( n ), Q_memprint( GC_MemHeapFreeBytes()));
+			Mod_GCWorldCanaryCheck( "after entity text move" );
+			return;
+		}
+	}
+#endif
 	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
 	{
 		static const model_t *said;
