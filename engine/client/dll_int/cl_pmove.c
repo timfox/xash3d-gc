@@ -22,6 +22,7 @@ GNU General Public License for more details.
 #if XASH_GAMECUBE
 #include <ogc/system.h>
 extern int gc_menu_step_frames;
+#include "server.h"	/* SV_ModelHandle: static brush models on the local route */
 #endif
 
 #define MAX_FORWARD			6	// forward probes for set idealpitch
@@ -468,6 +469,129 @@ static void CL_AddLinksToPmove( frame_t *frame )
 	}
 }
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/*
+===============
+CL_GCAddStaticBrushes
+
+Walls baked into the world DL never arrive in a packet (GC_StaticBrushes,
+model.c), so prediction and the client's traces take them from the list.
+They sit right after the world.  When all of them fit they are written once
+per map; when the table is too small for that (DoD builds lower
+MAX_PHYSENTS) only the ones around the player go in, every frame.
+===============
+*/
+#define GC_SB_DYNAMIC_RESERVE	64
+#define GC_SB_NEAR		512.0f
+
+static void CL_GCFillStaticBrush( physent_t *pe, model_t *mod, qboolean solid )
+{
+	memset( pe, 0, sizeof( *pe ));
+	Q_strncpy( pe->name, mod->name, sizeof( pe->name ));
+	pe->model = mod;
+	VectorCopy( mod->mins, pe->mins );
+	VectorCopy( mod->maxs, pe->maxs );
+	pe->solid = solid ? SOLID_BSP : SOLID_NOT;
+	pe->skin = solid ? 0 : CONTENTS_EMPTY;
+	pe->movetype = MOVETYPE_PUSH;
+	pe->takedamage = DAMAGE_NO;
+}
+
+static void CL_GCAddStaticBrushes( void )
+{
+	static int filled_serial = -1;
+	static model_t *filled_world;
+	static model_t *filled_first, *filled_last;
+	static int filled_phys, filled_vis;
+	int count = 0, serial = 0, solid_total = 0;
+	const word *list;
+	const int room = MAX_PHYSENTS - cl.maxclients - GC_SB_DYNAMIC_RESERVE - 1;
+	qboolean all;
+	int nphys = 1, nvis = 1, unloaded = 0;
+
+	if( !cl.worldmodel )
+		return;
+	/* A local server already loaded its map's list; naming the client's
+	 * world here would reload the old one for the frames of a level change. */
+	list = GC_StaticBrushes( SV_Active() ? NULL : cl.worldmodel->name, &count, &serial );
+	if( count <= 0 )
+		return;
+
+	for( int i = 0; i < count; i++ )
+	{
+		if( list[i] & 0x8000 )
+			solid_total++;
+	}
+	all = ( solid_total <= room && count <= room );
+
+	if( all && filled_serial == serial && filled_world == cl.worldmodel
+		&& ( filled_phys <= 1 || ( clgame.pmove->physents[1].model == filled_first
+			&& clgame.pmove->physents[filled_phys - 1].model == filled_last )))
+	{
+		clgame.pmove->numphysent = filled_phys;
+		clgame.pmove->numvisent = filled_vis;
+		return;
+	}
+
+	filled_first = filled_last = NULL;
+	for( int i = 0; i < count; i++ )
+	{
+		const qboolean solid = ( list[i] & 0x8000 ) != 0;
+		const int index = ( list[i] & 0x7fff ) + 1;
+		model_t *mod = CL_ModelHandle( index );
+
+		/* The local route skips the resource list, so the client binds a
+		 * model only once an entity using it arrived, and these never do:
+		 * take it from the server in the same process. */
+		if( !mod && SV_Active( ))
+			mod = SV_ModelHandle( index );
+		if( !mod )
+		{
+			unloaded++;	/* signon: the client has not bound its models yet */
+			continue;
+		}
+		if( mod->type != mod_brush || !mod->hulls[1].lastclipnode )
+			continue;
+		if( !all )
+		{
+			int a;
+
+			for( a = 0; a < 3; a++ )
+			{
+				if( cl.simorg[a] < mod->mins[a] - GC_SB_NEAR || cl.simorg[a] > mod->maxs[a] + GC_SB_NEAR )
+					break;
+			}
+			if( a < 3 )
+				continue;
+		}
+		if( nvis < MAX_PHYSENTS - 1 && ( all || nvis <= room ))
+			CL_GCFillStaticBrush( &clgame.pmove->visents[nvis++], mod, solid );
+		if( solid && nphys <= room )
+		{
+			CL_GCFillStaticBrush( &clgame.pmove->physents[nphys], mod, true );
+			if( !filled_first )
+				filled_first = mod;
+			filled_last = mod;
+			nphys++;
+		}
+	}
+	clgame.pmove->numphysent = nphys;
+	clgame.pmove->numvisent = nvis;
+
+	/* Keep the fill only when every model was there: the first calls of a
+	 * map come before the models are bound, and an empty fill kept for the
+	 * whole map would leave the player walking through the baked walls. */
+	if( all && !unloaded )
+	{
+		filled_serial = serial;
+		filled_world = cl.worldmodel;
+		filled_phys = nphys;
+		filled_vis = nvis;
+	}
+	else filled_serial = -1;
+}
+#endif
+
 /*
 ===============
 CL_SetSolidEntities
@@ -494,6 +618,10 @@ void CL_SetSolidEntities( void )
 
 	// share to visents
 	clgame.pmove->visents[0] = clgame.pmove->physents[0];
+
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	CL_GCAddStaticBrushes();
+#endif
 
 	// add all other entities exlucde players
 	CL_AddLinksToPmove( &cl.frames[cl.parsecountmod] );

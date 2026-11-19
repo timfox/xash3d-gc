@@ -2182,8 +2182,9 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	out = cache / f"wd_{bsp.stem.lower()}.gcd"
 	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
 	lf = cache / f"wd_{bsp.stem.lower()}_lf.gcd"
-	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1"
-	if out.is_file() and lf.is_file() and stamp.is_file() and stamp.read_text() == key:
+	sb = cache / f"wd_{bsp.stem.lower()}_sb.gcd"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb1"
+	if out.is_file() and lf.is_file() and sb.is_file() and stamp.is_file() and stamp.read_text() == key:
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
 	try:
@@ -2209,6 +2210,10 @@ def build_world_dl_overlays(source: Path, output: Path, cache: Path) -> list[tup
 			lf = wd.with_name(wd.stem + "_lf.gcd")
 			if lf.is_file():
 				overlays.append((f"media/{lf.name}", lf))
+			# Static brush entities baked into this pack (written with it).
+			sb = wd.with_name(wd.stem + "_sb.gcd")
+			if sb.is_file():
+				overlays.append((f"media/{sb.name}", sb))
 	print(f"  world DL: {len(overlays)} map(s) baked/cached")
 	return overlays
 
@@ -4115,6 +4120,11 @@ def stage_smoke_data(
 		if lf.is_file():
 			shutil.copy2(lf, media_out / lf.name)
 			print(f"  light faces: staged {lf.name} ({lf.stat().st_size} bytes)")
+		# Static brush entity list: only the one written with this very pack.
+		sb = src.with_name(f"wd_{stem}_sb.gcd")
+		if sb.is_file():
+			shutil.copy2(sb, media_out / sb.name)
+			print(f"  static brushes: staged {sb.name} ({sb.stat().st_size} bytes)")
 
 	# Changelevel / New Game loading plaque (retail gfx.wad art, ~3 KiB).
 	build_loading_spans(source, output)
