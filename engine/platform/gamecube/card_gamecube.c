@@ -54,12 +54,14 @@ static qboolean gc_card_silent;           // gc_card_load silent: no result text
 static qboolean gc_card_format_allowed; // set only by a NEEDS_FORMAT answer, consumed by gc_card_format
 static unsigned char *gc_card_work;      // 40 KiB work area, allocated while mounted only
 
-static void GC_CardResult( gc_card_status_t st )
+static void GC_CardResult( gc_card_status_t st, const char *ok_text )
 {
+	const char *text = st == GC_CARD_OK ? ok_text : gc_card_text[st];
+
 	if( gc_card_silent && ( st == GC_CARD_NO_CARD || st == GC_CARD_NO_SAVE || st == GC_CARD_NEEDS_FORMAT ))
 		return;
-	Cvar_FullSet( gc_card_status.name, gc_card_text[st], FCVAR_READ_ONLY );
-	Con_Reportf( "Xash3D GameCube: memory card: %s\n", gc_card_text[st] );
+	Cvar_FullSet( gc_card_status.name, text, FCVAR_READ_ONLY );
+	Con_Reportf( "Xash3D GameCube: memory card: %s\n", text );
 }
 
 static gc_card_status_t GC_CardMount( void )
@@ -228,7 +230,7 @@ static void GC_CardSave_f( void )
 	const gc_card_status_t st = GC_CardSave();
 
 	gc_card_format_allowed = st == GC_CARD_NEEDS_FORMAT;
-	GC_CardResult( st );
+	GC_CardResult( st, "saved" );
 }
 
 static void GC_CardLoad_f( void )
@@ -243,7 +245,7 @@ static void GC_CardLoad_f( void )
 
 	if( !gc_card_silent )
 		gc_card_format_allowed = st == GC_CARD_NEEDS_FORMAT;
-	GC_CardResult( st );
+	GC_CardResult( st, "loaded" );
 	gc_card_silent = false;
 }
 
@@ -263,17 +265,17 @@ static void GC_CardFormat_f( void )
 	if( st == GC_CARD_OK )
 	{
 		GC_CardUnmount(); // it mounts fine now (reinserted?): nothing to format, never touch a healthy card
-		GC_CardResult( GC_CARD_OK );
+		GC_CardResult( GC_CARD_OK, "the card is fine, nothing to format" );
 		return;
 	}
 	if( st != GC_CARD_NEEDS_FORMAT )
 	{
-		GC_CardResult( st );
+		GC_CardResult( st, "saved" );
 		return;
 	}
 	ret = CARD_Format( CARD_SLOTA );
 	st = ret == CARD_ERROR_READY ? GC_CardSave() : GC_CARD_ERROR;
-	GC_CardResult( st );
+	GC_CardResult( st, "formatted and saved" );
 }
 
 void GC_CardInit( void )
