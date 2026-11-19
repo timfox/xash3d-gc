@@ -1229,7 +1229,9 @@ static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 	 * free (ceres fsb). The static table holds 460 ents whatever maxclients
 	 * is, and cl_parse caps the map route to it, so nothing under-allocs;
 	 * maps over 460 take the map-arena path first. */
-	if( maxclients > 8 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* 16, not 8: the table does not depend on maxclients, and an 8-bot match is 9 clients (the heap table
+	 * of 744 KB then fails: "mem FAIL Client Edicts Zone"). */
+	if( maxclients > 16 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	if( GC_MapLoadMemoryOpt()
