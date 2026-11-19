@@ -92,4 +92,8 @@ non-whitelisted keys, unprintable values). Commands: `gc_card_save`, `gc_card_lo
 - Memory: a 40 KiB (5 x 8 KiB) libogc work area and one sector buffer, both allocated only while a card operation runs and
   freed after; resident cost zero. SYS arena and ARAM: none.
 - Still to do (needs a decision): the menu wiring (Options > Player page "Save to memory card" / load at start, and the
-  format dialog) and a Dolphin run with a GCI memory card image. No banner or icon is set, so the IPL shows a blank icon.
+  format dialog) and a Dolphin run with a GCI memory card image.
+- Banner and icon: original art (gold star badge, game name) in the retail palette, `scripts/bake-card-art.py` ->
+  `card_art.h` (CI8, GX tiling, RGB5A3 palette; committed so the build does not need Pillow), set with `CARD_SetStatus`. File
+  layout inside the one sector: comment 0, banner+icon 64..5184, settings blob at 5632. `gc_card_load silent` is the start-up
+  load: no message for no card / no file / needs formatting, and it never asks. Static data: about 5 KiB of const art in the DOL.

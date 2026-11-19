@@ -18,8 +18,19 @@ Commands: gc_card_save, gc_card_load, gc_card_format confirmed. Cvar gc_card_sta
 #include <malloc.h>
 #include <string.h>
 #include "settings_blob.h"
+#include "card_art.h"
 
 #define GC_CARD_FILE "DayOfDefeat_Settings"
+
+/* File layout inside the one sector (what the IPL card manager reads, see CARD_SetStatus below):
+ *   0     comment block, 64 bytes (two 32 character lines)
+ *   64    banner  CI8 96x32 (3072) + palette (512)
+ *   3648  icon    CI8 32x32 (1024) + palette (512)
+ *   5632  our settings blob (settings_blob.h)
+ */
+#define GC_CARD_OFF_COMMENT 0
+#define GC_CARD_OFF_ART     64
+#define GC_CARD_OFF_BLOB    5632
 
 typedef enum
 {
@@ -39,11 +50,14 @@ static const char *const gc_card_text[] =
 };
 
 static CVAR_DEFINE_AUTO( gc_card_status, "", FCVAR_READ_ONLY, "memory card: result of the last save / load" );
+static qboolean gc_card_silent;           // gc_card_load silent: no result text for "no card" / "no file" (start-up load)
 static qboolean gc_card_format_allowed; // set only by a NEEDS_FORMAT answer, consumed by gc_card_format
 static unsigned char *gc_card_work;      // 40 KiB work area, allocated while mounted only
 
 static void GC_CardResult( gc_card_status_t st )
 {
+	if( gc_card_silent && ( st == GC_CARD_NO_CARD || st == GC_CARD_NO_SAVE || st == GC_CARD_NEEDS_FORMAT ))
+		return;
 	Cvar_FullSet( gc_card_status.name, gc_card_text[st], FCVAR_READ_ONLY );
 	Con_Reportf( "Xash3D GameCube: memory card: %s\n", gc_card_text[st] );
 }
@@ -77,6 +91,37 @@ static void GC_CardUnmount( void )
 	gc_card_work = NULL;
 }
 
+static void GC_CardFillArt( unsigned char *sector )
+{
+	unsigned char *p = sector + GC_CARD_OFF_ART;
+	int i;
+
+	Q_strncpy( (char *)sector + GC_CARD_OFF_COMMENT, "Day of Defeat GameCube", 32 );
+	Q_strncpy( (char *)sector + GC_CARD_OFF_COMMENT + 32, "Name and settings", 32 );
+	memcpy( p, gc_card_banner_pixels, sizeof( gc_card_banner_pixels ));
+	p += sizeof( gc_card_banner_pixels );
+	for( i = 0; i < 256; i++, p += 2 ) { p[0] = gc_card_banner_tlut[i] >> 8; p[1] = gc_card_banner_tlut[i] & 255; }
+	memcpy( p, gc_card_icon_pixels, sizeof( gc_card_icon_pixels ));
+	p += sizeof( gc_card_icon_pixels );
+	for( i = 0; i < 256; i++, p += 2 ) { p[0] = gc_card_icon_tlut[i] >> 8; p[1] = gc_card_icon_tlut[i] & 255; }
+}
+
+/* Tell the IPL where the comment, banner and icon are, so the card manager shows our art. Best effort. */
+static void GC_CardSetStatus( card_file *file )
+{
+	card_stat stat;
+
+	if( CARD_GetStatus( CARD_SLOTA, file->filenum, &stat ) != CARD_ERROR_READY )
+		return;
+	stat.icon_addr = GC_CARD_OFF_ART;
+	stat.comment_addr = GC_CARD_OFF_COMMENT;
+	CARD_SetBannerFmt( &stat, CARD_BANNER_CI );
+	CARD_SetIconFmt( &stat, 0, CARD_ICON_CI );
+	CARD_SetIconSpeed( &stat, 0, CARD_SPEED_SLOW );
+	CARD_SetIconFmt( &stat, 1, CARD_ICON_NONE );
+	CARD_SetStatus( CARD_SLOTA, file->filenum, &stat );
+}
+
 static gc_card_status_t GC_CardSave( void )
 {
 	gc_setting_t items[16];
@@ -98,7 +143,7 @@ static gc_card_status_t GC_CardSave( void )
 			n++;
 	}
 	len = GC_SettingsPack( blob, sizeof( blob ), items, n );
-	if( !len || CARD_GetSectorSize( CARD_SLOTA, &sect_size ) < 0 || sect_size < GC_SETTINGS_MAX_BLOB )
+	if( !len || CARD_GetSectorSize( CARD_SLOTA, &sect_size ) < 0 || sect_size < GC_CARD_OFF_BLOB + GC_SETTINGS_MAX_BLOB )
 	{
 		GC_CardUnmount();
 		return GC_CARD_ERROR;
@@ -110,13 +155,16 @@ static gc_card_status_t GC_CardSave( void )
 		return GC_CARD_ERROR;
 	}
 	memset( sector, 0, sect_size );
-	memcpy( sector, blob, (size_t)len );
+	memcpy( sector + GC_CARD_OFF_BLOB, blob, (size_t)len );
+	GC_CardFillArt( sector );
 	ret = CARD_Open( CARD_SLOTA, GC_CARD_FILE, &file );
 	if( ret == CARD_ERROR_NOFILE )
 		ret = CARD_Create( CARD_SLOTA, GC_CARD_FILE, sect_size, &file );
 	if( ret == CARD_ERROR_READY )
 	{
 		ret = CARD_Write( &file, sector, sect_size, 0 );
+		if( ret == CARD_ERROR_READY )
+			GC_CardSetStatus( &file );
 		CARD_Close( &file );
 	}
 	free( sector );
@@ -146,7 +194,7 @@ static gc_card_status_t GC_CardLoad( void )
 		GC_CardUnmount();
 		return GC_CARD_NO_SAVE;
 	}
-	if( ret != CARD_ERROR_READY || CARD_GetSectorSize( CARD_SLOTA, &sect_size ) < 0 || sect_size < GC_SETTINGS_MAX_BLOB )
+	if( ret != CARD_ERROR_READY || CARD_GetSectorSize( CARD_SLOTA, &sect_size ) < 0 || sect_size < GC_CARD_OFF_BLOB + GC_SETTINGS_MAX_BLOB )
 	{
 		GC_CardUnmount();
 		return GC_CARD_ERROR;
@@ -166,7 +214,7 @@ static gc_card_status_t GC_CardLoad( void )
 		free( sector );
 		return GC_CARD_ERROR;
 	}
-	n = GC_SettingsUnpack( sector, GC_SETTINGS_MAX_BLOB, items, 16 );
+	n = GC_SettingsUnpack( sector + GC_CARD_OFF_BLOB, GC_SETTINGS_MAX_BLOB, items, 16 );
 	free( sector );
 	if( n < 0 )
 		return GC_CARD_BAD_SAVE;
@@ -185,10 +233,18 @@ static void GC_CardSave_f( void )
 
 static void GC_CardLoad_f( void )
 {
-	const gc_card_status_t st = GC_CardLoad();
+	gc_card_status_t st;
 
-	gc_card_format_allowed = st == GC_CARD_NEEDS_FORMAT;
+	/* "gc_card_load silent" is the start-up load: no card or no file is not worth a message, and it never asks anything */
+	gc_card_silent = Cmd_Argc() > 1 && !Q_strcmp( Cmd_Argv( 1 ), "silent" );
+	st = GC_CardLoad();
+	if( gc_card_silent )
+		gc_card_format_allowed = false;
+
+	if( !gc_card_silent )
+		gc_card_format_allowed = st == GC_CARD_NEEDS_FORMAT;
 	GC_CardResult( st );
+	gc_card_silent = false;
 }
 
 /* Only after the player has said yes to the format dialog: "gc_card_format confirmed" straight after a NEEDS_FORMAT. */
