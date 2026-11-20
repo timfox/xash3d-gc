@@ -3874,29 +3874,49 @@ int GAME_EXPORT CL_DecalIndex( int id )
 		if( GC_MapLoadMemoryOpt() && host.draw_decals[id][0] == '{' )
 		{
 #if XASH_DODGC_NETWORK
-			/* DoD: the five retail bullet holes are 16x16 (1152 bytes each
-			 * in decals.wad), cheap enough to load as they are. Everything
-			 * larger keeps the embedded stand-in. */
-			if( !Q_strnicmp( host.draw_decals[id], "{shot", 5 )
-				&& GC_MemHeapFreeBytes() > 24 * 1024 )
+			/* DoD: retail decal art from decals.wad. The five bullet holes
+			 * are 16x16 (1152 bytes each) and load whenever 24 KB are free.
+			 * Scorch marks, blood and the large holes are up to 64x64: they
+			 * load while the heap has 96 KB free and the retail decals of
+			 * this session stay under GC_RETAIL_DECAL_PIXELS. Anything
+			 * larger, or past the budget, keeps the embedded stand-in. */
+#define GC_RETAIL_DECAL_PIXELS	( 6 * 64 * 64 )
 			{
-				rgbdata_t *pic = FS_LoadImage( host.draw_decals[id], NULL, 0 );
+				static unsigned retail_pixels;
+				static int retail_servercount;
+				const qboolean shot = !Q_strnicmp( host.draw_decals[id], "{shot", 5 );
 
-				if( pic && CL_GCDecalImageToDarken( pic ))
-					gl_texturenum = ref.dllFuncs.GL_LoadTextureFromBuffer( host.draw_decals[id], pic,
-						TF_DECAL | TF_CLAMP | TF_NOMIPMAP, false );
-				if( pic )
-					FS_FreeImage( pic );
-				if( gl_texturenum > 0 )
+				/* The budget is per map: decal textures go with the level. */
+				if( retail_servercount != cl.servercount )
 				{
-					static int logs;
+					retail_servercount = cl.servercount;
+					retail_pixels = 0;
+				}
+				if( GC_MemHeapFreeBytes() > ( shot ? 24u : 96u ) * 1024u )
+				{
+					rgbdata_t *pic = FS_LoadImage( host.draw_decals[id], NULL, 0 );
+					const unsigned px = pic ? (unsigned)pic->width * (unsigned)pic->height : 0;
 
-					if( logs++ < 5 )
-						Con_Reportf( "Xash3D GameCube: retail decal %s tex=%d (heap %s)\n",
-							host.draw_decals[id], gl_texturenum, Q_memprint( GC_MemHeapFreeBytes( )));
-					cl.decal_index[id] = gl_texturenum;
-					Image_ClearForceFlags();
-					return gl_texturenum;
+					if( pic && px > 0 && px <= 64u * 64u
+						&& ( shot || retail_pixels + px <= GC_RETAIL_DECAL_PIXELS )
+						&& CL_GCDecalImageToDarken( pic ))
+						gl_texturenum = ref.dllFuncs.GL_LoadTextureFromBuffer( host.draw_decals[id], pic,
+							TF_DECAL | TF_CLAMP | TF_NOMIPMAP, false );
+					if( pic )
+						FS_FreeImage( pic );
+					if( gl_texturenum > 0 )
+					{
+						static int logs;
+
+						if( !shot )
+							retail_pixels += px;
+						if( logs++ < 24 )
+							Con_Reportf( "Xash3D GameCube: retail decal %s tex=%d %u px (heap %s)\n",
+								host.draw_decals[id], gl_texturenum, px, Q_memprint( GC_MemHeapFreeBytes( )));
+						cl.decal_index[id] = gl_texturenum;
+						Image_ClearForceFlags();
+						return gl_texturenum;
+					}
 				}
 			}
 #endif
