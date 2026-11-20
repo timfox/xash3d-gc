@@ -729,7 +729,7 @@ qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, co
 	u32 gx_ofs, gx_len;
 	int bi, k, last_tex = -1, tris = 0;
 
-	if( !base || !sub || !hdr || !bones || !bind || memcmp( base, "GCMB", 4 ))
+	if( !base || !sub || !hdr || !bones || !bind || memcmp( base, "GCMB", 4 ) || hdr->numbones > GCGX_MV_MAX )
 		return false;
 	memcpy( &gx_ofs, base + 4, sizeof( gx_ofs ));
 	memcpy( &gx_len, base + 8, sizeof( gx_len ));
