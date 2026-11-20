@@ -325,11 +325,22 @@ void R_GXSkinAttachCmpr( image_t *img, const byte *texels, int w, int h, qboolea
 	char key[GC_ARAM_NAME_LEN];
 	int handle, low_w, low_h;
 
-	if( !img || img->gc_skin_handle || !texels || !img->pixels[0] || ( (uintptr_t)texels & 31u )
+	static int reject_logs;
+
+	if( !img || img->gc_skin_handle || !texels || !img->pixels[0]
 		|| w < 16 || h < 16 || ( w & 7 ) || ( h & 7 ) || (size_t)w * h / 2u > GC_SKIN_WINDOW_BYTES )
+	{
+		if( img && !img->gc_skin_handle && reject_logs++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM CMPR %s not attached (texels=%p low=%p %dx%d)\n",
+				img->name, texels, img->pixels[0], w, h );
 		return;
+	}
 	if( !R_GXSkinInit( ))
+	{
+		if( reject_logs++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM CMPR %s not attached (stream off)\n", img->name );
 		return;
+	}
 	low_w = img->width;
 	low_h = img->height;
 	R_GXSkinKey( img->name, key, sizeof( key ));
