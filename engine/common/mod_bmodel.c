@@ -95,6 +95,13 @@ static qboolean gc_clipnodes_pool_block;
 #define GC_STATIC_HULL0_CAPACITY    16384
 static mclipnode16_t gc_static_clipnodes[GC_STATIC_CLIPNODE_CAPACITY]
 	__attribute__((aligned( 32 )));
+/* The routes whose Mod_LoadClipnodes owns a normalized copy (the pinned path):
+ * on DoD that copy is gc_static_clipnodes itself. */
+static qboolean Mod_GCClipnodesPinnedRoute( void )
+{
+	return Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcnewgame" )
+		|| Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcworldrender" );
+}
 /* Hull 0 as BSS (like clipnodes): heap memalign of even 26 KiB fails under
  * c4a3 smoke fragmentation (free≈50 Kb, probe 20261105-065947) after the
  * durable surfedges tail copy. 128 KiB fixed cost; never tip-fatal. */
@@ -9112,6 +9119,24 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 	}
 
 	numelems = lump.filelen / real_entrysize;
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+	/* DoD clipnodes end up normalized in gc_static_clipnodes (the pinned path in
+	 * Mod_LoadClipnodes), and a raw dclipnode_t is the same 8 bytes as the
+	 * mclipnode16_t it becomes, normalized element by element in place. Read
+	 * the lump straight into that table: the copy in the world-array spill
+	 * (253 KiB on dod_caen, 250 on charlie, 228 on avalanche) stayed used all
+	 * match and pushed the world DL tables and chunk cache (189 KiB) onto
+	 * the heap, which then ran at 4 KB with twelve bots. */
+	if( lumpnum == LUMP_CLIPNODES && real_entrysize == sizeof( mclipnode16_t )
+		&& numelems <= GC_STATIC_CLIPNODE_CAPACITY && Mod_GCClipnodesPinnedRoute())
+	{
+		lumpbuf = (byte *)gc_static_clipnodes;
+		scratch_backed = true;	/* never freed: the static table */
+		Con_Reportf( "Xash3D GameCube: clipnodes lump read into the static table %s\n",
+			Q_memprint( lump.filelen ));
+	}
+	else
+#endif
 	lumpbuf = (byte *)malloc( lump.filelen );
 	/* Tip-tight maps (dod_donner): markfaces ~31 KiB fails malloc after the
 	 * surface high-slot claim. Prefer spill before scratch/ARAM fallbacks.
@@ -10552,8 +10577,7 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 
 		/* Scratch aliases die when Flipper rearms BSP arena. Own compact pin
 		 * for New Game and CapFaces -gcmap/-gcworldrender (probe 013254). */
-		if( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcnewgame" )
-			|| Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcworldrender" ))
+		if( Mod_GCClipnodesPinnedRoute())
 		{
 			mclipnode16_t *owned;
 			if( !bmod->clipnodes )
