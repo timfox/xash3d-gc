@@ -196,6 +196,27 @@ lives in ARAM too and is the next candidate after this.
   sizes CMPR (and CMPR + low mip) textures correctly.
 - No frame-time measurement: the draw cost is the same GX CMPR bind; the stream counters show the promotion rate.
 
+## 4h. Lazy map logic (`sv_gc_lazy_logic 1`, default 0): relays, retargeters, info_targets, targeted ambients on demand
+
+- The entities the parity budget skips used to be dropped for good (charlie: 99 trigger_relay / trigger_changetarget /
+  info_target / ambient_generic entities, the objective and mortar chains among them). With the cvar on, the server keeps
+  where each one's text sits in the entity lump (12 bytes an entry, `sv_lazy_logic.c`) and `SV_FindEntityByString`
+  spawns the deferred entities of a name, in lump order, before the first scan for that name. The game DLL's own code
+  (FireTargets, trigger_relay, trigger_changetarget) runs unchanged, so the semantics are the DLL's; entities cost an edict
+  only once something addresses them.
+- Host tests (`tests/test_lazy_logic.py`): a model of FireTargets over 300 random lumps with random kept/deferred splits
+  compares the fire order with the all-spawned path (equal in every case); only looked-up names spawn; same-name entries spawn
+  together in lump order; hash collisions and "no room now" stay pending and retry; no re-entry; table limit.
+- Dolphin, charlie, 4 bots, headless, 230 s, cvar 0 vs 1: 99 entities deferred; in the run, spawned on demand:
+  `game_playerjoin`, `anti_sniper_mortar2b` then `rbm_foo` (a changetarget and the relay it retargets), the `crater02`
+  explosion chain, `cp3_start` and `cp3_mm` (objective), `flicker_driver`, `883_exp`, `crater03/04/05_exp` (14 in total, 85
+  still pending). No errors; edict count peaked at 437 of 460 (the same ceiling as with the flag off); heap after load
+  243 KB against 226 KB.
+- **Not shown:** capture flow and round end. The headless run covers about a minute and a half of game time, in which no
+  point was captured and no round ended, so the objective chain that ends a round (`allieswin_mm` and friends, always
+  spawned) and the cp score relays were only exercised up to `cp3_mm`. That needs a longer or accelerated bot match; the
+  bot thread should run it before the default is flipped.
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
