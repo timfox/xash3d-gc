@@ -3511,9 +3511,9 @@ static void R_StudioDrawWeaponModel( int number, int weaponmodel, alight_t *ligh
 		if( weapon_logs < 4 )
 		{
 			weapon_logs++;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s\n",
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s carrier remap=%d\n",
 				number, weaponmodel, pweaponmodel ? pweaponmodel->name : "(null)",
-				m_pStudioHeader ? "yes" : "no" );
+				m_pStudioHeader ? "yes" : "no", (int)m_fDoRemap );
 		}
 	}
 	/* The lean precache can stand a resident w_crowbar in for a
@@ -3555,10 +3555,18 @@ static void R_StudioDrawWeaponModel( int number, int weaponmodel, alight_t *ligh
 	 * (ceres 1ff66ba, DAR 0xA4 = studiohdr numseq). Skip the gun. */
 	if( m_pStudioHeader )
 	{
+		/* The gun has its own skins. The carrier's colour remap (left on
+		 * by R_StudioSetRemapColors for a player model with remappable
+		 * skins) would index the carrier's remapped texture table with
+		 * the gun's skin refs: the gun drawn in the uniform's textures. */
+		const qboolean remap = m_fDoRemap;
+
+		m_fDoRemap = false;
 		R_StudioMergeBones( RI.currententity, pweaponmodel );
 		R_StudioSetupLighting( lighting );
 		R_StudioRenderModel( );
 		R_StudioCalcAttachments( );
+		m_fDoRemap = remap;
 	}
 
 	*RI.currententity = saveent;
