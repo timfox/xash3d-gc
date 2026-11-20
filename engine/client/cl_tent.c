@@ -608,8 +608,10 @@ void CL_GCEnsureTempEntPool( void )
 	 * still keeps GC_TENT_SPILL_KEEP free for what loads later: the prop
 	 * chain cache and the team body cores it leaves room for. With 64 KiB
 	 * kept, charlie's 48-entry pool cut its prop chain cache from 104 KB
-	 * to 18 KB. */
-#define GC_TENT_SPILL_KEEP	( 320u * 1024u )
+	 * to 18 KB (110 prop chain reads a frame instead of none), and 320 KiB
+	 * still let it grow there: charlie has 438 KiB free at this point and
+	 * its prop chains (221 KB) plus the body cores (210 KB) want 431 KB. */
+#define GC_TENT_SPILL_KEEP	( 512u * 1024u )
 	{
 		extern size_t Mod_GCWorldArraySpillFree( void );
 		static const int sizes[] = { 48, 32, 16 };
