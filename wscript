@@ -683,6 +683,8 @@ def configure(conf):
 		# it comes out of the heap a listen host is short of.
 		if os.environ.get('XASH_GC_SKIN_WINDOW_BSS', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GC_SKIN_WINDOW_BSS', 1)
+			# Size of that block in KiB (default 192 for view models; 64 holds the two nearest 256 px bodies).
+			conf.define('GC_SKIN_WINDOW_KIB', int(os.environ.get('XASH_GC_SKIN_WINDOW_KIB', '192')))
 		# Broadband / eth2sp1: link -lbba and enable GC net headers when requested.
 		if os.environ.get('XASH_GAMECUBE_LINK_BBA', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_HAVE_LIBBBA', 1)
