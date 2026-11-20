@@ -43,6 +43,8 @@ Only Lost Coast bakes .gca files, so HL1 and DoD never take this path.
 #define GCA_HALFLAMBERT	0x01
 #define GCA_MASKED	0x02
 #define GCA_ADDITIVE	0x04
+#define GCA_EQUIPMENT	0x08	/* a weapon merged onto the character: gone once the entity's body has bit 0 (he dropped it) */
+#define GCA_HELD	0x10	/* a prop in his hand for a while (keys): drawn only while the entity's body has bit 1 */
 
 typedef struct
 {
@@ -333,6 +335,170 @@ static void R_GXActorRestore( void )
 	GX_SetCurrentMtx( GX_PNMTX0 );
 }
 
+/* What he was carrying, once he lets go of it (the fisherman's harpoon as he
+ * reaches for his keys: the map kills his weapon and spawns a physics
+ * harpoon in his hand). There is no rigid-body solver here, so the mesh that
+ * was in his hand is carried on as one rigid rod from where his hand left
+ * it: it drops under gravity until its lower end meets the ground he stands
+ * on, tips over about that end as a rod does (angular acceleration
+ * 3g/2L cos(angle)), and lies where it lands. No bounce, no slide. */
+#define GCA_DROP_GRAVITY	600.0f	/* sv_gravity */
+
+static struct
+{
+	int	ent;		/* 0 = nothing held or dropped */
+	int	state;		/* 0 in his hand, 1 falling, 2 tipping, 3 at rest */
+	float	time;		/* of the last step */
+	Mtx	held;		/* bone to world, as last drawn in his hand */
+	Mtx	now;		/* as it is drawn while dropped */
+	float	centre[3], axis[3];	/* in the bone's space: the rod's middle and its long way */
+	float	half, ground;
+	float	c[3], a[3];	/* world: middle, long way (pointing up) */
+	float	vz, tilt, spin;	/* fall speed; angle off the ground and its rate */
+} gca_drop;
+
+/* The rod of a batch: the bounds of the vertices its display list names. */
+static void R_GXActorDropMeasure( const byte *data, const gca_lod_t *lod, const gca_batch_t *b )
+{
+	const byte *p = data + b->dl_ofs, *end = p + b->dl_size;
+	const s16 *pos = (const s16 *)( data + lod->pos_ofs + 6u * b->vbase );
+	const float scale = 1.0f / (float)( 1 << lod->pos_frac );
+	float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+	int k, n, axis = 0;
+
+	while( p + 3 <= end && *p )
+	{
+		n = ( p[1] << 8 ) | p[2];
+		p += 3;
+		for( ; n > 0 && p + 4 <= end; n--, p += 4 )
+		{
+			for( k = 0; k < 3; k++ )
+			{
+				const float v = (float)pos[p[1] * 3 + k] * scale;
+
+				if( v < lo[k] ) lo[k] = v;
+				if( v > hi[k] ) hi[k] = v;
+			}
+		}
+	}
+	for( k = 1; k < 3; k++ )
+		if( hi[k] - lo[k] > hi[axis] - lo[axis] )
+			axis = k;
+	for( k = 0; k < 3; k++ )
+	{
+		gca_drop.centre[k] = 0.5f * ( lo[k] + hi[k] );
+		gca_drop.axis[k] = k == axis ? 1.0f : 0.0f;
+	}
+	gca_drop.half = 0.5f * ( hi[axis] - lo[axis] );
+}
+
+/* The bone-to-world matrix of the dropped thing at this moment. */
+static void R_GXActorDropStep( const cl_entity_t *e, float time )
+{
+	float dt = time - gca_drop.time, u[3], n[3], len, cs, sn;
+	Mtx r;
+	int k;
+
+	if( gca_drop.state == 0 )
+	{
+		/* let go: where the rod is, in the world */
+		for( k = 0; k < 3; k++ )
+		{
+			gca_drop.c[k] = gca_drop.held[k][0] * gca_drop.centre[0] + gca_drop.held[k][1] * gca_drop.centre[1]
+				+ gca_drop.held[k][2] * gca_drop.centre[2] + gca_drop.held[k][3];
+			gca_drop.a[k] = gca_drop.held[k][0] * gca_drop.axis[0] + gca_drop.held[k][1] * gca_drop.axis[1]
+				+ gca_drop.held[k][2] * gca_drop.axis[2];
+		}
+		len = sqrtf( DotProduct( gca_drop.a, gca_drop.a ));
+		if( len < 0.001f )
+			len = 1.0f;
+		for( k = 0; k < 3; k++ )
+			gca_drop.a[k] *= ( gca_drop.a[2] < 0.0f ? -1.0f : 1.0f ) / len;
+		gca_drop.ground = e->origin[2] + 1.0f;
+		gca_drop.vz = 0.0f;
+		gca_drop.state = 1;
+		dt = 0.0f;
+	}
+	if( dt < 0.0f || dt > 0.25f )
+		dt = dt < 0.0f ? 0.0f : 0.25f;
+	gca_drop.time = time;
+	if( gca_drop.state == 1 )
+	{
+		const float low = gca_drop.c[2] - gca_drop.a[2] * gca_drop.half;
+
+		gca_drop.vz += GCA_DROP_GRAVITY * dt;
+		if( low - gca_drop.vz * dt <= gca_drop.ground )
+		{
+			gca_drop.c[2] -= low - gca_drop.ground;
+			gca_drop.tilt = asinf( bound( 0.0f, gca_drop.a[2], 1.0f ));
+			gca_drop.spin = 0.0f;
+			gca_drop.state = 2;
+		}
+		else
+			gca_drop.c[2] -= gca_drop.vz * dt;
+	}
+	else if( gca_drop.state == 2 )
+	{
+		/* about its lower end, which stays where it landed */
+		float end[3], flat;
+
+		for( k = 0; k < 3; k++ )
+			end[k] = gca_drop.c[k] - gca_drop.a[k] * gca_drop.half;
+		/* (a rod stood dead upright still goes over: the least lean) */
+		gca_drop.spin += 1.5f * GCA_DROP_GRAVITY / ( 2.0f * gca_drop.half ) * Q_max( cosf( gca_drop.tilt ), 0.02f ) * dt;
+		gca_drop.tilt -= gca_drop.spin * dt;
+		if( gca_drop.tilt <= 0.0f )
+		{
+			gca_drop.tilt = 0.0f;
+			gca_drop.state = 3;
+		}
+		flat = sqrtf( gca_drop.a[0] * gca_drop.a[0] + gca_drop.a[1] * gca_drop.a[1] );
+		if( flat < 0.001f )
+		{
+			/* which way it goes over: the way the entity faces */
+			gca_drop.a[0] = cosf( e->angles[1] * ( M_PI_F / 180.0f ));
+			gca_drop.a[1] = sinf( e->angles[1] * ( M_PI_F / 180.0f ));
+			flat = 1.0f;
+		}
+		cs = cosf( gca_drop.tilt );
+		sn = sinf( gca_drop.tilt );
+		gca_drop.a[0] *= cs / flat;
+		gca_drop.a[1] *= cs / flat;
+		gca_drop.a[2] = sn;
+		for( k = 0; k < 3; k++ )
+			gca_drop.c[k] = end[k] + gca_drop.a[k] * gca_drop.half;
+	}
+	/* The turn from how it left his hand to how it lies now: about the axis
+	 * square to both directions of the rod. */
+	for( k = 0; k < 3; k++ )
+		u[k] = gca_drop.held[k][0] * gca_drop.axis[0] + gca_drop.held[k][1] * gca_drop.axis[1] + gca_drop.held[k][2] * gca_drop.axis[2];
+	len = sqrtf( DotProduct( u, u ));
+	for( k = 0; k < 3; k++ )
+		u[k] = len > 0.001f ? u[k] / len : gca_drop.a[k];
+	if( u[2] < 0.0f )
+		VectorNegate( u, u ); /* (as a was turned to point up when he let go) */
+	CrossProduct( u, gca_drop.a, n );
+	sn = sqrtf( DotProduct( n, n ));
+	cs = DotProduct( u, gca_drop.a );
+	if( sn > 0.0001f )
+	{
+		guVector ax = { n[0] / sn, n[1] / sn, n[2] / sn };
+
+		guMtxRotAxisRad( r, &ax, atan2f( sn, cs ));
+	}
+	else
+		guMtxIdentity( r );
+	r[0][3] = r[1][3] = r[2][3] = 0.0f;
+	guMtxConcat( r, gca_drop.held, gca_drop.now );
+	/* and the rod's middle where the fall has it */
+	for( k = 0; k < 3; k++ )
+	{
+		gca_drop.now[k][3] = 0.0f;
+		gca_drop.now[k][3] = gca_drop.c[k] - ( gca_drop.now[k][0] * gca_drop.centre[0]
+			+ gca_drop.now[k][1] * gca_drop.centre[1] + gca_drop.now[k][2] * gca_drop.centre[2] );
+	}
+}
+
 /*
 =============
 R_GXActorDraw
@@ -421,6 +587,30 @@ qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x
 
 		if( texnum <= 0 || texnum >= MAX_TEXTURES )
 			continue; /* skins not uploaded yet */
+		if( b->flags & GCA_EQUIPMENT )
+		{
+			const float now = gp_cl ? (float)gp_cl->time : 0.0f;
+
+			if( gca_drop.ent != e->index || now + 1.0f < gca_drop.time )
+			{
+				memset( &gca_drop, 0, sizeof( gca_drop ));
+				gca_drop.ent = e->index;
+				R_GXActorDropMeasure( data, lod, b );
+			}
+			if( !( e->curstate.body & 1 ))
+			{
+				/* in his hand: remember where, for when he lets go */
+				memcpy( gca_drop.held, bones[b->bones[0] < hdr->numbones ? b->bones[0] : 0], sizeof( Mtx ));
+				gca_drop.state = 0;
+				gca_drop.time = now;
+			}
+			else if( gca_drop.half <= 0.0f )
+				continue;
+			else if( gca_drop.state != 3 || gca_drop.time == 0.0f )
+				R_GXActorDropStep( e, now );
+		}
+		if(( b->flags & GCA_HELD ) && !( e->curstate.body & 2 ))
+			continue;
 		if( hl != lit_mode )
 		{
 			R_GXActorLights( view, pl, hl );
@@ -430,7 +620,10 @@ qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x
 		{
 			int bone = b->bones[k] < hdr->numbones ? b->bones[k] : 0;
 
-			guMtxConcat( view, bones[bone], m );
+			if(( b->flags & GCA_EQUIPMENT ) && ( e->curstate.body & 1 ))
+				guMtxConcat( view, gca_drop.now, m );
+			else
+				guMtxConcat( view, bones[bone], m );
 			GX_LoadPosMtxImm( m, GX_PNMTX0 + 3 * k );
 			GX_LoadNrmMtxImm( m, GX_PNMTX0 + 3 * k );
 		}

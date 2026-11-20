@@ -24,6 +24,7 @@ void R_GXPropDrawHorizon( const float *org );
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <ogc/lwp_watchdog.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 
@@ -36,6 +37,19 @@ void R_GXPropDrawHorizon( const float *org );
  * cache: a dozen chunks read from ARAM again every frame, 30 fps). A chunk
  * with no table (the 3D skybox, lit by its vertex colours) keeps them. */
 #define GC_WD_FLAG_CLR_INDEX	0x0004
+/* Lightmap pages are LZ4 blocks. The region at the lightmap stream is [u32 n_pages][u32 offset[n_pages + 1]],
+ * 32-aligned page blobs after it; a 2048-byte blob is a raw page. scripts/bake_worlddl_goldsrc.py pack_lm_pages_lz4.
+ * 1 MiB of pages a map shrinks to about 290 KiB of ARAM. */
+#define GC_WD_FLAG_LM_LZ4	0x0010
+/* The PVS rows are a random-access LZ4 region of GC_WD_PVS_BLOCK-byte blocks (header word ofs_pvs is the region
+ * start, pvsdir row offsets stay raw offsets into the uncompressed rows). pack_blocks_lz4. About 0.4 MiB a map. */
+#define GC_WD_FLAG_PVS_LZ4	0x0020
+#define GC_WD_PVS_BLOCK		4096u
+/* One staging buffer for every LZ4 blob read in this file (lightmap pages, PVS blocks, light-face blocks): each
+ * decode finishes before the next starts. */
+static byte gc_wd_stage[GC_WD_PVS_BLOCK] __attribute__(( aligned( 32 )));
+static byte gc_wd_pvs_blk[GC_WD_PVS_BLOCK] __attribute__(( aligned( 32 )));
+static s32 gc_wd_pvs_blk_id = -1;
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
 #define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
@@ -104,6 +118,22 @@ extern unsigned Mod_GCWorldArraySpillGeneration( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
+extern qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend );
+
+/* Decode cost counters, logged with the 256-frame world DL line: how many LZ4 blocks were decoded and the time they
+ * took (kinds: 0 lightmap page, 1 light-face record block, 2 PVS block, 3 light-face lighting block). */
+static u32 gc_wd_lz4_n[4], gc_wd_lf_hits[2];
+static u64 gc_wd_lz4_ticks[4];
+
+static qboolean R_GXWdLz4Decode( int kind, const byte *ip, const byte *iend, byte *op, byte *oend )
+{
+	const u64 t0 = gettime();
+	const qboolean ok = Mod_GCLZ4Decode( ip, iend, op, oend );
+
+	gc_wd_lz4_ticks[kind] += gettime() - t0;
+	gc_wd_lz4_n[kind]++;
+	return ok;
+}
 
 /* Bytes of the map-load arena the live BSP scratch still occupies (master's
  * fix for DoD maps). On Lost Coast the stub BSP's scratch is the whole 3.7 MB
@@ -128,6 +158,16 @@ extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t siz
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
+extern qboolean R_GXTexnumMasked( unsigned texnum );
+/* The last world texture bound has a cut-out mask: its batches alpha-test. */
+static qboolean gc_wd_masked;
+static qboolean R_GXWorldDLBind( unsigned texnum )
+{
+	const qboolean ok = R_GXWorldDLBindTex( texnum );
+
+	gc_wd_masked = ok && R_GXTexnumMasked( texnum );
+	return ok;
+}
 extern unsigned r_gx_hot_weight;
 extern unsigned r_gx_cmpr_near_miss_total;
 extern qboolean R_GXTexnumIsLargeChain( unsigned texnum );
@@ -213,6 +253,8 @@ static char gc_wd_mapbase[40];
 static void R_GXWorldDLFog( f32 z_near, f32 z_far );
 
 static qboolean R_GXWorldDLFetch( u32 file_ofs, void *dst, u32 len );
+static void R_GXWorldDLLoadPVS( int cluster );
+extern int R_GXCmprSlotCount( void );
 
 static void R_GXTevBindDetail( u8 idx )
 {
@@ -322,6 +364,40 @@ static int R_GXTevMatEmboss( int id )
  * is done with (the frame starts with DrawDone). Slots already used this
  * frame are left alone.
  */
+/* Page `page` into the 2048-byte slot dst (32-aligned). A compressed page is staged in a 2 KiB buffer and decoded into
+ * the slot (an exact-fit slot cannot be decoded in place: the last match always ends a byte past the read pointer). offset[i] is the blob start (32-aligned)
+ * with the count of zero padding bytes after the LZ4 stream in its low 5 bits. */
+static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
+{
+	static byte dir[64] __attribute__(( aligned( 32 )));
+	u32 w0, w1, ofs, pad, stored;
+	u32 e = 4u + 4u * page;	/* offset[page], offset[page + 1]: 8 bytes that may straddle a 32-byte line */
+
+	if( !( gc_wd_hdr.flags & GC_WD_FLAG_LM_LZ4 ))
+		return R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES, dst, GC_WD_LM_PAGE_BYTES );
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream, dir, 32 ))
+		return false;
+	if( page >= *(const u32 *)dir )
+		return false;
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ( e & ~31u ), dir, 64 ))
+		return false;
+	w0 = *(const u32 *)( dir + ( e & 31u ));
+	w1 = *(const u32 *)( dir + ( e & 31u ) + 4u );
+	ofs = w0 & ~31u;
+	pad = w0 & 31u;
+	stored = ( w1 & ~31u ) - ofs;
+	if( !stored || stored > GC_WD_LM_PAGE_BYTES || pad >= stored )
+		return false;
+	if( stored == GC_WD_LM_PAGE_BYTES && !pad )	/* a raw page */
+		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, GC_WD_LM_PAGE_BYTES );
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, gc_wd_stage, stored ))
+		return false;
+	if( !R_GXWdLz4Decode( 0, gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
+		return false;
+	DCFlushRange( dst, GC_WD_LM_PAGE_BYTES );
+	return true;
+}
+
 static byte *R_GXWorldDLLmPage( u32 page )
 {
 	static u8 hint[2048];	/* page & 2047 -> slot it was last found in */
@@ -366,8 +442,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		full_frame = gc_wd_frame;
 		return NULL;
 	}
-	if( !R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES,
-		gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES, GC_WD_LM_PAGE_BYTES ))
+	if( !R_GXWorldDLLmFetch( page, gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES ))
 		return NULL;
 	if( gc_wd_lm_slot_page[victim] >= 0 )
 		GX_InvalidateTexAll();
@@ -512,7 +587,32 @@ static void R_GXWorldDLSetupLit( int lightmap )
 
 /* id 0 restores the lit diffuse stage. Authored $detail adds mod2x (unlit
  * chunks only). $bumpmap without $envmap adds emboss on lit colour. */
+static void R_GXTevMatAppendStages( int id, int a, int b );
+
+/* GoldSrc '{' textures carry their mask in the CMPR alpha bit, but the lit
+ * setup turned the alpha test off for every batch, so lattices and netting
+ * drew their holes black (dod_charlie's flag tower *178, the trench netting
+ * *114). A plain material (no Source $alphatest record) cuts out when its
+ * texture is masked. */
 static void R_GXTevMatAppend( int id, int a, int b )
+{
+	R_GXTevMatAppendStages( id, a, b );
+	if( id < 1 || id > (int)gc_tev_nmat )
+	{
+		if( gc_wd_masked )
+		{
+			GX_SetAlphaCompare( GX_GEQUAL, 128, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_FALSE );
+		}
+		else
+		{
+			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_TRUE );
+		}
+	}
+}
+
+static void R_GXTevMatAppendStages( int id, int a, int b )
 {
 	u8 flags, didx, aref;
 	u16 scale_fp;
@@ -708,6 +808,11 @@ static s16 *gc_wd_chunk_maxs;
 static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
+static byte *gc_wd_cache_heap;	/* the cache when it had to come from the heap */
+static byte *gc_wd_tables_heap;	/* the tables when the spill had no room */
+static byte *gc_wd_force_heap;	/* -gccapture: the overflow bounce when the cache has no tail to spare */
+static u32 gc_wd_force_heap_size;
+qboolean R_GXCaptureMode( void );
 static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots this map */
 /* More distinct world textures than full-size slots: distant chunks then
  * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
@@ -768,6 +873,26 @@ static void R_GXWorldDLUnload( void )
 		gEngfuncs.fsapi->Close( gc_wd_file );
 	gc_wd_file = NULL;
 	gc_wd_cache = NULL;
+	if( gc_wd_cache_heap )
+	{
+		GX_DrawDone();	/* a list in it may still be in the FIFO */
+		free( gc_wd_cache_heap );
+		gc_wd_cache_heap = NULL;
+	}
+	if( gc_wd_tables_heap )
+	{
+		free( gc_wd_tables_heap );
+		gc_wd_tables_heap = NULL;
+	}
+	if( gc_wd_force_heap )
+	{
+		GX_DrawDone();
+		free( gc_wd_force_heap );
+		gc_wd_force_heap = NULL;
+		gc_wd_force_heap_size = 0;
+	}
+	gc_wd_force = NULL;
+	gc_wd_force_size = 0;
 	gc_wd_slots = NULL;
 	gc_wd_texnum = NULL;
 	gc_wd_pvs = NULL;
@@ -775,6 +900,7 @@ static void R_GXWorldDLUnload( void )
 	gc_wd_aram_prefix = gc_wd_aram_lm_start = gc_wd_aram_lm_bytes = 0;
 	gc_wd_disc_reads = gc_wd_disc_bytes = 0;
 	gc_wd_pvs_cluster = -2;
+	gc_wd_pvs_blk_id = -1;
 }
 
 static void R_GXMatPackLoad( void )
@@ -908,6 +1034,22 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		+ (( gc_wd_hdr.n_clusters + 7 ) >> 3 ) + 64
 		+ gc_wd_hdr.n_chunks * ( sizeof( u32 ) * 2 + sizeof( u16 ) + sizeof( s16 ) * 6 );
 	tbl = (byte *)Mod_GCWorldArraySpillTryAlloc( tables, "world DL tables" );
+	if( !tbl )
+	{
+		/* A full spill left the world undrawn (state -1, CapFaces already
+		 * skipped for the DL): take the tables from the heap when that
+		 * leaves it a working margin. */
+		extern size_t GC_MemHeapFreeBytes( void );
+
+		if( GC_MemHeapFreeBytes() >= tables + 128u * 1024u )
+			gc_wd_tables_heap = tbl = (byte *)memalign( 32, tables );
+		if( tbl )
+		{
+			memset( tbl, 0, tables );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL tables %u Kb from the heap (spill full)\n",
+				tables / 1024u );
+		}
+	}
 	if( !tbl )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL no spill for tables %u Kb\n",
@@ -1138,8 +1280,13 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				 * 43 KB with L0): in a 24 KB slot they lose L0 and the beach
 				 * and trench ground goes soft. -gccmprbig N adds N (default none:
 				 * on charlie fewer 24 KB slots cost more misses than they save). */
-				const size_t small = 24u * 1024u;
-				const size_t big = 44u * 1024u;
+				/* A 128x128 chain is 10944 bytes and every DoD world texture
+				 * but a few 256x128 ones draws at that size or smaller (the
+				 * 256x256 ones drop their top mip in a 24 KB slot too), so
+				 * slots of that size hold twice as many textures in the
+				 * same gap. Past sixteen, a few take a whole 256x128 chain. */
+				const size_t small = 10944u;
+				size_t big = 44u * 1024u;
 				const size_t keep_gap = 160u * 1024u;	/* later claims (overflow, entity tables) */
 				const size_t gap = GC_MapArenaLargestGap();
 				const size_t avail = gap > keep_gap ? gap - keep_gap : 0;
@@ -1153,8 +1300,17 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				while( bn > 0 && avail < (size_t)bn * big + 8u * small )
 					bn--;
 				gn = (int)(( avail - (size_t)bn * big ) / small );
-				if( gn > 32 )
-					gn = 32;
+				if( gn > 48 )
+					gn = 48;
+				if( !bn )
+				{
+					big = 21984u;
+					while( gn > 16 && bn < 6 )
+					{
+						gn -= 2;
+						bn++;
+					}
+				}
 				for( ; gn >= 8 && !gt; gn-- )
 				{
 					const size_t bytes = (size_t)gn * small + (size_t)bn * big;
@@ -1262,6 +1418,43 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			if( gc_wd_cache )
 				break;
 		}
+		/* The spill can be too full for even the smallest cache: dod_caen's
+		 * hull clipnodes (254 KiB) land in it on some builds and leave
+		 * 48 KiB, and the map then drew no world at all. Take the smallest
+		 * cache from a gap between the world arrays in the map arena, or
+		 * from the heap when that leaves it a working margin. */
+		if( !gc_wd_cache )
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+			const char *from = NULL;
+			size_t at;
+
+			try_sz = cache_lo;
+			at = GC_MapArenaFind( try_sz );
+			if( at != (size_t)-1 )
+			{
+				GC_RetainMapLoadBufferBorrow();
+				gc_wd_cache = (byte *)GC_MapLoadBufferTailAlloc( at, try_sz );
+				if( gc_wd_cache )
+				{
+					gc_wd_cache_in_arena = true;
+					from = "map arena gap";
+				}
+			}
+			if( !gc_wd_cache && GC_MemHeapFreeBytes() >= try_sz + 128u * 1024u )
+			{
+				gc_wd_cache_heap = (byte *)memalign( 32, try_sz );
+				gc_wd_cache = gc_wd_cache_heap;
+				if( gc_wd_cache )
+				{
+					gc_wd_cache_in_arena = true;	/* not in the spill: pin the tables only */
+					from = "heap";
+				}
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL chunk cache %u KiB from %s (spill free %u KiB, arena gap %u, heap free %u)\n",
+				try_sz / 1024u, from ? from : "nowhere", (unsigned)( Mod_GCWorldArraySpillFreeLasting() / 1024u ),
+				(unsigned)GC_MapArenaLargestGap(), (unsigned)GC_MemHeapFreeBytes());
+		}
 	}
 	if( !gc_wd_cache || try_sz < gc_wd_hdr.max_chunk * 2u )
 	{
@@ -1271,7 +1464,12 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	}
 	gc_wd_cache_size = try_sz;
 	gc_wd_cache_head = 0;
-	if( gc_wd_cache_in_arena )
+	if( gc_wd_tables_heap )
+	{
+		if( !gc_wd_cache_in_arena )	/* only the cache is in the spill */
+			Mod_GCWorldArraySpillPinBase( gc_wd_cache, try_sz );
+	}
+	else if( gc_wd_cache_in_arena )
 		Mod_GCWorldArraySpillPinBase( tbl, tables );
 	else
 		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));
@@ -1376,7 +1574,94 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	}
 
 	gc_wd_tev_gens = gc_wd_hdr.version == 2 ? 2 : 1;
+	/* A map that got no texture slots from the map arena binds every world
+	 * texture through one 24 KB bounce: 13 to 28 ARAM reads a frame, 2.8 to
+	 * 5.8 ms (avalanche shows 37 textures at once). Its chunk cache in the
+	 * spill is often far larger than any view can fill: avalanche and
+	 * glider hold about 380 KB and draw 39 KB a frame. Measure the most
+	 * chunk bytes one cluster's PVS can show, keep that plus a quarter, and
+	 * turn the rest of the cache into texture slots. */
+	if( !gc_wd_cache_in_arena && !cmpr_adopted && gc_wd_aram && gc_wd_pvs
+		&& R_GXCmprSlotCount() < 8 && gc_wd_hdr.n_clusters > 0
+		&& gc_wd_hdr.n_clusters * 4u <= gc_wd_cache_size
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocacheslots" ))
+	{
+		const u32 visbytes = ( gc_wd_hdr.n_clusters + 7 ) >> 3;
+		u32 *const per_cluster = (u32 *)gc_wd_cache;	/* the cache is idle until the first frame */
+		const u32 slot_bytes = 10944u;	/* a 128x128 chain */
+		const u32 big_bytes = 21984u;	/* a 256x128 chain */
+		u32 need = 0, keep, floor_bytes, c, k, total = 0, open_rows = 0;
+		int nslots = 0, big_n = 0;
+
+		memset( per_cluster, 0, gc_wd_hdr.n_clusters * 4u );
+		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
+		{
+			if( gc_wd_chunk_cluster[i] < gc_wd_hdr.n_clusters )
+			{
+				per_cluster[gc_wd_chunk_cluster[i]] += gc_wd_chunk_bytes[i];
+				total += gc_wd_chunk_bytes[i];
+			}
+		}
+		for( c = 0; c < gc_wd_hdr.n_clusters; c++ )
+		{
+			u32 sum = 0;
+
+			R_GXWorldDLLoadPVS( (int)c );
+			for( k = 0; k < visbytes; k++ )
+			{
+				u32 bits = gc_wd_pvs[k], j;
+
+				for( j = 0; bits; j++, bits >>= 1 )
+				{
+					if(( bits & 1u ) && k * 8u + j < gc_wd_hdr.n_clusters )
+						sum += per_cluster[k * 8u + j];
+				}
+			}
+			/* A cluster with no row sees everything; the eye is only in
+			 * one when it is outside the map. */
+			if( sum >= total )
+				open_rows++;
+			else if( sum > need )
+				need = sum;
+		}
+		if( open_rows == gc_wd_hdr.n_clusters )
+			need = total;
+		floor_bytes = Q_max( 96u * 1024u, gc_wd_hdr.max_chunk * 2u );
+		/* The PVS bound is before the frustum test, and more than half of a
+		 * DoD map's clusters have no row at all, so it is far above what a
+		 * frame draws (avalanche: 204 KB bound, 39 KB drawn). charlie and
+		 * caen run on a 96 KB cache; twice that is kept at most. */
+		keep = need + (( gc_wd_hdr.max_chunk + 31u ) & ~31u );
+		keep = Q_min( keep, 192u * 1024u );
+		keep = ( Q_max( keep, floor_bytes ) + 32767u ) & ~32767u;
+		if( gc_wd_cache_size > keep )
+		{
+			u32 spare = gc_wd_cache_size - keep;
+
+			nslots = (int)Q_min( spare / slot_bytes, 48u );
+			/* Past sixteen full slots, a few take whole 256x128 chains. */
+			while( nslots > 16 && big_n < 6
+				&& (u32)( nslots - 2 ) * slot_bytes + (u32)( big_n + 1 ) * big_bytes <= spare )
+			{
+				nslots -= 2;
+				big_n++;
+			}
+		}
+		if( nslots >= 8 )
+		{
+			byte *tex = gc_wd_cache + keep;
+
+			gc_wd_cache_size = keep;
+			R_GXCmprBounceAdopt( tex, nslots, slot_bytes, 0, 0 );
+			if( big_n )
+				R_GXCmprBigAdopt( tex + (size_t)nslots * slot_bytes, big_n, big_bytes );
+		}
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL widest PVS %u Kb of chunks, cache %u Kb, texture slots from its tail: %d x %u + %d x %u\n",
+			need / 1024u, gc_wd_cache_size / 1024u, nslots >= 8 ? nslots : 0, slot_bytes,
+			nslots >= 8 ? big_n : 0, big_bytes );
+	}
 	gc_wd_pvs_cluster = -2;
+	gc_wd_pvs_blk_id = -1;
 	/* The tail of the chunk cache is the overflow bounce. A frustum chunk
 	 * that does not fit the shore budget still draws from here. */
 	{
@@ -1389,6 +1674,35 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			gc_wd_cache_size -= tail;
 			gc_wd_force = gc_wd_cache + gc_wd_cache_size;
 			gc_wd_force_size = tail;
+		}
+		/* -gccapture: a 96 KiB cache holds the near ground of a wide shot
+		 * and nothing else. dod_charlie from the beach had ~1600 of 1830
+		 * chunks in view "waiting" every frame, never drawn: the bluff top,
+		 * its flag tower and the far bunkers were missing. Frame rate does
+		 * not matter there, so a bounce from the heap lets every chunk in
+		 * view draw, one at a time, straight from ARAM. */
+		if( !gc_wd_force && R_GXCaptureMode())
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+
+			if( gc_wd_force_heap && gc_wd_force_heap_size < tail )
+			{
+				GX_DrawDone();
+				free( gc_wd_force_heap );
+				gc_wd_force_heap = NULL;
+			}
+			if( !gc_wd_force_heap && GC_MemHeapFreeBytes() >= tail + 128u * 1024u )
+			{
+				gc_wd_force_heap = (byte *)memalign( 32, tail );
+				gc_wd_force_heap_size = gc_wd_force_heap ? tail : 0;
+			}
+			if( gc_wd_force_heap )
+			{
+				gc_wd_force = gc_wd_force_heap;
+				gc_wd_force_size = tail;
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture world DL overflow bounce %u KiB %s\n",
+				tail / 1024u, gc_wd_force_heap ? "from the heap" : "not allocated (heap low): far chunks will not draw" );
 		}
 	}
 	GC_HeapCheck( "world DL before mat pack" );
@@ -1407,6 +1721,78 @@ static void R_GXWorldDLLoad( const char *mapbase )
  * point walk in ref_light.c reads one node's faces and a few samples. */
 #define GC_LF_REC 56u
 static u32 gc_lf_aram, gc_lf_cap, gc_lf_faces, gc_lf_rec_ofs, gc_lf_lit_ofs, gc_lf_lit_bytes;
+/* Version 3 (DODGC_WD_LZ4=1): the lighting lump is a random-access LZ4 region; the records stay raw (version 2 packed
+ * both, and the light-point walk reads the faces of every node on a ray: 0.5 ms a frame in cache misses). Regions of GC_LF_BLOCK-byte
+ * blocks (scripts/bake_worlddl_goldsrc.py pack_blocks_lz4). A block is staged, decoded into one of GC_LF_CACHE
+ * block buffers (1 for the records, 2 for the lighting: a sample is read once per light style, far apart) and read
+ * from there. 4 KiB of MEM1 for about 1.3 MiB of ARAM a map. */
+#define GC_LF_BLOCK	1024u
+#define GC_LF_CACHE	3
+static u32 gc_lf_ver;
+static byte gc_lf_blk[GC_LF_CACHE][GC_LF_BLOCK] __attribute__(( aligned( 32 )));
+static s32 gc_lf_blk_id[GC_LF_CACHE];	/* ( region << 24 ) | block, -1 empty */
+static int gc_lf_lit_rr;
+
+/* Block `blk` of the region at ARAM offset region_ofs holding raw_total bytes -> a cached buffer, or NULL. */
+static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 blk )
+{
+	u32 w[2] __attribute__(( aligned( 32 )));
+	u32 raw_len, rawsz, ofs, pad, stored;
+	s32 id = (s32)(( region << 24 ) | blk );
+	int i, slot;
+
+	if( blk * GC_LF_BLOCK >= raw_total )
+		return NULL;
+	for( i = 0; i < GC_LF_CACHE; i++ )
+		if( gc_lf_blk_id[i] == id )
+		{
+			gc_wd_lf_hits[region ? 1 : 0]++;
+			return gc_lf_blk[i];
+		}
+	slot = region == 0 ? 0 : 1 + ( gc_lf_lit_rr++ & 1 );
+	raw_len = Q_min( GC_LF_BLOCK, raw_total - blk * GC_LF_BLOCK );
+	rawsz = ( raw_len + 31u ) & ~31u;
+	GC_AramCopy( gc_lf_aram + region_ofs + 4u + 4u * blk, w, 8, false );
+	ofs = w[0] & ~31u;
+	pad = w[0] & 31u;
+	stored = ( w[1] & ~31u ) - ofs;
+	gc_lf_blk_id[slot] = -1;
+	if( !stored || stored > rawsz || pad >= stored )
+		return NULL;
+	if( stored == rawsz && !pad )
+		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_lf_blk[slot], raw_len, false );
+	else
+	{
+		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_wd_stage, stored, false );
+		if( !R_GXWdLz4Decode( region ? 3 : 1, gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
+			return NULL;
+	}
+	gc_lf_blk_id[slot] = id;
+	return gc_lf_blk[slot];
+}
+
+/* len bytes at raw offset ofs of the record (region 0) or lighting (region 1) stream. */
+static qboolean R_GXLfRead2( u32 region, u32 ofs, void *out, u32 len )
+{
+	const u32 region_ofs = region ? gc_lf_lit_ofs : gc_lf_rec_ofs;
+	const u32 raw_total = region ? gc_lf_lit_bytes : gc_lf_faces * GC_LF_REC;
+	byte *dst = (byte *)out;
+
+	while( len )
+	{
+		const u32 blk = ofs / GC_LF_BLOCK, off = ofs % GC_LF_BLOCK;
+		const u32 n = Q_min( len, GC_LF_BLOCK - off );
+		const byte *b = R_GXLfBlock( region, region_ofs, raw_total, blk );
+
+		if( !b )
+			return false;
+		memcpy( dst, b + off, n );
+		dst += n;
+		ofs += n;
+		len -= n;
+	}
+	return true;
+}
 
 static void R_GXLightFacesLoad( const char *mapbase )
 {
@@ -1425,14 +1811,15 @@ static void R_GXLightFacesLoad( const char *mapbase )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces missing %s\n", path );
 		return;
 	}
-	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32 || memcmp( hdr, "GClf", 4 ) || hdr[1] != 1u
-		|| hdr[3] != 32u || hdr[4] < 32u + hdr[2] * GC_LF_REC )
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32 || memcmp( hdr, "GClf", 4 )
+		|| ( hdr[1] != 1u && !(( hdr[1] == 2u || hdr[1] == 3u ) && hdr[7] == GC_LF_BLOCK && hdr[6] >= hdr[4] ))
+		|| hdr[3] != 32u || hdr[4] < 32u + ( hdr[1] != 2u ? hdr[2] * GC_LF_REC : 0u ))
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces bad header %s\n", path );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
-	size = ( hdr[4] + hdr[5] + 31u ) & ~31u;
+	size = ( ( hdr[1] >= 2u ? hdr[6] : hdr[4] + hdr[5] ) + 31u ) & ~31u;
 	if( !gc_lf_aram || gc_lf_cap < size )
 	{
 		if( gc_lf_aram )
@@ -1463,11 +1850,14 @@ static void R_GXLightFacesLoad( const char *mapbase )
 			break;
 	}
 	gEngfuncs.fsapi->Close( f );
-	if( done < hdr[4] + hdr[5] )
+	if( done < ( hdr[1] >= 2u ? hdr[6] : hdr[4] + hdr[5] ))
 	{
 		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light faces short read %u/%u\n", done, hdr[4] + hdr[5] );
 		return;
 	}
+	gc_lf_ver = hdr[1];
+	for( done = 0; done < GC_LF_CACHE; done++ )
+		gc_lf_blk_id[done] = -1;
 	gc_lf_rec_ofs = hdr[3];
 	gc_lf_lit_ofs = hdr[4];
 	gc_lf_lit_bytes = hdr[5];
@@ -1485,6 +1875,8 @@ qboolean R_GXLightFacesRead( int first, int num, void *out )
 {
 	if( !gc_lf_faces || first < 0 || num <= 0 || (u32)( first + num ) > gc_lf_faces )
 		return false;
+	if( gc_lf_ver == 2u )
+		return R_GXLfRead2( 0, (u32)first * GC_LF_REC, out, (u32)num * GC_LF_REC );
 	GC_AramCopy( gc_lf_aram + gc_lf_rec_ofs + (u32)first * GC_LF_REC, out, (u32)num * GC_LF_REC, false );
 	return true;
 }
@@ -1493,6 +1885,8 @@ qboolean R_GXLightSamplesRead( u32 ofs, void *out, u32 len )
 {
 	if( !gc_lf_faces || ofs >= gc_lf_lit_bytes || len > gc_lf_lit_bytes - ofs )
 		return false;
+	if( gc_lf_ver >= 2u )
+		return R_GXLfRead2( 1, ofs, out, len );
 	GC_AramCopy( gc_lf_aram + gc_lf_lit_ofs + ofs, out, len, false );
 	return true;
 }
@@ -1557,6 +1951,67 @@ static int R_GXWorldDLEyeCluster( const float *org )
 	return idx == -1 ? -1 : -idx - 2;
 }
 
+
+/* Byte `raw` of the uncompressed PVS rows, or -1. */
+static int R_GXWorldDLPvsByte( u32 raw )
+{
+	static byte dir[64] __attribute__(( aligned( 32 )));
+	const u32 blk = raw / GC_WD_PVS_BLOCK;
+	u32 w0, w1, ofs, pad, stored, e;
+
+	if( (s32)blk == gc_wd_pvs_blk_id )
+		return gc_wd_pvs_blk[raw % GC_WD_PVS_BLOCK];
+	gc_wd_pvs_blk_id = -1;
+	e = 4u + 4u * blk;
+	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs, dir, 32 ) || blk >= *(const u32 *)dir )
+		return -1;
+	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ( e & ~31u ), dir, 64 ))
+		return -1;
+	w0 = *(const u32 *)( dir + ( e & 31u ));
+	w1 = *(const u32 *)( dir + ( e & 31u ) + 4u );
+	ofs = w0 & ~31u;
+	pad = w0 & 31u;
+	stored = ( w1 & ~31u ) - ofs;
+	if( !stored || stored > GC_WD_PVS_BLOCK || pad >= stored )
+		return -1;
+	if( stored == GC_WD_PVS_BLOCK && !pad )
+	{
+		if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ofs, gc_wd_pvs_blk, GC_WD_PVS_BLOCK ))
+			return -1;
+	}
+	else
+	{
+		if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ofs, gc_wd_stage, stored )
+			|| !R_GXWdLz4Decode( 2, gc_wd_stage, gc_wd_stage + stored - pad, gc_wd_pvs_blk, gc_wd_pvs_blk + GC_WD_PVS_BLOCK ))
+			return -1;
+	}
+	gc_wd_pvs_blk_id = (s32)blk;
+	return gc_wd_pvs_blk[raw % GC_WD_PVS_BLOCK];
+}
+
+static void R_GXWorldDLLoadPVSLz4( u32 row, u32 visbytes )
+{
+	u32 out = 0;
+
+	memset( gc_wd_pvs, 0, visbytes );
+	while( out < visbytes )
+	{
+		int b = R_GXWorldDLPvsByte( row++ );
+
+		if( b < 0 )
+			break;
+		if( b )
+			gc_wd_pvs[out++] = (byte)b;
+		else
+		{
+			b = R_GXWorldDLPvsByte( row++ );
+			if( b < 0 )
+				break;
+			out += (u32)b;
+		}
+	}
+}
+
 static void R_GXWorldDLLoadPVS( int cluster )
 {
 	const u32 visbytes = ( gc_wd_hdr.n_clusters + 7 ) >> 3;
@@ -1573,6 +2028,11 @@ static void R_GXWorldDLLoadPVS( int cluster )
 	row = *(const u32 *)( gc_wd_scratch + ( dir_ofs - base ));
 	if( row == 0xffffffffu )
 		return;
+	if( gc_wd_hdr.flags & GC_WD_FLAG_PVS_LZ4 )
+	{
+		R_GXWorldDLLoadPVSLz4( row, visbytes );
+		return;
+	}
 	row += gc_wd_hdr.ofs_pvs;
 	base = row & ~31u;
 	if( !R_GXWorldDLFetch( base, gc_wd_scratch, sizeof( gc_wd_scratch )))
@@ -1842,6 +2302,8 @@ static inline qboolean R_GXWorldDLBoxVisible( u32 i )
  * frustum test keeps a margin of 15 % of the distance. Without this every
  * character in the map was animated and skinned every frame (30 ms in the
  * Lost Coast harbor). `key` identifies the entity for the cluster memo. */
+qboolean R_GXCaptureMode( void );
+
 qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs )
 {
 	static struct { int key; float org[3]; int cluster; } memo[32];
@@ -1879,7 +2341,7 @@ qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs
 		memo[p].cluster = R_GXWorldDLEyeCluster( c );
 	}
 	cl = memo[p].cluster;
-	if( cl < 0 || (u32)cl >= gc_wd_hdr.n_clusters )
+	if( cl < 0 || (u32)cl >= gc_wd_hdr.n_clusters || R_GXCaptureMode( ))
 		return true;
 	return ( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))) != 0;
 }
@@ -2467,7 +2929,7 @@ static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 				gc_wd_texnum[b->mat] = (s16)GC_WorldTexnumByHash( m->tex_hash );
 			if( gc_wd_texnum[b->mat] <= 0 )
 				continue;
-			if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+			if( !R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 				continue;
 			*cur_mat = (int)b->mat;
 		}
@@ -2776,7 +3238,7 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 	R_GXCmprSetFar( far_pool ? true : false );
 	r_gx_hot_weight = ( far_pool || r_gx_mirror || !R_GXTexnumIsLargeChain( (unsigned)gc_wd_texnum2[mat] )) ? 0u
 		: R_GXWorldDLNearBatches( idx, k0, (int)(( gc_wd_keys[idx[k0]] >> 16 ) & 0xffffu ));
-	if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum2[mat] ))
+	if( !R_GXWorldDLBind( (unsigned)gc_wd_texnum2[mat] ))
 		return;
 	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
@@ -2932,7 +3394,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 				 * batches of its group (the hot window's priority). */
 				if( !far_pool && !r_gx_mirror && R_GXTexnumIsLargeChain( (unsigned)texnum ))
 					r_gx_hot_weight = R_GXWorldDLNearBatches( idx, k, key );
-				WD_PF( 4, ok = R_GXWorldDLBindTex( (unsigned)texnum ));
+				WD_PF( 4, ok = R_GXWorldDLBind( (unsigned)texnum ));
 				if( ok )
 				{
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
@@ -3147,7 +3609,7 @@ static void R_GXWorldDLDynDraw( void )
 					continue;
 				if( (int)b->mat != cur_mat )
 				{
-					if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+					if( !R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 						continue;
 					cur_mat = (int)b->mat;
 				}
@@ -3177,7 +3639,14 @@ int R_GXWorldDLDraw( void )
 	vec3_t normals[4];
 	u32 budget;
 	u32 i;
-	int cluster, drawn = 0, chunks = 0, waiting = 0, cur_mat = -1, bind_miss = 0;
+	int cluster, drawn = 0, chunks = 0, waiting = 0, cur_mat = -1, bind_miss = 0, bind_fail = 0;
+	/* The camera's own eye. `org` may move to the world centre below when
+	 * the eye sits in solid or outside the map (a film camera over the sea
+	 * or inside a hedgehog): that is right for picking a PVS row, but the
+	 * frustum test and the draw order need the real eye or the chunks in
+	 * front of the camera are culled from the wrong place. */
+	const float *eye = RI.rvp.vieworigin;
+	const qboolean eye_ok = isfinite( eye[0] ) && ( eye[0] || eye[1] || eye[2] );
 
 	gc_wd_pf_enter = gettime();
 	if( gc_wd_state != 1 )
@@ -3196,6 +3665,10 @@ int R_GXWorldDLDraw( void )
 	/* First ~90 frames: pull a denser visible set so CapFaces listen does not
 	 * open on a starved alley; after warmup keep 512 KiB/frame lazy stream. */
 	budget = ( gc_wd_frame <= 90 ) ? GC_WD_WARMUP_BUDGET : GC_WD_LOAD_BUDGET;
+	/* -gccapture: frame rate does not matter, so every chunk in view loads
+	 * this frame instead of streaming in over the next ones. */
+	if( R_GXCaptureMode())
+		budget = 0xffffffffu;
 	/* CapFaces wall-aim normally seeds vieworigin; World DL skips CapFaces so
 	 * early frames can sit at (0,0,0) / solid → cluster=-1 → all-vis. Prefer a
 	 * non-degenerate eye, then fall back to world AABB center from mins/maxs. */
@@ -3309,6 +3782,8 @@ int R_GXWorldDLDraw( void )
 	{
 		/* Chunks outside the camera go. -gcworlddlfull draws the whole PVS. */
 		const qboolean frustum_cull = !gEngfuncs.Sys_CheckParm( "-gcworlddlfull" );
+		/* -gccapture: every chunk in view, not only the eye's PVS row. */
+		const qboolean capture = R_GXCaptureMode();
 		int pvs_hits = 0, frustum_drop = 0, tower_chunks = 0, forced_n = 0;
 		static u16 order[GC_WD_MAX_CHUNKS];
 		const qboolean skip_water = GC_GetWaterFaceCount() > 0
@@ -3318,12 +3793,12 @@ int R_GXWorldDLDraw( void )
 		u32 tower_budget = 288u * 1024u;
 		u32 tower_grant, shore_budget;
 
-		R_GXWorldDLBoxTestSet( normals, r_gx_mirror ? RI.rvp.vieworigin : org );
+		R_GXWorldDLBoxTestSet( normals, ( r_gx_mirror || eye_ok ) ? RI.rvp.vieworigin : org );
 		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
 		{
 			const u16 cl = gc_wd_chunk_cluster[i];
 
-			if( !( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))))
+			if( !capture && !( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))))
 				continue;
 			pvs_hits++;
 			/* Nothing under the water reflects in it. */
@@ -3339,7 +3814,7 @@ int R_GXWorldDLDraw( void )
 		}
 		/* Spend the cache on the ground in front of the camera. Index order
 		 * filled it with whatever chunk id came first and left the shore out. */
-		gc_wd_sort_org = org;
+		gc_wd_sort_org = ( eye_ok && !r_gx_mirror ) ? eye : org;
 		/* Key each chunk once (the distance has a sqrt for tall chunks and
 		 * qsort asked for it ~10 times per chunk: 2.5 to 4.8 ms a frame in
 		 * the harbor), then shell-sort the packed keys. Distances are
@@ -3589,9 +4064,12 @@ int R_GXWorldDLDraw( void )
 					{
 						qboolean bound;
 
-						WD_PF( 4, bound = R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ));
+						WD_PF( 4, bound = R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ));
 						if( !bound )
+						{
+							bind_fail++;
 							continue;
+						}
 					}
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 					cur_mat = (int)b->mat;
@@ -3610,7 +4088,7 @@ int R_GXWorldDLDraw( void )
 						gc_wd_texnum2[b->mat] = (s16)( t2 > 0 ? t2 : -1 );
 					}
 					if( gc_wd_texnum2[b->mat] > 0
-						&& R_GXWorldDLBindTex( (unsigned)gc_wd_texnum2[b->mat] ))
+						&& R_GXWorldDLBind( (unsigned)gc_wd_texnum2[b->mat] ))
 					{
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 						/* Coverage = vertex alpha, carried through the later stages. */
@@ -3626,7 +4104,7 @@ int R_GXWorldDLDraw( void )
 						blend_draws++;
 					}
 					/* Back to layer 1 for the spec pass and the next batch. */
-					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+					if( R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 				}
 				/* $envmap: reflective batches carry their normal. Main view
@@ -3651,7 +4129,7 @@ int R_GXWorldDLDraw( void )
 							GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
 						R_GXWorldDLEnvOff();
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
-						if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+						if( R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 							cur_mat = (int)b->mat;
 					}
 				}
@@ -3680,6 +4158,14 @@ int R_GXWorldDLDraw( void )
 			gEngfuncs.Con_Reportf(
 				"Xash3D GameCube: world DL pvs=%d frustum_drop=%d cull=%d towers=%d forced=%d\n",
 				pvs_hits, frustum_drop, frustum_cull ? 1 : 0, tower_chunks, forced_n );
+		/* Capture runs check every chunk in view got drawn: waiting and
+		 * bind_fail should stay 0, cluster -1 means the eye is outside the
+		 * map (all chunks are candidates then). */
+		if( capture && !r_gx_mirror && ( gc_wd_frame & 63 ) == 0 )
+			gEngfuncs.Con_Reportf(
+				"Xash3D GameCube: capture world DL frame=%d eye=(%.0f,%.0f,%.0f) cluster=%d chunks=%u in_view=%d frustum_drop=%d waiting=%d bind_miss=%d bind_fail=%d forced=%d zfar=%.0f\n",
+				gc_wd_frame, eye[0], eye[1], eye[2], cluster, (uint)gc_wd_hdr.n_chunks,
+				norder, frustum_drop, waiting, bind_miss, bind_fail, forced_n, RI.farClip );
 	}
 	R_GXCmprSetFar( false );
 	R_GXFogEnd();
@@ -3825,6 +4311,12 @@ int R_GXWorldDLDraw( void )
 			"Xash3D GameCube: world DL frame=%d cluster=%d chunks=%d batches=%d waiting=%d bind_miss=%d lm_bind=%d lm_miss=%d\n",
 			gc_wd_frame, cluster, chunks, drawn, waiting, bind_miss,
 			gc_wd_lm_binds, gc_wd_lm_miss );
+		if( gc_wd_lz4_n[0] + gc_wd_lz4_n[1] + gc_wd_lz4_n[2] + gc_wd_lz4_n[3] )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL LZ4 decodes (since load, %d frames): lightmap %u in %u us, lf records %u in %u us (%u hits), lf lighting %u in %u us (%u hits), pvs %u in %u us\n",
+				gc_wd_frame, gc_wd_lz4_n[0], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[0] ),
+				gc_wd_lz4_n[1], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[1] ), gc_wd_lf_hits[0],
+				gc_wd_lz4_n[3], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[3] ), gc_wd_lf_hits[1],
+				gc_wd_lz4_n[2], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[2] ));
 	}
 	return drawn;
 }
