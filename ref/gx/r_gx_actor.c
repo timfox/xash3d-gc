@@ -670,7 +670,205 @@ qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x
 	return true;
 }
 
+/*
+ * GoldSrc body parts (Day of Defeat soldiers) from display lists.
+ *
+ * dod-gc's split_studio_mdl.py appends a "GCGX" section to each streamed body part's blob: batches of at most ten
+ * bones, each a display list of strips, fans and triangles whose vertices carry a matrix slot, 16-bit indices
+ * into the blob's own vertex and normal arrays (bone space, big-endian floats) and the texel coordinates of the
+ * triangle commands. The CPU keeps R_StudioSetupBones; Flipper transforms, lights and draws.
+ *
+ * Light is GoldSrc's (R_StudioLighting): colour x ( ambient + shade x w ), w = clamp(( 1 + N.L ) / 1.5, 0, 1 ) with
+ * L pointing at the light. One signed diffuse light of 2/3 on an ambient of 2/3 gives w in the raster colour;
+ * the first TEV stage turns it into amb + w x shade and the second multiplies the skin in.
+ */
+#define GCGX_MAGIC	0x47434758u /* 'GCGX' */
+#define GCGX_VTXFMT	GX_VTXFMT5
+
+typedef struct
+{
+	u32	magic;
+	u16	version, nbatch;
+	u32	size;
+	u32	pad;
+} gcgx_header_t; /* 16 bytes */
+
+typedef struct
+{
+	u16	mesh;
+	u8	nbones, pad0;
+	u8	bones[10];
+	u16	pad1;
+	u32	dl_ofs, dl_size;
+} gcgx_batch_t; /* 24 bytes */
+
+/* view x bone per bone, valid while the caller's serial (one per body drawn) is unchanged */
+#define GCGX_MV_MAX 64 /* a DoD soldier has 34 bones; 128 entries would be 6 KB of BSS */
+static Mtx gcgx_mv[GCGX_MV_MAX];
+static unsigned gcgx_mv_serial[GCGX_MV_MAX];
+
+static u8 R_GXBodyByte( float v )
+{
+	const float x = v * 255.0f + 0.5f;
+
+	return x <= 0.0f ? 0 : x >= 255.0f ? 255 : (u8)x;
+}
+
+qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, const studiohdr_t *hdr, matrix3x4 *bones,
+	const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref, const float *lightvec,
+	const float *amb, const float *shade, void (*bind)( int texture ), unsigned serial )
+{
+	static int logged;
+	const gcgx_header_t *h;
+	const gcgx_batch_t *b;
+	const byte *gx;
+	GXColor white = { 255, 255, 255, 255 }, twothirds = { 170, 170, 170, 255 }, c;
+	GXLightObj lo;
+	Mtx view, texm;
+	float toward[3], v[3];
+	u32 gx_ofs, gx_len;
+	int bi, k, last_tex = -1, tris = 0;
+
+	if( !base || !sub || !hdr || !bones || !bind || memcmp( base, "GCMB", 4 ) || hdr->numbones > GCGX_MV_MAX )
+		return false;
+	memcpy( &gx_ofs, base + 4, sizeof( gx_ofs ));
+	memcpy( &gx_len, base + 8, sizeof( gx_len ));
+	if( gx_ofs < 32u || ( gx_ofs & 31u ) || gx_len < sizeof( *h ) || gx_len > 256u * 1024u )
+		return false;
+	gx = base + gx_ofs;
+	h = (const gcgx_header_t *)gx;
+	if( h->magic != GCGX_MAGIC || h->version != 1 || h->nbatch == 0 || h->size != gx_len
+		|| sizeof( *h ) + (u32)h->nbatch * sizeof( *b ) > gx_len || ((uintptr_t)gx & 31u ))
+		return false;
+	b = (const gcgx_batch_t *)( gx + sizeof( *h ));
+	for( bi = 0; bi < h->nbatch; bi++ )
+	{
+		if( b[bi].mesh >= sub->nummesh || b[bi].nbones == 0 || b[bi].nbones > 10 || ( b[bi].dl_ofs & 31u )
+			|| ( b[bi].dl_size & 31u ) || b[bi].dl_ofs + b[bi].dl_size > gx_len )
+			return false;
+	}
+
+	R_GXStudioForceBegin( false );
+	R_GXActorView( view );
+
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_PTNMTXIDX, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_POS, GX_INDEX16 );
+	GX_SetVtxDesc( GX_VA_NRM, GX_INDEX16 );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GCGX_VTXFMT, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GCGX_VTXFMT, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GCGX_VTXFMT, GX_VA_TEX0, GX_TEX_ST, GX_S16, 0 );
+	GX_SetArray( GX_VA_POS, (void *)( base + sub->vertindex ), 12 );
+	GX_SetArray( GX_VA_NRM, (void *)( base + sub->normindex ), 12 );
+	GX_InvVtxCache();
+
+	/* w = 2/3 + 2/3 N.L, clamped to 0..1 by the channel */
+	toward[0] = -lightvec[0]; toward[1] = -lightvec[1]; toward[2] = -lightvec[2];
+	R_GXActorRotate( view, toward, v );
+	GX_InitLightColor( &lo, twothirds );
+	GX_InitLightPos( &lo, v[0] * 1048576.0f, v[1] * 1048576.0f, v[2] * 1048576.0f );
+	GX_InitLightAttn( &lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f );
+	GX_LoadLightObj( &lo, GX_LIGHT0 );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHT0, GX_DF_SIGNED, GX_AF_NONE );
+	GX_SetChanCtrl( GX_ALPHA0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetChanAmbColor( GX_COLOR0A0, twothirds );
+	GX_SetChanMatColor( GX_COLOR0A0, white );
+
+	GX_SetNumTexGens( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0 );
+	GX_SetNumTevStages( 2 );
+	GX_SetTevDirect( GX_TEVSTAGE0 );
+	GX_SetTevDirect( GX_TEVSTAGE1 );
+	c.r = R_GXBodyByte( amb[0] ); c.g = R_GXBodyByte( amb[1] ); c.b = R_GXBodyByte( amb[2] ); c.a = 255;
+	GX_SetTevColor( GX_TEVREG0, c );
+	c.r = R_GXBodyByte( shade[0] ); c.g = R_GXBodyByte( shade[1] ); c.b = R_GXBodyByte( shade[2] ); c.a = 255;
+	GX_SetTevKColor( GX_KCOLOR0, c );
+	GX_SetTevKColorSel( GX_TEVSTAGE0, GX_TEV_KCSEL_K0 );
+	/* stage 0: amb + w x shade; alpha is the skin's */
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+	GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_RASC, GX_CC_KONST, GX_CC_C0 );
+	GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA );
+	GX_SetTevAlphaOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	/* stage 1: x skin */
+	GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL );
+	GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+	GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+	GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetCullMode( GX_CULL_BACK );
+	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+
+	for( bi = 0; bi < h->nbatch; bi++, b++ )
+	{
+		const int tex = pskinref[pmesh[b->mesh].skinref];
+
+		if( tex != last_tex )
+		{
+			last_tex = tex;
+			bind( tex );
+			/* triangle commands carry texels: scale them to 0..1 like the CPU path's 1/width, 1/height */
+			memset( texm, 0, sizeof( texm ));
+			texm[0][0] = 1.0f / (float)ptexture[tex].width;
+			texm[1][1] = 1.0f / (float)ptexture[tex].height;
+			texm[2][2] = 1.0f;
+			GX_LoadTexMtxImm( texm, GX_TEXMTX0, GX_MTX2x4 );
+			if( ptexture[tex].flags & STUDIO_NF_MASKED )
+			{
+				GX_SetAlphaCompare( GX_GREATER, 127, GX_AOP_AND, GX_ALWAYS, 0 );
+				GX_SetZCompLoc( GX_FALSE );
+			}
+			else
+			{
+				GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+				GX_SetZCompLoc( GX_TRUE );
+			}
+		}
+		for( k = 0; k < b->nbones; k++ )
+		{
+			const int bone = ( b->bones[k] < hdr->numbones && b->bones[k] < GCGX_MV_MAX ) ? b->bones[k] : 0;
+
+			/* view x bone once per body: its parts and batches share bones */
+			if( gcgx_mv_serial[bone] != serial )
+			{
+				guMtxConcat( view, bones[bone], gcgx_mv[bone] );
+				gcgx_mv_serial[bone] = serial;
+			}
+			GX_LoadPosMtxImm( gcgx_mv[bone], GX_PNMTX0 + 3 * k );
+			GX_LoadNrmMtxImm( gcgx_mv[bone], GX_PNMTX0 + 3 * k );
+		}
+		GX_CallDispList( (void *)( gx + b->dl_ofs ), b->dl_size );
+	}
+	for( k = 0; k < sub->nummesh; k++ )
+		tris += pmesh[k].numtris;
+
+	GX_SetNumTevStages( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	R_GXActorRestore();
+	R_GXStudioEnd();
+	R_GXStudioInvalidateBindings();
+	R_GXInvalidateTriApiLayout();
+	r_stats.c_studio_polys += tris;
+	if( logged++ < 4 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: body lists '%s' batches=%u bytes=%u verts=%d norms=%d\n",
+			sub->name, h->nbatch, gx_len, sub->numverts, sub->numnorms );
+	return true;
+}
+
 #else /* !XASH_GAMECUBE */
+
+qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, const studiohdr_t *hdr, matrix3x4 *bones,
+	const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref, const float *lightvec,
+	const float *amb, const float *shade, void (*bind)( int texture ), unsigned serial )
+{
+	(void)serial;
+	(void)base; (void)sub; (void)hdr; (void)bones; (void)pmesh; (void)ptexture; (void)pskinref; (void)lightvec;
+	(void)amb; (void)shade; (void)bind;
+	return false;
+}
 
 void R_GXActorPreloadModel( model_t *mod ) { (void)mod; }
 

@@ -483,6 +483,9 @@ qboolean R_GXStudioEmitTricmds( const short *cmds, const float (*verts)[3], int 
 qboolean R_GXStudioDLActive( void );
 qboolean R_GXStudioDLTryDraw( cl_entity_t *e, model_t *mod );
 qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x4 *bones ); /* r_gx_actor.c */
+qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, const studiohdr_t *hdr, matrix3x4 *bones,
+	const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref, const float *lightvec,
+	const float *amb, const float *shade, void (*bind)( int texture ), unsigned serial ); /* r_gx_actor.c */
 void R_GXInvalidateTriApiLayout( void );
 int R_GXDrawBrushModel( cl_entity_t *e );
 int R_GXDrawTramBaked( const float *origin, const float *angles );

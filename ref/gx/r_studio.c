@@ -1474,9 +1474,14 @@ StudioSaveBones
 
 ====================
 */
+static unsigned r_gc_bones_serial = 1; /* one per bone setup: keys r_gx_actor.c's view x bone cache */
+
 static void R_StudioSaveBones( void )
 {
 	mstudiobone_t *pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+	if( ++r_gc_bones_serial == 0 )
+		r_gc_bones_serial = 1;
 
 	g_studio.cached_numbones = m_pStudioHeader->numbones;
 
@@ -2605,6 +2610,54 @@ R_StudioDrawPoints
 ===============
 */
 #if XASH_GAMECUBE
+/* R_StudioSetupSkin for r_gx_actor.c's list draw: binds mesh skin, as the CPU path does before each mesh. */
+static void R_StudioGXBodySkin( int texture )
+{
+	R_StudioSetupSkin( m_pStudioHeader, texture );
+	R_GXStudioRebindPending();
+}
+
+/* One body part from its display lists. False (nothing drawn) when this part or this frame needs the CPU path:
+ * no lists in the blob, a material the lists cannot express, dynamic lights, a render effect. */
+static qboolean R_StudioDrawPointsGX( const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref )
+{
+	static int disabled = -1;
+	const cl_entity_t *e = RI.currententity;
+	float lo, hi, amb[3], shade[3];
+	int k;
+
+	if( disabled < 0 )
+		disabled = gEngfuncs.Sys_CheckParm( "-gcbodycpu" ) ? 1 : 0;
+	if( disabled || !GC_UseGxWorldDraw() || e == tr.viewent || g_studio.numlocallights
+		|| e->curstate.rendermode != kRenderNormal || e->curstate.renderfx == kRenderFxGlowShell
+		|| g_nForceFaceFlags || FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ))
+		return false;
+	for( k = 0; k < m_pSubModel->nummesh; k++ )
+	{
+		const int ref = pmesh[k].skinref;
+		int tex;
+
+		if( ref < 0 || ref >= m_pStudioHeader->numskinref )
+			return false;
+		tex = pskinref[ref];
+		if( tex < 0 || tex >= m_pStudioHeader->numtextures || ptexture[tex].width <= 0 || ptexture[tex].height <= 0
+			|| FBitSet( ptexture[tex].flags, STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE | STUDIO_NF_FULLBRIGHT
+				| STUDIO_NF_FLATSHADE | STUDIO_NF_UV_COORDS ))
+			return false;
+	}
+	/* R_StudioLighting: ambient + shade x w, w = clamp(( 1 - cos ) / 1.5, 0, 1 ), then the gamma table. Flipper
+	 * computes w per vertex; the table is applied at both ends here and the ramp between them is linear. */
+	lo = (float)LightToTexGamma( (uint)( Q_min( g_studio.ambientlight, 255.0f ) * 4.0f )) / 1023.0f;
+	hi = (float)LightToTexGamma( (uint)( Q_min( g_studio.ambientlight + g_studio.shadelight, 255.0f ) * 4.0f )) / 1023.0f;
+	for( k = 0; k < 3; k++ )
+	{
+		amb[k] = g_studio.lightcolor[k] * lo;
+		shade[k] = g_studio.lightcolor[k] * ( hi - lo );
+	}
+	return R_GXActorDrawBodyLists( m_pSubModelBase, m_pSubModel, m_pStudioHeader, g_studio.bonestransform,
+		pmesh, ptexture, pskinref, g_studio.lightvec, amb, shade, R_StudioGXBodySkin, r_gc_bones_serial );
+}
+
 static qboolean r_gc_vm_bbox_logged;
 #endif
 static void R_StudioDrawPoints( void )
@@ -2656,6 +2709,18 @@ static void R_StudioDrawPoints( void )
 		: (short *)((byte *)m_pStudioHeader + m_pStudioHeader->skinindex );
 	if( !mesh_only && m_skinnum > 0 && m_skinnum < m_pStudioHeader->numskinfamilies )
 		pskinref += ( m_skinnum * m_pStudioHeader->numskinref );
+
+#if XASH_GAMECUBE
+	/* A streamed body part whose blob carries display lists (dod-gc split_studio_mdl.py gx_section): Flipper
+	 * skins and lights it. The CPU path below cost about 1 ms a body in transform, lighting and FIFO writes,
+	 * 12 ms with a full server in view. */
+	if( !mesh_only && m_pSubModel->unused == GC_STUDIO_MESH_STREAMED && m_pSubModelBase != (byte *)m_pStudioHeader
+		&& R_StudioDrawPointsGX( pmesh, ptexture, pskinref ))
+	{
+		R_STUDIO_PROF( "studio: gx body" );
+		return;
+	}
+#endif
 
 	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) && m_pSubModel->blendvertinfoindex != 0 && m_pSubModel->blendnorminfoindex != 0 )
 	{
