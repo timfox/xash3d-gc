@@ -1474,9 +1474,14 @@ StudioSaveBones
 
 ====================
 */
+static unsigned r_gc_bones_serial = 1; /* one per bone setup: keys r_gx_actor.c's view x bone cache */
+
 static void R_StudioSaveBones( void )
 {
 	mstudiobone_t *pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+	if( ++r_gc_bones_serial == 0 )
+		r_gc_bones_serial = 1;
 
 	g_studio.cached_numbones = m_pStudioHeader->numbones;
 
@@ -2650,7 +2655,7 @@ static qboolean R_StudioDrawPointsGX( const mstudiomesh_t *pmesh, const mstudiot
 		shade[k] = g_studio.lightcolor[k] * ( hi - lo );
 	}
 	return R_GXActorDrawBodyLists( m_pSubModelBase, m_pSubModel, m_pStudioHeader, g_studio.bonestransform,
-		pmesh, ptexture, pskinref, g_studio.lightvec, amb, shade, R_StudioGXBodySkin );
+		pmesh, ptexture, pskinref, g_studio.lightvec, amb, shade, R_StudioGXBodySkin, r_gc_bones_serial );
 }
 
 static qboolean r_gc_vm_bbox_logged;

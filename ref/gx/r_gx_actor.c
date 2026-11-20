@@ -702,6 +702,11 @@ typedef struct
 	u32	dl_ofs, dl_size;
 } gcgx_batch_t; /* 24 bytes */
 
+/* view x bone per bone, valid while the caller's serial (one per body drawn) is unchanged */
+#define GCGX_MV_MAX 64 /* a DoD soldier has 34 bones; 128 entries would be 6 KB of BSS */
+static Mtx gcgx_mv[GCGX_MV_MAX];
+static unsigned gcgx_mv_serial[GCGX_MV_MAX];
+
 static u8 R_GXBodyByte( float v )
 {
 	const float x = v * 255.0f + 0.5f;
@@ -711,7 +716,7 @@ static u8 R_GXBodyByte( float v )
 
 qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, const studiohdr_t *hdr, matrix3x4 *bones,
 	const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref, const float *lightvec,
-	const float *amb, const float *shade, void (*bind)( int texture ))
+	const float *amb, const float *shade, void (*bind)( int texture ), unsigned serial )
 {
 	static int logged;
 	const gcgx_header_t *h;
@@ -719,7 +724,7 @@ qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, co
 	const byte *gx;
 	GXColor white = { 255, 255, 255, 255 }, twothirds = { 170, 170, 170, 255 }, c;
 	GXLightObj lo;
-	Mtx view, m, texm;
+	Mtx view, texm;
 	float toward[3], v[3];
 	u32 gx_ofs, gx_len;
 	int bi, k, last_tex = -1, tris = 0;
@@ -824,11 +829,16 @@ qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, co
 		}
 		for( k = 0; k < b->nbones; k++ )
 		{
-			const int bone = b->bones[k] < hdr->numbones ? b->bones[k] : 0;
+			const int bone = ( b->bones[k] < hdr->numbones && b->bones[k] < GCGX_MV_MAX ) ? b->bones[k] : 0;
 
-			guMtxConcat( view, bones[bone], m );
-			GX_LoadPosMtxImm( m, GX_PNMTX0 + 3 * k );
-			GX_LoadNrmMtxImm( m, GX_PNMTX0 + 3 * k );
+			/* view x bone once per body: its parts and batches share bones */
+			if( gcgx_mv_serial[bone] != serial )
+			{
+				guMtxConcat( view, bones[bone], gcgx_mv[bone] );
+				gcgx_mv_serial[bone] = serial;
+			}
+			GX_LoadPosMtxImm( gcgx_mv[bone], GX_PNMTX0 + 3 * k );
+			GX_LoadNrmMtxImm( gcgx_mv[bone], GX_PNMTX0 + 3 * k );
 		}
 		GX_CallDispList( (void *)( gx + b->dl_ofs ), b->dl_size );
 	}
@@ -852,8 +862,9 @@ qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, co
 
 qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, const studiohdr_t *hdr, matrix3x4 *bones,
 	const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref, const float *lightvec,
-	const float *amb, const float *shade, void (*bind)( int texture ))
+	const float *amb, const float *shade, void (*bind)( int texture ), unsigned serial )
 {
+	(void)serial;
 	(void)base; (void)sub; (void)hdr; (void)bones; (void)pmesh; (void)ptexture; (void)pskinref; (void)lightvec;
 	(void)amb; (void)shade; (void)bind;
 	return false;
