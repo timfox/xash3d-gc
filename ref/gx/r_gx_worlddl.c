@@ -254,6 +254,8 @@ static int gc_wd_tev_gens = 1;
 static byte gc_wd_lm_bss[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__(( aligned( 32 )));
 static byte *gc_wd_lm_store = gc_wd_lm_bss;	/* the BSS store, or gc_wd_lm_heap */
 static byte *gc_wd_lm_heap;	/* a larger store from the heap, freed with the world */
+static qboolean gc_wd_lm_in_arena;	/* gc_wd_lm_store is a map arena block: dropped with the arena */
+static u32 gc_wd_lm_refused;	/* page asks that found no slot (vertex colour drawn instead) */
 static int gc_wd_lm_nslots = GC_WD_LM_SLOTS;
 static u32 gc_wd_lm_page_bytes = GC_WD_LM_PAGE_BYTES;	/* 2048 RGB565 or 512 CMPR */
 static u8 gc_wd_lm_fmt = GX_TF_RGB565;
@@ -270,6 +272,7 @@ static u16 gc_wd_lm_slot_seq[GC_WD_LM_SLOTS_MAX];
 #else
 #define GC_WD_LM_TOUCH( i ) ((void)0)
 #endif
+static u32 gc_wd_pf_lm_refused;
 static int gc_wd_lm_binds;
 static int gc_wd_chunk_lm;	/* current chunk uses TEXMAP2 lightmap */
 static GXTexObj gc_wd_lm_obj;
@@ -423,6 +426,24 @@ static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 		return false;
 	DCFlushRange( dst, gc_wd_lm_page_bytes );
 	return true;
+}
+
+/* Back to the BSS store. Also the map arena reset hook: the arena hands its blocks
+ * out again on the next map load, so a store in it must not outlive the map. */
+static void R_GXWorldDLLmDropStore( void )
+{
+	int i;
+
+	if( gc_wd_lm_in_arena )
+		GX_DrawDone();	/* no list may still read the block */
+	gc_wd_lm_in_arena = false;
+	gc_wd_lm_store = gc_wd_lm_bss;
+	gc_wd_lm_nslots = GC_WD_LM_SLOTS;
+	for( i = 0; i < GC_WD_LM_SLOTS_MAX; i++ )
+	{
+		gc_wd_lm_slot_page[i] = -1;
+		gc_wd_lm_slot_frame[i] = -1000;
+	}
 }
 
 static byte *R_GXWorldDLLmPage( u32 page )
@@ -950,8 +971,7 @@ static void R_GXWorldDLUnload( void )
 		free( gc_wd_lm_heap );
 		gc_wd_lm_heap = NULL;
 	}
-	gc_wd_lm_store = gc_wd_lm_bss;
-	gc_wd_lm_nslots = GC_WD_LM_SLOTS;
+	R_GXWorldDLLmDropStore();	/* an arena store goes back with the map arena */
 	if( gc_wd_force_heap )
 	{
 		GX_DrawDone();
@@ -1634,7 +1654,36 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		gc_wd_lm_fmt = ( gc_wd_hdr.flags & GC_WD_FLAG_LM_CMPR ) ? GX_TF_CMPR : GX_TF_RGB565;
 		gc_wd_lm_nslots = (int)( sizeof( gc_wd_lm_bss ) / gc_wd_lm_page_bytes );
 #if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
-		if( !gc_wd_lm_heap )
+		/* The store comes from a gap in the map arena first: the heap gate
+		 * below (640 KiB kept free) fails on busy maps with bots, the store
+		 * then fell to the 16 KiB BSS (32 CMPR pages for a view that binds
+		 * 40 to 100), and leaves swapped between lightmap and vertex colour
+		 * frame to frame. The arena gap is there on every DoD map and costs
+		 * the heap nothing. */
+		if( !gc_wd_lm_heap && !gc_wd_lm_in_arena )
+		{
+			static const u32 tries[] = { GC_WD_LM_HEAP_BYTES, 96u * 1024u, 64u * 1024u };
+			unsigned t;
+
+			for( t = 0; t < sizeof( tries ) / sizeof( tries[0] ) && !gc_wd_lm_in_arena; t++ )
+			{
+				const size_t at = GC_MapArenaFind( (size_t)tries[t] );
+				byte *mem;
+
+				if( at == (size_t)-1 )
+					continue;
+				GC_RetainMapLoadBufferBorrow();
+				mem = (byte *)GC_MapLoadBufferTailAlloc( at, (size_t)tries[t] );
+				if( mem && !( (uintptr_t)mem & 31u ))
+				{
+					gc_wd_lm_store = mem;
+					gc_wd_lm_nslots = (int)( tries[t] / gc_wd_lm_page_bytes );
+					gc_wd_lm_in_arena = true;
+					GC_SetMapArenaResetHook( R_GXWorldDLLmDropStore );
+				}
+			}
+		}
+		if( !gc_wd_lm_heap && !gc_wd_lm_in_arena )
 		{
 			extern size_t GC_MemHeapFreeBytes( void );
 			static const u32 tries[] = { GC_WD_LM_HEAP_BYTES, 80u * 1024u, 48u * 1024u };
@@ -1669,7 +1718,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			"Xash3D GameCube: world DL lightmap pages stream@%u slots=%d (%u Kb%s%s)\n",
 			(unsigned)gc_wd_lm_stream, gc_wd_lm_nslots,
 			(unsigned)( (u32)gc_wd_lm_nslots * gc_wd_lm_page_bytes / 1024u ),
-			gc_wd_lm_heap ? " from heap" : "", gc_wd_lm_fmt == GX_TF_CMPR ? ", CMPR pages" : "" );
+			gc_wd_lm_heap ? " from heap" : gc_wd_lm_in_arena ? " from map arena" : " BSS", gc_wd_lm_fmt == GX_TF_CMPR ? ", CMPR pages" : "" );
 	}
 
 	gc_wd_tev_gens = gc_wd_hdr.version == 2 ? 2 : 1;
@@ -4108,6 +4157,8 @@ int R_GXWorldDLDraw( void )
 						gc_wd_chunk_lm = 1;
 						gc_wd_lm_binds++;
 					}
+					else
+						gc_wd_lm_refused++;
 				}
 				/* Lit TEV changes with the page — rebind materials next batch. */
 				if( prev_lm != gc_wd_chunk_lm )
@@ -4150,6 +4201,8 @@ int R_GXWorldDLDraw( void )
 						gc_wd_chunk_lm = 1;
 						gc_wd_lm_binds++;
 					}
+					else
+						gc_wd_lm_refused++;
 					if( had != gc_wd_chunk_lm )
 						cur_mat = -1;
 				}
@@ -4325,6 +4378,10 @@ int R_GXWorldDLDraw( void )
 			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: lightmap pages per frame refused=%.1f of %d slots%s\n",
+			(float)( gc_wd_lm_refused - gc_wd_pf_lm_refused ) / 120.0f, gc_wd_lm_nslots,
+			gc_wd_lm_heap ? " (heap)" : gc_wd_lm_in_arena ? " (map arena)" : " (BSS)" );
+		gc_wd_pf_lm_refused = gc_wd_lm_refused;
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f lm_miss/call=%.1f\n",
 			(float)ticks_to_microsecs( gc_wd_pf[9] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[6] ) * k,
