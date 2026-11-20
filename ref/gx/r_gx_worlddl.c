@@ -120,6 +120,21 @@ extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
 extern qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend );
 
+/* Decode cost counters, logged with the 256-frame world DL line: how many LZ4 blocks were decoded and the time they
+ * took (kinds: 0 lightmap page, 1 light-face record block, 2 PVS block, 3 light-face lighting block). */
+static u32 gc_wd_lz4_n[4], gc_wd_lf_hits[2];
+static u64 gc_wd_lz4_ticks[4];
+
+static qboolean R_GXWdLz4Decode( int kind, const byte *ip, const byte *iend, byte *op, byte *oend )
+{
+	const u64 t0 = gettime();
+	const qboolean ok = Mod_GCLZ4Decode( ip, iend, op, oend );
+
+	gc_wd_lz4_ticks[kind] += gettime() - t0;
+	gc_wd_lz4_n[kind]++;
+	return ok;
+}
+
 /* Bytes of the map-load arena the live BSP scratch still occupies (master's
  * fix for DoD maps). On Lost Coast the stub BSP's scratch is the whole 3.7 MB
  * arena, which pushed the chunk ring to 234 KB and the texture slots out and
@@ -367,7 +382,7 @@ static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, GC_WD_LM_PAGE_BYTES );
 	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, gc_wd_stage, stored ))
 		return false;
-	if( !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
+	if( !R_GXWdLz4Decode( 0, gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
 		return false;
 	DCFlushRange( dst, GC_WD_LM_PAGE_BYTES );
 	return true;
@@ -1630,7 +1645,8 @@ static void R_GXWorldDLLoad( const char *mapbase )
  * point walk in ref_light.c reads one node's faces and a few samples. */
 #define GC_LF_REC 56u
 static u32 gc_lf_aram, gc_lf_cap, gc_lf_faces, gc_lf_rec_ofs, gc_lf_lit_ofs, gc_lf_lit_bytes;
-/* Version 2 (DODGC_WD_LZ4=1): the record array and the lighting lump are random-access LZ4 regions of GC_LF_BLOCK-byte
+/* Version 3 (DODGC_WD_LZ4=1): the lighting lump is a random-access LZ4 region; the records stay raw (version 2 packed
+ * both, and the light-point walk reads the faces of every node on a ray: 0.5 ms a frame in cache misses). Regions of GC_LF_BLOCK-byte
  * blocks (scripts/bake_worlddl_goldsrc.py pack_blocks_lz4). A block is staged, decoded into one of GC_LF_CACHE
  * block buffers (1 for the records, 2 for the lighting: a sample is read once per light style, far apart) and read
  * from there. 4 KiB of MEM1 for about 1.3 MiB of ARAM a map. */
@@ -1653,7 +1669,10 @@ static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 b
 		return NULL;
 	for( i = 0; i < GC_LF_CACHE; i++ )
 		if( gc_lf_blk_id[i] == id )
+		{
+			gc_wd_lf_hits[region ? 1 : 0]++;
 			return gc_lf_blk[i];
+		}
 	slot = region == 0 ? 0 : 1 + ( gc_lf_lit_rr++ & 1 );
 	raw_len = Q_min( GC_LF_BLOCK, raw_total - blk * GC_LF_BLOCK );
 	rawsz = ( raw_len + 31u ) & ~31u;
@@ -1669,7 +1688,7 @@ static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 b
 	else
 	{
 		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_wd_stage, stored, false );
-		if( !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
+		if( !R_GXWdLz4Decode( region ? 3 : 1, gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
 			return NULL;
 	}
 	gc_lf_blk_id[slot] = id;
@@ -1717,14 +1736,14 @@ static void R_GXLightFacesLoad( const char *mapbase )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32 || memcmp( hdr, "GClf", 4 )
-		|| ( hdr[1] != 1u && !( hdr[1] == 2u && hdr[7] == GC_LF_BLOCK && hdr[6] >= hdr[4] ))
-		|| hdr[3] != 32u || hdr[4] < 32u + ( hdr[1] == 1u ? hdr[2] * GC_LF_REC : 0u ))
+		|| ( hdr[1] != 1u && !(( hdr[1] == 2u || hdr[1] == 3u ) && hdr[7] == GC_LF_BLOCK && hdr[6] >= hdr[4] ))
+		|| hdr[3] != 32u || hdr[4] < 32u + ( hdr[1] != 2u ? hdr[2] * GC_LF_REC : 0u ))
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces bad header %s\n", path );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
-	size = ( ( hdr[1] == 2u ? hdr[6] : hdr[4] + hdr[5] ) + 31u ) & ~31u;
+	size = ( ( hdr[1] >= 2u ? hdr[6] : hdr[4] + hdr[5] ) + 31u ) & ~31u;
 	if( !gc_lf_aram || gc_lf_cap < size )
 	{
 		if( gc_lf_aram )
@@ -1755,7 +1774,7 @@ static void R_GXLightFacesLoad( const char *mapbase )
 			break;
 	}
 	gEngfuncs.fsapi->Close( f );
-	if( done < ( hdr[1] == 2u ? hdr[6] : hdr[4] + hdr[5] ))
+	if( done < ( hdr[1] >= 2u ? hdr[6] : hdr[4] + hdr[5] ))
 	{
 		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light faces short read %u/%u\n", done, hdr[4] + hdr[5] );
 		return;
@@ -1790,7 +1809,7 @@ qboolean R_GXLightSamplesRead( u32 ofs, void *out, u32 len )
 {
 	if( !gc_lf_faces || ofs >= gc_lf_lit_bytes || len > gc_lf_lit_bytes - ofs )
 		return false;
-	if( gc_lf_ver == 2u )
+	if( gc_lf_ver >= 2u )
 		return R_GXLfRead2( 1, ofs, out, len );
 	GC_AramCopy( gc_lf_aram + gc_lf_lit_ofs + ofs, out, len, false );
 	return true;
@@ -1887,7 +1906,7 @@ static int R_GXWorldDLPvsByte( u32 raw )
 	else
 	{
 		if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ofs, gc_wd_stage, stored )
-			|| !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, gc_wd_pvs_blk, gc_wd_pvs_blk + GC_WD_PVS_BLOCK ))
+			|| !R_GXWdLz4Decode( 2, gc_wd_stage, gc_wd_stage + stored - pad, gc_wd_pvs_blk, gc_wd_pvs_blk + GC_WD_PVS_BLOCK ))
 			return -1;
 	}
 	gc_wd_pvs_blk_id = (s32)blk;
@@ -4216,6 +4235,12 @@ int R_GXWorldDLDraw( void )
 			"Xash3D GameCube: world DL frame=%d cluster=%d chunks=%d batches=%d waiting=%d bind_miss=%d lm_bind=%d lm_miss=%d\n",
 			gc_wd_frame, cluster, chunks, drawn, waiting, bind_miss,
 			gc_wd_lm_binds, gc_wd_lm_miss );
+		if( gc_wd_lz4_n[0] + gc_wd_lz4_n[1] + gc_wd_lz4_n[2] + gc_wd_lz4_n[3] )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL LZ4 decodes (since load, %d frames): lightmap %u in %u us, lf records %u in %u us (%u hits), lf lighting %u in %u us (%u hits), pvs %u in %u us\n",
+				gc_wd_frame, gc_wd_lz4_n[0], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[0] ),
+				gc_wd_lz4_n[1], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[1] ), gc_wd_lf_hits[0],
+				gc_wd_lz4_n[3], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[3] ), gc_wd_lf_hits[1],
+				gc_wd_lz4_n[2], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[2] ));
 	}
 	return drawn;
 }

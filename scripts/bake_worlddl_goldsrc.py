@@ -824,18 +824,19 @@ def bake_lightfaces(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 		recs += struct.pack(">8f4iI4s", *vecs0, *vecs1, *tmins, *ext, (flags << 24) | (lo & LF_NO_LIGHT), styles)
 	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
 	if lz4:
-		# Version 2: both parts are random-access LZ4 regions (pack_blocks_lz4, LF_BLOCK-byte blocks).
-		# Header: "GClf", 2, faces, record region offset (32), lighting region offset, lighting raw bytes, file size,
-		# block size.
-		rec_region = pack_blocks_lz4(bytes(recs), LF_BLOCK)
+		# Version 3: the records stay raw, the lighting lump is a random-access LZ4 region (pack_blocks_lz4,
+		# LF_BLOCK-byte blocks). The light-point walk reads the faces of every node along a ray (about 25 record
+		# blocks a frame): LZ4 records thrashed the 1-block cache at 0.5 ms a frame (Dolphin counters), so only the
+		# lighting is packed. Header: "GClf", 3, faces, record offset (32), lighting region offset, lighting raw bytes,
+		# file size, block size. (Version 2 packed the records too; the engine still reads it.)
 		lit_region = pack_blocks_lz4(bytes(bsp.lighting), LF_BLOCK) if bsp.lighting else b""
 		body = bytearray(32)
-		body += rec_region
+		body += recs
 		pad32(body)
 		lit_ofs = len(body)
 		body += lit_region
 		pad32(body)
-		struct.pack_into(">4s7I", body, 0, b"GClf", 2, len(bsp.faces), 32, lit_ofs, len(bsp.lighting), len(body), LF_BLOCK)
+		struct.pack_into(">4s7I", body, 0, b"GClf", 3, len(bsp.faces), 32, lit_ofs, len(bsp.lighting), len(body), LF_BLOCK)
 	else:
 		body = bytearray(32)
 		body += recs

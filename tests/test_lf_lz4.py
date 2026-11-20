@@ -123,24 +123,23 @@ class LfLz4Test(unittest.TestCase):
             self.assertEqual(self.read(region, n, 0, n), d)
 
     @unittest.skipUnless(BSP.exists(), "no dod_flash.bsp")
-    def test_baked_lf_v2_equals_v1(self):
+    def test_baked_lf_v3_equals_v1(self):
         with tempfile.TemporaryDirectory() as t:
-            v1, v2 = Path(t) / "a.gcd", Path(t) / "b.gcd"
+            v1, v3 = Path(t) / "a.gcd", Path(t) / "b.gcd"
             bake.bake_lightfaces(BSP, v1, lz4=False)
-            bake.bake_lightfaces(BSP, v2, lz4=True)
-            a, b = v1.read_bytes(), v2.read_bytes()
+            bake.bake_lightfaces(BSP, v3, lz4=True)
+            a, b = v1.read_bytes(), v3.read_bytes()
             h1 = struct.unpack_from(">4s5I", a, 0)
-            h2 = struct.unpack_from(">4s7I", b, 0)
-            self.assertEqual((h1[1], h2[1], h2[2], h2[7]), (1, 2, h1[2], BLOCK))
-            self.assertEqual(h2[6], len(b))
-            self.assertLess(len(b), len(a) * 0.75)
+            h3 = struct.unpack_from(">4s7I", b, 0)
+            self.assertEqual((h1[1], h3[1], h3[2], h3[7]), (1, 3, h1[2], BLOCK))
+            self.assertEqual(h3[6], len(b))
+            self.assertLess(len(b), len(a) * 0.85)
             recs1, lit1 = a[h1[3]:h1[4]], a[h1[4]:h1[4] + h1[5]]
-            rec_region = b[h2[3]:h2[4]]
-            lit_region = b[h2[4]:]
-            self.assertEqual(h2[5], h1[5])
-            rec_bytes = h1[2] * 56
-            for ofs in (0, 56 * 13, rec_bytes - 56):
-                self.assertEqual(self.read(rec_region, rec_bytes, ofs, 56), recs1[ofs:ofs + 56])
+            # version 3: records are raw, byte for byte, in front of the lighting region
+            self.assertEqual(b[h3[3]:h3[3] + h1[2] * 56], recs1[:h1[2] * 56])
+            self.assertGreaterEqual(h3[4], 32 + h1[2] * 56)
+            lit_region = b[h3[4]:]
+            self.assertEqual(h3[5], h1[5])
             for ofs in (0, 1000, 1023, h1[5] // 2, h1[5] - 3):
                 self.assertEqual(self.read(lit_region, h1[5], ofs, 3), lit1[ofs:ofs + 3])
 
