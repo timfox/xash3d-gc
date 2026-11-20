@@ -1663,7 +1663,10 @@ static void GCube_LoadDiscBootOverrides( void )
 			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
 			{
 				gc_capture_configured = true;
-				SYS_Report( "Xash3D GameCube: disc boot override gccapture\n" );
+				/* Film footage never wants the lean HUD (HP, team, ammo over the
+				 * camera player's frames): capture implies nohud. */
+				gc_nohud_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override gccapture (and nohud)\n" );
 				continue;
 			}
 		}
