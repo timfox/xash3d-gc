@@ -689,7 +689,11 @@ static void RVB_DoReverb( portable_samplepair_t *paint, int count )
 	dly_t *dly1 = &reverbdly[0];
 	dly_t *dly2 = &reverbdly[1];
 
-	if( !dly1->lpdelayline )
+	/* Both delay lines are used below.  DLY_Init's Mem_Calloc soft-fails
+	 * (NULL) on the GameCube Sound Zone when MEM1 is exhausted; with only
+	 * one of the two allocated the second was indexed from NULL (DSI at
+	 * c2a3b, DAR=0x2C74 after the 17/69 KiB s_dsp.c:301 soft-fails). */
+	if( !dly1->lpdelayline || !dly2->lpdelayline )
 		return;
 
 	for( ; count; count--, paint++ )

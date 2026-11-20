@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "r_local.h"
 #if XASH_GAMECUBE
+#include <gccore.h>
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 #endif
 
@@ -70,10 +71,172 @@ static qboolean R_GCIsStudioSkinOverflow( const void *ptr )
 	return Mod_GCIsStudioSkin( ptr );
 }
 
+/* Effect sprites (explosion, steam, blood, smoke) get their pixels from a
+ * block of their own. In the shared heap they always lost: a DoD match uses
+ * every free byte (view models, resident textures), so the sprites either
+ * failed their free-heap gate or, when let in first, starved the grenade
+ * view model skins. The block is filled while gc_sprite_effect_load is set
+ * (engine/client/cl_sprite.c). */
+/* 208 KiB: exactly the BSS this build gave up elsewhere (the Half-Life
+ * changelevel entity fallback and the unused pool chain slots). Freed BSS that
+ * went to the heap instead was taken at once by a third resident view model
+ * and left the grenade hands without skins. */
+/* Only the DoD build gave that BSS up, and only DoD fills the block. In the
+ * Half-Life and Lost Coast builds the same 208 KiB came out of the heap
+ * instead: Lost Coast could no longer load its map ("Could not load model
+ * maps/d2_lostcoast.bsp"). There the block is a stub; every allocation
+ * falls through to the heap as before. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+#define GC_FX_PIXELS_BYTES ( 208u * 1024u )
+#else
+#define GC_FX_PIXELS_BYTES 32u
+#endif
+#define GC_FX_PIXELS_ALLOCS 256
+extern qboolean gc_sprite_effect_load;
+static byte gc_fx_pixels[GC_FX_PIXELS_BYTES] __attribute__((aligned(32)));
+static size_t gc_fx_pixels_used;
+/* Offsets of the live allocations in address order; bit 31 marks one that was
+ * freed while a later one is still live. The top rewinds over freed entries,
+ * so the transient copies a sprite upload makes do not stay charged. */
+static uint gc_fx_pixels_at[GC_FX_PIXELS_ALLOCS];
+/* Bytes at the end of the block lent out as scratch (R_GCFxScratchAlloc). */
+static size_t gc_fx_scratch;
+static int gc_fx_pixels_count;
+/* View model skins borrow the idle end of the block, filled from the top down
+ * (R_GCAllocFxPixelsTop). Effects keep filling from the start, so a level
+ * change that frees and reloads the effect sprites rewinds below the skins
+ * instead of leaving holes under them. */
+#define GC_FX_TOP_ALLOCS 64
+#define GC_FX_TOP_RESERVE ( 64u * 1024u )	/* always left for effect sprites */
+static size_t gc_fx_top_used;
+static uint gc_fx_top_at[GC_FX_TOP_ALLOCS];
+static int gc_fx_top_count;
+
+static qboolean R_GCIsFxPixels( const void *ptr )
+{
+	return (const byte *)ptr >= gc_fx_pixels && (const byte *)ptr < gc_fx_pixels + GC_FX_PIXELS_BYTES;
+}
+
+static byte *R_GCAllocFxPixels( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+	byte *out;
+
+	if( !gc_sprite_effect_load || bytes == 0 || gc_fx_pixels_count >= GC_FX_PIXELS_ALLOCS
+		|| gc_fx_pixels_used + need + gc_fx_scratch + gc_fx_top_used > GC_FX_PIXELS_BYTES )
+		return NULL;
+	out = gc_fx_pixels + gc_fx_pixels_used;
+	gc_fx_pixels_at[gc_fx_pixels_count++] = (uint)gc_fx_pixels_used;
+	gc_fx_pixels_used += need;
+	memset( out, 0, need );
+	return out;
+}
+
+/* A view model skin in the bytes the effect sprites leave idle. The studio
+ * skin window is full in a DoD match (448 bytes left) and the heap has no
+ * 8 KiB in one piece, so half the view model skins fell to a 2x2 flat colour:
+ * a black Thompson, a green MP40. The block has about 130 KiB idle after the
+ * effects are warmed; GC_FX_TOP_RESERVE of it stays for effects. */
+static __attribute__((unused)) byte *R_GCAllocFxPixelsTop( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+	byte *out;
+
+	if( bytes == 0 || gc_fx_scratch || gc_fx_top_count >= GC_FX_TOP_ALLOCS
+		|| gc_fx_pixels_used + gc_fx_top_used + need + GC_FX_TOP_RESERVE > GC_FX_PIXELS_BYTES )
+		return NULL;
+	gc_fx_top_used += need;
+	gc_fx_top_at[gc_fx_top_count++] = (uint)( GC_FX_PIXELS_BYTES - gc_fx_top_used );
+	out = gc_fx_pixels + GC_FX_PIXELS_BYTES - gc_fx_top_used;
+	memset( out, 0, need );
+	return out;
+}
+
+static void R_GCFreeFxPixels( const void *ptr )
+{
+	const uint at = (uint)((const byte *)ptr - gc_fx_pixels );
+	int i;
+
+	if( gc_fx_top_used && at >= GC_FX_PIXELS_BYTES - gc_fx_top_used )
+	{
+		for( i = gc_fx_top_count - 1; i >= 0; i-- )
+		{
+			if( gc_fx_top_at[i] == at )
+			{
+				gc_fx_top_at[i] |= 0x80000000u;
+				break;
+			}
+		}
+		while( gc_fx_top_count > 0 && ( gc_fx_top_at[gc_fx_top_count - 1] & 0x80000000u ))
+			gc_fx_top_count--;
+		gc_fx_top_used = gc_fx_top_count > 0
+			? GC_FX_PIXELS_BYTES - ( gc_fx_top_at[gc_fx_top_count - 1] & 0x7fffffffu ) : 0;
+		return;
+	}
+	for( i = gc_fx_pixels_count - 1; i >= 0; i-- )
+	{
+		if( gc_fx_pixels_at[i] == at )
+		{
+			gc_fx_pixels_at[i] |= 0x80000000u;
+			break;
+		}
+	}
+	while( gc_fx_pixels_count > 0 && ( gc_fx_pixels_at[gc_fx_pixels_count - 1] & 0x80000000u ))
+		gc_fx_pixels_used = gc_fx_pixels_at[--gc_fx_pixels_count] & 0x7fffffffu;
+}
+
+size_t R_GCFxPixelsFree( void )
+{
+	return GC_FX_PIXELS_BYTES - gc_fx_pixels_used - gc_fx_scratch - gc_fx_top_used;
+}
+
+/* The unused end of the block as scratch for one sprite load: the shrunk copy
+ * of a large sprite file (cl_game.c) is 50 KiB in one piece, which the
+ * fragmented heap of a match cannot give. One loan at a time; frames keep
+ * filling the block from the start meanwhile. */
+byte *R_GCFxScratchAlloc( size_t bytes )
+{
+	const size_t need = ( bytes + 31u ) & ~(size_t)31u;
+
+	if( gc_fx_scratch || bytes == 0 || gc_fx_pixels_used + need + gc_fx_top_used > GC_FX_PIXELS_BYTES )
+		return NULL;
+	gc_fx_scratch = need;
+	return gc_fx_pixels + GC_FX_PIXELS_BYTES - gc_fx_top_used - need;
+}
+
+void R_GCFxScratchFree( void )
+{
+	gc_fx_scratch = 0;
+}
+
 /* Mip 0 is 32-byte aligned inside a slightly larger block so the GX path can
  * use it as a texture in place (R_GXNativeTexture in r_gx_world.c). */
+void *GC_TexRegionAlloc( size_t bytes );
+qboolean GC_TexRegionFree( void *p );
+
 static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 {
+	byte *fx = R_GCAllocFxPixels( bytes );
+
+	if( fx )
+	{
+		if( level == 0 )
+			tex->gc_pixels_base = fx;
+		return (pixel_t *)fx;
+	}
+	/* Per-map budget: mips live in the persistent texture region at the top
+	 * of the map-load arena when it has room (32-byte aligned, zeroed), so
+	 * the heap keeps its headroom for entity spawns and level changes. */
+	{
+		byte *region = (byte *)GC_TexRegionAlloc( bytes );
+
+		if( region )
+		{
+			if( level == 0 )
+				tex->gc_pixels_base = region;
+			return (pixel_t *)region;
+		}
+	}
 	byte *base = (byte *)Mem_TryCalloc( r_temppool, bytes + ( level == 0 ? 31 : 0 ));
 	if( !base && level == 0 && bytes <= sizeof( gc_tiny_pixels[0] ))
 	{
@@ -100,6 +263,21 @@ static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 
 void R_GCFreeMip( image_t *tex, uint level )
 {
+	const void *fx = level == 0 && tex->gc_pixels_base ? (void *)tex->gc_pixels_base : (void *)tex->pixels[level];
+
+	if( R_GCIsFxPixels( fx ))
+	{
+		R_GCFreeFxPixels( fx );
+		if( level == 0 )
+			tex->gc_pixels_base = NULL;
+		return;
+	}
+	if( GC_TexRegionFree( (void *)fx ))
+	{
+		if( level == 0 )
+			tex->gc_pixels_base = NULL;
+		return;
+	}
 	if( level == 0 && tex->gc_pixels_base )
 	{
 		for( unsigned i = 0; i < ARRAYSIZE( gc_tiny_pixels ); i++ )
@@ -251,6 +429,11 @@ void GAME_EXPORT GL_Bind( int tmu, unsigned int texnum )
 #if XASH_GAMECUBE
 	/* Studio Flipper mesh path may not have ForceBegin yet — TriAPI-only
 	 * bind left r_gx_studio_bound_tex=0 and EmitTriC fell back to white (G376). */
+	{
+		extern unsigned r_gx_effects_pending_texnum;
+
+		r_gx_effects_pending_texnum = texnum;
+	}
 	if( R_GXTriApiIsActive() || R_GXStudioIsActive() )
 		R_GXStudioBindTexnum( texnum );
 #endif
@@ -433,6 +616,95 @@ upload texture into video memory
 */
 static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic );
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/*
+A view model skin's chromakey, applied to the decoded RGBA in place before it
+is encoded as CMPR. Same rules as the RGB565 path below (vm_rgb565) and the
+ARAM skin builder (R_GXSkinBuildTiled): key colours become holes; the hands
+keep them as a 1-bit cut-out, a gun skin floods them from its neighbours so no
+key colour is left to bleed under the linear filter. Returns true when the
+skin is a cut-out.
+*/
+static qboolean R_GCViewModelSkinKey( byte *rgba, int w, int h, qboolean hands, qboolean onebit )
+{
+	const int n = w * h;
+	int i, pass, holes = 0;
+	byte last[3] = { 96, 80, 64 };	/* warm wood fallback */
+
+	for( i = 0; i < n; i++ )
+	{
+		byte *p = rgba + i * 4;
+		const unsigned r8 = p[0], g8 = p[1], b8 = p[2];
+		qboolean key = false;
+
+		if( onebit && p[3] < 128 )
+			key = true;
+		else if( r8 > 200 && b8 > 180 && g8 + 40 < r8 && g8 + 40 < b8 )
+			key = true;	/* magenta / hot pink */
+		else if( r8 < 40 && g8 < 40 && b8 > 200 )
+			key = true;	/* blue */
+		else if( r8 > 220 && g8 < 40 && b8 > 220 )
+			key = true;
+		else if( hands && r8 < 16 && g8 < 16 && b8 < 16 )
+			key = true;	/* the hands atlas keys on black */
+		p[3] = key ? 0 : 255;
+		if( key )
+			holes++;
+	}
+	if( !holes )
+		return false;
+	if( hands )
+		return true;
+	for( pass = 0; pass < 64 && holes; pass++ )
+	{
+		for( i = 0; i < n; i++ )
+		{
+			byte *p = rgba + i * 4;
+			const int px = i % w, py = i / w;
+			int ox, oy;
+
+			if( p[3] )
+			{
+				if( p[3] == 255 )
+					continue;
+				p[3] = 255;	/* filled last pass */
+				continue;
+			}
+			for( oy = -1; oy <= 1 && !p[3]; oy++ )
+				for( ox = -1; ox <= 1 && !p[3]; ox++ )
+				{
+					const int sx = px + ox, sy = py + oy;
+					const byte *q;
+
+					if( sx < 0 || sy < 0 || sx >= w || sy >= h )
+						continue;
+					q = rgba + ( sy * w + sx ) * 4;
+					if( q[3] != 255 )
+						continue;
+					p[0] = q[0]; p[1] = q[1]; p[2] = q[2];
+					p[3] = 254;	/* a source for the next pass, not this one */
+					holes--;
+				}
+		}
+	}
+	for( i = 0; i < n; i++ )
+	{
+		byte *p = rgba + i * 4;
+
+		if( p[3] == 0 )
+		{
+			p[0] = last[0]; p[1] = last[1]; p[2] = last[2];
+		}
+		else
+		{
+			last[0] = p[0]; last[1] = p[1]; last[2] = p[2];
+		}
+		p[3] = 255;
+	}
+	return false;
+}
+#endif
+
 /* GameCube: menu/UI images (resource/, gfx/shell/) may take their pixel and
  * alpha planes from the boot arena when the heap is short before the first
  * map load.  They are released by R_GcFreeMenuImages, which the first map
@@ -578,6 +850,128 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 #endif
 
 #if XASH_GAMECUBE
+	/* Effect sprite frames (explosions, smoke, blood, flashes) as GX CMPR: a
+	 * quarter of the RGB565 residency, which pays for frames at twice the
+	 * size in the effect block above (cl_sprite.c caps them at 64 px, was 32).
+	 * At 32x16 DoD's explosion burst was a shapeless haze. Only frames without
+	 * real alpha: opaque (additive sprites) or cut-out (alphatest). */
+	if( gc_sprite_effect_load && tex->name[0] == '#' && Q_stristr( tex->name, "sprites/" )
+		&& pic->type == PF_RGBA_32 && pic->width >= 8 && pic->height >= 8 && pic->depth <= 1
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprsprites" ))
+	{
+		const int n = pic->width * pic->height;
+		qboolean masked = false, soft = false;
+		int i;
+
+		for( i = 0; i < n; i++ )
+		{
+			const byte a = buf[i * 4 + 3];
+
+			if( a == 0 )
+				masked = true;
+			else if( a != 255 )
+			{
+				soft = true;
+				break;
+			}
+		}
+		if( !soft )
+		{
+			int cw, ch;
+			size_t bytes;
+			byte *dst;
+
+			R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
+			bytes = R_GXCmprBytes( cw, ch );
+			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+			if( dst )
+			{
+				static int fx_cmpr_logged;
+
+				tex->width = cw;
+				tex->height = ch;
+				tex->depth = 1;
+				tex->alpha_pixels = NULL;
+				ClearBits( tex->flags, TF_HAS_ALPHA );
+				tex->gc_gx_native_alpha = R_GXEncodeCmprSkin( buf, pic->width, pic->height, cw, ch, masked, dst ) ? 1 : 0;
+				tex->pixels[0] = (pixel_t *)dst;
+				tex->gc_gx_native = true;
+				tex->gc_gx_cmpr = 1;
+				tex->numMips = 1;
+				tex->size = bytes;
+				if( fx_cmpr_logged++ < 6 )
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR effect sprite %s %dx%d -> %dx%d masked=%d (%s)\n",
+						tex->name, pic->width, pic->height, cw, ch, masked ? 1 : 0, Q_memprint( bytes ));
+				return true;
+			}
+		}
+	}
+#endif
+
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* DoD view model skins as GX CMPR. The 192 KiB window that streams the
+	 * full skin from ARAM never fits beside a DoD match (about 100 KiB of
+	 * heap is free), so the gun drew from its 64 px RGB565 low mip. CMPR is
+	 * a quarter of the bytes per texel: the same 8 KiB holds the skin at
+	 * 128 px, twice the detail each way, resident. */
+	if( tex->name[0] == '#' && Q_stristr( tex->name, "models/v_" )
+		&& pic->type == PF_RGBA_32 && pic->width >= 8 && pic->height >= 8 && pic->depth <= 1
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocmprvmskins" ))
+	{
+		int cw, ch;
+		size_t bytes;
+		byte *dst = NULL;
+
+		R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
+		const int vm_cmpr_cap = gEngfuncs.Sys_CheckParm( "-gcvm128" ) ? 128 : 256;
+
+		while(( cw > vm_cmpr_cap || ch > vm_cmpr_cap ) && cw > 8 && ch > 8 )
+		{
+			cw >>= 1;
+			ch >>= 1;
+		}
+		bytes = R_GXCmprBytes( cw, ch );
+		if( r_gc_studio_skins_in_arena )
+			dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+		if( !dst && ( dst = R_GCAllocFxPixelsTop( bytes )) != NULL )
+			tex->gc_pixels_base = dst;
+		if( !dst )
+			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+		if( dst && !((uintptr_t)dst & 31 ))
+		{
+			static int vm_cmpr_logged;
+			const qboolean hands = Q_stristr( tex->name, "hands" ) != NULL;
+			const qboolean onebit = !sw_noalphabrushes.value && FBitSet( pic->flags, IMAGE_ONEBIT_ALPHA );
+			const qboolean masked = R_GCViewModelSkinKey( buf, pic->width, pic->height, hands, onebit );
+
+			tex->width = cw;
+			tex->height = ch;
+			tex->depth = 1;
+			tex->alpha_pixels = NULL;
+			ClearBits( tex->flags, TF_HAS_ALPHA );
+			tex->gc_gx_native_alpha = R_GXEncodeCmprSkin( buf, pic->width, pic->height, cw, ch, masked, dst ) ? 1 : 0;
+			tex->pixels[0] = (pixel_t *)dst;
+			tex->gc_gx_native = true;
+			tex->gc_gx_cmpr = 1;
+			tex->numMips = 1;
+			tex->size = bytes;
+			if( vm_cmpr_logged++ < 12 )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR view model skin %s %dx%d -> %dx%d masked=%d (%s)\n",
+					tex->name, pic->width, pic->height, cw, ch, masked ? 1 : 0, Q_memprint( bytes ));
+			return true;
+		}
+		{
+			static int vm_cmpr_fail_logged;
+
+			if( vm_cmpr_fail_logged++ < 4 )
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR view model skin %s no room (%s, window left %s, effect block %s)\n",
+					tex->name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )),
+					Q_memprint( R_GCFxPixelsFree( )));
+		}
+	}
+#endif
+
+#if XASH_GAMECUBE
 	/* (Studio skins carry TF_FONT on GameCube to skip resampling, so it is
 	 * not a test here: the "#models/" name already excludes fonts.)
 	 * Character skins as GX CMPR: a quarter of the RGB565 residency, so a
@@ -599,6 +993,17 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
 		if( !dst )
 			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+		/* GX samples CMPR only from 32-aligned texels (R_GXNativeTexture): an unaligned plane would draw
+		 * as 16-bit texels, garbage. Take the plain path instead. */
+		if( dst && ((uintptr_t)dst & 31 ))
+		{
+			static int cmpr_align_logs;
+
+			if( cmpr_align_logs++ < 4 )
+				gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: CMPR skin %s at %p is not 32-byte aligned, not CMPR\n",
+					tex->name, (void *)dst );
+			dst = NULL;
+		}
 		if( dst )
 		{
 			const qboolean masked = !sw_noalphabrushes.value && FBitSet( pic->flags, IMAGE_ONEBIT_ALPHA );
@@ -617,7 +1022,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			{
 				static int cmpr_logged;
 
-				if( cmpr_logged++ < 4 )
+				if( cmpr_logged++ < 4 || Q_stristr( tex->name, "models/player" ))
 					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s %dx%d -> %dx%d (%s)\n",
 						tex->name, pic->width, pic->height, cw, ch, Q_memprint( bytes ));
 			}
@@ -626,7 +1031,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		{
 			static int cmpr_fail_logs;
 
-			if( cmpr_fail_logs++ < 4 )
+			if( cmpr_fail_logs++ < 4 || Q_stristr( tex->name, "models/player" ))
 				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s no room (%s, window left %s)\n",
 					tex->name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
 		}
@@ -654,6 +1059,15 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 	}
 	else
 		data = buf;
+
+#if XASH_GAMECUBE
+	if( !data )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: no MEM1 to resample %s %dx%d, upload skipped\n",
+			tex->name, pic->width, pic->height );
+		return false;
+	}
+#endif
 
 	// mips will be auto-generated if desired
 	// Low-memory/quality 0 path skips mips to save texture memory pressure
@@ -1254,6 +1668,75 @@ int R_GCPackedTexture( const char *name, int width, int height, int levels, qboo
 	tex->gc_packed_levels = (byte)levels;
 	tex->gc_packed_alpha = (byte)alpha;
 	tex->gc_packed_queued = false;
+	return tex - r_images;
+}
+
+/*
+================
+R_GCBakedCmprSkin
+
+A studio skin the disc build already encoded as GX CMPR (STUDIO_NF_GC_CMPR in
+a gc_studio companion).  The texels are copied into the studio skin window as
+they are: no palette decode, no RGBA scratch, no encode at load.
+Returns the texture number, 0 when there is no room for it.
+================
+*/
+int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int height, qboolean masked )
+{
+	const size_t bytes = R_GXCmprBytes( width, height );
+	const qboolean in_arena = r_gc_studio_skins_in_arena;
+	image_t *tex;
+	byte *dst;
+
+	if( !GL_CheckTexName( name ) || !texels || width < 8 || height < 8
+		|| ( width & 7 ) || ( height & 7 ) || width > 1024 || height > 1024 )
+		return 0;
+	if(( tex = GL_TextureForName( name )) != NULL )
+		return tex - r_images;
+	tex = GL_AllocTexture( name, TF_NOMIPMAP );
+	r_gc_studio_skins_in_arena = true;
+	dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
+	r_gc_studio_skins_in_arena = in_arena;
+	if( !dst )
+		dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+	if( !dst )
+	{
+		static int baked_fail_logs;
+
+		if( baked_fail_logs++ < 4 )
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: baked CMPR skin %s no room (%s, window left %s)\n",
+				name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
+		/* Unlink the slot again so a later load can retry. */
+		{
+			image_t **prev = &r_imagesHashTable[tex->hashValue];
+
+			while( *prev && *prev != tex )
+				prev = &( *prev )->nextHash;
+			if( *prev )
+				*prev = tex->nextHash;
+		}
+		memset( tex, 0, sizeof( *tex ));
+		return 0;
+	}
+	memcpy( dst, texels, bytes );
+	DCFlushRange( dst, (u32)bytes );
+	tex->width = tex->srcWidth = width;
+	tex->height = tex->srcHeight = height;
+	tex->depth = 1;
+	tex->alpha_pixels = NULL;
+	tex->pixels[0] = (pixel_t *)dst;
+	tex->gc_gx_native = true;
+	tex->gc_gx_native_alpha = masked ? 1 : 0;
+	tex->gc_gx_cmpr = 1;
+	tex->numMips = 1;
+	tex->size = bytes;
+	{
+		static int baked_logged;
+
+		if( baked_logged++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: baked CMPR skin %s %dx%d (%s)\n",
+				name, width, height, Q_memprint( bytes ));
+	}
 	return tex - r_images;
 }
 

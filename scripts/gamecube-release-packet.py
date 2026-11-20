@@ -68,7 +68,7 @@ def load_storage(root: Path):
 def evaluate_presentation(text: str) -> dict:
     markers = (
         "Xash3D GameCube: G172 HUD sheets loaded",
-        "Xash3D GameCube: lean HUD sprites drawn",
+        "Xash3D GameCube: HUD sprites drawn",
         "Xash3D GameCube: G105 landmark viewmodel ready",
     )
     missing = []

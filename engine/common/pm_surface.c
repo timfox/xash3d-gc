@@ -271,6 +271,8 @@ loc0:
 	// walk through real faces
 	int numsurfaces = node_numsurfaces( node, mod );
 	int firstsurface = node_firstsurface( node, mod );
+	if( !mod->surfaces || firstsurface < 0 || firstsurface + numsurfaces > mod->numsurfaces )
+		numsurfaces = 0; // GameCube World DL route: no live surface table
 	for( int i = 0; i < numsurfaces; i++ )
 	{
 		msurface_t	*surf = &mod->surfaces[firstsurface + i];

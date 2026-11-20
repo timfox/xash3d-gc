@@ -42,8 +42,17 @@ static void SV_GameCubePlayStart_f( void )
 	char map_name[MAX_QPATH];
 	const char *map;
 
+	if( COM_StringEmpty( sv_gc_playstart_map_override )
+		&& Sys_GetParmFromCmdLine( "-gcstartmap", sv_gc_playstart_map_override ))
+		Con_Reportf( "Xash3D GameCube: play start uses test start map %s\n", sv_gc_playstart_map_override );
 	if( !COM_StringEmpty( sv_gc_playstart_map_override ))
 		map = sv_gc_playstart_map_override;
+	else if( Cmd_Argc() > 1 && !COM_StringEmpty( Cmd_Argv( 1 )))
+	{
+		/* Create Game sends "gc_playstart <map>"; honor the chosen map. */
+		map = Cmd_Argv( 1 );
+		Con_Reportf( "Xash3D GameCube: play start uses requested map %s\n", map );
+	}
 	else
 		map = ( GI && !COM_StringEmpty( GI->startmap )) ? GI->startmap : "c0a0";
 	/* SpawnServer and map-load trimming can rewrite Cmd_Argv() storage. */
@@ -75,6 +84,7 @@ static void SV_GameCubePlayStart_f( void )
 		SV_SpawnEntities( map );
 		SV_ActivateServer( true );
 		Con_Reportf( "Xash3D GameCube: play start post-activate %s\n", map );
+		GC_HeapCheck( "play start post-activate" );
 		GC_DeltaCheckTables( "play start post-activate" );
 		if( Sys_CheckParm( "-gcmenuplaystart" ) && !GC_MenuRunsServer() )
 			SV_GCPlaceNewGameTrackTrains();
@@ -116,6 +126,7 @@ static void SV_GameCubePlayStart_f( void )
 			return;
 		}
 		Con_Reportf( "Xash3D GameCube: play start ready %s\n", map );
+		GC_HeapCheck( "play start ready" );
 		GC_DeltaCheckTables( "play start client ready" );
 		/* SV_ActivateServer defers the menu route's world prepare until the
 		 * client progs are resident; run it now. */

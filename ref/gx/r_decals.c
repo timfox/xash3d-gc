@@ -54,10 +54,165 @@ static float g_DecalClipVerts2[MAX_DECALCLIPVERT][VERTEXSIZE];
 decal_t      gDecalPool[MAX_RENDER_DECALS];
 static int   gDecalCount;
 
+#if XASH_GAMECUBE
+/*
+ * Decal ring for the World DL route. The world is drawn from its baked pack
+ * and has no live msurface table, so the stock path (clip the decal against
+ * surfaces) has nothing to clip against. Bullet holes, scorches and blood are
+ * small next to a wall, so each one is kept as a quad lying on the plane a
+ * short trace finds at the hit point, and the oldest one is reused.
+ */
+#include "pm_defs.h"
+
+#define GC_DECAL_RING 64
+
+typedef struct
+{
+	vec3_t org;
+	vec3_t right;
+	vec3_t up;
+	int    texture;
+} gc_ring_decal_t;
+
+static gc_ring_decal_t gc_decal_ring[GC_DECAL_RING];
+static int gc_decal_ring_next, gc_decal_ring_count;
+
+static void R_GXDecalRingClear( void )
+{
+	gc_decal_ring_next = gc_decal_ring_count = 0;
+}
+
+static void R_GXDecalRingAdd( int texture, const vec3_t pos, float scale )
+{
+	static const vec3_t axes[3] = {{ 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }};
+	vec3_t normal, best_pos, ref_up;
+	float best = 2.0f, half_w, half_h;
+	gc_ring_decal_t *d;
+	int i, width = 16, height = 16;
+
+	if( texture <= 0 )
+		return;
+
+	/* The caller gives the hit point only: probe both ways along each axis
+	 * and keep the closest plane. */
+	for( i = 0; i < 6; i++ )
+	{
+		vec3_t start, end;
+		pmtrace_t tr;
+		const float sign = ( i & 1 ) ? -1.0f : 1.0f;
+
+		VectorMA( pos, 6.0f * sign, axes[i >> 1], start );
+		VectorMA( pos, -6.0f * sign, axes[i >> 1], end );
+		tr = gEngfuncs.CL_TraceLine( start, end, PM_STUDIO_IGNORE );
+		if( tr.startsolid || tr.allsolid || tr.fraction >= 1.0f || tr.fraction >= best )
+			continue;
+		best = tr.fraction;
+		VectorCopy( tr.plane.normal, normal );
+		VectorCopy( tr.endpos, best_pos );
+	}
+	if( best > 1.0f )
+		return;
+
+	R_GetTextureParms( &width, &height, texture );
+	if( scale <= 0.0f )
+		scale = 1.0f;
+	half_w = Q_max( 1, width ) * scale * 0.5f;
+	half_h = Q_max( 1, height ) * scale * 0.5f;
+
+	d = &gc_decal_ring[gc_decal_ring_next];
+	gc_decal_ring_next = ( gc_decal_ring_next + 1 ) % GC_DECAL_RING;
+	if( gc_decal_ring_count < GC_DECAL_RING )
+		gc_decal_ring_count++;
+
+	/* lift it off the wall so the depth test does not flicker */
+	VectorMA( best_pos, 0.3f, normal, d->org );
+	if( fabsf( normal[2] ) > 0.9f )
+		VectorSet( ref_up, 1.0f, 0.0f, 0.0f );
+	else
+		VectorSet( ref_up, 0.0f, 0.0f, 1.0f );
+	CrossProduct( ref_up, normal, d->right );
+	VectorNormalize( d->right );
+	CrossProduct( normal, d->right, d->up );
+	VectorScale( d->right, half_w, d->right );
+	VectorScale( d->up, half_h, d->up );
+	d->texture = texture;
+}
+
+/* Drawn with the translucent effects, after the world. */
+void R_GXDecalRingDraw( void )
+{
+	extern qboolean r_gx_effects_darken;
+
+	int i, bound_tex = -1;
+	qboolean open = false;
+
+	if( gc_decal_ring_count <= 0 )
+		return;
+
+	GL_SetRenderMode( kRenderTransTexture );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* DoD decal textures say how much to darken (cl_tent.c): frame * ( 1 - texel ). */
+	r_gx_effects_darken = true;
+#endif
+	_TriColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+	for( i = 0; i < gc_decal_ring_count; i++ )
+	{
+		const gc_ring_decal_t *d = &gc_decal_ring[i];
+		vec3_t v[4];
+		vec3_t delta;
+
+		/* behind the camera */
+		VectorSubtract( d->org, RI.rvp.vieworigin, delta );
+		if( DotProduct( delta, RI.cull_vforward ) < 0.0f )
+			continue;
+
+		if( d->texture != bound_tex )
+		{
+			if( open )
+				TriEnd();
+			GL_Bind( XASH_TEXTURE0, d->texture );
+			bound_tex = d->texture;
+			TriBegin( TRI_TRIANGLES );
+			open = true;
+		}
+		v[0][0] = d->org[0] - d->right[0] + d->up[0];
+		v[0][1] = d->org[1] - d->right[1] + d->up[1];
+		v[0][2] = d->org[2] - d->right[2] + d->up[2];
+		v[1][0] = d->org[0] + d->right[0] + d->up[0];
+		v[1][1] = d->org[1] + d->right[1] + d->up[1];
+		v[1][2] = d->org[2] + d->right[2] + d->up[2];
+		v[2][0] = d->org[0] + d->right[0] - d->up[0];
+		v[2][1] = d->org[1] + d->right[1] - d->up[1];
+		v[2][2] = d->org[2] + d->right[2] - d->up[2];
+		v[3][0] = d->org[0] - d->right[0] - d->up[0];
+		v[3][1] = d->org[1] - d->right[1] - d->up[1];
+		v[3][2] = d->org[2] - d->right[2] - d->up[2];
+
+		TriTexCoord2f( 0.0f, 0.0f ); TriVertex3f( v[0][0], v[0][1], v[0][2] );
+		TriTexCoord2f( 1.0f, 0.0f ); TriVertex3f( v[1][0], v[1][1], v[1][2] );
+		TriTexCoord2f( 1.0f, 1.0f ); TriVertex3f( v[2][0], v[2][1], v[2][2] );
+		TriTexCoord2f( 0.0f, 0.0f ); TriVertex3f( v[0][0], v[0][1], v[0][2] );
+		TriTexCoord2f( 1.0f, 1.0f ); TriVertex3f( v[2][0], v[2][1], v[2][2] );
+		TriTexCoord2f( 0.0f, 1.0f ); TriVertex3f( v[3][0], v[3][1], v[3][2] );
+	}
+	if( open )
+	{
+		TriEnd();
+		R_GXEffectsTriEnd();
+	}
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	r_gx_effects_darken = false;
+#endif
+}
+#endif
+
 void R_ClearDecals( void )
 {
 	memset( gDecalPool, 0, sizeof( gDecalPool ));
 	gDecalCount = 0;
+#if XASH_GAMECUBE
+	R_GXDecalRingClear();
+#endif
 }
 
 // unlink pdecal from any surface it's attached to
@@ -759,6 +914,27 @@ void GAME_EXPORT R_DecalShoot( int textureIndex, int entityIndex, int modelIndex
 		return;
 	}
 
+#if XASH_GAMECUBE
+	/* The retail New Game route draws the world from its World DL pack and
+	 * never builds the live msurface table (mod->surfaces is NULL), but the
+	 * BSP nodes still name face ranges: R_DecalNode walked NULL + firstsurface
+	 * and the game died on the first bullet hole (c1a2a). Until decals get
+	 * their own surface data, place none rather than crash. */
+	if( !model->surfaces || model->numsurfaces <= 0 )
+	{
+		static qboolean logged;
+
+		if( !logged )
+		{
+			logged = true;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: %s has no live surface table, decals go to the quad ring\n",
+				model->name );
+		}
+		R_GXDecalRingAdd( textureIndex, pos, scale );
+		return;
+	}
+#endif
+
 	decalInfo.m_pModel = model;
 	hull_t *hull = &model->hulls[0]; // always use #0 hull
 
@@ -1080,6 +1256,9 @@ used for full decals restart
 */
 void GAME_EXPORT R_ClearAllDecals( qboolean includePermanent )
 {
+#if XASH_GAMECUBE
+	R_GXDecalRingClear();
+#endif
 	// because gDecalCount may be zeroed after recach the decal limit
 	for( int i = 0; i < MAX_RENDER_DECALS; i++ )
 	{

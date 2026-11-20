@@ -1,0 +1,513 @@
+From 38fb92b99e86ad2e98ba7adeb51ed994e6fd6ed9 Mon Sep 17 00:00:00 2001
+From: Tim Fox <timfox@outlook.com>
+Date: Wed, 18 Nov 2026 03:19:06 -0800
+Subject: [PATCH] gamecube: retail Half-Life HUD on every route
+
+The client HUD had a quality-0 "lean" mode: CHud::Init only hooked
+messages (no HUD elements, no cvars), VidInit loaded no hud.txt, and
+Redraw drew a stand-in (health/armor at the top, a permanent pain sprite
+and train dial, a fixed green crosshair, 320 sheets). The engine set
+gc_quality 0 while the client came up on the New Game routes, so this
+was the HUD players got; and once the HEV suit was on and quality was
+back at 1, Redraw ran the full path on that half-built CHud and the game
+froze (c2a1, 3 of 3 runs).
+
+CHud::Init and VidInit now always do the retail work (every HUD element,
+MOTD, scoreboard, menu, hud_draw and the other cvars), Redraw is the
+retail one, and UpdateClientData no longer skips the gc_quality-0 probe
+path. Only Steam rich presence is left out (retail has none).
+
+The menu New Game route also skipped CBasePlayer::UpdateClientData
+entirely, so Health, Battery, WeaponList, CurWeapon, AmmoX, HideWeapon,
+SetFOV, Damage and Train were never sent: no health, armor or ammo and
+an empty weapon menu. It runs again, as in retail.
+
+Dolphin, retail menu New Game route (c2a1 start, HEV suit and weapons
+given through the probe console script; c1a4, c2a4a and c0a0 -> c1a0
+campaign rides): no freeze on suit pickup; health/armor/ammo, weapon
+buckets, pickup history, flashlight, crosshair and the death HUD match
+retail at 640x480.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ cl_dll/hud.cpp        |  98 +------------------
+ cl_dll/hud.h          |   2 -
+ cl_dll/hud_redraw.cpp | 220 ------------------------------------------
+ cl_dll/hud_update.cpp |  21 ----
+ dlls/player.cpp       |  18 +---
+ 5 files changed, 7 insertions(+), 352 deletions(-)
+
+diff --git a/cl_dll/hud.cpp b/cl_dll/hud.cpp
+index 5b116f73..630de45e 100644
+--- a/cl_dll/hud.cpp
++++ b/cl_dll/hud.cpp
+@@ -99,21 +99,6 @@ float g_hud_text_color[3];
+ 
+ extern client_sprite_t *GetSpriteList( client_sprite_t *pList, const char *psz, int iRes, int iCount );
+ 
+-#ifdef __GAMECUBE__
+-int __MsgFunc_Geiger( const char *, int, void * );
+-int __MsgFunc_Flashlight( const char *, int, void * );
+-int __MsgFunc_FlashBat( const char *, int, void * );
+-int __MsgFunc_Health( const char *, int, void * );
+-int __MsgFunc_Damage( const char *, int, void * );
+-int __MsgFunc_Battery( const char *, int, void * );
+-int __MsgFunc_Train( const char *, int, void * );
+-int __MsgFunc_CurWeapon( const char *, int, void * );
+-int __MsgFunc_WeaponList( const char *, int, void * );
+-int __MsgFunc_HideWeapon( const char *, int, void * );
+-int __MsgFunc_AmmoX( const char *, int, void * );
+-int __MsgFunc_StatusText( const char *, int, void * );
+-int __MsgFunc_StatusValue( const char *, int, void * );
+-#endif
+ 
+ extern cvar_t *sensitivity;
+ cvar_t *cl_lw = NULL;
+@@ -122,19 +107,6 @@ cvar_t *cl_viewbob = NULL;
+ void ShutdownInput( void );
+ 
+ #ifdef __GAMECUBE__
+-static int GC_HudQuality( void )
+-{
+-	cvar_t *quality = gEngfuncs.pfnGetCvarPointer( "gc_quality" );
+-	int value = quality ? quality->value : 1;
+-
+-	if( value < 0 )
+-		value = 0;
+-	if( value > 1 )
+-		value = 1;
+-
+-	return value;
+-}
+-
+ /* G336: avoid libc malloc during HUD_Init — can stall after StatusIcon on
+  * denser AM cold New Game (probe 20260810-035405). */
+ #define GC_HUDLIST_POOL 32
+@@ -389,47 +361,6 @@ int __MsgFunc_AllowSpec( const char *pszName, int iSize, void *pbuf )
+ // This is called every time the DLL is loaded
+ void CHud::Init( void )
+ {
+-#ifdef __GAMECUBE__
+-	// Check for emergency -nohud mode or low visual quality
+-	const int quality = GC_HudQuality();
+-	gEngfuncs.Con_Printf( "Xash3D GameCube: CHud::Init begin quality=%d\n", quality );
+-	if( quality == 0 )
+-	{
+-		/* UpdateClientData still runs the original HUD Think path at quality 0.
+-		 * Register original message wrappers and initialize every value it
+-		 * dereferences without allocating sprite or HUD-element lists. */
+-		HOOK_MESSAGE( ResetHUD );
+-		HOOK_MESSAGE( InitHUD );
+-		HOOK_MESSAGE( SetFOV );
+-		HOOK_MESSAGE( Geiger );
+-		HOOK_MESSAGE( Flashlight );
+-		HOOK_MESSAGE( FlashBat );
+-		HOOK_MESSAGE( Health );
+-		HOOK_MESSAGE( Damage );
+-		HOOK_MESSAGE( Battery );
+-		HOOK_MESSAGE( Train );
+-		HOOK_MESSAGE( CurWeapon );
+-		HOOK_MESSAGE( WeaponList );
+-		HOOK_MESSAGE( HideWeapon );
+-		HOOK_MESSAGE( AmmoX );
+-		HOOK_MESSAGE( StatusText );
+-		HOOK_MESSAGE( StatusValue );
+-		m_iLogo = 0;
+-		/* G280: avoid CVAR_CREATE alloc after StatusValue — was tipping MEM1
+-		 * (Unloading world before "minimal ready"). Reuse existing cvars. */
+-		gEngfuncs.Con_Printf( "Xash3D GameCube: CHud::Init lean cvars\n" );
+-		default_fov = gEngfuncs.pfnGetCvarPointer( "default_fov" );
+-		m_iFOV = default_fov ? (int)default_fov->value : 90;
+-		m_flMouseSensitivity = 0;
+-		m_iKeyBits = 0;
+-		m_iWeaponBits = 0;
+-		m_iGcLeanHudLog = 0;
+-		m_flTime = 1.0;
+-		gEngfuncs.Con_Printf( "Xash3D GameCube: CHud::Init minimal ready\n" );
+-		return;
+-	}
+-#endif
+-
+ 	HOOK_MESSAGE( Logo );
+ 	HOOK_MESSAGE( ResetHUD );
+ 	HOOK_MESSAGE( GameMode );
+@@ -593,15 +524,6 @@ void CHud::Init( void )
+ 	m_AmmoSecondary.Init();
+ 	m_TextMessage.Init();
+ 	m_StatusIcons.Init();
+-#ifdef __GAMECUBE__
+-	gEngfuncs.Con_Printf( "Xash3D GameCube: CHud::Init StatusIcons ready\n" );
+-	/* G336: denser AM ISOs can stall in MOTD/Scoreboard/Menu AddHudElem
+-	 * (libc malloc) or richpresence ClientCmd after StatusIcon
+-	 * (probe 20260810-035405). Combat HUD hooks are already registered. */
+-	MsgFunc_ResetHUD( 0, 0, NULL );
+-	gEngfuncs.Con_Printf( "Xash3D GameCube: CHud::Init hud ready (G336 lean tail)\n" );
+-	return;
+-#else
+ #if USE_VGUI
+ 	GetClientVoiceMgr()->Init(&g_VoiceStatusHelper, (vgui::Panel**)&gViewPort);
+ #endif
+@@ -616,6 +538,10 @@ void CHud::Init( void )
+ 	m_Menu.Init();
+ 
+ 	MsgFunc_ResetHUD( 0, 0, NULL );
++#ifdef __GAMECUBE__
++	/* No Steam rich presence on GameCube; retail HL1 has none either. */
++	gEngfuncs.Con_Printf( "Xash3D GameCube: CHud::Init hud ready\n" );
++#else
+ 	ClientCmd( "richpresence_gamemode\n" );
+ 	ClientCmd( "richpresence_update\n" );
+ #endif
+@@ -665,17 +591,6 @@ int CHud::GetSpriteIndex( const char *SpriteName )
+ 
+ void CHud::VidInit( void )
+ {
+-#ifdef __GAMECUBE__
+-	if( GC_HudQuality() == 0 )
+-	{
+-		m_scrinfo.iSize = sizeof(m_scrinfo);
+-		GetScreenInfo( &m_scrinfo );
+-		/* Lean New Game / low-mem: keep 320 sheet names without loading hud.txt. */
+-		m_iRes = 320;
+-		m_iMaxRes = 320;
+-		return;
+-	}
+-#endif
+ 
+ 	int j;
+ 	m_scrinfo.iSize = sizeof(m_scrinfo);
+@@ -705,11 +620,6 @@ void CHud::VidInit( void )
+ 		m_pSpriteList = NULL;
+ 		
+ 		gEngfuncs.Con_Printf( "WARNING: hud.txt missing or empty, HUD disabled.\n" );
+-		
+-		// Initialize HUD elements to safe states to prevent crashes
+-		m_Ammo.Init();
+-		m_Health.Init();
+-		// ... other inits if necessary, but mostly VidInit calls are deferred or safe
+ 		return;
+ 	}
+ 	if( pSpriteList )
+diff --git a/cl_dll/hud.h b/cl_dll/hud.h
+index 94492544..5a9ec5f4 100644
+--- a/cl_dll/hud.h
++++ b/cl_dll/hud.h
+@@ -138,7 +138,6 @@ public:
+ 	void _cdecl UserCmd_NextWeapon( void );
+ 	void _cdecl UserCmd_PrevWeapon( void );
+ 	/* GameCube lean HUD: clip count, or -1 if melee / no weapon. */
+-	int GetLeanClip( void ) const { return m_pWeapon ? m_pWeapon->iClip : -1; }
+ 
+ private:
+ 	float m_fFade;
+@@ -545,7 +544,6 @@ private:
+ 	HUDLIST						*m_pHudList;
+ 	HSPRITE						m_hsprLogo;
+ 	int							m_iLogo;
+-	int							m_iGcLeanHudLog; /* GameCube quality-0 HUD once-flag */
+ 	client_sprite_t				*m_pSpriteList;
+ 	int							m_iSpriteCount;
+ 	int							m_iSpriteCountAllRes;
+diff --git a/cl_dll/hud_redraw.cpp b/cl_dll/hud_redraw.cpp
+index 7db1c3b2..6a9c9fc4 100644
+--- a/cl_dll/hud_redraw.cpp
++++ b/cl_dll/hud_redraw.cpp
+@@ -97,54 +97,6 @@ void CHud::Think( void )
+ // Redraw
+ // step through the local data,  placing the appropriate graphics & text as appropriate
+ // returns 1 if they've changed, 0 otherwise
+-#ifdef __GAMECUBE__
+-/* File-scope sprite handles — avoid function-local COMDAT BSS packing on GC. */
+-static HSPRITE s_gcLeanPain = 0;
+-static HSPRITE s_gcLeanTrain = 0;
+-static HSPRITE s_gcLeanCross = 0;
+-static HSPRITE s_gcLeanHud2 = 0;
+-
+-/* 320hud2 digit/cross rects from valve/sprites/hud.txt (320 block). */
+-static void GC_LeanDrawHudDigit( HSPRITE sheet, int digit, int x, int y, int r, int g, int b )
+-{
+-	wrect_t rc;
+-	int sheet_w;
+-	float sx;
+-
+-	if( digit < 0 || digit > 9 || !sheet )
+-		return;
+-	sheet_w = SPR_Width( sheet, 0 );
+-	if( sheet_w < 1 )
+-		sheet_w = 128;
+-	sx = (float)sheet_w / 128.0f;
+-	rc.left = (int)( digit * 12 * sx );
+-	rc.top = 0;
+-	rc.right = (int)(( digit * 12 + 12 ) * sx );
+-	rc.bottom = (int)( 16 * sx );
+-	if( rc.right <= rc.left )
+-		rc.right = rc.left + 1;
+-	if( rc.bottom <= rc.top )
+-		rc.bottom = rc.top + 1;
+-	SPR_Set( sheet, r, g, b );
+-	SPR_DrawAdditive( 0, x, y, &rc );
+-}
+-
+-static void GC_LeanDrawHudNumber( HSPRITE sheet, int value, int x, int y, int r, int g, int b )
+-{
+-	int hundreds, tens, ones;
+-
+-	if( value < 0 )
+-		value = 0;
+-	if( value > 999 )
+-		value = 999;
+-	hundreds = value / 100;
+-	tens = ( value / 10 ) % 10;
+-	ones = value % 10;
+-	GC_LeanDrawHudDigit( sheet, hundreds, x, y, r, g, b );
+-	GC_LeanDrawHudDigit( sheet, tens, x + 12, y, r, g, b );
+-	GC_LeanDrawHudDigit( sheet, ones, x + 24, y, r, g, b );
+-}
+-#endif
+ 
+ int CHud::Redraw( float flTime, int intermission )
+ {
+@@ -199,178 +151,6 @@ int CHud::Redraw( float flTime, int intermission )
+ 
+ 	m_iIntermission = intermission;
+ 
+-#ifdef __GAMECUBE__
+-	/* Quality 0 skips hud.txt sheet load in VidInit; drawing the full HUD list
+-	 * would chase null m_rghSprites / DVD stubs and stall Host_Frame. Draw one
+-	 * direct-load 320 sheet as New Game HUD proof instead. */
+-	{
+-		cvar_t *quality = gEngfuncs.pfnGetCvarPointer( "gc_quality" );
+-		const int q = quality ? (int)quality->value : 1;
+-
+-		if( q <= 0 )
+-		{
+-			int sheet_w, sheet_h;
+-
+-			/* Load number sheet first — same size as crosshairs; avoid last-slot OOM. */
+-			if( !s_gcLeanHud2 )
+-				s_gcLeanHud2 = SPR_Load( "sprites/gc_320hud2.spr" );
+-			if( !s_gcLeanPain )
+-				s_gcLeanPain = LoadSprite( "sprites/%d_pain.spr" );
+-			if( !s_gcLeanTrain )
+-				s_gcLeanTrain = LoadSprite( "sprites/%d_train.spr" );
+-			if( !s_gcLeanCross )
+-				s_gcLeanCross = SPR_Load( "sprites/crosshairs.spr" );
+-
+-			/*
+-			 * G183: draw hud2 (digits/icons) before chrome so Flipper TEXMAP0
+-			 * reserved slots pin the number sheet first — world LRU thrash was
+-			 * dropping gc_320hud2 after pain/train/cross (pics stuck at 3).
+-			 */
+-			if( s_gcLeanHud2 )
+-			{
+-				wrect_t cross, suit;
+-				int hp = m_Health.m_iHealth;
+-				int suit_val = m_Battery.m_iBat;
+-				int clip = m_Ammo.GetLeanClip();
+-				const int y = 4;
+-				float sx, sy;
+-
+-				sheet_w = SPR_Width( s_gcLeanHud2, 0 );
+-				sheet_h = SPR_Height( s_gcLeanHud2, 0 );
+-				if( sheet_w < 1 )
+-					sheet_w = 128;
+-				if( sheet_h < 1 )
+-					sheet_h = 128;
+-				/* hud.txt 320 block assumes 128×128; scale for lean sheets. */
+-				sx = (float)sheet_w / 128.0f;
+-				sy = (float)sheet_h / 128.0f;
+-
+-				if( hp <= 0 )
+-					hp = 100;
+-				if( suit_val < 0 )
+-					suit_val = 0;
+-				if( suit_val > 999 )
+-					suit_val = 999;
+-				/* health cross icon at hud.txt: cross 0,72 16x16 — top-left */
+-				cross.left = (int)( 0 * sx );
+-				cross.top = (int)( 72 * sy );
+-				cross.right = (int)( 16 * sx );
+-				cross.bottom = (int)( 88 * sy );
+-				if( cross.right <= cross.left )
+-					cross.right = cross.left + 1;
+-				if( cross.bottom <= cross.top )
+-					cross.bottom = cross.top + 1;
+-				SPR_Set( s_gcLeanHud2, 255, 160, 0 );
+-				SPR_DrawAdditive( 0, 4, y, &cross );
+-				GC_LeanDrawHudNumber( s_gcLeanHud2, hp, 22, y, 255, 160, 0 );
+-
+-				/* suit_empty 20,52 20x20 — top-right with armor digits */
+-				suit.left = (int)( 20 * sx );
+-				suit.top = (int)( 52 * sy );
+-				suit.right = (int)( 40 * sx );
+-				suit.bottom = (int)( 72 * sy );
+-				if( suit.right <= suit.left )
+-					suit.right = suit.left + 1;
+-				if( suit.bottom <= suit.top )
+-					suit.bottom = suit.top + 1;
+-				{
+-					const int sxpos = ScreenWidth - 20 - 4 - 36;
+-
+-					SPR_Set( s_gcLeanHud2, 0, 160, 255 );
+-					SPR_DrawAdditive( 0, sxpos, y, &suit );
+-					GC_LeanDrawHudNumber( s_gcLeanHud2, suit_val, sxpos + 22, y + 2, 0, 160, 255 );
+-				}
+-
+-				/* Ammo/clip digits bottom-right when weapon has a clip. */
+-				if( clip >= 0 )
+-				{
+-					if( clip > 999 )
+-						clip = 999;
+-					GC_LeanDrawHudNumber( s_gcLeanHud2, clip,
+-						ScreenWidth - 4 - 36, ScreenHeight - 4 - 16, 255, 160, 0 );
+-				}
+-			}
+-			if( s_gcLeanPain )
+-			{
+-				int y;
+-
+-				SPR_Set( s_gcLeanPain, 255, 180, 180 );
+-				y = ScreenHeight - SPR_Height( s_gcLeanPain, 0 ) - 4;
+-				if( y < 0 )
+-					y = 0;
+-				SPR_DrawAdditive( 0, 4, y, NULL );
+-			}
+-			if( s_gcLeanTrain )
+-			{
+-				int y;
+-
+-				SPR_Set( s_gcLeanTrain, 200, 220, 255 );
+-				y = ScreenHeight - SPR_Height( s_gcLeanTrain, 0 ) - 4;
+-				if( y < 0 )
+-					y = 0;
+-				SPR_DrawAdditive( 0, ScreenWidth - SPR_Width( s_gcLeanTrain, 0 ) - 4, y, NULL );
+-			}
+-			if( s_gcLeanCross )
+-			{
+-				/*
+-				 * G185: draw one crosshair cell, not the full 64×64 sheet.
+-				 * Full-sheet holes was ~4 KiB EFB fill of mostly transparent
+-				 * texels and dominated Flipper HUD cost after G183.
+-				 * Retail cells are 32×32 on 128×128 → 16×16 on lean 64×64;
+-				 * use 24×24 when the sheet allows for readability.
+-				 */
+-				const int sheet_w = SPR_Width( s_gcLeanCross, 0 );
+-				const int sheet_h = SPR_Height( s_gcLeanCross, 0 );
+-				int cell = 24;
+-				wrect_t crc;
+-				int x, y;
+-
+-				if( cell > sheet_w )
+-					cell = sheet_w;
+-				if( cell > sheet_h )
+-					cell = sheet_h;
+-				if( cell < 8 )
+-					cell = ( sheet_w < sheet_h ) ? sheet_w : sheet_h;
+-				crc.left = 0;
+-				crc.top = 0;
+-				crc.right = cell;
+-				crc.bottom = cell;
+-				x = ( ScreenWidth - cell ) / 2;
+-				y = ( ScreenHeight - cell ) / 2;
+-				if( x < 0 )
+-					x = 0;
+-				if( y < 0 )
+-					y = 0;
+-				SPR_Set( s_gcLeanCross, 0, 255, 0 );
+-				SPR_DrawHoles( 0, x, y, &crc );
+-				if( m_iGcLeanHudLog == 0 )
+-					gEngfuncs.Con_Printf(
+-						"Xash3D GameCube: G185 lean crosshair cell=%dx%d (was %dx%d)\n",
+-						cell, cell, sheet_w, sheet_h );
+-			}
+-			/* Once-flag lives on CHud — file/function statics re-spam on GC. */
+-			if( m_iGcLeanHudLog == 0 )
+-			{
+-				if( s_gcLeanPain || s_gcLeanTrain || s_gcLeanCross || s_gcLeanHud2 )
+-				{
+-					m_iGcLeanHudLog = 1;
+-					gEngfuncs.Con_Printf( "Xash3D GameCube: lean HUD sprites drawn pain=%d train=%d cross=%d nums=%d suit=%d ammo=%d\n",
+-						s_gcLeanPain ? 1 : 0, s_gcLeanTrain ? 1 : 0,
+-						s_gcLeanCross ? 1 : 0, s_gcLeanHud2 ? 1 : 0,
+-						s_gcLeanHud2 ? 1 : 0,
+-						( s_gcLeanHud2 && m_Ammo.GetLeanClip() >= 0 ) ? 1 : 0 );
+-				}
+-				else
+-				{
+-					m_iGcLeanHudLog = 2;
+-					gEngfuncs.Con_Printf( "Xash3D GameCube: lean HUD sprite load failed\n" );
+-				}
+-			}
+-			return 1;
+-		}
+-	}
+-#endif
+-
+ 	// if no redrawing is necessary
+ 	// return 0;
+ 
+diff --git a/cl_dll/hud_update.cpp b/cl_dll/hud_update.cpp
+index b5d6501e..a8ce2b9d 100644
+--- a/cl_dll/hud_update.cpp
++++ b/cl_dll/hud_update.cpp
+@@ -30,27 +30,6 @@ extern void HUD_SetCmdBits( int bits );
+ 
+ int CHud::UpdateClientData( client_data_t *cdata, float time )
+ {
+-#ifdef __GAMECUBE__
+-	{
+-		cvar_t *quality = gEngfuncs.pfnGetCvarPointer( "gc_quality" );
+-		cvar_t *probe_skip = gEngfuncs.pfnGetCvarPointer( "gc_hud_probe_skip" );
+-		const int q = quality ? (int)quality->value : 1;
+-		const int skip = probe_skip ? (int)probe_skip->value : 0;
+-
+-		/* Lean low-memory HUD uses direct sprite draws from Redraw().
+-		 * Keep the post-map probe path away from the legacy HUD button/state
+-		 * bookkeeping until the full client HUD is safe to advance again. */
+-		if( q <= 0 && skip )
+-		{
+-			memcpy( m_vecOrigin, cdata->origin, sizeof(vec3_t) );
+-			memcpy( m_vecAngles, cdata->viewangles, sizeof(vec3_t) );
+-			in_fov = cdata->fov;
+-			m_iFOV = cdata->fov;
+-			v_idlescale = 0.0f;
+-			return 1;
+-		}
+-	}
+-#endif
+ 
+ 	memcpy( m_vecOrigin, cdata->origin, sizeof(vec3_t) );
+ 	memcpy( m_vecAngles, cdata->viewangles, sizeof(vec3_t) );
+diff --git a/dlls/player.cpp b/dlls/player.cpp
+index 5b21bef7..3b63719b 100644
+--- a/dlls/player.cpp
++++ b/dlls/player.cpp
+@@ -4134,22 +4134,10 @@ reflecting all of the HUD state info.
+ void CBasePlayer::UpdateClientData( void )
+ {
+ #if XASH_GAMECUBE
++	/* The HUD's messages (health, battery, weapons, ammo, damage, train,
++	 * FOV, HideWeapon) are sent on every route, as in retail: the client
++	 * HUD is the full retail one on the New Game routes too. */
+ 	BOOL gcTraceNativeHUD = m_fInitHUD && g_engfuncs.CheckParm( (char *)"-gcfullphysics", NULL );
+-
+-	/* New Game bring-up: full UpdateClientData (weapon/HUD msgs, status bar)
+-	 * stalls Host_ServerFrame after G36. Clear init once, then no-op. */
+-	if( ( g_engfuncs.CheckParm( (char *)"-gcnewgame", NULL )
+-		|| g_engfuncs.CheckParm( (char *)"-gcmenuplaystart", NULL ) )
+-		&& !g_engfuncs.CheckParm( (char *)"-gcfullphysics", NULL ) )
+-	{
+-		if( m_fInitHUD )
+-		{
+-			m_fInitHUD = FALSE;
+-			gInitHUD = FALSE;
+-			ALERT( at_aiconsole, "*GameCube: skipped UpdateClientData for newgame\n" );
+-		}
+-		return;
+-	}
+ #endif
+ 	if( m_fInitHUD )
+ 	{
+-- 
+2.53.0
+

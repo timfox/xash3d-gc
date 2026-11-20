@@ -623,20 +623,68 @@ def configure(conf):
 
 	if conf.env.DEST_OS == 'gamecube':
 		conf.define('XASH_GAMECUBE', 1)
+		if conf.options.GAMEDIR == 'lostcoast':
+			# Single player only, and the heap is down to a few KB in play:
+			# tables sized for a second player or for bots are cut to one
+			# (server client slots: 91 KB each).
+			conf.define('XASH_GC_LOSTCOAST', 1)
+			# The level has 85 map entities and a handful made in play. The
+			# edict tables (server edicts and baselines, client entities)
+			# are static data sized by these caps, and static data is heap
+			# here: at the stock 900 / 460 they held 1.8 MB, nearly all of
+			# it never touched (measured in Dolphin over the ride and the
+			# gate scene), while the heap could not find 8 KB to spawn the
+			# map's actors.
+			conf.define('DEFAULT_MAX_EDICTS', 256)
+			conf.define('GC_SP_EDICT_CAP', 256)
+			conf.define('GC_GCMAP_CLIENT_EDICTS', 256)
 		if conf.options.GAMEDIR == 'dod':
 			conf.define('XASH_DODGC_NETWORK', 1)
-			conf.define('DEFAULT_MAX_EDICTS', 460)
-			conf.define('GC_SP_EDICT_CAP', 460)
+			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
+			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
+			# screen) can be built with a bigger table: XASH_GC_MAX_EDICTS=560 costs about
+			# 0.8 KiB of edict + 0.3 KiB of baseline BSS and ~1.4 KiB of client entity per edict.
+			max_edicts = os.environ.get('XASH_GC_MAX_EDICTS', '460')
+			max_edicts = int(max_edicts) if max_edicts.isdigit() else 460
+			max_edicts = max(460, min(900, max_edicts))
+			conf.define('DEFAULT_MAX_EDICTS', max_edicts)
+			conf.define('GC_SP_EDICT_CAP', max_edicts)
+			if max_edicts != 460:
+				Logs.info('GameCube dod edicts: %d' % max_edicts)
+			# playermove_t array caps (two static copies, ~0.5 KiB per physent+visent+touch).
+			# Unset keeps the stock 600/64. dod-gc patches the SDK's pm_defs.h with the same
+			# numbers (scripts/integrate-dod-gameplay.py); both sides must agree.
+			pm_phys = os.environ.get('XASH_GC_PM_MAX_PHYSENTS', '')
+			pm_move = os.environ.get('XASH_GC_PM_MAX_MOVEENTS', '')
+			if pm_phys.isdigit():
+				conf.define('GC_PM_MAX_PHYSENTS', int(pm_phys))
+			if pm_move.isdigit():
+				conf.define('GC_PM_MAX_MOVEENTS', int(pm_move))
 		# Slim server client slots: more than two listen-server slots (bots), real
-		# clients still limited to two. Off unless asked for; see server.h.
-		if os.environ.get('XASH_GC_SLIM_CLIENTS', '').lower() in ('1', 'yes', 'true', 'on'):
+		# clients still limited to two; see server.h. DoD builds default to on
+		# with 5 slots (the player and four bots). Measured on dod_charlie in Dolphin
+		# (3/4/5/6/8 slots): a slot costs ~9 KiB of client table and the free heap at
+		# client start is unchanged (442-450 KiB); entities are the ceiling (the map uses
+		# ~422 of the 460 edicts, 7 bots reached 453 and crashed once), so the table is
+		# 5 as well. XASH_GC_SLIM_CLIENTS=0 turns it off.
+		is_dod = conf.options.GAMEDIR == 'dod'
+		slim_env = os.environ.get('XASH_GC_SLIM_CLIENTS', '1' if is_dod else '').lower()
+		if slim_env in ('1', 'yes', 'true', 'on'):
+			max_slots = os.environ.get('XASH_GC_MAX_SLOTS', '5' if is_dod else '4')
+			default_slots = os.environ.get('XASH_GC_DEFAULT_SLOTS', '5' if is_dod else '2')
 			conf.define('XASH_GC_SLIM_CLIENTS', 1)
-			conf.define('GC_SV_MAX_SLOTS', int(os.environ.get('XASH_GC_MAX_SLOTS', '4')))
-			# The slot count a listen server starts with (sv_gc_slots default); 2 = as before.
-			conf.define('GC_SV_DEFAULT_SLOTS_STR', os.environ.get('XASH_GC_DEFAULT_SLOTS', '2'))
-			Logs.info('GameCube slim client slots: table %s, default %s' % (os.environ.get('XASH_GC_MAX_SLOTS', '4'), os.environ.get('XASH_GC_DEFAULT_SLOTS', '2')))
+			conf.define('GC_SV_MAX_SLOTS', int(max_slots))
+			# The slot count a listen server starts with (sv_gc_slots default).
+			conf.define('GC_SV_DEFAULT_SLOTS_STR', default_slots)
+			Logs.info('GameCube slim client slots: table %s, default %s' % (max_slots, default_slots))
 		if os.environ.get('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', 1)
+		# DoD view-model skin window as a 192 KiB static block (ref/gx/r_gx_skins.c). Off by default:
+		# it comes out of the heap a listen host is short of.
+		if os.environ.get('XASH_GC_SKIN_WINDOW_BSS', '').lower() in ('1', 'yes', 'true', 'on'):
+			conf.define('XASH_GC_SKIN_WINDOW_BSS', 1)
+			# Size of that block in KiB (default 192 for view models; 64 holds the two nearest 256 px bodies).
+			conf.define('GC_SKIN_WINDOW_KIB', int(os.environ.get('XASH_GC_SKIN_WINDOW_KIB', '192')))
 		# Broadband / eth2sp1: link -lbba and enable GC net headers when requested.
 		if os.environ.get('XASH_GAMECUBE_LINK_BBA', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_HAVE_LIBBBA', 1)

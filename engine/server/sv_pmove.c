@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "server.h"
 #include "const.h"
 #include "pm_local.h"
+#include "pm_layout.h"
 #include "event_flags.h"
 #include "studio.h"
 #if XASH_GAMECUBE
@@ -443,6 +444,21 @@ SV_InitClientMove
 */
 void SV_InitClientMove( void )
 {
+	/* The game DLL has its own copy of pm_defs.h: a DLL built with different XASH_GC_PM_MAX_PHYSENTS /
+	 * MAX_MOVEENTS has a different playermove_t, and PM_Init then crashes (PC 0 in PM_InitTextureTypes).
+	 * A DLL that publishes its layout in gc_pm_layout_dll is checked here, before PM_Init. */
+	{
+		const convar_t *dll = Cvar_FindVar( "gc_pm_layout_dll" );
+		char mine[64];
+
+		Q_snprintf( mine, sizeof( mine ), "%d,%d,%d", (int)sizeof( playermove_t ), MAX_PHYSENTS, MAX_MOVEENTS );
+		if( dll && dll->string && !PM_LayoutMatches( dll->string, (int)sizeof( playermove_t ), MAX_PHYSENTS, MAX_MOVEENTS ))
+			Host_Error( "playermove_t layout mismatch: the game DLL was built with (size,physents,moveents) = %s, the engine with %s. "
+				"Build both with the same XASH_GC_PM_MAX_PHYSENTS / XASH_GC_PM_MAX_MOVEENTS (256 and 32 through scripts/build-dodgc.sh, "
+				"or both stock 600 and 64) and rebuild the game archives.\n", dll->string, mine );
+		Cvar_FullSet( "gc_pm_layout", mine, FCVAR_READ_ONLY );
+	}
+
 	Pmove_Init ();
 
 	svgame.pmove->server = true;
@@ -1166,8 +1182,17 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	 * CapFaces then Guru'd on frame 3 without this skip (DAR junk, 20261108). */
 	/* Network sessions must simulate movement; retain the offline capture
 	 * workaround only for routes that do not host or join a match. */
+	/* Bots (fake clients) only exist in a real match and must walk: they run
+	 * PM_Move even on this route. WorldDL keeps the hull0 clipnodes resident
+	 * ("WorldDL keep hull0 clipnodes" in the load log), which is what the skip
+	 * below was protecting. */
+	/* A match started from the in-game Create Server menu runs without -gclistenserver, but it
+	 * hosts several slots (bots and a human): the human must walk there too. Only the single-slot
+	 * capture/solo routes keep the skip. */
 	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw()
-		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" ))
+		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" )
+		&& svs.maxclients <= 1
+		&& !FBitSet( cl->flags, FCL_FAKECLIENT ))
 	{
 		static qboolean gc_pm_skip_logged;
 
@@ -1187,6 +1212,9 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 		VectorCopy( clent->v.origin, gc_network_before );
 #endif
 		svgame.dllFuncs.pfnPM_Move( svgame.pmove, true );
+#if XASH_GAMECUBE
+		{ static int hw[4]; PM_NoteHighWater( "server", svgame.pmove, hw ); }
+#endif
 
 		// copy results back to client
 		SV_FinishPMove( svgame.pmove, cl );

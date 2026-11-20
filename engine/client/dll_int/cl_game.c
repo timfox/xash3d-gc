@@ -80,7 +80,7 @@ static void CL_GameCubeApplySmokeClientBudgets( void )
 		}
 		else
 		{
-			/* Standard: zombie blood + weapon tracers without desktop 256/64. */
+			/* Standard: zombie blood + weapon tracers without the retail 256/64. */
 			particles = 96;
 			beams = 12;
 			tents = 32;
@@ -421,6 +421,19 @@ static void SPR_AdjustTexCoords( int texnum, float width, float height, float *s
 	const int xremainder = refState.width % clgame.scrInfo.iWidth;
 	const int yremainder = refState.height % clgame.scrInfo.iHeight;
 
+#if XASH_GAMECUBE
+	/* 640 HUD on the 640x480 EFB (CL_GetScreenInfo): texels map 1:1 onto
+	 * EFB pixels, so no half-texel inset (it would crop and blur cells). */
+	if( refState.width * 2 == clgame.scrInfo.iWidth && refState.height * 2 == clgame.scrInfo.iHeight )
+	{
+		*s1 /= width;
+		*t1 /= height;
+		*s2 /= width;
+		*t2 /= height;
+		return;
+	}
+#endif
+
 	if(( filtering || xremainder ) && refState.width != clgame.scrInfo.iWidth )
 	{
 		// align to texel if scaling
@@ -448,11 +461,31 @@ SPR_DrawGeneric
 draw hudsprite routine
 ====================
 */
+#if XASH_GAMECUBE
+/* Half-Life's retail 640 HUD (Day of Defeat keeps its own layout and lists). */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#define GC_HUD_LIST_FILTER 1
+#else
+#define GC_HUD_LIST_FILTER 0
+#endif
+static int gc_hud_spr_draws; /* sprite draws in the current client Redraw */
+static qboolean gc_hud_fullupdate_pending; /* CL_GCEnsureHudVidInit */
+static int gc_hud_fullupdate_frames;
+qboolean SV_GCForceClientHudUpdate( void );
+#endif
+
 static void SPR_DrawGeneric( int frame, float x, float y, float width, float height, const wrect_t *prc )
 {
+#if XASH_GAMECUBE
+	gc_hud_spr_draws++;
+#endif
 	float	s1, s2, t1, t2;
+	/* An explicit size scales the sprite (or its rectangle) to it; the
+	 * rectangle is still clamped and normalised against the image size. */
+	const qboolean sized = width > 0.0f && height > 0.0f;
+	const float dest_w = width, dest_h = height;
 
-	if( width == -1 && height == -1 )
+	if(( width == -1 && height == -1 ) || ( sized && prc ))
 	{
 		int	w, h;
 
@@ -493,8 +526,16 @@ static void SPR_DrawGeneric( int frame, float x, float y, float width, float hei
 
 		// calc user-defined rectangle
 		SPR_AdjustTexCoords( texnum, width, height, &s1, &t1, &s2, &t2 );
-		width = rc.right - rc.left;
-		height = rc.bottom - rc.top;
+		if( sized )
+		{
+			width = dest_w;
+			height = dest_h;
+		}
+		else
+		{
+			width = rc.right - rc.left;
+			height = rc.bottom - rc.top;
+		}
 	}
 	else
 	{
@@ -910,7 +951,7 @@ Render crosshair
 */
 static void CL_DrawCrosshair( void )
 {
-	int	x, y, width, height;
+	int	x, y, width, height, vw, vh;
 	float xscale, yscale;
 
 	if( !clgame.ds.pCrosshair || !cl_crosshair.value )
@@ -924,8 +965,21 @@ static void CL_DrawCrosshair( void )
 	width = clgame.ds.rcCrosshair.right - clgame.ds.rcCrosshair.left;
 	height = clgame.ds.rcCrosshair.bottom - clgame.ds.rcCrosshair.top;
 
-	x = clgame.viewport[0] + ( clgame.viewport[2] >> 1 );
-	y = clgame.viewport[1] + ( clgame.viewport[3] >> 1 );
+	vw = clgame.viewport[2];
+	vh = clgame.viewport[3];
+	x = clgame.viewport[0] + ( vw >> 1 );
+	y = clgame.viewport[1] + ( vh >> 1 );
+#if XASH_GAMECUBE
+	/* The GameCube world presents set up the view without V_SetRefParams'
+	 * viewport (left zero): the view is the whole screen. */
+	if( clgame.viewport[2] <= 0 || clgame.viewport[3] <= 0 )
+	{
+		vw = refState.width;
+		vh = refState.height;
+		x = vw >> 1;
+		y = vh >> 1;
+	}
+#endif
 
 	// g-cont - cl.crosshairangle is the autoaim angle.
 	// if we're not using autoaim, just draw in the middle of the screen
@@ -940,8 +994,8 @@ static void CL_DrawCrosshair( void )
 		VectorAdd( refState.vieworg, forward, point );
 		ref.dllFuncs.WorldToScreen( point, screen );
 
-		x += ( clgame.viewport[2] >> 1 ) * screen[0] + 0.5f;
-		y += ( clgame.viewport[3] >> 1 ) * screen[1] + 0.5f;
+		x += ( vw >> 1 ) * screen[0] + 0.5f;
+		y += ( vh >> 1 ) * screen[1] + 0.5f;
 	}
 
 	// back to logical sizes
@@ -1010,6 +1064,27 @@ static int gc_hud_call_trace;
 
 void CL_DrawHUD( int state )
 {
+	/* cinematic shot: frame stamp always, HUD only when cine_hud is set */
+	if( state == CL_ACTIVE && CL_CineActive( ))
+	{
+		CL_CineDraw2D();
+		if( CL_CineHideHUD( ))
+			return;
+	}
+#if XASH_GAMECUBE
+	/* gc_hud_off 1 (console or listenserver.cfg): draw no client HUD at all, for clean spectator and
+	 * capture footage. The cvar is looked up by name each frame so a value set before any
+	 * registration still counts. */
+	if( state == CL_ACTIVE )
+	{
+		static convar_t *gc_hud_off;
+
+		if( !gc_hud_off )
+			gc_hud_off = Cvar_FindVar( "gc_hud_off" );
+		if( gc_hud_off && gc_hud_off->value != 0.0f )
+			return;
+	}
+#endif
 	if( state == CL_ACTIVE && !cl.video_prepped )
 		state = CL_LOADING;
 
@@ -1051,20 +1126,10 @@ void CL_DrawHUD( int state )
 	{
 	case CL_ACTIVE:
 	{
-#if XASH_GAMECUBE
-		/* Half-Life shows no HUD before the HEV suit (WEAPON_SUIT, bit 31);
-		 * the quality-0 client.dll's lean HUD ignores that, so skip it and
-		 * the crosshair here. Fades and intro titles still draw. */
-		const qboolean gc_no_suit = Sys_CheckParm( "-gcmenuplaystart" )
-			&& !FBitSet( cl.frames[cl.parsecountmod].clientdata.weapons, BIT( 31 ));
-#else
-		const qboolean gc_no_suit = false;
-#endif
 		if( !cl.intermission )
 			CL_DrawScreenFade ();
 		CL_HUD_TRACE( "fade done" );
-		if( !gc_no_suit )
-			CL_DrawCrosshair ();
+		CL_DrawCrosshair ();
 		CL_HUD_TRACE( "crosshair done" );
 		CL_DrawCenterPrint ();
 		CL_HUD_TRACE( "centerprint done" );
@@ -1083,12 +1148,35 @@ void CL_DrawHUD( int state )
 				gc_hud_call_trace = 8;
 		}
 		GC_WatchdogMark( "client HUD Redraw" );
+		CL_GCEnsureHudVidInit( "first HUD draw" );
+		/* Once the client is really in the game (signon done, a few HUD
+		 * frames run): messages sent earlier on this route can still be
+		 * dropped on the way in. */
+		if( gc_hud_fullupdate_pending && cls.state == ca_active && cls.signon == SIGNONS
+			&& ++gc_hud_fullupdate_frames >= 10 && SV_GCForceClientHudUpdate( ))
+		{
+			gc_hud_fullupdate_pending = false;
+			gc_hud_fullupdate_frames = 0;
+		}
+		gc_hud_spr_draws = 0;
 #endif
-		if( !gc_no_suit )
-			clgame.dllFuncs.pfnRedraw( cl.time, cl.intermission );
+		clgame.dllFuncs.pfnRedraw( cl.time, cl.intermission );
 #if XASH_GAMECUBE
+		{
+			static int drawn_logged;
+
+			/* Harness G506 (dolphin-probe-analyze.py): the client's HUD ran;
+			 * a second line once it drew sprites (the HEV suit is on). */
+			if( drawn_logged == 0 || ( drawn_logged == 1 && gc_hud_spr_draws > 0 ))
+			{
+				Con_Reportf( "Xash3D GameCube: HUD sprites drawn n=%d screen=%dx%d\n",
+					gc_hud_spr_draws, clgame.scrInfo.iWidth, clgame.scrInfo.iHeight );
+				drawn_logged = gc_hud_spr_draws > 0 ? 2 : 1;
+			}
+		}
 		gc_hud_call_trace = 0;
-		/* env_message titles the quality-0 client.dll does not draw. */
+		/* env_message titles when the client has no HudText hook (the
+		 * engine fallback in CL_ParseUserMessage queues them). */
 		CL_GCHudTextDraw();
 #endif
 		CL_HUD_TRACE( "client Redraw done" );
@@ -1184,17 +1272,28 @@ void CL_ClearWorld( void )
 }
 
 #if XASH_GAMECUBE
-#define GC_GCMAP_STATIC_CLIENT_EDICTS 460
+/* BSS client entity table (cl_entity_t is ~1.6 KiB each). Every entity dropped
+ * from here is 1:1 libc heap on MEM1; build with -DGC_GCMAP_CLIENT_EDICTS=N once
+ * the peak entity index of the target maps is known. Must match cl_parse.c. */
+#ifndef GC_GCMAP_CLIENT_EDICTS
+#define GC_GCMAP_CLIENT_EDICTS 460
+#endif
+#define GC_GCMAP_STATIC_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
 static cl_entity_t gc_gcmap_bootstrap_entities[GC_GCMAP_STATIC_CLIENT_EDICTS];
 static entity_state_t gc_gcmap_bootstrap_packet_entities[128];
+static entity_state_t *cl_gc_arena_packet_entities; // per-map ring in the map arena
 remap_info_t *gc_gcmap_bootstrap_remap_info[GC_GCMAP_STATIC_CLIENT_EDICTS + 1];
 
 static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 {
-	/* Dual BBA listen needs maxplayers=2; heap Client Edicts (~1.42 Mb) soft-
-	 * NULLs and hangs mid-serverdata. Bootstrap tables still fit LM2 (128
-	 * packet ents). Cap stays at 2 so larger MP cannot silently under-alloc. */
-	if( maxclients > 2 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* Heap Client Edicts (744 Kb at 460 ents) cannot fit MEM1 once a map is
+	 * up, at any listen size: a 3-slot bot match hit mem FAIL with 380 Kb
+	 * free (ceres fsb). The static table holds 460 ents whatever maxclients
+	 * is, and cl_parse caps the map route to it, so nothing under-allocs;
+	 * maps over 460 take the map-arena path first. */
+	/* 16, not 8: the table does not depend on maxclients, and an 8-bot match is 9 clients (the heap table
+	 * of 744 KB then fails: "mem FAIL Client Edicts Zone"). */
+	if( maxclients > 16 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	if( GC_MapLoadMemoryOpt()
@@ -1213,6 +1312,110 @@ static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 }
 #endif
 
+#if XASH_GAMECUBE
+static cl_entity_t *cl_gc_arena_entities;	// per-map table in the map arena
+static remap_info_t **cl_gc_arena_remaps;
+
+/* Maps over 460 entities (42 of HL1's campaign maps): put the whole client
+ * table in the free map-arena tail, and the packet ring in the static
+ * bootstrap block it no longer needs. Steps down if the tail is short,
+ * logging what the map got; the server never sends past the table. */
+static qboolean CL_GCArenaEdicts( int maxclients )
+{
+	const int want = clgame.maxEntities;
+	int count;
+
+	cl_gc_arena_entities = NULL;
+	cl_gc_arena_remaps = NULL;
+	/* Any listen size: the table lives in the map arena, not the heap. Was
+	 * capped at 2 clients, so a 3-slot match (two bots and the player) fell
+	 * through to a 744 KiB heap calloc that cannot fit (ceres fra). */
+	if( !GC_MenuRunsServer() || maxclients > 8 || want <= GC_GCMAP_STATIC_CLIENT_EDICTS )
+		return false;
+
+	for( count = want; count > GC_GCMAP_STATIC_CLIENT_EDICTS; count -= 32 )
+	{
+		const size_t ent_bytes = ( sizeof( cl_entity_t ) * (size_t)count + 31u ) & ~(size_t)31u;
+		const size_t remap_bytes = sizeof( remap_info_t * ) * ( (size_t)count + 1 );
+		const size_t at = GC_MapArenaFind( ent_bytes + remap_bytes );
+		byte *block = at == (size_t)-1 ? NULL
+			: (byte *)GC_MapLoadBufferTailAlloc( at, ent_bytes + remap_bytes );
+
+		if( !block )
+			continue;
+		memset( block, 0, ent_bytes + remap_bytes );
+		cl_gc_arena_entities = (cl_entity_t *)block;
+		cl_gc_arena_remaps = (remap_info_t **)( block + ent_bytes );
+		break;
+	}
+	if( !cl_gc_arena_entities )
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client entities map=%s %d of %d (no arena room, arena_tail_left=%s)\n",
+			clgame.mapname, GC_GCMAP_STATIC_CLIENT_EDICTS, want,
+			Q_memprint( GC_MapArenaLargestGap()));
+		clgame.maxEntities = GC_GCMAP_STATIC_CLIENT_EDICTS;
+		return false;
+	}
+	clgame.maxEntities = count;
+	clgame.entities = cl_gc_arena_entities;
+	clgame.static_entities = NULL;
+	clgame.numStatics = 0;
+
+	/* The static block the table would have used holds the packet ring. */
+	cls.num_client_entities = MAX_VISIBLE_PACKET * CL_UPDATE_BACKUP;
+	while( sizeof( entity_state_t ) * (size_t)cls.num_client_entities > sizeof( gc_gcmap_bootstrap_entities ))
+		cls.num_client_entities -= MAX_VISIBLE_PACKET;
+	cls.packet_entities = (entity_state_t *)gc_gcmap_bootstrap_entities;
+	memset( cls.packet_entities, 0, sizeof( entity_state_t ) * cls.num_client_entities );
+
+	Con_Reportf( "Xash3D GameCube: %sclient entities map=%s %d of %d in map arena (%s), packet ring %d in static block, arena_tail_left=%s\n",
+		count < want ? "Warning: REDUCED " : "", clgame.mapname, count, want,
+		Q_memprint( sizeof( cl_entity_t ) * count ), cls.num_client_entities,
+		Q_memprint( GC_MapArenaLargestGap()));
+	return true;
+}
+#endif
+
+/* The server is about to hand this map's arena to the next map's BSP: move
+ * the client off it first (the transition hold still draws a few frames). */
+void CL_GCLeaveMapArena( void )
+{
+	if( !cl_gc_arena_entities && !cl_gc_arena_packet_entities )
+		return;
+	if( clgame.entities && clgame.entities == cl_gc_arena_entities )
+	{
+		const int keep = Q_min( clgame.maxEntities, GC_GCMAP_STATIC_CLIENT_EDICTS );
+
+		/* Remap entries are heap blocks listed in the arena: free them now. */
+		if( clgame.remap_info == cl_gc_arena_remaps )
+		{
+			CL_ClearAllRemaps();
+			clgame.maxRemapInfos = 0;
+		}
+
+		ref.dllFuncs.R_ProcessEntData( false, NULL, 0 );
+		/* The static block held the packet ring; it takes the table back. */
+		memcpy( gc_gcmap_bootstrap_entities, cl_gc_arena_entities, sizeof( cl_entity_t ) * keep );
+		clgame.entities = gc_gcmap_bootstrap_entities;
+		clgame.maxEntities = keep;
+		ref.dllFuncs.R_ProcessEntData( true, clgame.entities, clgame.maxEntities );
+	}
+	cls.packet_entities = gc_gcmap_bootstrap_packet_entities;
+	cls.num_client_entities = (int)ARRAYSIZE( gc_gcmap_bootstrap_packet_entities );
+	cls.next_client_entities = 0;
+	for( int i = 0; i < (int)ARRAYSIZE( cl.frames ); i++ )
+	{
+		cl.frames[i].num_entities = 0;
+		cl.frames[i].first_entity = 0;
+		cl.frames[i].valid = false;
+	}
+	cl.validsequence = 0;
+	cl_gc_arena_entities = NULL;
+	cl_gc_arena_remaps = NULL;
+	cl_gc_arena_packet_entities = NULL;
+	Con_Reportf( "Xash3D GameCube: client entity tables left the map arena (%d kept)\n", clgame.maxEntities );
+}
+
 void CL_InitEdicts( int maxclients )
 {
 	Assert( clgame.entities == NULL );
@@ -1223,17 +1426,74 @@ void CL_InitEdicts( int maxclients )
 #endif
 	cls.num_client_entities = CL_UPDATE_BACKUP * NUM_PACKET_ENTITIES;
 #if XASH_GAMECUBE
-	if( maxclients <= 2 )
+	if( maxclients <= 8 )
 		cls.num_client_entities = 128;
 	Con_Reportf( "Xash3D GameCube: client edicts alloc request max=%d bytes=%u packet_entities=%d\n",
 		clgame.maxEntities, (uint)( sizeof( cl_entity_t ) * clgame.maxEntities ),
 		cls.num_client_entities );
 
+	if( CL_GCArenaEdicts( maxclients ))
+		goto init_remaps;
 	if( CL_GameCubeUseStaticGcmapBootstrapEdicts( maxclients ))
 	{
 		memset( gc_gcmap_bootstrap_entities, 0, sizeof( gc_gcmap_bootstrap_entities ));
 		memset( gc_gcmap_bootstrap_packet_entities, 0, sizeof( gc_gcmap_bootstrap_packet_entities ));
 		cls.packet_entities = gc_gcmap_bootstrap_packet_entities;
+		/* Retail sends up to 256 visible entities a frame. Hold CL_UPDATE_BACKUP
+		 * frames of them in the map arena tail the World DL route leaves free
+		 * (the server sized its own copy there first); the 128-entry static
+		 * table could not even hold one frame of c1a2a. DoD matches too. */
+#if XASH_DODGC_NETWORK
+		/* A match hosted here: the server sized this ring with its own, so
+		 * both hold the same count, and a second call for the same map
+		 * (connect, then the map name arrives) gets the same ring back. */
+		{
+			extern entity_state_t *SV_GCLocalClientRing( int *entries );
+			int entries = 0;
+			entity_state_t *ring = SV_GCLocalClientRing( &entries );
+
+			if( ring )
+			{
+				memset( ring, 0, sizeof( entity_state_t ) * (size_t)entries );
+				cls.packet_entities = ring;
+				cl_gc_arena_packet_entities = ring;
+				cls.num_client_entities = entries;
+				Con_Reportf( "Xash3D GameCube: client packet entities map=%s share the server block, %d entries\n",
+					clgame.mapname, entries );
+			}
+		}
+		if( !cl_gc_arena_packet_entities && !SV_Active( ))
+#else
+		if( GC_MenuRunsServer( ))
+#endif
+		{
+			int frames;
+
+			for( frames = CL_UPDATE_BACKUP; frames >= 2; frames-- )
+			{
+				const size_t bytes = sizeof( entity_state_t ) * (size_t)MAX_VISIBLE_PACKET * frames;
+				const size_t at = GC_MapArenaFind( bytes );
+				entity_state_t *ring = at == (size_t)-1 ? NULL
+					: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+
+				if( !ring )
+					continue;
+				memset( ring, 0, bytes );
+				cls.packet_entities = ring;
+				cl_gc_arena_packet_entities = ring;
+				cls.num_client_entities = MAX_VISIBLE_PACKET * frames;
+				Con_Reportf( "Xash3D GameCube: %sclient packet entities map=%s visible=%d frames=%d/%d bytes=%s arena_tail_left=%s\n",
+					frames < CL_UPDATE_BACKUP ? "Warning: REDUCED " : "", clgame.mapname, MAX_VISIBLE_PACKET,
+					frames, CL_UPDATE_BACKUP, Q_memprint( bytes ),
+					Q_memprint( GC_MapArenaLargestGap()));
+				break;
+			}
+			if( !cl_gc_arena_packet_entities )
+			{
+				Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client packet entities map=%s 128 entries (static fallback, arena_tail_left=%s)\n",
+					clgame.mapname, Q_memprint( GC_MapArenaLargestGap()));
+			}
+		}
 		clgame.entities = gc_gcmap_bootstrap_entities;
 		clgame.static_entities = NULL;
 		clgame.numStatics = 0;
@@ -1255,7 +1515,9 @@ init_remaps:
 		CL_ClearAllRemaps (); // purge old remap info
 		clgame.maxRemapInfos = clgame.maxEntities + 1;
 #if XASH_GAMECUBE
-		if( CL_GameCubeUseStaticGcmapBootstrapEdicts( maxclients ))
+		if( cl_gc_arena_remaps && clgame.entities == cl_gc_arena_entities )
+			clgame.remap_info = cl_gc_arena_remaps;
+		else if( CL_GameCubeUseStaticGcmapBootstrapEdicts( maxclients ))
 		{
 			memset( gc_gcmap_bootstrap_remap_info, 0, sizeof( gc_gcmap_bootstrap_remap_info ));
 			clgame.remap_info = gc_gcmap_bootstrap_remap_info;
@@ -1275,8 +1537,9 @@ void CL_FreeEdicts( void )
 	if( clgame.entities )
 #if XASH_GAMECUBE
 	{
-		if( clgame.entities != gc_gcmap_bootstrap_entities )
+		if( clgame.entities != gc_gcmap_bootstrap_entities && clgame.entities != cl_gc_arena_entities )
 			Mem_Free( clgame.entities );
+		cl_gc_arena_entities = NULL;
 	}
 #else
 		Mem_Free( clgame.entities );
@@ -1290,8 +1553,12 @@ void CL_FreeEdicts( void )
 	if( cls.packet_entities )
 #if XASH_GAMECUBE
 	{
-		if( cls.packet_entities != gc_gcmap_bootstrap_packet_entities )
+		/* Map-arena rings go with the arena itself. */
+		if( cls.packet_entities != gc_gcmap_bootstrap_packet_entities
+			&& cls.packet_entities != cl_gc_arena_packet_entities
+			&& (void *)cls.packet_entities != (void *)gc_gcmap_bootstrap_entities )
 			Z_Free( cls.packet_entities );
+		cl_gc_arena_packet_entities = NULL;
 	}
 #else
 		Z_Free( cls.packet_entities );
@@ -1452,7 +1719,7 @@ static void Mod_LoadMapSprite( model_t *mod, const void *buffer, size_t size, qb
 }
 
 #if XASH_GAMECUBE
-/* G290: tip-safe lean HUD file stage — libc malloc fails ~5 KiB under cliff. */
+/* HUD sprite files are staged outside the heap (CL_LoadHudSprite). */
 #define GC_HUD_SPR_BSS_BYTES (8 * 1024)
 void *Image_GCAllocMdlDecode( size_t bytes );
 qboolean Image_GCIsMdlDecode( const void *ptr );
@@ -1486,7 +1753,7 @@ static byte *CL_GCLoadHudSpriteBss( const char *path, fs_offset_t *sizeptr )
 		dst = gc_hud_spr_bss;
 	else
 	{
-		/* Larger sheets (gc_320hud1 65 KiB, gc_320hud2, gc_320_train) stage
+		/* Larger sheets (640hud1-6 65 KiB, 640_train 46 KiB) stage
 		 * in the 128 KiB model-skin decode buffer: idle during HUD prepare
 		 * (sprite frames never take the mdl decode path), and the file is
 		 * released as soon as Mod_LoadSpriteModel has built its frames.
@@ -1532,6 +1799,180 @@ static void CL_GCReleaseHudSpriteBss( byte *buf )
 		Image_GCReleaseMdlDecode();
 	}
 }
+
+/* A HUD text list (hud.txt, weapon_*.txt) in the same staging buffers, with
+ * a terminating NUL as FS_LoadFile gives. */
+static byte *CL_GCLoadHudTextFile( const char *path )
+{
+	file_t *f;
+	fs_offset_t flen, total = 0, got;
+	byte *dst;
+
+	if( !path || !path[0] || !( f = FS_Open( path, "rb", false )))
+		return NULL;
+	flen = FS_FileLength( f );
+	if( flen < 1 )
+	{
+		FS_Close( f );
+		return NULL;
+	}
+	if( flen < (fs_offset_t)GC_HUD_SPR_BSS_BYTES && !gc_hud_spr_bss_busy )
+	{
+		dst = gc_hud_spr_bss;
+		gc_hud_spr_bss_busy = true;
+	}
+	else if(( dst = (byte *)Image_GCAllocMdlDecode( (size_t)flen + 1 )) != NULL )
+		gc_hud_spr_staged_in_decode = true;
+	else
+	{
+		FS_Close( f );
+		return NULL;
+	}
+	while( total < flen && ( got = FS_Read( f, dst + total, flen - total )) > 0 )
+		total += got;
+	FS_Close( f );
+	if( total != flen )
+	{
+		CL_GCReleaseHudSpriteBss( dst );
+		return NULL;
+	}
+	dst[flen] = 0;
+	return dst;
+}
+
+/*
+ * An effect sprite whose file does not fit the free heap (DoD's
+ * zerogxplode.spr: 24 frames of 128x64, 198 KiB, against ~90 KiB free in a
+ * match) is read from disc a row at a time into a small copy whose frames are
+ * already at the size the effect loader would shrink them to. The copy is a
+ * valid sprite file, little-endian like the original; *prescale is the factor
+ * the frames were shrunk by, so the loader can keep their drawn size.
+ */
+extern qboolean gc_sprite_effect_load;
+extern int gc_sprite_fx_prescale;
+extern byte *R_GCFxScratchAlloc( size_t bytes );
+extern void R_GCFxScratchFree( void );
+static byte *gc_fx_spr_scratch;
+
+static void CL_GCFreeEffectSpriteShrunk( byte *buf )
+{
+	if( buf == gc_fx_spr_scratch )
+	{
+		gc_fx_spr_scratch = NULL;
+		R_GCFxScratchFree();
+	}
+	else
+		free( buf );
+}
+
+static byte *CL_GCLoadEffectSpriteShrunk( const char *path, fs_offset_t *sizeptr, int *prescale )
+{
+	dsprite_hl_t hdr;
+	dframetype_t ftype;
+	dspriteframe_t fr;
+	byte row[1024];
+	file_t *f;
+	byte *out = NULL, *o;
+	short numi_le;
+	int numi, numframes, i, x, y, w, h, cap, fac = 1;
+	int maxw = 0, maxh = 0, minw = 0x7fffffff, minh = 0x7fffffff;
+	size_t head, pixels = 0, out_bytes;
+
+	f = FS_Open( path, "rb", false );
+	if( !f )
+		return NULL;
+	if( FS_Read( f, &hdr, sizeof( hdr )) != (fs_offset_t)sizeof( hdr )
+		|| FS_Read( f, &numi_le, sizeof( numi_le )) != (fs_offset_t)sizeof( numi_le )
+		|| LittleLong( hdr.version ) != SPRITE_VERSION_HL )
+		goto fail;
+	numi = LittleShort( numi_le );
+	numframes = LittleLong( hdr.numframes );
+	if( numi < 1 || numi > 256 || numframes < 1 || numframes > 256 )
+		goto fail;
+	head = sizeof( hdr ) + sizeof( numi_le ) + (size_t)numi * 3;
+
+	FS_Seek( f, (fs_offset_t)head, SEEK_SET );
+	for( i = 0; i < numframes; i++ )
+	{
+		if( FS_Read( f, &ftype, sizeof( ftype )) != (fs_offset_t)sizeof( ftype )
+			|| FS_Read( f, &fr, sizeof( fr )) != (fs_offset_t)sizeof( fr )
+			|| LittleLong( ftype.type ) != FRAME_SINGLE )
+			goto fail;
+		w = LittleLong( fr.width );
+		h = LittleLong( fr.height );
+		if( w < 1 || h < 1 || w > (int)sizeof( row ) || h > 1024 )
+			goto fail;
+		if( w > maxw ) maxw = w;
+		if( h > maxh ) maxh = h;
+		if( w < minw ) minw = w;
+		if( h < minh ) minh = h;
+		pixels += (size_t)w * h;
+		FS_Seek( f, (fs_offset_t)w * h, SEEK_CUR );
+	}
+	/* the rule of Mod_SpriteLoadFrame (cl_sprite.c) */
+	cap = ( numframes <= 4 || LittleLong( hdr.texFormat ) != SPR_INDEXALPHA ) ? 64 : 32;
+	while( maxw / ( fac * 2 ) >= 1 && maxh / ( fac * 2 ) >= 1 && ( maxw / fac > cap || maxh / fac > cap ))
+		fac *= 2;
+	if( fac < 2 || minw < fac || minh < fac )
+		goto fail;
+
+	out_bytes = head + (size_t)numframes * ( sizeof( ftype ) + sizeof( fr )) + pixels / ( (size_t)fac * fac );
+	/* The copy goes to the free end of the renderer's effect block: 50 KiB
+	 * in one piece is more than the fragmented heap of a match gives. If
+	 * the block is short too, a smaller copy from the heap. */
+	out = R_GCFxScratchAlloc( out_bytes );
+	gc_fx_spr_scratch = out;
+	if( !out )
+		out = (byte *)malloc( out_bytes );
+	while( !out && fac < 16 && minw >= fac * 2 && minh >= fac * 2 )
+	{
+		fac *= 2;
+		out_bytes = head + (size_t)numframes * ( sizeof( ftype ) + sizeof( fr )) + pixels / ( (size_t)fac * fac );
+		out = (byte *)malloc( out_bytes );
+	}
+	if( !out )
+		goto fail;
+	FS_Seek( f, 0, SEEK_SET );
+	if( FS_Read( f, out, (fs_offset_t)head ) != (fs_offset_t)head )
+		goto fail;
+	o = out + head;
+	for( i = 0; i < numframes; i++ )
+	{
+		if( FS_Read( f, &ftype, sizeof( ftype )) != (fs_offset_t)sizeof( ftype )
+			|| FS_Read( f, &fr, sizeof( fr )) != (fs_offset_t)sizeof( fr ))
+			goto fail;
+		w = LittleLong( fr.width );
+		h = LittleLong( fr.height );
+		fr.width = LittleLong( w / fac );
+		fr.height = LittleLong( h / fac );
+		memcpy( o, &ftype, sizeof( ftype ));
+		o += sizeof( ftype );
+		memcpy( o, &fr, sizeof( fr ));
+		o += sizeof( fr );
+		for( y = 0; y < h / fac; y++ )
+		{
+			if( FS_Read( f, row, w ) != w )
+				goto fail;
+			for( x = 0; x < w / fac; x++ )
+				*o++ = row[x * fac];
+			FS_Seek( f, (fs_offset_t)( fac - 1 ) * w, SEEK_CUR );
+		}
+		FS_Seek( f, (fs_offset_t)( h % fac ) * w, SEEK_CUR );
+	}
+	FS_Close( f );
+	if( (size_t)( o - out ) > out_bytes )
+		Host_Error( "%s: %s overran its copy\n", __func__, path );
+	*sizeptr = (fs_offset_t)( o - out );
+	*prescale = fac;
+	Con_Reportf( "Xash3D GameCube: effect sprite %s read shrunk by %d from disc (%d frames, copy %s)\n",
+		path, fac, numframes, Q_memprint( (size_t)( o - out )));
+	return out;
+fail:
+	FS_Close( f );
+	if( out )
+		CL_GCFreeEffectSpriteShrunk( out );
+	return NULL;
+}
 #endif
 
 /*
@@ -1556,81 +1997,13 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 	m_pSprite->numtexinfo = texFlags; // store texFlags for renderer into numtexinfo
 
 #if XASH_GAMECUBE
-	/* New Game bootstrap HUD sheets can be false-miss-cached after earlier
-	 * ISO9660 probes (hud.txt / VidInit). Clear once before the exists check.
-	 * Retail 320hud2 can also miss while the injected gc_320hud2.spr is present. */
+	/* HUD sheets can be false-miss-cached after earlier ISO9660 probes
+	 * (hud.txt / VidInit). Clear once before the exists check. */
 	{
-		char altname[MAX_QPATH];
 		const char *loadname = szSpriteName;
 
-		if( Sys_CheckParm( "-gcnewgame" ) && !FS_FileExists( loadname, false ))
+		if( !FS_FileExists( loadname, false ))
 			FS_ClearFindMissCache();
-
-		/*
-		 * G173/G174/G288: under memopt prefer lean gc_* bootstrap sheets even
-		 * when fat retail exists on ISO — 7–66 KiB soft-fail under tip.
-		 */
-		if( GC_MapLoadMemoryOpt())
-		{
-			static const struct { const char *retail; const char *lean; } lean_hud[] = {
-				{ "sprites/320hud1.spr", "sprites/gc_320hud1.spr" },
-				{ "sprites/320hud2.spr", "sprites/gc_320hud2.spr" },
-				{ "sprites/crosshairs.spr", "sprites/gc_crosshairs.spr" },
-				{ "sprites/320_train.spr", "sprites/gc_320_train.spr" },
-				{ "sprites/320_pain.spr", "sprites/gc_320_pain.spr" },
-			};
-			int hi;
-
-			for( hi = 0; hi < (int)( sizeof( lean_hud ) / sizeof( lean_hud[0] )); hi++ )
-			{
-				if( Q_stricmp( loadname, lean_hud[hi].retail ))
-					continue;
-				Q_strncpy( altname, lean_hud[hi].lean, sizeof( altname ));
-				if( FS_FileExists( altname, false ))
-				{
-					loadname = altname;
-					Con_Reportf( "Xash3D GameCube: HUD sprite fallback %s -> %s\n",
-						szSpriteName, loadname );
-				}
-				break;
-			}
-		}
-		else
-		{
-			if( !FS_FileExists( loadname, false )
-				&& !Q_stricmp( loadname, "sprites/320hud2.spr" ))
-			{
-				Q_strncpy( altname, "sprites/gc_320hud2.spr", sizeof( altname ));
-				if( FS_FileExists( altname, false ))
-				{
-					loadname = altname;
-					Con_Reportf( "Xash3D GameCube: HUD sprite fallback %s -> %s\n",
-						szSpriteName, loadname );
-				}
-			}
-			else if( !FS_FileExists( loadname, false )
-				&& !Q_stricmp( loadname, "sprites/320hud1.spr" ))
-			{
-				Q_strncpy( altname, "sprites/gc_320hud1.spr", sizeof( altname ));
-				if( FS_FileExists( altname, false ))
-				{
-					loadname = altname;
-					Con_Reportf( "Xash3D GameCube: HUD sprite fallback %s -> %s\n",
-						szSpriteName, loadname );
-				}
-			}
-			else if( !FS_FileExists( loadname, false )
-				&& !Q_stricmp( loadname, "sprites/crosshairs.spr" ))
-			{
-				Q_strncpy( altname, "sprites/gc_crosshairs.spr", sizeof( altname ));
-				if( FS_FileExists( altname, false ))
-				{
-					loadname = altname;
-					Con_Reportf( "Xash3D GameCube: HUD sprite fallback %s -> %s\n",
-						szSpriteName, loadname );
-				}
-			}
-		}
 
 		if( !FS_FileExists( loadname, false ))
 		{
@@ -1654,41 +2027,38 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 			qboolean used_sys = false;
 
 			/*
-			 * G172: HUD sheets under memopt prefer libc malloc — FileSystem pool
-			 * soft-fails on ~12–17 KiB after studios even when malloc still has a hole.
+			 * HUD sheets (hud.txt / weapon_*.txt, 640hud* up to 65 KiB) are
+			 * staged in static buffers, never the heap: an 8 KiB BSS block,
+			 * else the 128 KiB model-skin decode buffer. The frame loader
+			 * keeps big sheets in ARAM (hud_hires.c) and the file is
+			 * released as soon as the frames are built.
 			 */
-			if( GC_MapLoadMemoryOpt()
-				&& ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
-			{
-				Image_GCPurgeDecodeScratch();
-				buf = FS_LoadFileMalloc( loadname, &size, false );
-				if( buf )
-				{
-					used_sys = true;
-					Con_Reportf( "Xash3D GameCube: G172 HUD sprite sys-malloc %s size=%s\n",
-						loadname, Q_memprint( (size_t)size ));
-				}
-			}
-			if( buf == NULL )
-				buf = FS_LoadFile( loadname, &size, false );
-			if( buf == NULL && GC_MapLoadMemoryOpt()
-				&& ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
-			{
-				Image_GCPurgeDecodeScratch();
-				buf = FS_LoadFileMalloc( loadname, &size, false );
-				if( buf )
-				{
-					used_sys = true;
-					Con_Reportf( "Xash3D GameCube: G172 HUD sprite sys-malloc %s size=%s\n",
-						loadname, Q_memprint( (size_t)size ));
-				}
-			}
-			/* G290: lean sheet file into BSS when both pools tip. */
-			if( buf == NULL && GC_MapLoadMemoryOpt()
-				&& ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
+			if( type == SPR_HUDSPRITE || type == SPR_CLIENT )
 			{
 				Image_GCPurgeDecodeScratch();
 				buf = CL_GCLoadHudSpriteBss( loadname, &size );
+			/* An effect sprite larger than the 128 KiB staging buffer (puff and smoke sprites, 190-215 KiB) never fits
+			 * as a whole file: the pool request below fails (a "mem FAIL FileSystem Pool" line and a texture-mip trim
+			 * on every map that loads one) and the streaming shrink at the end of the ladder is what serves it.
+			 * Take the shrink first for those. */
+			if( buf == NULL && gc_sprite_effect_load && type == SPR_CLIENT && GC_MapLoadMemoryOpt()
+				&& FS_FileSize( loadname, false ) > (fs_offset_t)( 128 * 1024 ))
+			{
+				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
+				used_sys = buf != NULL;
+			}
+			}
+			if( buf == NULL )
+				buf = FS_LoadFile( loadname, &size, false );
+			if( buf == NULL && ( type == SPR_HUDSPRITE || type == SPR_CLIENT ))
+			{
+				buf = FS_LoadFileMalloc( loadname, &size, false );
+				used_sys = buf != NULL;
+			}
+			if( buf == NULL && gc_sprite_effect_load && type == SPR_CLIENT )
+			{
+				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
+				used_sys = buf != NULL;
 			}
 			if( buf == NULL )
 			{
@@ -1703,7 +2073,10 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 				ref.dllFuncs.Mod_ProcessRenderData( m_pSprite, true, buf, size );
 			}
 
-			if( buf == gc_hud_spr_bss || Image_GCIsMdlDecode( buf ))
+			gc_sprite_fx_prescale = 1;
+			if( gc_fx_spr_scratch && buf == gc_fx_spr_scratch )
+				CL_GCFreeEffectSpriteShrunk( buf );
+			else if( buf == gc_hud_spr_bss || Image_GCIsMdlDecode( buf ))
 				CL_GCReleaseHudSpriteBss( buf );
 			else if( used_sys )
 				free( buf );
@@ -1773,6 +2146,9 @@ some sprite models is exist only at client: HUD sprites,
 tent sprites or overview images
 =============
 */
+#if XASH_GAMECUBE
+static model_t *CL_LoadSpriteModelSlow( const char *name, uint type, uint texFlags );
+#endif
 static model_t *CL_LoadSpriteModel( const char *filename, uint type, uint texFlags )
 {
 	char	name[MAX_QPATH];
@@ -1787,6 +2163,52 @@ static model_t *CL_LoadSpriteModel( const char *filename, uint type, uint texFla
 
 	Q_strncpy( name, filename, sizeof( name ));
 	COM_FixSlashes( name );
+
+#if XASH_GAMECUBE
+	/* The client HUD asks for the same eight sprites every frame. Each ask
+	 * walked the whole sprite table comparing names, and one that is not on
+	 * the disc went on to look for its file again: 0.93 ms a frame on the
+	 * Lost Coast ride. Remember the last answers; a found sprite is checked
+	 * against its slot, a missing one is asked for again after five seconds. */
+	{
+		static struct { char name[MAX_QPATH]; model_t *mod; uint until; } memo[16];
+		static uint memo_next;
+		const uint now = (uint)host.framecount;
+		int m;
+
+		for( m = 0; m < 16; m++ )
+		{
+			if( memo[m].name[0] != name[0] || Q_stricmp( memo[m].name, name ))
+				continue;
+			if( memo[m].mod )
+			{
+				mod = memo[m].mod;
+				if( mod->needload != NL_UNREFERENCED && mod->needload != NL_NEEDS_LOADED
+					&& !Q_stricmp( mod->name, name ))
+				{
+					mod->needload = NL_PRESENT;
+					return mod;
+				}
+			}
+			else if( now < memo[m].until )
+				return NULL;
+			memo[m].name[0] = 0;
+			break;
+		}
+		mod = CL_LoadSpriteModelSlow( name, type, texFlags );
+		m = (int)( memo_next++ & 15u );
+		Q_strncpy( memo[m].name, name, sizeof( memo[m].name ));
+		memo[m].mod = mod;
+		memo[m].until = now + 300u;
+		return mod;
+	}
+}
+
+static model_t *CL_LoadSpriteModelSlow( const char *name, uint type, uint texFlags )
+{
+	model_t	*mod;
+	int	i;
+#endif
 
 	for( i = 0, mod = clgame.sprites; i < MAX_CLIENT_SPRITES; i++, mod++ )
 	{
@@ -1844,177 +2266,98 @@ model_t *CL_LoadClientSprite( const char *filename )
 =============
 CL_GCPreloadNewGameHudSprites
 
-G127/G172: load HUD sheets while MEM1 still has a contiguous block (before
-deferred studios). Fat 320hud1 first, then lean bootstrap sheets. Keep sheet
-names as SPR_HUDSPRITE so Redraw reuses them.
+G320: the reactor's env_beam texture, while MEM1 still has a contiguous
+block. The HUD sheets themselves are the client's (HUD_VidInit loads the 640
+set of hud.txt; CL_GCEnsureHudVidInit), staged outside the heap and kept in
+ARAM, so they need no early slot.
 =============
 */
 HSPRITE EXPORT pfnSPR_Load( const char *szPicName );
 
-void CL_GCPreloadNewGameHudSprites( void )
+static void CL_GCPreloadEffectSheets( const char *when )
 {
-	/*
-	 * G172–G174/G290: lean HUD sheets. Crosshairs early — last slot tip-fails.
-	 */
-	static const char *const sheets[] = {
-		"sprites/320hud1.spr", /* → lean gc_320hud1 (~5 KiB @ 64×64) */
-		"sprites/crosshairs.spr", /* → lean gc_crosshairs (G290: before hud2/train) */
-		"sprites/lgtning.spr", /* G320: env_beam / reactor electricity (~7 KiB) */
-		"sprites/320_train.spr", /* → lean gc_320_train (G288) */
-		"sprites/320hud2.spr", /* → lean gc_320hud2 (G288) */
-	};
-	int i;
-	int real = 0;
-	qboolean hud1_real = false;
-	qboolean cross_real = false;
-	static qboolean g172_logged;
-	static qboolean g173_logged;
-	static qboolean g174_logged;
+	HSPRITE handle;
 
 	if( !( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gcmenuplaystart" ))
 		|| !GC_MapLoadMemoryOpt())
 		return;
-
 	Image_GCPurgeDecodeScratch();
 	FS_ClearFindMissCache();
-	Con_Reportf( "Xash3D GameCube: G127 HUD sheet preload begin\n" );
-	for( i = 0; i < (int)( sizeof( sheets ) / sizeof( sheets[0] )); i++ )
-	{
-		HSPRITE handle = pfnSPR_Load( sheets[i] );
-		model_t *mod = NULL;
-		qboolean is_real = false;
+	handle = pfnSPR_Load( "sprites/lgtning.spr" );
+	Con_Reportf( "Xash3D GameCube: G320 effect sheet %s sprites/lgtning.spr handle=%d\n", when, (int)handle );
+}
 
-		if( handle > 0 && handle <= MAX_CLIENT_SPRITES )
-			mod = &clgame.sprites[handle - 1];
-		is_real = ( mod != NULL );
-		if( is_real )
-		{
-			real++;
-			if( !Q_stricmp( sheets[i], "sprites/320hud1.spr" )
-				|| ( mod && !Q_stricmp( mod->name, "sprites/gc_320hud1.spr" )))
-				hud1_real = true;
-			if( !Q_stricmp( sheets[i], "sprites/crosshairs.spr" )
-				|| ( mod && !Q_stricmp( mod->name, "sprites/gc_crosshairs.spr" )))
-				cross_real = true;
-		}
-		Con_Reportf( "Xash3D GameCube: G127 HUD sheet %s handle=%d real=%d\n",
-			sheets[i], (int)handle, is_real ? 1 : 0 );
-	}
-	Con_Reportf( "Xash3D GameCube: G127 HUD sheet preload ready\n" );
-	/* Tip-safe New Game often lands only 1 real lean sheet (crosshair/hud1). */
-	if( !g172_logged && real >= 1 )
-	{
-		g172_logged = true;
-		if( real > 0 )
-			Con_Reportf( "Xash3D GameCube: lean HUD sprites drawn\n" );
-		Con_Reportf( "Xash3D GameCube: G172 HUD sheets loaded real=%d of %d\n",
-			real, (int)( sizeof( sheets ) / sizeof( sheets[0] )));
-	}
-	if( !g173_logged && hud1_real )
-	{
-		g173_logged = true;
-		Con_Reportf( "Xash3D GameCube: G173 HUD hud1 lean real=%d of %d\n",
-			real, (int)( sizeof( sheets ) / sizeof( sheets[0] )));
-	}
-	if( !g174_logged && cross_real )
-	{
-		g174_logged = true;
-		Con_Reportf( "Xash3D GameCube: G174 HUD crosshairs lean real=%d of %d\n",
-			real, (int)( sizeof( sheets ) / sizeof( sheets[0] )));
-	}
+void CL_GCPreloadNewGameHudSprites( void )
+{
+	CL_GCPreloadEffectSheets( "preload" );
+}
+
+void CL_GCPreloadNewGameHudSpritesLate( void )
+{
+	CL_GCPreloadEffectSheets( "late" );
 }
 
 /*
 =============
-CL_GCPreloadNewGameHudSpritesLate
+CL_GCEnsureHudVidInit
 
-G172: after SFX preload, free any gcmap stubs and retry small HUD sheets.
+The local map routes defer HUD_VidInit from serverdata to after the first
+world presents (G327). Retail runs it at every serverdata, before any HUD
+draw; the client's HUD elements index sprite tables VidInit fills. Run it
+exactly once per map: at the deferred point, or at the latest before the
+first HUD Redraw.
 =============
 */
-void CL_GCPreloadNewGameHudSpritesLate( void )
+static qboolean gc_hud_vidinit_done;
+
+void CL_GCHudVidInitReset( void )
 {
-	static const char *const sheets[] = {
-		"sprites/320hud1.spr", /* G173: → lean gc_320hud1 */
-		"sprites/crosshairs.spr", /* G174/G290: before hud2/train */
-		"sprites/lgtning.spr", /* G320: env_beam texture */
-		"sprites/320_train.spr", /* G288: → lean gc_320_train */
-		"sprites/320hud2.spr", /* G288: → lean gc_320hud2 */
-	};
-	int i;
-	int real = 0;
-	qboolean hud1_real = false;
-	qboolean cross_real = false;
-	static qboolean g173_late_logged;
-	static qboolean g174_late_logged;
+	gc_hud_vidinit_done = false;
+}
 
-	if( !( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gcmenuplaystart" ))
-		|| !GC_MapLoadMemoryOpt())
-		return;
+qboolean CL_GCEnsureHudVidInit( const char *why )
+{
+	static qboolean sheets_logged;
+	int i, sheets = 0, cross = 0;
+	size_t heap_before;
 
+	if( gc_hud_vidinit_done )
+		return true;
+	if( !clgame.hInstance || !clgame.dllFuncs.pfnVidInit )
+		return false;
+	gc_hud_vidinit_done = true;
+	gc_hud_fullupdate_pending = true;
+	gc_hud_fullupdate_frames = 0;
+	if( !cls.creditsFont.valid )
+		SCR_LoadCreditsFont();
 	Image_GCPurgeDecodeScratch();
 	FS_ClearFindMissCache();
-	Con_Reportf( "Xash3D GameCube: G172 HUD sheet late preload begin\n" );
-	for( i = 0; i < (int)( sizeof( sheets ) / sizeof( sheets[0] )); i++ )
+	heap_before = GC_MemHeapFreeBytes();
+	clgame.dllFuncs.pfnVidInit();
+	for( i = 0; i < MAX_CLIENT_SPRITES; i++ )
 	{
-		model_t *mod;
-		HSPRITE handle;
-		int j;
-		qboolean is_real;
+		const model_t *mod = &clgame.sprites[i];
 
-		for( j = 0; j < MAX_CLIENT_SPRITES; j++ )
-		{
-			mod = &clgame.sprites[j];
-			if( mod->needload == NL_UNREFERENCED )
-				continue;
-			if( Q_stricmp( mod->name, sheets[i] )
-				&& !( !Q_stricmp( sheets[i], "sprites/320hud1.spr" )
-					&& !Q_stricmp( mod->name, "sprites/gc_320hud1.spr" ))
-				&& !( !Q_stricmp( sheets[i], "sprites/crosshairs.spr" )
-					&& !Q_stricmp( mod->name, "sprites/gc_crosshairs.spr" ))
-				&& !( !Q_stricmp( sheets[i], "sprites/320hud2.spr" )
-					&& !Q_stricmp( mod->name, "sprites/gc_320hud2.spr" ))
-				&& !( !Q_stricmp( sheets[i], "sprites/320_train.spr" )
-					&& !Q_stricmp( mod->name, "sprites/gc_320_train.spr" )))
-				continue;
-			break;
-		}
-
-		handle = pfnSPR_Load( sheets[i] );
-		mod = ( handle > 0 && handle <= MAX_CLIENT_SPRITES )
-			? &clgame.sprites[handle - 1] : NULL;
-		is_real = ( mod != NULL );
-		if( is_real )
-		{
-			real++;
-			if( !Q_stricmp( sheets[i], "sprites/320hud1.spr" )
-				|| ( mod && !Q_stricmp( mod->name, "sprites/gc_320hud1.spr" )))
-				hud1_real = true;
-			if( !Q_stricmp( sheets[i], "sprites/crosshairs.spr" )
-				|| ( mod && !Q_stricmp( mod->name, "sprites/gc_crosshairs.spr" )))
-				cross_real = true;
-		}
-		Con_Reportf( "Xash3D GameCube: G172 HUD sheet late %s handle=%d real=%d\n",
-			sheets[i], (int)handle, is_real ? 1 : 0 );
+		if( mod->needload == NL_UNREFERENCED || !mod->name[0] )
+			continue;
+		if( !Q_strnicmp( mod->name, "sprites/640", 11 ) || !Q_strnicmp( mod->name, "sprites/320", 11 ))
+			sheets++;
+		else if( !Q_stricmp( mod->name, "sprites/crosshairs.spr" ))
+			cross++;
 	}
-	Con_Reportf( "Xash3D GameCube: G172 HUD sheet late preload ready real=%d\n", real );
-	if( real >= 1 )
+	Con_Reportf( "Xash3D GameCube: HUD VidInit (%s) screen=%dx%d sheets=%d heap before=%s after=%s\n", why,
+		clgame.scrInfo.iWidth, clgame.scrInfo.iHeight, sheets, Q_memprint( heap_before ),
+		Q_memprint( GC_MemHeapFreeBytes( )));
+	if( !sheets_logged && sheets > 0 )
 	{
-		Con_Reportf( "Xash3D GameCube: lean HUD sprites drawn\n" );
-		Con_Reportf( "Xash3D GameCube: G172 HUD sheets loaded real=%d of %d\n",
-			real, (int)( sizeof( sheets ) / sizeof( sheets[0] )));
+		sheets_logged = true;
+		/* Harness G172/G173/G174 (dolphin-probe-analyze.py, gates). */
+		Con_Reportf( "Xash3D GameCube: G172 HUD sheets loaded real=%d\n", sheets );
+		Con_Reportf( "Xash3D GameCube: G173 HUD 640 sheets real=%d\n", sheets );
+		if( cross )
+			Con_Reportf( "Xash3D GameCube: G174 HUD crosshairs real=%d\n", cross );
 	}
-	if( !g173_late_logged && hud1_real )
-	{
-		g173_late_logged = true;
-		Con_Reportf( "Xash3D GameCube: G173 HUD hud1 lean real=%d of %d\n",
-			real, (int)( sizeof( sheets ) / sizeof( sheets[0] )));
-	}
-	if( !g174_late_logged && cross_real )
-	{
-		g174_late_logged = true;
-		Con_Reportf( "Xash3D GameCube: G174 HUD crosshairs lean real=%d of %d\n",
-			real, (int)( sizeof( sheets ) / sizeof( sheets[0] )));
-	}
+	return true;
 }
 #endif
 
@@ -2057,15 +2400,6 @@ HSPRITE EXPORT pfnSPR_Load( const char *szPicName )
 	model_t *spr;
 
 	GC_HUD_CALL( "SPR_Load begin %s", szPicName ? szPicName : "(null)" );
-#if XASH_GAMECUBE
-	/* CapFaces Flipper listen is MEM1-tight; HUD SPR_Load after frame 1
-	 * Gurus (solo 20261107-123341 mid 320_pain.spr). CapFaces already drew. */
-	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw() )
-	{
-		GC_HUD_CALL( "SPR_Load skip CapFaces %s", szPicName ? szPicName : "(null)" );
-		return 0;
-	}
-#endif
 	spr = CL_LoadSpriteModel( szPicName, SPR_HUDSPRITE, 0 );
 	GC_HUD_CALL( "SPR_Load done %s ok=%d", szPicName ? szPicName : "(null)", spr != NULL );
 
@@ -2254,6 +2588,9 @@ static client_sprite_t *SPR_GetList( char *psz, int *piCount )
 	GC_HUD_CALL( "SPR_GetList %s", psz ? psz : "(null)" );
 	cached_spritelist_t	*pEntry = &clgame.sprlist[0];
 	int		slot, index, numSprites = 0;
+#if XASH_GAMECUBE
+	int		gc_list_res = 640, gc_list_total = 0;
+#endif
 	byte *afile;
 	char *pfile;
 	string		token;
@@ -2283,6 +2620,12 @@ static client_sprite_t *SPR_GetList( char *psz, int *piCount )
 	if( !clgame.itemspath[0] )	// typically it's sprites\*.txt
 		COM_ExtractFilePath( psz, clgame.itemspath );
 
+#if XASH_GAMECUBE
+	/* Read the list (hud.txt is 10 KiB) through the static HUD staging
+	 * buffers, not the heap; NUL-terminated for the parser. */
+	afile = CL_GCLoadHudTextFile( psz );
+	if( !afile )
+#endif
 	afile = FS_LoadFile( psz, NULL, false );
 	if( !afile ) return NULL;
 
@@ -2294,8 +2637,32 @@ static client_sprite_t *SPR_GetList( char *psz, int *piCount )
 
 	// name, res, pic, x, y, w, h
 	#if XASH_GAMECUBE
-	Con_Reportf( "Xash3D GameCube: client sprite list alloc path=%s count=%d bytes=%u\n",
-		psz, numSprites, (unsigned)( sizeof( client_sprite_t ) * numSprites ));
+	/* Keep only the entries of the one resolution the client can pick here
+	 * (GetSpriteRes: 640 on the 640x480 HUD screen, 320 below it). hud.txt
+	 * alone has 257 entries for 320/640/1280/2560 (39 KiB); the 640 set is
+	 * 62. The client filters by iRes itself, so the lists it sees are the
+	 * same apart from the other resolutions. */
+	gc_list_res = clgame.scrInfo.iWidth >= 640 ? 640 : 320;
+	if( GC_HUD_LIST_FILTER )
+	{
+		char *scan = pfile;
+		int n, kept = 0;
+
+		for( n = 0; n < numSprites; n++ )
+		{
+			if(( scan = COM_ParseFile( scan, token, sizeof( token ))) == NULL )
+				break;
+			scan = COM_ParseFile( scan, token, sizeof( token ));
+			if( Q_atoi( token ) == gc_list_res )
+				kept++;
+			for( int k = 0; k < 5; k++ )
+				scan = COM_ParseFile( scan, token, sizeof( token ));
+		}
+		gc_list_total = numSprites;
+		numSprites = kept;
+	}
+	Con_Reportf( "Xash3D GameCube: client sprite list alloc path=%s res=%d count=%d of %d bytes=%u\n",
+		psz, gc_list_res, numSprites, gc_list_total, (unsigned)( sizeof( client_sprite_t ) * numSprites ));
 	#endif
 	#if XASH_GAMECUBE
 	/*
@@ -2328,6 +2695,20 @@ static client_sprite_t *SPR_GetList( char *psz, int *piCount )
 		// read resolution
 		pfile = COM_ParseFile( pfile, token, sizeof( token ));
 		pEntry->pList[index].iRes = Q_atoi( token );
+#if XASH_GAMECUBE
+		if( GC_HUD_LIST_FILTER && pEntry->pList[index].iRes != gc_list_res )
+		{
+			/* another resolution: skip its sprite name and rectangle */
+			for( int k = 0; k < 5; k++ )
+				pfile = COM_ParseFile( pfile, token, sizeof( token ));
+			if( --gc_list_total < 0 )
+				break;
+			index--;
+			continue;
+		}
+		if( GC_HUD_LIST_FILTER )
+			gc_list_total--;
+#endif
 
 		// read spritename
 		pfile = COM_ParseFile( pfile, token, sizeof( token ));
@@ -2352,6 +2733,11 @@ static client_sprite_t *SPR_GetList( char *psz, int *piCount )
 	if( index < numSprites )
 		Con_DPrintf( S_WARN "unexpected end of %s (%i should be %i)\n", psz, numSprites, index );
 	if( piCount ) *piCount = pEntry->count;
+#if XASH_GAMECUBE
+	if( afile == gc_hud_spr_bss || Image_GCIsMdlDecode( afile ))
+		CL_GCReleaseHudSpriteBss( afile );
+	else
+#endif
 	Mem_Free( afile );
 
 	return pEntry->pList;
@@ -2415,6 +2801,23 @@ int GAME_EXPORT CL_GetScreenInfo( SCREENINFO *pscrinfo )
 			apply_scale_factor = true;
 	}
 
+#if XASH_GAMECUBE && !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+	/* Half-Life (Day of Defeat keeps its own HUD layout).
+	 * The soft framebuffer is 320x240 (tip-safe), but the HUD is drawn by
+	 * Flipper straight into the 640x480 EFB (R_GXDrawStretchPic maps the
+	 * 320x240 logical surface onto the whole EFB). Give the client the
+	 * retail 640x480 screen: it picks the 640 sheets of hud.txt and lays
+	 * them out as retail does, and SPR_AdjustSize halves every rectangle in
+	 * floats, so each 640 texel lands on one EFB pixel. */
+	if( !apply_scale_factor && refState.width > 0 && refState.width <= 320
+		&& refState.height > 0 && refState.height <= 240 )
+	{
+		clgame.scrInfo.iWidth = refState.width * 2;
+		clgame.scrInfo.iHeight = refState.height * 2;
+		ClearBits( clgame.scrInfo.iFlags, SCRINFO_STRETCHED );
+	}
+	else
+#endif
 	if( apply_scale_factor )
 	{
 		clgame.scrInfo.iWidth = (float)refState.width / scale_factor;
@@ -2448,6 +2851,7 @@ setup crosshair
 */
 static void GAME_EXPORT pfnSetCrosshair( HSPRITE hspr, wrect_t rc, int r, int g, int b )
 {
+
 	clgame.ds.rgbaCrosshair[0] = (byte)r;
 	clgame.ds.rgbaCrosshair[1] = (byte)g;
 	clgame.ds.rgbaCrosshair[2] = (byte)b;
@@ -3723,7 +4127,15 @@ static void GAME_EXPORT pfnSPR_DrawGeneric( int frame, int x, int y, const wrect
 	pglEnable( GL_BLEND );
 	pglBlendFunc( blendsrc, blenddst ); // g-cont. are params is valid?
 #endif
+#if XASH_GAMECUBE
+	/* The DoD retail HUD draws its 640-res art at real size on the 320x240
+	 * HUD space through this call: masked like SPR_DrawHoles. */
+	ref.dllFuncs.GL_SetRenderMode( kRenderTransColor );
 	SPR_DrawGeneric( frame, x, y, width, height, prc );
+	ref.dllFuncs.GL_SetRenderMode( kRenderNormal );
+#else
+	SPR_DrawGeneric( frame, x, y, width, height, prc );
+#endif
 }
 
 /*
@@ -4753,6 +5165,64 @@ static int pfnStudio_IsHardware( void )
 	return 1;
 }
 
+#if XASH_GAMECUBE
+/* The client DLL's studio renderer asks for a sequence's animation here when its seqgroup file is an animation pack. */
+void *R_StudioGetAnim( studiohdr_t *m_pStudioHeader, model_t *m_pSubModel, mstudioseqdesc_t *pseqdesc );
+
+static void *pfnStudio_GCGetAnim( void *phdr, void *submodel, void *pseqdesc )
+{
+	return R_StudioGetAnim( (studiohdr_t *)phdr, (model_t *)submodel, (mstudioseqdesc_t *)pseqdesc );
+}
+#endif
+
+/* The studio renderer asks for a player's weapon model by index (StudioDrawPlayer, pplayer->weaponmodel). On the GameCube the bots' third-person
+ * weapon models (p_enfield.mdl, ...) are named in the model table but never loaded, because nothing client side references them: the header
+ * came back NULL and StudioMergeBones read through it (a guest data fault that froze the match). Load such a model on demand, once, into
+ * the studio arena (never the heap), and let the DLL's own check skip the weapon if that fails. */
+#if XASH_GAMECUBE
+extern const char *CL_GCServerModelName( int modelindex );
+static model_t *CL_GCStudioModelByIndex( int modelindex )
+{
+	static const model_t *tried[32];
+	static int ntried;
+	model_t *m = CL_ModelHandle( modelindex );
+	int i;
+
+	/* The client's own table has no entry for a model the server precached late (the last index of the weapon set): look it up by the
+	 * server's name, which finds the resident model without a disc read and fills the slot. */
+	if( !m && modelindex > 0 && modelindex < MAX_MODELS && CL_GCServerModelName( modelindex )
+		&& Q_stristr( CL_GCServerModelName( modelindex ), ".mdl" ))
+	{
+		m = Mod_ForName( CL_GCServerModelName( modelindex ), false, false );
+		if( m )
+		{
+			cl.models[modelindex] = m;
+			Con_Reportf( "Xash3D GameCube: client model slot %d filled from the server table: %s (%s)\n", modelindex, m->name,
+				m->cache.data ? "resident" : "not loaded" );
+		}
+		return m;
+	}
+	if( !m || m->cache.data || !m->name[0] || !Q_stristr( m->name, ".mdl" ))
+		return m;
+	for( i = 0; i < ntried; i++ )
+		if( tried[i] == m )
+			return m;
+	if( ntried < (int)ARRAYSIZE( tried ))
+		tried[ntried++] = m;
+	{
+		model_t *loaded = Mod_ForName( m->name, false, false );
+
+		Con_Reportf( "Xash3D GameCube: weapon model %d %s loaded on demand: %s\n", modelindex, m->name,
+			loaded && loaded->cache.data ? "ok" : "failed" );
+		if( loaded )
+			m = loaded;
+	}
+	return m;
+}
+#else
+#define CL_GCStudioModelByIndex CL_ModelHandle
+#endif
+
 static engine_studio_api_t gStudioAPI =
 {
 	.Mem_Calloc              = Mod_Calloc,
@@ -4760,13 +5230,16 @@ static engine_studio_api_t gStudioAPI =
 	.LoadCacheFile           = Mod_LoadCacheFile,
 	.Mod_ForName             = pfnStudio_Mod_ForName,
 	.Mod_Extradata           = pfnStudio_Mod_Extradata,
-	.GetModelByIndex         = CL_ModelHandle,
+	.GetModelByIndex         = CL_GCStudioModelByIndex,
 	.GetCvar                 = CL_CvarGetPointer,
 	.GetChromeSprite         = pfnStudio_GetChromeSprite,
 	.GetAliasScale           = pfnStudio_GetAliasScale,
 	.StudioGetAliasTransform = pfnStudio_GetAliasTransform,
 	.GetViewEntity           = CL_GetViewModel,
 	.IsHardware              = pfnStudio_IsHardware,
+#if XASH_GAMECUBE
+	.GCGetAnim               = pfnStudio_GCGetAnim,
+#endif
 };
 
 static void CL_InitStudioAPI( void )
@@ -5054,11 +5527,15 @@ qboolean CL_LoadProgs( const char *name )
 
 	// initialize game
 #if XASH_GAMECUBE
-	Con_Reportf( "Xash3D GameCube: client callback begin\n" );
+	Con_Reportf( "Xash3D GameCube: client callback begin heap=%s\n", Q_memprint( GC_MemHeapFreeBytes( )));
+#endif
+#if XASH_GAMECUBE
+	{ void GC_MemPoolDelta( const char *what, qboolean begin ); GC_MemPoolDelta( "HUD_Init", true ); }
 #endif
 	clgame.dllFuncs.pfnInit();
 #if XASH_GAMECUBE
-	Con_Reportf( "Xash3D GameCube: client callback initialized\n" );
+	{ void GC_MemPoolDelta( const char *what, qboolean begin ); GC_MemPoolDelta( "HUD_Init", false ); }
+	Con_Reportf( "Xash3D GameCube: client callback initialized heap=%s\n", Q_memprint( GC_MemHeapFreeBytes( )));
 #endif
 
 	CL_InitStudioAPI();

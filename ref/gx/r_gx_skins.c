@@ -30,17 +30,30 @@ extern void *Image_GCAllocMdlDecode( size_t bytes );
 extern void Image_GCReleaseMdlDecode( void );
 
 #define GC_SKIN_MAX_DIM        256
-#define GC_SKIN_WINDOW_BYTES   ( 192 * 1024 )	/* a 256x256 body skin plus hands */
+#ifndef GC_SKIN_WINDOW_KIB
+#define GC_SKIN_WINDOW_KIB     192
+#endif
+#define GC_SKIN_WINDOW_BYTES   ( GC_SKIN_WINDOW_KIB * 1024 )	/* a 256x256 body skin plus hands */
 #define GC_SKIN_FRAME_BUDGET   ( 160 * 1024 )	/* promoted per frame at most */
 #define GC_SKIN_LOG_FRAMES     600
 
 static gc_skin_stream_t r_skin_stream;
 static byte *r_skin_window;
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
+/* The DoD view-model skin window is a named static pool, not a heap request. The 192 KiB heap
+ * allocation below is gated on 704 KiB of free heap, which a map at map-active never has
+ * (140-220 KiB), so 256 px skins never got a window. This takes part of the 360.7 KiB that
+ * PR 240 freed from the playermove arrays (the DoD image is still 168 KiB smaller than before).
+ * OPT-IN (XASH_GC_SKIN_WINDOW_BSS=1 at configure): 192 KiB of static image is 192 KiB less heap, and a
+ * listen host currently runs out of heap in SV_InitGame, so it stays off until the host has headroom. */
+static byte r_skin_window_bss[GC_SKIN_WINDOW_BYTES] __attribute__(( aligned( 32 )));
+#endif
 static qboolean r_skin_ready;
 static qboolean r_skin_failed;
 static int r_skin_disabled = -1;
 static unsigned r_skin_gen = 1;
 static byte r_skin_alpha[GC_SKIN_MAX];
+static byte r_skin_cmpr[GC_SKIN_MAX];	/* 1: a CMPR body skin registered as a byte surface (height / 2) */
 static unsigned r_skin_frames;
 static unsigned r_skin_logged_promotions, r_skin_logged_low;
 
@@ -252,6 +265,8 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	u16 *pix;
 	int handle;
 
+	static int attach_logged;
+
 	if( !src || w < 8 || h < 8 || w > GC_SKIN_MAX_DIM || h > GC_SKIN_MAX_DIM || ( w & 3 ) || ( h & 3 ))
 		return;
 	img = R_GetTexture( texnum );
@@ -260,7 +275,13 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 	if( !img->pixels[0] || img->gc_packed || img->gc_gx_native || img->gc_skin_handle
 		|| img->width < 8 || img->height < 8
 		|| ( img->width >= w && img->height >= h ))
+	{
+		/* why a viewmodel skin is not streamed (first few only) */
+		if( attach_logged++ < 12 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM no attach %s src=%dx%d img=%dx%d pixels=%d packed=%d native=%d handle=%d\n",
+				img->name, w, h, img->width, img->height, img->pixels[0] != NULL, img->gc_packed, img->gc_gx_native, img->gc_skin_handle );
 		return;
+	}
 	if( !R_GXSkinInit( ))
 		return;
 	/* Scratch is the idle MDL decode buffer (128 KiB, static): no MEM1 heap
@@ -285,10 +306,62 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 		return;
 	}
 	r_skin_alpha[handle] = alpha ? 1 : 0;
+	r_skin_cmpr[handle] = 0;
 	img->gc_skin_handle = (short)( handle + 1 );
 	img->gc_skin_gen = r_skin_gen;
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM reg %s full=%dx%d low=%dx%d fmt=%s handle=%d\n",
 		img->name, w, h, img->width, img->height, alpha ? "RGB5A3" : "RGB565", handle );
+}
+
+/*
+A baked CMPR studio skin (player bodies, GC_PLAYER_SKIN_STREAM): the 128 px low mip is already the image's texture, the
+256 px texels in the companion go to ARAM. Registered as a byte surface (CMPR is half a byte a texel, so height / 2 at
+one byte a texel) so the policy in skin_stream.c needs no change. Only where a static window pool exists
+(XASH_GC_SKIN_WINDOW_BSS): without one the low mip is all there is, which is exactly the 128 px skin.
+*/
+void R_GXSkinAttachCmpr( image_t *img, const byte *texels, int w, int h, qboolean masked )
+{
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
+	char key[GC_ARAM_NAME_LEN];
+	int handle, low_w, low_h;
+
+	static int reject_logs;
+
+	if( !img || img->gc_skin_handle || !texels || !img->pixels[0]
+		|| w < 16 || h < 16 || ( w & 7 ) || ( h & 7 ) || (size_t)w * h / 2u > GC_SKIN_WINDOW_BYTES )
+	{
+		if( img && !img->gc_skin_handle && reject_logs++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM CMPR %s not attached (texels=%p low=%p %dx%d)\n",
+				img->name, texels, img->pixels[0], w, h );
+		return;
+	}
+	if( !R_GXSkinInit( ))
+	{
+		if( reject_logs++ < 4 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM CMPR %s not attached (stream off)\n", img->name );
+		return;
+	}
+	low_w = img->width;
+	low_h = img->height;
+	R_GXSkinKey( img->name, key, sizeof( key ));
+	handle = GC_SkinStreamRegisterBpp( &r_skin_stream, key, (uint16_t)w, (uint16_t)( h / 2 ), texels,
+		(uint16_t)low_w, (uint16_t)( low_h / 2 ), img->pixels[0], 1 );
+	if( handle < 0 )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM refused CMPR %s %dx%d (ARAM/table full)\n", img->name, w, h );
+		return;
+	}
+	r_skin_alpha[handle] = masked ? 1 : 0;
+	r_skin_cmpr[handle] = 1;
+	img->gc_skin_handle = (short)( handle + 1 );
+	img->gc_skin_gen = r_skin_gen;
+	img->srcWidth = (uint16_t)w;
+	img->srcHeight = (uint16_t)h;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM reg CMPR %s full=%dx%d low=%dx%d handle=%d\n",
+		img->name, w, h, low_w, low_h, handle );
+#else
+	(void)img; (void)texels; (void)w; (void)h; (void)masked;
+#endif
 }
 
 /*
@@ -317,7 +390,13 @@ const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean
 	{
 		if( !r_skin_window )
 		{
-			r_skin_window = (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES );
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
+			r_skin_window = r_skin_window_bss;
+#else
+			/* Never take the last of the heap: the map load still needs it. */
+			r_skin_window = ( GC_MemHeapFreeBytes() >= GC_SKIN_WINDOW_BYTES + 512u * 1024u )
+				? (byte *)memalign( 32, GC_SKIN_WINDOW_BYTES ) : NULL;
+#endif
 			if( !r_skin_window )
 			{
 				static qboolean window_logged;

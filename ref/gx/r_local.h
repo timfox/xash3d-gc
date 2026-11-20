@@ -55,6 +55,8 @@ typedef int fixed16_t;
 #define MAX_LIGHTMAPS       256
 #define SUBDIVIDE_SIZE      64
 #define MAX_DRAW_STACK      2           // normal view and menu view
+#define GX_MAX_EDGE_ENTITIES 128
+#define GX_MAX_BEAM_ENTITIES 128
 
 #if XASH_GAMECUBE
 #define SW_SPAN_CHUNK       16
@@ -204,10 +206,13 @@ typedef struct
 
 typedef struct
 {
-	cl_entity_t *edge_entities[MAX_VISIBLE_PACKET];         // brush edge drawing
+	/* Every visible entity can be solid or translucent (retail 256); beam
+	 * entities stay at 128 and the soft-renderer edge list is never drawn on
+	 * GX, which keeps the MEM1 static budget where it was. */
+	cl_entity_t *edge_entities[GX_MAX_EDGE_ENTITIES];       // brush edge drawing
 	cl_entity_t *solid_entities[MAX_VISIBLE_PACKET];        // opaque moving or alpha brushes
 	cl_entity_t *trans_entities[MAX_VISIBLE_PACKET];        // translucent brushes
-	cl_entity_t *beam_entities[MAX_VISIBLE_PACKET];
+	cl_entity_t *beam_entities[GX_MAX_BEAM_ENTITIES];
 	uint        num_edge_entities;
 	uint        num_solid_entities;
 	uint        num_trans_entities;
@@ -271,9 +276,9 @@ typedef struct
 	lightstyle_t *lightstyles;
 	dlight_t     *elights;
 	byte         *texgammatable;
-	uint         *lightgammatable;
-	uint         *lineargammatable;
-	uint         *screengammatable;
+	uint16_t     *lightgammatable;
+	uint16_t     *lineargammatable;
+	uint16_t     *screengammatable;
 
 	uint         max_entities;
 } gl_globals_t;
@@ -442,6 +447,8 @@ qboolean R_GXDrawStretchPic( float x, float y, float w, float h,
 qboolean R_GXFillRGBA( float x, float y, float w, float h, int r, int g, int b, int a, int rendermode );
 int R_GXDrawNewGameCapFaces( void );
 qboolean R_GXStudioIsActive( void );
+qboolean R_GXStudioVmDirectReady( void );
+void R_GXStudioVmPushVerts( vec3_t *verts, int n );
 qboolean R_GXTriApiIsActive( void );
 void R_GXEffectsTriBegin( void );
 void R_GXEffectsTriEnd( void );
@@ -470,9 +477,13 @@ typedef struct gx_tri_vertex_s
 } gx_tri_vertex_t;
 void R_GXStudioEmitFanC( const gx_tri_vertex_t *verts, int count, qboolean strip );
 void R_GXStudioEmitTrianglesC( const gx_tri_vertex_t *verts, int count );
+qboolean R_GXStudioEmitTricmds( const short *cmds, const float (*verts)[3], int nverts,
+	const unsigned *colors, float s, float t );
 /* Static mapmodel display lists (media/sd_<map>.gsd). */
 qboolean R_GXStudioDLActive( void );
 qboolean R_GXStudioDLTryDraw( cl_entity_t *e, model_t *mod );
+qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x4 *bones ); /* r_gx_actor.c */
+void R_GXInvalidateTriApiLayout( void );
 int R_GXDrawBrushModel( cl_entity_t *e );
 int R_GXDrawTramBaked( const float *origin, const float *angles );
 void R_GXHoldEfbForDump( int frames );
@@ -535,7 +546,9 @@ void R_GCFreeMip( image_t *tex, uint level );
 int R_GXSkinLowCap( void );
 void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean flag_masked );
 const void *R_GXSkinGet( image_t *img, int *w, int *h, qboolean *alpha, qboolean *promoted );
+void R_GXSkinAttachCmpr( image_t *img, const byte *texels, int w, int h, qboolean masked );
 void R_GXSkinBeginFrame( void );
+void R_GXHudHiBeginFrame( void );
 void R_GXSkinReport( const char *stage );
 void R_GXSkinRelease( image_t *img );
 void R_GXSkinReset( void );
@@ -1254,12 +1267,21 @@ extern int            r_currentbkey;
 extern qboolean       insubmodel;
 
 extern vec3_t         r_entorigin;
+#if XASH_GAMECUBE
+/* BSP30 addresses leafs with signed shorts, so no GoldSrc map has more than
+ * 32768 of them. The full MAX_MAP_LEAFS table costs 256 KiB of MEM1 BSS; this
+ * one costs 64 KiB. The index is masked so an oversized map can only missort. */
+#define R_LEAFKEYS_COUNT 32768
+extern unsigned short r_leafkeys[R_LEAFKEYS_COUNT];
+#define LEAF_KEY( pleaf ) r_leafkeys[( pleaf - WORLDMODEL->leafs ) & ( R_LEAFKEYS_COUNT - 1 )]
+#else
 #if XASH_LOW_MEMORY
 extern unsigned short r_leafkeys[MAX_MAP_LEAFS];
 #else
 extern int            r_leafkeys[MAX_MAP_LEAFS];
 #endif
 #define LEAF_KEY( pleaf ) r_leafkeys[( pleaf - WORLDMODEL->leafs )]
+#endif
 
 
 
@@ -1400,5 +1422,6 @@ void R_SetUpWorldTransform( void );
 void R_GXCmprSkinSize( int w, int h, int *ow, int *oh );
 size_t R_GXCmprBytes( int w, int h );
 qboolean R_GXEncodeCmprSkin( const byte *src, int sw, int sh, int dw, int dh, qboolean masked, byte *dst );
+int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int height, qboolean masked );
 #endif
 #endif // GL_LOCAL_H

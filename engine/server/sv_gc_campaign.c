@@ -17,9 +17,12 @@ can be cut and labelled by map.
 
 #if XASH_GAMECUBE
 
+qboolean SV_GCEntityInSolid( edict_t *ent );
+
 #define GC_CAMPAIGN_MAX_TRIGGERS	16
 #define GC_CAMPAIGN_MAX_VISITED		160
 #define GC_CAMPAIGN_FORCE_AFTER		6.0
+#define GC_CAMPAIGN_SCRIPTED_WAIT	180.0
 
 typedef struct
 {
@@ -173,6 +176,69 @@ static void SV_GCCampaignCenterPrint( const char *text )
 	MSG_WriteString( &cl->netchan.message, text );
 }
 
+/* Probe-only console script (gamecube.cfg "probecmd ..." → -gcprobecmd):
+ * ';'-separated console commands run on the first map the local client
+ * spawns in; a token "@<seconds>" holds the rest until the map has run that
+ * long.  Used to script HUD evidence runs (give items, take damage, open the
+ * weapon menu) without a pad. */
+static void SV_GCProbeCmdFrame( void )
+{
+	static char script[512];
+	static int pos = -1;
+	static double start;
+	char cmd[128];
+
+	if( pos == -2 )
+		return;
+	if( pos == -1 )
+	{
+		if( !Sys_GetParmFromCmdLine( "-gcprobecmd", script ))
+		{
+			pos = -2;
+			return;
+		}
+		if( sv.state != ss_active || !svs.clients || svs.clients[0].state != cs_spawned )
+			return;
+		pos = 0;
+		start = sv.time;
+		Con_Printf( "Xash3D GameCube: probecmd start map=%s time=%.1f\n", sv.name, sv.time );
+	}
+	if( sv.state != ss_active )
+		return;
+	while( script[pos] )
+	{
+		int n = 0, tok;
+
+		while( script[pos] == ';' || script[pos] == ' ' )
+			pos++;
+		tok = pos;
+		while( script[pos] && script[pos] != ';' && n < (int)sizeof( cmd ) - 1 )
+			cmd[n++] = script[pos++];
+		while( n > 0 && cmd[n - 1] == ' ' )
+			n--;
+		cmd[n] = '\0';
+		if( !n )
+			continue;
+		if( cmd[0] == '@' )
+		{
+			double at = Q_atof( cmd + 1 );
+
+			if( sv.time - start < at )
+			{
+				pos = tok; /* re-read this marker next frame */
+				return;
+			}
+			Con_Printf( "Xash3D GameCube: probecmd mark %s map=%s t=%.1f\n", cmd, sv.name, sv.time - start );
+			continue;
+		}
+		Con_Printf( "Xash3D GameCube: probecmd exec %s\n", cmd );
+		Cbuf_AddText( cmd );
+		Cbuf_AddText( "\n" );
+	}
+	pos = -2;
+	Con_Printf( "Xash3D GameCube: probecmd done\n" );
+}
+
 /* Once per server frame while a map is running. */
 void SV_GCCampaignFrame( void )
 {
@@ -180,6 +246,8 @@ void SV_GCCampaignFrame( void )
 	double delay = 20.0, elapsed;
 	gc_campaign_trigger_t *t;
 	edict_t *player, *trig;
+
+	SV_GCProbeCmdFrame();
 
 	{
 		static unsigned calls;
@@ -194,6 +262,21 @@ void SV_GCCampaignFrame( void )
 		return; /* map not scanned (loaded some other way) */
 	if( gc_camp_map_start < 0.0 )
 		gc_camp_map_start = sv.time;
+	/* Never pull the player off a ride the game is giving them (the c0a0
+	 * tram): the level change is the train's to make. Restart the clock
+	 * while they stand on a train. */
+	{
+		edict_t *pl = SV_EdictNum( 1 );
+		edict_t *ground = ( SV_IsValidEdict( pl ) && SV_IsValidEdict( pl->v.groundentity ))
+			? pl->v.groundentity : NULL;
+
+		if( ground && ( !Q_stricmp( SV_ClassName( ground ), "func_tracktrain" )
+			|| !Q_stricmp( SV_ClassName( ground ), "func_train" )))
+		{
+			gc_camp_map_start = sv.time;
+			return;
+		}
+	}
 	if( Sys_GetParmFromCmdLine( "-gcautocampaign", delay_arg ) && atof( delay_arg ) > 1.0 )
 		delay = atof( delay_arg );
 	elapsed = sv.time - gc_camp_map_start;
@@ -216,27 +299,129 @@ void SV_GCCampaignFrame( void )
 	t = &gc_camp_triggers[gc_camp_target];
 	player = SV_EdictNum( 1 );
 
+	/* A named trigger_changelevel is fired by the map itself (the c0a0 tram
+	 * path_tracks Use "transition"); its brush is a small marker the player
+	 * never stands in. Let the scripted ride finish, as in retail: walking
+	 * into the marker leaves the player inside the next map's matching
+	 * marker back, which bounces straight back. */
+	trig = SV_GCCampaignFindTrigger( t );
+	if( trig && trig->v.targetname && elapsed < delay + GC_CAMPAIGN_SCRIPTED_WAIT )
+		return;
+
 	if( !gc_camp_moved )
 	{
 		gc_camp_moved = true;
-		trig = SV_GCCampaignFindTrigger( t );
 		if( trig && SV_IsValidEdict( player ))
 		{
-			vec3_t center;
+			vec3_t entry;
+			int k;
 
-			VectorAverage( trig->v.absmin, trig->v.absmax, center );
-			VectorCopy( center, player->v.origin );
+			/* Step the player just across the trigger face nearest to
+			 * where they stand, as walking into it would. Dropping them at
+			 * the trigger centre put them deep in the next map's matching
+			 * trigger back (c0a0b -> c0a0c bounced straight back), which a
+			 * real crossing never does. */
+			/* A doorway trigger is thin along the walking direction.  Cross
+			 * that axis from the player's side, and stay inside the doorway's
+			 * width on the other axis: entering from the side (c1a4 *56 at
+			 * x=-214) put the hull in the corridor wall of c1a4k. */
+			{
+				const int thin = ( trig->v.absmax[0] - trig->v.absmin[0] )
+					<= ( trig->v.absmax[1] - trig->v.absmin[1] ) ? 0 : 1;
+
+				for( k = 0; k < 2; k++ )
+				{
+					float lo, hi;
+
+					if( k == thin )
+					{
+						lo = trig->v.absmin[k] - player->v.maxs[k] + 2.0f;
+						hi = trig->v.absmax[k] - player->v.mins[k] - 2.0f;
+					}
+					else
+					{
+						lo = trig->v.absmin[k] - player->v.mins[k] + 1.0f;
+						hi = trig->v.absmax[k] - player->v.maxs[k] - 1.0f;
+					}
+					entry[k] = player->v.origin[k];
+					if( lo <= hi )
+						entry[k] = bound( lo, entry[k], hi );
+					else
+						entry[k] = ( trig->v.absmin[k] + trig->v.absmax[k] ) * 0.5f;
+				}
+			}
+			/* Height: feet on the doorway floor, as a player walking through
+			 * it would be.  Clamping the current height let the hull
+			 * overlap the trigger by 2 units from above or below (c2a3 from
+			 * z=1556 entered *56 at the lintel; c1a1 entered *4 with its feet
+			 * 70 units under the floor), and the landmark offset carried that
+			 * into the next map as a stuck arrival. */
+			/* Some triggers start below the floor (c1a1a *15 is 250 units
+			 * tall from under the c1a1atof doorway), so search upward from
+			 * the trigger's bottom for the first height the hull fits:
+			 * that is the doorway floor.  Off-centre spots that never fit
+			 * (inside a wall) retry on the trigger's centre line. */
+			{
+				const float top = trig->v.absmax[2] - player->v.mins[2] - 2.0f;
+				int pass;
+
+				for( pass = 0; pass < 2; pass++ )
+				{
+					if( pass == 1 )
+					{
+						entry[0] = ( trig->v.absmin[0] + trig->v.absmax[0] ) * 0.5f;
+						entry[1] = ( trig->v.absmin[1] + trig->v.absmax[1] ) * 0.5f;
+					}
+					for( entry[2] = trig->v.absmin[2] - player->v.mins[2] + 1.0f;
+						entry[2] <= top; entry[2] += 4.0f )
+					{
+						VectorCopy( entry, player->v.origin );
+						if( !SV_GCEntityInSolid( player ))
+							break;
+					}
+					if( entry[2] <= top )
+						break;
+				}
+				if( pass == 2 ) // nothing fits: fall back to the trigger floor
+				{
+					entry[2] = trig->v.absmin[2] - player->v.mins[2] + 1.0f;
+					VectorCopy( entry, player->v.origin );
+				}
+			}
 			VectorClear( player->v.velocity );
 			SV_LinkEdict( player, true );
-			SV_GCCampaignCenterPrint( va( "AUTOPILOT: teleport to exit -> %s", t->map ));
-			Con_Printf( "Xash3D GameCube: CAMPAIGN walk-in %s -> %s via %s (landmark %s)\n",
-				sv.name, t->map, t->model, t->landmark[0] ? t->landmark : "-" );
+			SV_GCCampaignCenterPrint( va( "AUTOPILOT: step into exit -> %s", t->map ));
+			Con_Printf( "Xash3D GameCube: CAMPAIGN walk-in %s -> %s via %s (landmark %s) at (%.0f,%.0f,%.0f) stuck=%d\n",
+				sv.name, t->map, t->model, t->landmark[0] ? t->landmark : "-",
+				entry[0], entry[1], entry[2], SV_GCEntityInSolid( player ) ? 1 : 0 );
 		}
 		else
 			Con_Printf( "Xash3D GameCube: CAMPAIGN no trigger edict for %s -> %s\n", sv.name, t->map );
 		return;
 	}
-	if( !gc_camp_forced && elapsed >= delay + GC_CAMPAIGN_FORCE_AFTER )
+	/* Keep walking toward the trigger centre at running speed until its own
+	 * touch (and the game's transition-volume check) fires, as it would for
+	 * a player crossing it. */
+	if( !gc_camp_forced && SV_IsValidEdict( player )
+		&& ( trig = SV_GCCampaignFindTrigger( t )) != NULL )
+	{
+		vec3_t center, step;
+		float dist;
+
+		VectorAverage( trig->v.absmin, trig->v.absmax, center );
+		center[2] = player->v.origin[2]; // stay on the floor while walking in
+		VectorSubtract( center, player->v.origin, step );
+		dist = VectorLength( step );
+		if( dist > 1.0f )
+		{
+			VectorScale( step, Q_min( dist, 320.0f * (float)sv.frametime ) / dist, step );
+			VectorAdd( player->v.origin, step, player->v.origin );
+			VectorClear( player->v.velocity );
+			SV_LinkEdict( player, true );
+		}
+	}
+	if( !gc_camp_forced && elapsed >= delay + GC_CAMPAIGN_FORCE_AFTER
+		+ (( trig && trig->v.targetname ) ? GC_CAMPAIGN_SCRIPTED_WAIT : 0.0 ))
 	{
 		gc_camp_forced = true;
 		SV_GCCampaignCenterPrint( va( "AUTOPILOT: forced level change -> %s", t->map ));

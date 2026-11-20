@@ -187,6 +187,15 @@ qboolean Mod_GCWorldSurfacesPinned( model_t *mod ); /* G213: surfaces outside sc
 qboolean Mod_GCWorldSurfacesScratchRetained( model_t *mod ); /* G283: scratch retain-pin */
 /* G92: retained BSP scratch is not a Mem_ block — skip Mem_Free on changelevel. */
 qboolean Mod_GCIsRetainedBspScratch( const void *buf );
+/* True when the world keeps real hull0 clipnodes (WorldDL pack present), so
+ * point traces are safe on the CapFaces (-gcworldrender) route. */
+qboolean Mod_GCWorldTraceReady( const model_t *world );
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/* Brush entities baked into the world DL (model.c): list of "*N" numbers
+ * (bit 15: solid) for this map, and the test the server packs with. */
+const word *GC_StaticBrushes( const char *mapname, int *count, int *serial );
+qboolean GC_StaticBrushModel( int num );
+#endif
 void Mod_GCClearRetainedBspScratch( void );
 #if XASH_GAMECUBE
 /* G154: when LUMP_LIGHTING lives in ARAM (c5a1 tip/scratch OOM), CapFaces/G180
@@ -195,8 +204,10 @@ color24 *Mod_GCHydrateSurfaceLightmap( const msurface_t *surf );
 qboolean Mod_GCAramLightmapActive( void );
 byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
 void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+size_t Mod_GCWorldArraySpillFreeLasting( void );
 void *Mod_GCWorldArraySpillTryGrow( const void *ptr, size_t old_bytes, size_t new_bytes, const char *what );
 size_t Mod_GCWorldArraySpillUsed( void );
+unsigned Mod_GCWorldArraySpillGeneration( void );
 void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 qboolean Mod_GCIsWorldArraySpillCache( const void *ptr );
 void Mod_GCWorldArraySpillRewind( const void *ptr, size_t bytes );
@@ -209,6 +220,9 @@ byte *Mod_GCStudioArenaStage( size_t size, size_t *previous_bump );
 void Mod_GCStudioArenaUnstage( byte *slot, size_t size, size_t previous_bump );
 byte *Mod_GCStudioArenaLoadFile( const char *path, fs_offset_t *length );
 byte *Mod_GCSeqGroupLoad( const char *path, cache_user_t *cu, fs_offset_t *length );
+void Mod_GCAnimPackReset( void ); /* mod_studio.c: split-model animation packs */
+void Mod_GCAnimPackSpillReset( void );
+byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel ); /* mod_studio.c: streamed body meshes */
 byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size );
 void Mod_GCStudioBssTrimLast( void *ptr, size_t kept );
 void Mod_GCUploadDeferredStudioSkins( void ); /* post-MAP_READY companion/view skins */

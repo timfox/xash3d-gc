@@ -289,6 +289,8 @@ void Netchan_FragSend( netchan_t *chan );
 void Netchan_Clear( netchan_t *chan );
 #if XASH_GAMECUBE
 void Netchan_GCResetEmergency( void );
+void *Netchan_GCBorrowEmergency( size_t bytes );
+qboolean Netchan_GCReturnEmergency( const void *data );
 #endif
 
 #endif//NET_MSG_H

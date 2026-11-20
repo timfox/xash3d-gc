@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "net_ws.h"
 #include "server.h"
 #include "client.h"
+#include "dodgc_master_http.h"
 
 typedef struct master_s
 {
@@ -51,6 +52,21 @@ static struct masterlist_s
 
 static CVAR_DEFINE_AUTO( sv_verbose_heartbeats, "0", 0, "print every heartbeat to console" );
 
+/* Day of Defeat GameCube master: base URL of the REST master (scripts/dodgc_master.py),
+ * for example "http://master.example.com:8080". "host[:port]" is taken as http://.
+ * Empty = none. Set it in the config, with `dodgc_master url` or with -dodgcmaster url.
+ * A GameCube has no keyboard, so a non-empty value also makes listen servers announce
+ * themselves without `public 1`. Find servers > Internet asks it for the list
+ * (GET /v1/servers) and then queries every listed address itself, so nothing the
+ * master says is shown to the player; hosts send POST /v1/servers as heartbeat. */
+#ifndef DODGC_DEFAULT_MASTER
+#define DODGC_DEFAULT_MASTER ""
+#endif
+static CVAR_DEFINE( dodgc_master, "dodgc_master", DODGC_DEFAULT_MASTER, FCVAR_ARCHIVE, "DoD GC REST master server URL for Find servers, e.g. http://host:8080 (empty = none)" );
+static qboolean dodgc_list_in_flight;
+static qboolean dodgc_beat_in_flight;
+static double dodgc_last_beat = -1e9;
+
 #define HEARTBEAT_SECONDS               ((sv_nat.value > 0.0f) ? 60.0f : 300.0f) // 1 or 5 minutes
 #define RESOLVE_EXPIRE_SECONDS          (60.0f)  // positive cache: 1 minute
 #define NEGATIVE_RESOLVE_EXPIRE_SECONDS (300.0f) // negative cache: 5 minutes
@@ -66,6 +82,7 @@ static size_t NET_BuildMasterServerScanRequest( char *buf, size_t size, uint32_t
 	Q_strncpy( info, filter, remaining );
 
 	Info_SetValueForKey( info, "gamedir", GI->gamefolder, remaining );
+	Info_SetValueForKey( info, DODGC_NET_KEY, DODGC_NET_VERSION, remaining );
 
 	if( proto != PROTO_GOLDSRC )
 	{
@@ -117,6 +134,41 @@ static net_gai_state_t NET_GetMasterHostByName( master_t *m )
 
 	m->adr.type = 0;
 	return res;
+}
+
+/*
+========================
+NET_DodGCMasterURL
+
+Build "<base>/v1/servers<suffix>" from the cvar. Returns false when unset or too long.
+========================
+*/
+static qboolean NET_DodGCMasterURL( char *out, size_t size, const char *suffix )
+{
+	const char *base = dodgc_master.string;
+	size_t len;
+
+	if( COM_StringEmpty( base ))
+		return false;
+
+	if( Q_strnicmp( base, "http://", 7 ) && Q_strnicmp( base, "https://", 8 ))
+		Q_snprintf( out, size, "http://%s", base );
+	else Q_strncpy( out, base, size );
+
+	len = Q_strlen( out );
+	while( len > 0 && out[len - 1] == '/' )
+		out[--len] = '\0';
+
+	if( len + Q_strlen( suffix ) >= size )
+		return false;
+
+	Q_strncat( out, suffix, size );
+	return true;
+}
+
+static qboolean NET_DodGCMasterEnabled( void )
+{
+	return !COM_StringEmpty( dodgc_master.string );
 }
 
 static void NET_ClearSendState( void )
@@ -209,6 +261,8 @@ void NET_MasterClear( void )
 {
 	for( master_t *m = ml.head; m; m = m->next )
 		m->last_heartbeat = MAX_HEARTBEAT;
+
+	dodgc_last_beat = -1e9; // announce the new map to the REST master
 }
 
 /*
@@ -299,23 +353,139 @@ static void NET_MasterStaticResponse( const char *url, qboolean success, const b
 #endif
 }
 
+/*
+========================
+DoD GC REST master: list
+========================
+*/
+static void NET_DodGCListEntry( const uint8_t ip[4], uint16_t port, void *user )
+{
+	char text[32];
+	netadr_t adr = { 0 };
+	int *count = (int *)user;
+
+	Q_snprintf( text, sizeof( text ), "%d.%d.%d.%d:%d", ip[0], ip[1], ip[2], ip[3], port );
+
+	// only the address is used: the server describes itself in its own info reply
+	if( !NET_StringToAdr( text, &adr ))
+		return;
+
+	NET_QueryServerByAddress( adr, PROTO_CURRENT );
+	( *count )++;
+}
+
+static void NET_DodGCListResponse( const char *url, qboolean success, const byte *data, size_t size, void *userdata )
+{
+	int count = 0, ret;
+
+	dodgc_list_in_flight = false;
+
+	if( !success || !data || size == 0 )
+	{
+		Con_Printf( S_WARN "master %s returned no data\n", url );
+		return;
+	}
+
+	NET_Config( true, false ); // allow remote sends
+
+	ret = DodGC_MasterParseList( (const char *)data, size, NET_DodGCListEntry, &count );
+	if( ret < 0 )
+		Con_Printf( S_WARN "master %s sent an unexpected reply\n", url );
+	else Con_Reportf( "master %s yielded %d server(s)\n", url, count );
+
+#if !XASH_DEDICATED
+	CL_NotifyServerListResponse();
+#endif
+}
+
+static void NET_DodGCMasterFetch( void )
+{
+	char url[512], path[64];
+
+	if( dodgc_list_in_flight )
+		return;
+
+	Q_snprintf( path, sizeof( path ), "/v1/servers?gamedir=%s", GI ? GI->gamefolder : "dod" );
+	if( !NET_DodGCMasterURL( url, sizeof( url ), path ))
+		return;
+
+	if( HTTP_RequestToMemory( "GET", url, NULL, NET_DodGCListResponse, NULL ))
+		dodgc_list_in_flight = true;
+}
+
+/*
+========================
+DoD GC REST master: heartbeat
+========================
+*/
+static void NET_DodGCBeatResponse( const char *url, qboolean success, const byte *data, size_t size, void *userdata )
+{
+	dodgc_beat_in_flight = false;
+
+	if( !success )
+	{
+		Con_Reportf( S_WARN "heartbeat to %s failed\n", url );
+		dodgc_last_beat = host.realtime - HEARTBEAT_SECONDS + 15.0; // retry soon, not in 5 minutes
+	}
+	else if( sv_verbose_heartbeats.value )
+		Con_Printf( S_NOTE "heartbeat to %s ok\n", url );
+}
+
+static void NET_DodGCUnregister( void )
+{
+	char url[512], path[32];
+	int port = (int)Cvar_VariableValue( "hostport" );
+
+	if( port <= 0 )
+		port = PORT_SERVER;
+
+	// best effort: the master also expires entries on its own
+	Q_snprintf( path, sizeof( path ), "/v1/servers/%d", port );
+	if( dodgc_beat_in_flight || !NET_DodGCMasterURL( url, sizeof( url ), path ))
+		return;
+
+	HTTP_RequestToMemory( "DELETE", url, NULL, NET_DodGCBeatResponse, NULL );
+	dodgc_last_beat = -1e9;
+}
+
+static void NET_DodGCHeartbeat( void )
+{
+	char url[512], body[MAX_INFO_STRING];
+	int clients = 0, bots = 0, port;
+
+	if( dodgc_beat_in_flight || host.realtime - dodgc_last_beat < HEARTBEAT_SECONDS )
+		return;
+
+	if( !NET_DodGCMasterURL( url, sizeof( url ), "/v1/servers" ))
+		return;
+
+	dodgc_last_beat = host.realtime;
+	SV_GetPlayerCount( &clients, &bots );
+	port = (int)Cvar_VariableValue( "hostport" );
+	if( port <= 0 )
+		port = PORT_SERVER;
+
+	if( !DodGC_MasterBuildHeartbeat( body, sizeof( body ), port, GI->gamefolder, sv.name, clients, svs.maxclients,
+		Cvar_VariableString( "hostname" )))
+		return;
+
+	if( HTTP_RequestToMemory( "POST", url, body, NET_DodGCBeatResponse, NULL ))
+		dodgc_beat_in_flight = true;
+}
+
 static void NET_MasterStaticQuery( void )
 {
 	const char *gamedir = GI ? GI->gamefolder : "valve";
 
 #if XASH_GAMECUBE
-	/* HTTPS masterlist needs DNS + TLS heap the cube tip cannot spare;
-	 * Find servers used to fatal/hang here. Keep UDP masters + LAN. */
-	static qboolean logged;
-
-	if( !logged )
-	{
-		Con_Reportf( "Xash3D GameCube: HTTP masterlist skipped (use LAN/localservers or IP connect)\n" );
-		logged = true;
-	}
+	/* The upstream HTTPS masterlist needs TLS the cube cannot spare. The DoD GC
+	 * REST master is plain HTTP with tiny buffers (see dodgc_master). */
+	NET_DodGCMasterFetch();
 	(void)gamedir;
 	return;
 #else
+	NET_DodGCMasterFetch();
+
 	for( masterstatic_t *ms = ml.static_head; ms; ms = ms->next )
 	{
 		char url[1024];
@@ -340,7 +510,9 @@ NET_MasterQuery
 qboolean NET_MasterQuery( uint32_t key, qboolean nat, const char *filter )
 {
 	char buf[512];
-	size_t len = NET_BuildMasterServerScanRequest( buf, sizeof( buf ), key, nat, filter, PROTO_CURRENT );
+	size_t len;
+
+	len = NET_BuildMasterServerScanRequest( buf, sizeof( buf ), key, nat, filter, PROTO_CURRENT );
 	qboolean wait = NET_SendToMasters( NS_CLIENT, len, buf, PROTO_CURRENT );
 
 	// goldsrc don't have nat traversal extensions
@@ -366,7 +538,8 @@ NET_MasterHeartbeat
 */
 void NET_MasterHeartbeat( void )
 {
-	if(( !public_server.value && !sv_nat.value ) || svs.maxclients == 1 )
+
+	if(( !public_server.value && !sv_nat.value && !NET_DodGCMasterEnabled( )) || svs.maxclients == 1 )
 		return; // only public servers send heartbeats
 
 	if( Host_IsDedicated() && public_server.value )
@@ -390,6 +563,8 @@ void NET_MasterHeartbeat( void )
 			shown_serverlist_notice = true;
 		}
 	}
+
+	NET_DodGCHeartbeat();
 
 	for( master_t *m = ml.head; m; m = m->next )
 	{
@@ -431,6 +606,7 @@ void NET_MasterShutdown( void )
 	NET_Config( true, false ); // allow remote
 	while( NET_SendToMasters( NS_SERVER, 2, S2M_SHUTDOWN, PROTO_CURRENT ));
 	NET_ClearSendState();
+	NET_DodGCUnregister();
 }
 
 
@@ -781,6 +957,14 @@ void NET_InitMasters( void )
 	Cmd_AddCommand( "listmasters", NET_ListMasters_f, "list masterservers" );
 
 	Cvar_RegisterVariable( &sv_verbose_heartbeats );
+	Cvar_RegisterVariable( &dodgc_master );
+
+	{
+		char arg[MAX_STRING];
+
+		if( Sys_GetParmFromCmdLine( "-dodgcmaster", arg ) && arg[0] )
+			Cvar_DirectSet( &dodgc_master, arg );
+	}
 
 #if 0
 	NET_AddMasterStatic( "http://meltdown.lan/test" );

@@ -369,6 +369,9 @@ extern host_parm_t	host;
 #define CMD_FILTERABLE  BIT( 4 ) // filtered in unprivileged mode if cl_filterstuffcmd is 1
 #define CMD_REFDLL      BIT( 5 ) // added by ref.dll
 #define CMD_OVERRIDABLE BIT( 6 ) // can be removed by DLLs if name matches
+#if XASH_GAMECUBE
+#define CMD_GC_STATICNAME BIT( 7 ) // name points at the statically linked DLL's literal, not freed
+#endif
 
 typedef void (*xcommand_t)( void );
 
@@ -778,6 +781,8 @@ qboolean CL_IsIntermission( void );
 qboolean CL_DisableVisibility( void );
 qboolean CL_IsRecordDemo( void );
 qboolean CL_IsPlaybackDemo( void );
+void CL_CineFrameTime( double *frametime );
+qboolean CL_CineActive( void );
 qboolean UI_CreditsActive( void );
 void *UI_GetMenuFactory( void );
 int CL_GetMaxClients( void );
@@ -789,6 +794,8 @@ static inline qboolean CL_IsIntermission( void ) { return false; }
 static inline qboolean CL_DisableVisibility( void ) { return false; }
 static inline qboolean CL_IsRecordDemo( void ) { return false; }
 static inline qboolean CL_IsPlaybackDemo( void ) { return false; }
+static inline void CL_CineFrameTime( double *frametime ) { (void)frametime; }
+static inline qboolean CL_CineActive( void ) { return false; }
 static inline qboolean UI_CreditsActive( void ) { return false; }
 static inline void *UI_GetMenuFactory( void ) { return NULL; }
 static inline int CL_GetMaxClients( void ) { return SV_GetMaxClients(); }

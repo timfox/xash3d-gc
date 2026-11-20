@@ -708,7 +708,18 @@ Host_ServerFrame
 void Host_ServerFrame( void )
 {
 #if XASH_GAMECUBE
+	GC_HeapCheckArmed( "server frame enter" );
+#endif
+#if XASH_GAMECUBE
 	static int gc_fullphysics_log;
+	static unsigned gc_canary_frames;
+
+	/* Arena canary (mod_bmodel.c): world data must not change in play. */
+	if( GC_MenuRunsServer() && sv.state == ss_active && ( ++gc_canary_frames % 300 ) == 0 )
+	{
+		extern void Mod_GCWorldCanaryCheck( const char *when );
+		Mod_GCWorldCanaryCheck( "in play" );
+	}
 	qboolean gc_fullphysics = Sys_CheckParm( "-gcnewgame" )
 		&& Sys_CheckParm( "-gcfullphysics" ) && GC_IsNewGameG36Done();
 	qboolean gc_fullphysics_trace = Sys_CheckParm( "-gcnewgame" )
@@ -778,6 +789,21 @@ void Host_ServerFrame( void )
 		SV_ReadPackets(); /* authentic HL1MP usercmd → PM_Move */
 		SV_UpdateMovevars( false );
 		/* Player motion ran in ReadPackets. Skip DoD entity-think storm. */
+		/* A film shot still needs the game's frame: its rules Think moves the
+		 * scripted actors and fires the shot's effects (StartFrame only, not
+		 * the entity walk). */
+		if( CL_CineActive() || Sys_CheckParm( "-gccapture" ))
+		{
+			static int gc_film_sf_log;
+
+			svgame.globals->time = sv.time;
+			svgame.dllFuncs.pfnStartFrame();
+			if( gc_film_sf_log < 3 )
+			{
+				gc_film_sf_log++;
+				Con_Reportf( "Xash3D GameCube: WorldDL listen StartFrame for film time=%.2f\n", sv.time );
+			}
+		}
 		sv.time += sv.frametime;
 		SV_SendClientMessagesBoundedGC();
 		/* Sparse crumbs only — dense OSReport after Flipper present hangs EXI. */
@@ -819,6 +845,9 @@ void Host_ServerFrame( void )
 	// read packets from clients
 	SV_ReadPackets ();
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: read packets (usercmds)" );
+#endif
+#if XASH_GAMECUBE
 	if( gc_fullphysics_trace )
 		Con_Reportf( "Xash3D GameCube: full server packets ready\n" );
 #endif
@@ -831,6 +860,9 @@ void Host_ServerFrame( void )
 
 	// check timeouts
 	SV_CheckTimeouts ();
+#if XASH_GAMECUBE
+	GC_ProfMark( "sv: movevars+resources+timeouts" );
+#endif
 
 	// let everything in the world think and move
 	if( !SV_RunGameFrame ()) return;
@@ -841,6 +873,7 @@ void Host_ServerFrame( void )
 
 	SV_SendClientMessages ();
 #if XASH_GAMECUBE
+	GC_ProfMark( "sv: send client messages" );
 	if( gc_fullphysics_trace )
 	{
 		Con_Reportf( "Xash3D GameCube: full server messages ready\n" );
@@ -910,6 +943,7 @@ void SV_AddToMaster( netadr_t from, sizebuf_t *msg )
 	Info_SetValueForKey( s, "region", "255", len ); // server region. 255 -- all regions
 	Info_SetValueForKey( s, "product", GI->gamefolder, len ); // product? Where is the difference with gamedir?
 	Info_SetValueForKey( s, "nat", sv_nat.string, len ); // Server running under NAT, use reverse connection
+	Info_SetValueForKey( s, DODGC_NET_KEY, DODGC_NET_VERSION, len ); // DoD GC compatibility marker
 
 	NET_SendPacket( NS_SERVER, Q_strlen( s ), s, from );
 }

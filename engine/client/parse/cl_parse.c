@@ -34,7 +34,10 @@ int CL_UPDATE_BACKUP = SINGLEPLAYER_BACKUP;
 #endif
 
 #if XASH_GAMECUBE
-#define GC_GCMAP_DEFAULT_CLIENT_EDICTS 460
+#ifndef GC_GCMAP_CLIENT_EDICTS
+#define GC_GCMAP_CLIENT_EDICTS 460	/* keep in sync with cl_game.c */
+#endif
+#define GC_GCMAP_DEFAULT_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
 
 static qboolean CL_GameCubeMapRoute( void )
 {
@@ -60,6 +63,15 @@ static int CL_GameCubeClientEdictLimit( int requested )
 
 	if( Sys_GetParmFromCmdLine( "-gcmaxentities", value ))
 		limit = Q_atoi( value );
+	else if( GC_MenuRunsServer() && Host_IsLocalClient( ))
+	{
+		/* Retail New Game route: the local server's map is spawned (and any
+		 * transition restored) by now, so size the table from its real
+		 * entity count with room for what the map spawns at run time.
+		 * cl_game.c places a table above 460 in the map arena. */
+		extern int SV_GCEntityCount( void );
+		limit = Q_max( GC_GCMAP_DEFAULT_CLIENT_EDICTS, SV_GCEntityCount() + 160 );
+	}
 
 	/* Allow GC map-route caps below MIN_EDICTS when intentionally small. */
 	limit = bound( 2, limit, requested );
@@ -162,12 +174,19 @@ static void CL_ParseSoundPacket( sizebuf_t *msg, qboolean restore )
 	}
 
 #if XASH_GAMECUBE
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+#define CL_GCLocalSoundNames()	( true )
+#else
+#define CL_GCLocalSoundNames()	GC_MenuRunsServer()
+#endif
 	/* The local map route skips the resource list (SV_ActivateServer), so
 	 * this client never learned the map's sound names and dropped every
 	 * positional sound: the announcer, NPCs, the tram. Take the name from
 	 * the local server on first use and register it then; loads still go
 	 * through the gameplay sound budget, announcer lines are streamed. */
-	if( GC_MenuRunsServer() && !FBitSet( flags, SND_SENTENCE )
+	/* A DoD match skips the list the same way and is not the menu route:
+	 * rifles, footsteps, pickups and doors were all dropped here. */
+	if( CL_GCLocalSoundNames() && !FBitSet( flags, SND_SENTENCE )
 		&& sound > 0 && sound < MAX_SOUNDS && !cl.sound_precache[sound][0] )
 	{
 		extern const char *SV_GCSoundPrecacheName( int index );
@@ -180,7 +199,7 @@ static void CL_ParseSoundPacket( sizebuf_t *msg, qboolean restore )
 			Con_Reportf( "Xash3D GameCube: sound %d registered late %s handle=%d\n", sound, name, handle );
 		}
 	}
-	if( GC_MenuRunsServer() && cls.state == ca_active && !cl.audio_prepped )
+	if( CL_GCLocalSoundNames() && cls.state == ca_active && !cl.audio_prepped )
 	{
 		cl.audio_prepped = true;
 		Con_Reportf( "Xash3D GameCube: audio prepped for local map route\n" );
@@ -358,6 +377,11 @@ static void CL_ParseStaticEntity( sizebuf_t *msg )
 
 	MSG_ReadUBitLong( msg, MAX_ENTITY_BITS );
 	MSG_ReadDeltaEntity( msg, &from, &to, 0, DELTA_STATIC, cl.mtime[0] );
+#if XASH_GAMECUBE
+	/* DoD static props: kept in the compact prop list, not as cl_entity_t. */
+	if( CL_GCStaticPropFromSignon( &to ))
+		return;
+#endif
 
 	int i = clgame.numStatics;
 	if( i >= MAX_STATIC_ENTITIES )
@@ -933,6 +957,9 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 	int	i, required_version;
 
 	HPAK_CheckSize( hpk_custom_file.string );
+#if XASH_GAMECUBE
+	CL_GCClearRemoteStaticProps();
+#endif
 
 	switch( proto )
 	{
@@ -957,14 +984,19 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 #if XASH_GAMECUBE
 	if( CL_GameCubeLocalMapRoute() )
 	{
-		/* Full hud.txt preload at quality 1 OOMs on New Game. Lean VidInit runs
-		 * later at world present (gc_quality=0). GetSpriteRes no longer maps
-		 * unset m_iMaxRes to sprites/0_*.spr. */
+		/* HUD_VidInit runs after the first world presents (G327) or at the
+		 * latest before the first HUD draw: CL_GCEnsureHudVidInit. */
+		CL_GCHudVidInitReset();
 		Con_Reportf( "Xash3D GameCube: serverdata HUD vidinit deferred for local map route\n" );
 	}
 	else
+	{
+		CL_GCHudVidInitReset();
+		CL_GCEnsureHudVidInit( "serverdata" );
+	}
+#else
+	clgame.dllFuncs.pfnVidInit();
 #endif
-		clgame.dllFuncs.pfnVidInit();
 
 	cls.state = ca_connected;
 
@@ -1009,7 +1041,7 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 		clgame.maxEntities = Q_min( clgame.maxEntities, MAX_GOLDSRC_EDICTS );
 #if XASH_GAMECUBE
 			/* Allow 2P listen hosts — same MEM1 bootstrap path as SP map route. */
-			if( CL_GameCubeMapRoute() && cl.maxclients <= 2 )
+			if( CL_GameCubeMapRoute() && cl.maxclients <= 8 )
 				clgame.maxEntities = CL_GameCubeClientEdictLimit( clgame.maxEntities );
 #endif
 			clgame.maxModels = 512; // ???
@@ -1024,7 +1056,7 @@ static void CL_ParseServerData( sizebuf_t *msg, connprotocol_t proto )
 		clgame.maxEntities = MSG_ReadWord( msg );
 		clgame.maxEntities = bound( MIN_EDICTS, clgame.maxEntities, MAX_EDICTS );
 #if XASH_GAMECUBE
-			if( CL_GameCubeMapRoute() && cl.maxclients <= 2 )
+			if( CL_GameCubeMapRoute() && cl.maxclients <= 8 )
 				clgame.maxEntities = CL_GameCubeClientEdictLimit( clgame.maxEntities );
 #endif
 			clgame.maxModels = MSG_ReadWord( msg );
@@ -2651,6 +2683,14 @@ void CL_ParseUserMessage( sizebuf_t *msg, int svc_num, connprotocol_t proto )
 	{
 		pbuf[sizeof( pbuf ) - 1] = 0;
 		CL_GCHudTextShow( (const char *)pbuf );
+		return;
+	}
+
+	/* The quality-0 client does not hook SayText either: keep chat lines in the engine. */
+	if(( !clgame.msg[i].func || clgame.msg[i].func == CL_UserMsgStub )
+		&& !Q_strcmp( clgame.msg[i].name, "SayText" ))
+	{
+		OSK_ChatMessage( pbuf, iSize );
 		return;
 	}
 #endif

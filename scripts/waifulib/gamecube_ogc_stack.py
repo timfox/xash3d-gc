@@ -220,8 +220,18 @@ def engine_extra_ldflags(info: Optional[Dict[str, Any]] = None) -> List[str]:
 		flags.append("-lfat")
 	flags.append("-Wl,--allow-multiple-definition")
 	# Boot arena (mem_gamecube.c): free/realloc must accept blocks lent from
-	# the idle map-load pad, whoever releases them.
-	flags.append("-Wl,--wrap=free,--wrap=realloc")
+	# the idle map-load pad, whoever releases them. malloc/calloc are wrapped
+	# too so a refused small allocation anywhere (libiso9660, libfat, ...) can
+	# fall back to the boot pad's small zone instead of returning NULL.
+	flags.append("-Wl,--wrap=free,--wrap=realloc,--wrap=malloc,--wrap=calloc,--wrap=memalign")
+	# Drop the plain-C libraries' DWARF unwind tables (~47 KiB of MEM1 image);
+	# see the script for why no exception path needs them.
+	discard = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+		"engine", "platform", "gamecube", "discard_c_unwind.ld")
+	if os.path.isfile(discard):
+		# INSERT scripts must be given with -T: they then augment the default
+		# GameCube script instead of replacing it.
+		flags.append("-Wl,-T," + discard)
 	return flags
 
 

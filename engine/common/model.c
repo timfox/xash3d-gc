@@ -59,6 +59,46 @@ static qboolean Mod_GCMapModelSpillAfterWorldDL( void )
 	return true;
 }
 
+/* Map props and player bodies go to the world-array spill first: a team
+ * body's mesh core is about 265 KiB, and the studio arena has to keep room
+ * for viewmodels, skins and the animation pool. */
+size_t Mod_GCWorldArraySpillFree( void );
+
+/* Third-person weapons (models/p_*.mdl) the DoD weapon table precaches: what a
+ * bot or another player holds. Lean meshes with a small skin companion. */
+static qboolean Mod_GCIsWeaponModelPath( const char *path )
+{
+	static const char *pweapons[] = {
+		"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger",
+		"p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44",
+		"p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
+		/* BAR, British and para loadouts. */
+		"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley",
+		"p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
+		/* Bipod down / up third-person models. */
+		"p_barbd", "p_brenbd", "p_brenbu", "p_fg42bd", "p_fg42bu", "p_scopedfg42bu", "p_mg34bd", "p_mg34bu", "p_mg42bd", "p_mg42bu",
+		NULL
+	};
+	char bare[64];
+	int i;
+
+	if( !path || !Q_stristr( path, "models/p_" ))
+		return false;
+	COM_FileBase( path, bare, sizeof( bare ));
+	for( i = 0; pweapons[i]; i++ )
+	{
+		if( !Q_stricmp( bare, pweapons[i] ))
+			return true;
+	}
+	return false;
+}
+
+static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
+{
+	return Q_stristr( model_path, "mapmodels/" ) != NULL
+		|| Q_stristr( model_path, "models/player" ) != NULL;
+}
+
 /* Real MDLs live in the 1 MiB studio BSS arena (lean meshes + viewweapons).
  * Stubbing left GetEyePosition null and stalled denser maps during spawn —
  * the GameCube can hold the early-campaign cast without that compromise. */
@@ -312,6 +352,8 @@ static void Mod_GCVMSlotsReset( void )
 {
 	memset( gc_vm_slot, 0, sizeof( gc_vm_slot ));
 	gc_vm_clock = 0;
+	/* Called at every studio arena reset: the animation pool lives there too. */
+	Mod_GCAnimPackReset();
 }
 
 static void Mod_GCVMSlotEvict( int i )
@@ -352,7 +394,7 @@ static void Mod_GCVMSlotEvict( int i )
  * owner. NULL (caller falls back to the arena bump) if it does not fit. */
 static byte *Mod_GCVMSlotAlloc( size_t size )
 {
-	int i, pick = -1;
+	int i, pick = -1, held = -1;
 
 	if( size == 0 || size > GC_VM_SLOT_SIZE )
 		return NULL;
@@ -369,11 +411,28 @@ static byte *Mod_GCVMSlotAlloc( size_t size )
 			pick = i;
 			break;
 		}
+		/* The weapon in hand is never the victim while another slot can
+		 * go: late precaches of a map's other loadouts (v_sten, v_webley
+		 * ... on dod_caen) evicted the held v_enfield, which then drew
+		 * nothing until it was promoted back. */
+		if( gc_landmark_viewmodel[0]
+			&& !Q_stricmp( gc_vm_slot[i].owner->name, gc_landmark_viewmodel ))
+		{
+			if( held < 0 )
+				held = i;
+			continue;
+		}
 		if( pick < 0 || gc_vm_slot[i].used < gc_vm_slot[pick].used )
 			pick = i;
 	}
 	if( pick < 0 )
+		pick = held;
+	if( pick < 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: viewmodel slot alloc failed (%s, studio bump=%s)\n",
+			Q_memprint( size ), Q_memprint( gc_studio_bss_bump ));
 		return NULL;
+	}
 	Mod_GCVMSlotEvict( pick );
 	return gc_vm_slot[pick].buf;
 }
@@ -395,6 +454,22 @@ static void Mod_GCVMSlotClaim( model_t *mod, const void *buf, size_t bytes )
 	}
 }
 
+/* A viewmodel's *t skin merge appends texture headers after the mesh. When
+ * the mesh sits in a viewmodel slot the slot has room for it, so the merge
+ * stays in place instead of moving the model to a calloc copy on the heap
+ * (which also orphaned the slot). NULL when buf is no slot or it won't fit. */
+byte *Mod_GCVMSlotGrow( void *buf, size_t new_size )
+{
+	int i;
+
+	for( i = 0; buf && i < GC_VM_SLOTS; i++ )
+	{
+		if( gc_vm_slot[i].buf == buf )
+			return new_size <= GC_VM_SLOT_SIZE ? (byte *)buf : NULL;
+	}
+	return NULL;
+}
+
 static void Mod_GCVMSlotTouch( const model_t *mod )
 {
 	int i;
@@ -404,13 +479,111 @@ static void Mod_GCVMSlotTouch( const model_t *mod )
 			gc_vm_slot[i].used = ++gc_vm_clock;
 }
 
-qboolean Mod_GCIsStudioBssCache( const void *ptr )
+/* Inside the fixed BSS array: offsets from gc_studio_bss are meaningful. */
+static qboolean Mod_GCInStudioBssArray( const void *ptr )
 {
 	const byte *p = (const byte *)ptr;
 
-	if( !ptr )
-		return false;
-	return ( p >= gc_studio_bss && p < gc_studio_bss + GC_STUDIO_MODEL_LIMIT );
+	return ptr && p >= gc_studio_bss && p < gc_studio_bss + GC_STUDIO_MODEL_LIMIT;
+}
+
+/*
+ * Studio overflow into the map's leftover memory.
+ *
+ * The fixed studio arena filled on monster-heavy maps (c2a4: houndeye, hgrunt,
+ * bullsquid, islave skipped, so they spawned without hitboxes or animation)
+ * while about 1 MiB of the map-load arena was never carved.  Once the client
+ * is in game every map-load-time carve (world arrays, entity tables, packet
+ * ring) has been made, so what remains is this map's leftover; studio slices
+ * are carved from it on demand.  They live exactly as long as the map: the
+ * pre-spawn release forgets them before the old world's arena is discarded.
+ * In-place grow/trim/rollback stay BSS-only (the overflow is a plain carve).
+ */
+#define GC_STUDIO_OVERFLOW_MAX 64
+static struct { byte *base; size_t size; } gc_studio_overflow[GC_STUDIO_OVERFLOW_MAX];
+static int gc_studio_overflow_count;
+static size_t gc_studio_overflow_bytes;
+
+static qboolean Mod_GCInStudioOverflow( const void *ptr )
+{
+	const byte *p = (const byte *)ptr;
+	int i;
+
+	for( i = 0; ptr && i < gc_studio_overflow_count; i++ )
+		if( p >= gc_studio_overflow[i].base && p < gc_studio_overflow[i].base + gc_studio_overflow[i].size )
+			return true;
+	return false;
+}
+
+static byte *Mod_GCStudioOverflowAlloc( size_t size )
+{
+	size_t at;
+	byte *slot;
+
+	extern void Mod_GCWorldCanaryCheck( const char *when );
+
+	/* Only between "map active" and the next load: during a changelevel the
+	 * client is still in game while the server loads the next map into this
+	 * same arena, and a slice carved then lands in the new map's data. */
+	if( gc_studio_overflow_count >= GC_STUDIO_OVERFLOW_MAX || !GC_MapLoadBufferIsWorldSettled( ))
+		return NULL;
+	Mod_GCWorldCanaryCheck( "before studio overflow slice" ); // covers earlier slices' writes
+	size = ( size + 31u ) & ~(size_t)31u; // keep the next carve contiguous for GrowLast
+	/* Free gaps only: a lean load keeps world arrays above the tail too
+	 * (leafs/nodes high slot, clipnode spill); carving at the highwater
+	 * landed on c2a4's clipnodes (DSI in PM_HullPointContents). */
+	at = GC_MapArenaFind( size );
+	if( at == (size_t)-1 )
+		return NULL;
+	slot = (byte *)GC_MapLoadBufferTailAlloc( at, size );
+	if( !slot )
+		return NULL;
+	gc_studio_overflow[gc_studio_overflow_count].base = slot;
+	gc_studio_overflow[gc_studio_overflow_count].size = size;
+	gc_studio_overflow_count++;
+	gc_studio_overflow_bytes += size;
+	Con_Reportf( "Xash3D GameCube: studio overflow slice %s in map leftover (total %s, %d slices)\n",
+		Q_memprint( size ), Q_memprint( gc_studio_overflow_bytes ), gc_studio_overflow_count );
+	return slot;
+}
+
+/* Grow the newest overflow slice in place when nothing was carved after it
+ * (the T.mdl texture-header merge after a mesh read). */
+static byte *Mod_GCStudioOverflowGrowLast( void *ptr, size_t new_size )
+{
+	const int last = gc_studio_overflow_count - 1;
+	byte *end, *more;
+	size_t extra;
+
+	if( last < 0 || ptr != gc_studio_overflow[last].base )
+		return NULL;
+	if( new_size <= gc_studio_overflow[last].size )
+		return (byte *)ptr;
+	end = gc_studio_overflow[last].base + gc_studio_overflow[last].size;
+	if( GC_MapLoadBufferTailEnd() != end || GC_MapLoadBufferTailPeak() > GC_MapLoadBufferTailHighwater( ))
+		return NULL; // something was carved after this slice
+	extra = ( new_size - gc_studio_overflow[last].size + 31u ) & ~(size_t)31u;
+	{
+		extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+		const size_t off = (size_t)( end - GC_MapLoadBufferBase( ));
+		size_t gap_end = 0;
+
+		/* The extension must be free arena too, not a world array above. */
+		if( Mod_GCArenaGap( off, &gap_end ) != off || off + extra > gap_end )
+			return NULL;
+	}
+	more = (byte *)GC_MapLoadBufferTailAlloc( GC_MapLoadBufferTailHighwater(), extra );
+	if( more != end )
+		return NULL; // cannot happen when the tail ended at the slice
+	gc_studio_overflow[last].size += extra;
+	gc_studio_overflow_bytes += extra;
+	return (byte *)ptr;
+}
+
+/* Model-owned studio memory (BSS array or a map-leftover slice): never free(). */
+qboolean Mod_GCIsStudioBssCache( const void *ptr )
+{
+	return Mod_GCInStudioBssArray( ptr ) || Mod_GCInStudioOverflow( ptr );
 }
 
 /* Studio skins from the top of the shared region (see GC_STUDIO_BSS_BYTES).
@@ -462,11 +635,11 @@ byte *Mod_GCStudioBssAlloc( size_t size )
 {
 	size_t align_off;
 
-	if( size == 0 || size > GC_STUDIO_MODEL_LIMIT )
+	if( size == 0 )
 		return NULL;
 	align_off = ( gc_studio_bss_bump + 31u ) & ~31u;
-	if( align_off + size > GC_STUDIO_MODEL_LIMIT )
-		return NULL;
+	if( size > GC_STUDIO_MODEL_LIMIT || align_off + size > GC_STUDIO_MODEL_LIMIT )
+		return Mod_GCStudioOverflowAlloc( size );
 	gc_studio_bss_bump = align_off + size;
 	gc_studio_bss_owners++;
 	if( Sys_CheckParm( "-gcmodeltrace" ))
@@ -474,21 +647,34 @@ byte *Mod_GCStudioBssAlloc( size_t size )
 	return gc_studio_bss + align_off;
 }
 
+/* End of a slice grown in place into a staged companion's room (GrowLast);
+ * the unstage rollback must not drop the bump below it. */
+static size_t gc_studio_bss_grow_end;
+
 /* Roll back an unsuccessful read only while its slice is still last. */
 static void Mod_GCStudioBssRollbackLast( byte *slot, size_t size, size_t previous_bump )
 {
 	size_t offset;
 
-	if( !Mod_GCIsStudioBssCache( slot ) || gc_studio_bss_owners <= 0 )
+	if( !Mod_GCInStudioBssArray( slot ) || gc_studio_bss_owners <= 0 )
 		return;
 	offset = (size_t)( slot - gc_studio_bss );
 	if( size > GC_STUDIO_BSS_BYTES - offset || previous_bump > offset )
 		return;
 	if( gc_studio_bss_bump == offset + size )
 	{
-		gc_studio_bss_bump = previous_bump;
-		gc_studio_bss_owners--;
+		/* A *T.mdl staged above a mesh is where that mesh's merged texture
+		 * headers and skin table were grown to: keep them reserved, or the
+		 * next model loads over them (garbage skinref -> white NPC). */
+		if( gc_studio_bss_grow_end > previous_bump && gc_studio_bss_grow_end <= offset + size )
+			gc_studio_bss_bump = gc_studio_bss_grow_end;
+		else
+		{
+			gc_studio_bss_bump = previous_bump;
+			gc_studio_bss_owners--;
+		}
 	}
+	gc_studio_bss_grow_end = 0;
 }
 
 /* Stage a transient file (a *T.mdl skin companion) at the bottom of the
@@ -518,8 +704,8 @@ byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size )
 
 	if( !ptr || old_size == 0 || new_size < old_size || new_size > GC_STUDIO_MODEL_LIMIT )
 		return NULL;
-	if( !Mod_GCIsStudioBssCache( ptr ))
-		return NULL;
+	if( !Mod_GCInStudioBssArray( ptr ))
+		return Mod_GCInStudioOverflow( ptr ) ? Mod_GCStudioOverflowGrowLast( ptr, new_size ) : NULL;
 	off = (size_t)( p - gc_studio_bss );
 	old_end = off + old_size;
 	if( off + new_size > GC_STUDIO_MODEL_LIMIT )
@@ -527,7 +713,11 @@ byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size )
 	/* Deferred T.mdl headers: lean load reserved a pad so bump > old_end and
 	 * later companions (scientist) sit above that pad. Fit in-place. */
 	if( off + new_size <= gc_studio_bss_bump )
+	{
+		if( off + new_size > old_end )
+			gc_studio_bss_grow_end = off + new_size;
 		return p;
+	}
 	/* Accept either exact bump or 32-byte padded bump from Alloc. */
 	if( gc_studio_bss_bump != old_end
 		&& gc_studio_bss_bump != (( old_end + 31u ) & ~31u ))
@@ -546,7 +736,7 @@ void Mod_GCStudioBssTrimLast( void *ptr, size_t kept )
 	byte *p = (byte *)ptr;
 	size_t off, new_bump;
 
-	if( !ptr || kept == 0 || !Mod_GCIsStudioBssCache( ptr ))
+	if( !ptr || kept == 0 || !Mod_GCInStudioBssArray( ptr ))
 		return;
 	off = (size_t)( p - gc_studio_bss );
 	if( off >= gc_studio_bss_bump || off + kept > gc_studio_bss_bump )
@@ -643,6 +833,11 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		"by_canopy", "arc_xer_tree2", "furniture", "bulb",
 		/* dod_avalanche env_models — full-fidelity props (ava-prop-1). */
 		"sherman", "jagd", "by_banister", "flags",
+		/* DoD team bodies, split into a mesh core plus an animation pack
+		 * (dod-gc tools/split_studio_mdl.py --pack). */
+		"axis-inf", "axis-para", "brit-inf", "us-inf", "us-para",
+		/* Lost Coast characters baked to studio v10 (models/lc/, monster_generic). */
+		"fisherman", "combine_soldier", "combine_super_soldier", "seagull",
 		NULL
 	};
 	static const char *views[] = {
@@ -655,6 +850,9 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		/* The rest of the table-driven DoD gun set (dod_weapon.cpp). */
 		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 		"v_bazooka", "v_panzerschreck",
+		/* BAR, British and para loadouts. */
+		"v_bar", "v_enfield", "v_enfield_scoped", "v_sten", "v_piat", "v_webley",
+		"v_fairbairn", "v_mills", "v_m1carbine", "v_greasegun", "v_fg42", "v_paraknife",
 		NULL
 	};
 	int i;
@@ -663,6 +861,8 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		*is_viewmodel = false;
 	if( !name || !name[0] )
 		return false;
+	if( Mod_GCIsWeaponModelPath( name ))
+		return true;
 
 	COM_FileBase( name, bare, sizeof( bare ));
 	for( i = 0; npcs[i]; i++ )
@@ -682,6 +882,15 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 	return false;
 }
 
+/* Lean v_30cal (~186 KiB) and v_mg42 (~268 KiB) are bigger than a viewmodel
+ * slot and than the whole DoD studio model share, so they stream into the
+ * world-array spill like the team bodies. Once loaded they stay resident
+ * until the map arena resets, so a switch back costs nothing. */
+static qboolean Mod_GCViewModelNeedsSpill( const char *path, size_t size )
+{
+	return Mod_GCIsViewModelPath( path ) && size > GC_VM_SLOT_SIZE;
+}
+
 static qboolean Mod_GCAllowRealStudioLoad( const char *name, size_t filesize )
 {
 	qboolean is_view = false;
@@ -696,10 +905,24 @@ static qboolean Mod_GCAllowRealStudioLoad( const char *name, size_t filesize )
 
 	if( is_view )
 	{
+		/* A viewmodel that fits a viewmodel slot replaces the slot's least
+		 * recently used owner (Mod_GCVMSlotEvict gives back its count and
+		 * bytes), so the slots are its reserved budget. Without this the
+		 * team rifle never loaded once props and bodies had spent the byte
+		 * budget (ceres b302741eb: "deferred studio budget skip
+		 * 'models/v_garand.mdl' (113.42 Kb)" every frame, vm unbound). */
+		if( Mod_GCIsViewModelPath( name ) && filesize >= sizeof( studiohdr_t )
+			&& filesize <= GC_VM_SLOT_SIZE )
+			return true;
 		if( gc_real_studio_view >= GC_REAL_STUDIO_MAX_VIEW )
 			return false;
+		/* The spill has its own limit (the allocation fails cleanly), so
+		 * the shared byte budget, spent on props and bodies, does not
+		 * apply (ceres PR 98: v_30cal/v_mg42 budget skip). */
+		if( Mod_GCViewModelNeedsSpill( name, filesize ) && filesize <= ( 448 * 1024 ))
+			return true;
 	}
-	else if( gc_real_studio_npc >= max_npc )
+	else if( gc_real_studio_npc >= max_npc && !Mod_GCIsWeaponModelPath( name ))
 		return false;
 	/* The internally textured Nihilanth is approximately 420 KiB. */
 	if( filesize < sizeof( studiohdr_t ) || filesize > ( 448 * 1024 ))
@@ -716,7 +939,7 @@ static void Mod_GCNoteRealStudioLoaded( const char *name, size_t filesize )
 	Mod_GCStudioNameAllowed( name, &is_view );
 	if( is_view )
 		gc_real_studio_view++;
-	else
+	else if( !Mod_GCIsWeaponModelPath( name ))	/* small, own allowlist */
 		gc_real_studio_npc++;
 	gc_real_studio_bytes += filesize;
 	Con_Reportf( "Xash3D GameCube: real studio loaded '%s' (%s) npc=%d view=%d budget=%s/%s\n",
@@ -751,6 +974,25 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 	COM_FileBase( model_path, bare, sizeof( bare ));
 	Q_snprintf( mirror, sizeof( mirror ), "gc_studio/%s.mdl", bare );
 
+	/* Day of Defeat ships split team bodies (gc_studio/us-inf.mdl etc.) and
+	 * the renderer draws those from each player's "model" userinfo. The HL1
+	 * player.mdl (about 275 KiB) would only be a fallback body, and holding it
+	 * in the world-array spill left no room for the team body a bot needs
+	 * (ceres 877bb27: axis-inf spill alloc miss, then heap alloc fail). The
+	 * server uses a hull-only stub for player.mdl, so skip it here. */
+	if( !Q_stricmp( bare, "player" ) && FS_FileExists( "gc_studio/us-inf.mdl", false ))
+	{
+		static qboolean logged;
+
+		if( !logged )
+		{
+			logged = true;
+			Con_Reportf( "Xash3D GameCube: skip HL1 player body '%s', DoD team bodies present (spill free %s)\n",
+				model_path, Q_memprint( Mod_GCWorldArraySpillFree()));
+		}
+		return NULL;
+	}
+
 	/* A model read once this boot stays in ARAM (raw file bytes, before the
 	 * in-place byte swap), so an arena reset, a team pick or a changelevel
 	 * reloads it by DMA instead of from disc. */
@@ -767,8 +1009,38 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				return NULL;
 			}
 			previous_bump = gc_studio_bss_bump;
+			/* Map props reloaded from ARAM go back to the world-array spill,
+			 * like the disc read below. In the studio BSS, the flags merge
+			 * grew into the room the team viewmodel's skins need, and the
+			 * rifle drew with a rainbow skin (ceres rfL, DoD charlie). */
+			if(( Mod_GCStudioPrefersSpill( model_path )
+				|| Mod_GCViewModelNeedsSpill( model_path, (size_t)cached ))
+				&& Mod_GCMapModelSpillAfterWorldDL())
+			{
+				extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+				extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
+
+				slot = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)cached, "mapmodel-studio" );
+				if( slot && GC_AssetCacheRead( mirror, slot, cached ))
+				{
+					Mod_GCWorldArraySpillPinBase( slot, (size_t)cached );
+					*length = (fs_offset_t)cached;
+					if( from_bss )
+						*from_bss = true;
+					Con_Reportf( "Xash3D GameCube: mapmodel spill from ARAM '%s' (%s)\n",
+						model_path, Q_memprint( (size_t)cached ));
+					return slot;
+				}
+				if( slot )
+					Mod_GCWorldArraySpillRewind( slot, (size_t)cached );
+				Con_Reportf( "Xash3D GameCube: mapmodel spill from ARAM miss '%s' (%s), studio arena\n",
+					model_path, Q_memprint( (size_t)cached ));
+				slot = NULL;
+			}
 			slot = Mod_GCIsViewModelPath( model_path ) ? Mod_GCVMSlotAlloc( (size_t)cached ) : NULL;
-			if( !slot )
+			/* Oversized viewmodels belong in the spill (disc path below),
+			 * not in the studio arena the skins share. */
+			if( !slot && !Mod_GCViewModelNeedsSpill( model_path, (size_t)cached ))
 				slot = Mod_GCStudioBssAlloc( (size_t)cached );
 			if( slot && GC_AssetCacheRead( mirror, slot, cached ))
 			{
@@ -784,9 +1056,19 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 		}
 	}
 
-	if( FS_FileExists( mirror, false ))
+	/* Every studio file takes the read-into-slot path below (studio arena,
+	 * viewmodel slot or map spill): the gc_studio/ mirror when the disc has
+	 * one, otherwise models/<name>.mdl itself.  Only mirrored models used to,
+	 * so barnacle/bullsquid/hgrunt/... went through a whole-file heap malloc
+	 * that fragmented MEM1 refused thousands of times per sweep and the
+	 * monsters spawned without their model.  The ARAM cache stays keyed by
+	 * the mirror name either way. */
+	const char *src = FS_FileExists( mirror, false ) ? mirror
+		: ( FS_FileExists( model_path, false ) ? model_path : NULL );
+
+	if( src )
 	{
-		f = FS_Open( mirror, "rb", false );
+		f = FS_Open( src, "rb", false );
 		if( f )
 		{
 			flen = FS_FileLength( f );
@@ -806,7 +1088,8 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			/* Mapmodels prefer world-array spill so the 184 KiB studio BSS
 			 * stays free for the team viewmodel (ava-prop-2 tip≈6 KiB).
 			 * Only after WorldDL owns its chunk-cache slice. */
-			if( Q_stristr( model_path, "mapmodels/" )
+			if(( Mod_GCStudioPrefersSpill( model_path )
+				|| Mod_GCViewModelNeedsSpill( model_path, (size_t)flen ))
 				&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 				&& Mod_GCMapModelSpillAfterWorldDL())
 			{
@@ -834,11 +1117,11 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 						if( from_bss )
 							*from_bss = true;
 						Con_Reportf( "Xash3D GameCube: mapmodel spill read '%s' via %s (%s)\n",
-							model_path, mirror, Q_memprint( (size_t)flen ));
+							model_path, src, Q_memprint( (size_t)flen ));
 						return slot;
 					}
 					Con_Reportf( "Xash3D GameCube: mapmodel spill short '%s' read=%li want=%li\n",
-						mirror, (long)total, (long)flen );
+						src, (long)total, (long)flen );
 					slot = NULL;
 				}
 			}
@@ -847,7 +1130,7 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 			{
 				if( Mod_GCIsViewModelPath( model_path ))
 					slot = Mod_GCVMSlotAlloc( (size_t)flen );
-				if( !slot )
+				if( !slot && !Mod_GCViewModelNeedsSpill( model_path, (size_t)flen ))
 					slot = Mod_GCStudioBssAlloc( (size_t)flen );
 			}
 			if( slot )
@@ -868,12 +1151,12 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 					if( from_bss )
 						*from_bss = true;
 					Con_Reportf( "Xash3D GameCube: G289 studio BSS read '%s' via %s (%s) bump=%s\n",
-						model_path, mirror, Q_memprint( (size_t)flen ),
+						model_path, src, Q_memprint( (size_t)flen ),
 						Q_memprint( gc_studio_bss_bump ));
 					return slot;
 				}
 				Con_Reportf( "Xash3D GameCube: G289 studio BSS short '%s' read=%li want=%li\n",
-					mirror, (long)total, (long)flen );
+					src, (long)total, (long)flen );
 				/* Only release the last allocation: another owner may have
 				 * acquired a later slice while the file was being read. */
 				Mod_GCStudioBssRollbackLast( slot, (size_t)flen, previous_bump );
@@ -883,11 +1166,15 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 				FS_Close( f );
 				if( flen > (fs_offset_t)GC_STUDIO_MODEL_LIMIT )
 					Con_Reportf( "Xash3D GameCube: G289 studio too large for BSS '%s' (%s)\n",
-						mirror, Q_memprint( (size_t)flen ));
+						src, Q_memprint( (size_t)flen ));
 				/* Map props: WorldDL listen leaves spill headroom (chunk cache
 				 * capped at 192 KiB). Stream lean mesh there — tip heap is dead.
 				 * Gate on WorldDL Active so props cannot starve the cache. */
-				if( Q_stristr( model_path, "mapmodels/" )
+				/* The lean HL1 player body (about 281 KiB) is over the BSS limit too and
+				 * has no heap fallback once client start has spent it, so it takes the
+				 * spill the same way, as do the split team bodies. */
+				if(( Mod_GCStudioPrefersSpill( model_path ) || !Q_stricmp( bare, "player" )
+					|| Mod_GCIsWeaponModelPath( model_path ))
 					&& flen >= (fs_offset_t)sizeof( studiohdr_t )
 					&& Mod_GCAllowRealStudioLoad( model_path, (size_t)flen )
 					&& Mod_GCMapModelSpillAfterWorldDL())
@@ -895,9 +1182,9 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 					extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 					extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 
-					f = FS_Open( mirror, "rb", false );
+					f = FS_Open( src, "rb", false );
 					if( !f )
-						f = FS_Open( mirror, "rb", true );
+						f = FS_Open( src, "rb", true );
 					if( f )
 					{
 						slot = (byte *)Mod_GCWorldArraySpillTryAlloc( (size_t)flen, "mapmodel-studio" );
@@ -921,17 +1208,17 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 								if( from_bss )
 									*from_bss = true; /* don't free — spill-backed */
 								Con_Reportf( "Xash3D GameCube: mapmodel spill read '%s' via %s (%s)\n",
-									model_path, mirror, Q_memprint( (size_t)flen ));
+									model_path, src, Q_memprint( (size_t)flen ));
 								return slot;
 							}
 							Con_Reportf( "Xash3D GameCube: mapmodel spill short '%s' read=%li want=%li\n",
-								mirror, (long)total, (long)flen );
+								src, (long)total, (long)flen );
 						}
 						else
 						{
 							FS_Close( f );
-							Con_Reportf( "Xash3D GameCube: mapmodel spill alloc miss '%s' (%s)\n",
-								mirror, Q_memprint( (size_t)flen ));
+							Con_Reportf( "Xash3D GameCube: mapmodel spill alloc miss '%s' (%s, spill free %s)\n",
+								src, Q_memprint( (size_t)flen ), Q_memprint( Mod_GCWorldArraySpillFree()));
 						}
 					}
 				}
@@ -958,6 +1245,17 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 		buf = NULL;
 	}
 	*length = 0;
+
+	/* The mirror exists but could not be read into memory: the retail file is 3-5x bigger and fails the same way
+	 * (zalec: v_bren 525 KB after the 125 KB mirror). The slot path loads the weapon when it is equipped. */
+	if( Sys_CheckParm( "-gclistenserver" ) && FS_FileExists( mirror, false ))
+	{
+		static int skip_logs;
+
+		if( skip_logs++ < 8 )
+			Con_Reportf( "Xash3D GameCube: no retail fallback for '%s' (gc_studio mirror exists), loads when used\n", model_path );
+		return NULL;
+	}
 
 	buf = FS_LoadFileMalloc( model_path, length, false );
 	if( buf && *length >= (fs_offset_t)sizeof( studiohdr_t ))
@@ -1080,6 +1378,14 @@ qboolean Mod_GCPromoteStudioPath( const char *path )
 		if( loaded_hdr && loaded_hdr->length > 0 && (size_t)loaded_hdr->length < kept )
 			kept = (size_t)loaded_hdr->length;
 		Mod_GCNoteRealStudioLoaded( path, kept );
+		{
+			/* Flipper-skinned characters (ref/gx/r_gx_actor.c): their
+			 * display lists load beside the model, before the prop
+			 * cache claims the rest of the studio arena. */
+			extern void R_GXActorPreloadModel( model_t *mod );
+
+			R_GXActorPreloadModel( mod );
+		}
 		Mod_GCStudioNameAllowed( path, &is_view );
 		if( is_view )
 		{
@@ -1113,6 +1419,42 @@ qboolean Mod_GCEnsureLandmarkViewModel( const char *model_path )
 		Mod_GCVMSlotTouch( mod );
 		Mod_GCPinViewModel( mod );
 		Q_strncpy( gc_landmark_viewmodel, model_path, sizeof( gc_landmark_viewmodel ));
+		/* Promoted earlier (precache, or the spill route for the split
+		 * v_30cal / v_mg42 cores) without skins: the map-load skin pass skips
+		 * weapons nobody holds, so attach them once one is held. Only the
+		 * held weapon gets skins: attaching every promoted viewmodel at load
+		 * ran the skin uploads out of memory on ceres (v_scoped98k, v_grenade,
+		 * v_stick) and left no room for the animation ring. */
+		if( Mod_GCIsViewModelPath( model_path ))
+		{
+			extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+			static model_t *skinned_last, *failed_last;
+			static double failed_time;
+
+			/* Attach returns at once when the skins are already bound; a
+			 * failed attach (OOM) is retried once a second, not per frame. */
+			if( mod != failed_last || host.realtime - failed_time >= 1.0 )
+			{
+				if( Mod_GCAttachStudioSkins( mod ))
+				{
+					if( skinned_last != mod )
+					{
+						skinned_last = mod;
+						Con_Reportf( "Xash3D GameCube: held viewmodel skins '%s' ok=1 (resident)\n", model_path );
+						R_GXStudioInvalidateBindings();
+					}
+					if( failed_last == mod )
+						failed_last = NULL;
+				}
+				else
+				{
+					if( failed_last != mod )
+						Con_Reportf( "Xash3D GameCube: held viewmodel skins '%s' ok=0 (resident)\n", model_path );
+					failed_last = mod;
+					failed_time = host.realtime;
+				}
+			}
+		}
 		return true;
 	}
 
@@ -1120,7 +1462,24 @@ qboolean Mod_GCEnsureLandmarkViewModel( const char *model_path )
 	Image_GCPurgeDecodeScratch();
 	ok = Mod_GCPromoteStudioPath( model_path );
 	if( ok )
+	{
+		extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+
 		Q_strncpy( gc_landmark_viewmodel, model_path, sizeof( gc_landmark_viewmodel ));
+		/* The map-load skin pass skips viewmodels nobody holds yet
+		 * ("deferred skins skip ... viewmodel not held"), so a weapon
+		 * promoted here when it is first held needs its *t skins now, or
+		 * it draws flat grey (ceres PR 97: v_garand bound, untextured). */
+		mod = Mod_FindName( model_path, false );
+		if( mod && mod->cache.data && Mod_GCIsViewModelPath( model_path ))
+		{
+			qboolean skinned = Mod_GCAttachStudioSkins( mod );
+
+			Con_Reportf( "Xash3D GameCube: held viewmodel skins '%s' ok=%d\n",
+				model_path, skinned ? 1 : 0 );
+			R_GXStudioInvalidateBindings();
+		}
+	}
 	return ok;
 }
 
@@ -1295,6 +1654,41 @@ void Mod_GCPromoteMapModels( void )
 	 * stay in the 184 KiB studio BSS. */
 	FS_ClearFindMissCache();
 	Image_GCPurgeDecodeScratch();
+	/* The team body cores (models/player/<team>/<team>.mdl, ~79 KB each) first, while the spill and heap are still one
+	 * piece: loaded lazily on first draw they hit "spill alloc miss" + a malloc that fails on a fragmented heap that
+	 * reports 300 KB free (caen: brit-inf, zalec: us-para), and that side's bots have no body. */
+	{
+		int n_pre = 0, n_player = 0;
+
+		for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+		{
+			n_pre++;
+			if( Q_stristr( sv.model_precache[i], "models/player" ))
+			{
+				n_player++;
+				Con_Reportf( "Xash3D GameCube: precache list has %s (index %d)\n", sv.model_precache[i], i );
+			}
+		}
+		Con_Reportf( "Xash3D GameCube: early body promote: %d precached models, %d player\n", n_pre, n_player );
+	}
+	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		const char *name = sv.model_precache[i];
+		qboolean is_view = false;
+
+		if( !name || !Q_stristr( name, "models/player/" ) || !Q_stristr( name, ".mdl" ))
+			continue;
+		if( !Mod_GCStudioNameAllowed( name, &is_view ))
+			continue;
+		tried++;
+		if( Mod_GCPromoteStudioPath( name ))
+		{
+			ok++;
+			Con_Reportf( "Xash3D GameCube: early player body promote '%s' ok (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+		}
+		else
+			Con_Reportf( S_WARN "Xash3D GameCube: early player body promote '%s' FAILED (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+	}
 	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
 	{
 		const char *name = sv.model_precache[i];
@@ -1316,6 +1710,10 @@ void Mod_GCPromoteMapModels( void )
 			if( mod && mod->cache.data )
 				Mod_GCAttachStudioSkins( mod );
 		}
+	}
+	{
+		extern void SV_GCStaticWallsSelfTest( void );
+		SV_GCStaticWallsSelfTest();
 	}
 	Mod_GCRebindPromotedStudios();
 	Con_Reportf( "Xash3D GameCube: mapmodel studios promote ok=%d/%d budget=%s tip=%s\n",
@@ -1370,6 +1768,17 @@ static qboolean Mod_GCMapNeedsStudio( const char *path )
 		}
 		return false;
 	}
+	/* A viewmodel no map entity names waits until it is held, like the ones
+	 * above. Lost Coast: preloading v_grenade took 133 KB of the studio arena
+	 * at spawn, room the prop chain cache needs in the harbor. DoD: the game
+	 * precaches its whole gun table (18 viewmodels, 30-120 KB each plus a
+	 * 30-86 KB *t skin scratch), and on dod_avalanche that ran the heap from
+	 * 96 KB to 2.4 KB during entity spawn, so the grenade world models, later
+	 * entities and listenserver.cfg failed to load (ceres 59f4f145). Only the
+	 * held gun is ever drawn, and it loads on demand (V_SetupViewModel and the
+	 * lean listen route in cl_frame.c). */
+	if( !Q_strnicmp( path, "models/v_", 9 ))
+		return false;
 	return true;	/* unknown model: keep the old behaviour */
 }
 
@@ -1816,6 +2225,14 @@ void Mod_FreeModel( model_t *mod )
 				}
 				mod->cache.data = NULL;
 			}
+			else if( Mod_GCIsWorldArraySpillCache( mod->cache.data )
+				|| GC_IsMapLoadBuffer( mod->cache.data ))
+			{
+				/* G289 spill-resident cache (mod_studio.c) lives in the map
+				 * arena, never on the libc heap: free() would walk a bogus
+				 * chunk header (Flash Guru, DAR=3FA2AB2C). */
+				mod->cache.data = NULL;
+			}
 			else
 			{
 				free( mod->cache.data );
@@ -1824,17 +2241,19 @@ void Mod_FreeModel( model_t *mod )
 		}
 #endif
 #if XASH_GAMECUBE
-			/* Retail tram hop tip≈18 KiB (probe 235602): Mem_FreePool walks the
-			 * world zone and never returns after lean tex unload. Drop the pool
-			 * handle without walking — malloc surfaces already freed above. */
+			/* The old world's pool is always freed.  A low-heap skip here
+			 * (added for a tram-hop hang) leaked the pool on every changelevel
+			 * once the heap sat under 48 KiB, which then kept it there: c2a1's
+			 * c1a4i/c1a4b round trips ran out of memory after ~75 loads.  At
+			 * low heap, list what the pool still holds so a bad block that
+			 * would hang the walk is named in the log. */
 			if( mod->type == mod_brush && FBitSet( mod->flags, MODEL_WORLD )
 				&& GC_MemHeapFreeBytes() < 48u * 1024u )
 			{
-				Con_Reportf( "Xash3D GameCube: FreeModel skip world Mem_FreePool tip=%s\n",
-					Q_memprint( GC_MemHeapFreeBytes() ));
-				mod->mempool = 0;
+				extern void Mem_GCDescribePool( poolhandle_t poolptr, const char *why );
+				Mem_GCDescribePool( mod->mempool, "world free at low tip" );
 			}
-			else if( !( mod->type == mod_sprite && mod->mempool == host.mempool ))
+			if( !( mod->type == mod_sprite && mod->mempool == host.mempool ))
 				Mem_FreePool( &mod->mempool );
 #else
 		Mem_FreePool( &mod->mempool );
@@ -2060,8 +2479,12 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 
 			/* World precache registers every weapon; a viewmodel the map does
 			 * not place stays deferred and loads when held (V_SetupViewModel). */
+			/* Third-person weapons likewise load when a player first holds
+			 * one (CL lean player emit): precaching the whole DoD table put
+			 * all 17 in memory at spawn, twice across the map reload. */
 			if( !Q_stricmp( ext, "mdl" )
 				&& Mod_GCStudioNameAllowed( tempname, &is_view )
+				&& !Mod_GCIsWeaponModelPath( tempname )
 				&& !( is_view && !Mod_GCMapNeedsStudio( tempname ))
 				&& Mod_GCPromoteStudioPath( tempname ))
 				return mod;
@@ -2410,6 +2833,12 @@ static void Mod_PurgeStudioCache( void )
 	gc_pinned_viewmodel_count = 0;
 	memset( gc_pinned_viewmodels, 0, sizeof( gc_pinned_viewmodels ));
 #endif
+#if XASH_GAMECUBE && !XASH_DEDICATED
+	{
+		extern void CL_GCLeaveMapArena( void );
+		CL_GCLeaveMapArena();
+	}
+#endif
 	// release previois map
 	Mod_FreeModel( mod_known );	// world is stuck on slot #0 always
 #if XASH_GAMECUBE
@@ -2429,6 +2858,19 @@ static void Mod_PurgeStudioCache( void )
 		if( mod_known[i].needload == NL_UNREFERENCED )
 			continue;
 
+#if XASH_GAMECUBE
+		/* The spill was rewound above. A studio model whose data lives in it
+		 * (mapmodel-studio, merged T.mdl blocks) would otherwise be marked
+		 * free-unused, reused by the next map as present, and read memory the
+		 * new world DL tables and chunk cache now own. Drop it so the next
+		 * load fetches it again. */
+		if( mod_known[i].type == mod_studio && mod_known[i].cache.data
+			&& Mod_GCIsWorldArraySpillCache( mod_known[i].cache.data ))
+		{
+			Mod_FreeModel( &mod_known[i] );
+			continue;
+		}
+#endif
 		if( mod_known[i].type == mod_studio )
 			mod_known[i].submodels = NULL;
 
@@ -2520,6 +2962,93 @@ void Mod_FreeUnused( void )
 	}
 }
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/*
+================
+GC_StaticBrushes
+
+media/wd_<map>_sb.gcd (scripts/bake_worlddl_goldsrc.py): the brush entities
+whose faces are baked into the world DL because nothing can ever change them
+(unnamed opaque func_wall / func_illusionary at the lump origin).  The server
+keeps them out of the packets (dod_avalanche has 252 entities in view and
+190 of them are such walls), the client collides with them from this list.
+Entry: model number of "*N", bit 15 set when solid.  The list only counts
+when the world DL on the disc is the one it was baked with.
+================
+*/
+#define GC_SB_MAX	256
+#define GC_SB_MODELS	1024
+#define GC_SB_SOLID	0x8000
+
+static word gc_sb_list[GC_SB_MAX];
+static byte gc_sb_bits[GC_SB_MODELS / 8];
+static int gc_sb_count;
+static int gc_sb_serial;
+static char gc_sb_map[64];
+
+const word *GC_StaticBrushes( const char *mapname, int *count, int *serial )
+{
+	char base[64];
+
+	if( mapname && mapname[0] )
+	{
+		COM_FileBase( mapname, base, sizeof( base ));
+		if( Q_stricmp( base, gc_sb_map ))
+		{
+			char path[MAX_SYSPATH];
+			fs_offset_t len = 0;
+			byte *buf;
+
+			Q_strncpy( gc_sb_map, base, sizeof( gc_sb_map ));
+			memset( gc_sb_bits, 0, sizeof( gc_sb_bits ));
+			gc_sb_count = 0;
+			gc_sb_serial++;
+
+			Q_snprintf( path, sizeof( path ), "media/wd_%s_sb.gcd", base );
+			buf = FS_LoadFile( path, &len, false );
+			if( buf )
+			{
+				if( len >= 12 && !memcmp( buf, "GCsb", 4 ) && (( buf[4] << 8 ) | buf[5] ) == 1 )
+				{
+					const int n = ( buf[6] << 8 ) | buf[7];
+					const fs_offset_t wd_want = ((fs_offset_t)buf[8] << 24 ) | ( buf[9] << 16 ) | ( buf[10] << 8 ) | buf[11];
+					fs_offset_t wd_have;
+
+					Q_snprintf( path, sizeof( path ), "media/wd_%s.gcd", base );
+					wd_have = FS_FileSize( path, false );
+					if( wd_have == wd_want && n <= GC_SB_MAX && len >= 12 + n * 2 )
+					{
+						for( int i = 0; i < n; i++ )
+						{
+							const word v = (word)(( buf[12 + i * 2] << 8 ) | buf[13 + i * 2] );
+							const int num = v & ~GC_SB_SOLID;
+
+							if( num < 1 || num >= GC_SB_MODELS )
+								continue;
+							gc_sb_bits[num >> 3] |= (byte)( 1 << ( num & 7 ));
+							gc_sb_list[gc_sb_count++] = v;
+						}
+					}
+					Con_Reportf( "Xash3D GameCube: static brushes map=%s listed=%d used=%d world DL %d of %d bytes\n",
+						base, n, gc_sb_count, (int)wd_have, (int)wd_want );
+				}
+				Mem_Free( buf );
+			}
+		}
+	}
+	if( count ) *count = gc_sb_count;
+	if( serial ) *serial = gc_sb_serial;
+	return gc_sb_list;
+}
+
+qboolean GC_StaticBrushModel( int num )
+{
+	if( num < 1 || num >= GC_SB_MODELS )
+		return false;
+	return ( gc_sb_bits[num >> 3] & ( 1 << ( num & 7 ))) != 0;
+}
+#endif
+
 #if XASH_GAMECUBE
 /*
 ================
@@ -2538,8 +3067,20 @@ void Mod_GCReleaseStudioArena( void )
 	model_t *mod;
 	int i, freed = 0;
 
+	/* The DoD play route needs this release too: a body model kept in a
+	 * slice of the old map's arena (us-inf.mdl) survived the level change
+	 * and the next map loaded its planes and nodes over it (ceres, charlie
+	 * to avalanche: WORLD CANARY CHANGED parts=planes,nodes,clipnodes). */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
 	if( !GC_MenuRunsServer( ))
 		return;
+#endif
+	{
+		extern void R_GXActorSlotsReset( void );
+		R_GXActorSlotsReset();
+	}
+	/* The level change has begun: no more claims against this map's arena. */
+	GC_MapLoadBufferWorldSettled( false );
 	gc_pinned_viewmodel_count = 0;
 	memset( gc_pinned_viewmodels, 0, sizeof( gc_pinned_viewmodels ));
 	for( i = 1, mod = &mod_known[1]; i < mod_numknown; i++, mod++ )
@@ -2568,6 +3109,16 @@ void Mod_GCReleaseStudioArena( void )
 	gc_deferred_studio_attempts = 0;
 	gc_studio_bss_owners = 0;
 	gc_studio_bss_bump = 0;
+	if( gc_studio_overflow_count )
+	{
+		extern void Mod_GCWorldCanaryCheck( const char *when );
+		Mod_GCWorldCanaryCheck( "studio overflow release" );
+	}
+	if( gc_studio_overflow_count )
+		Con_Reportf( "Xash3D GameCube: studio overflow released slices=%d bytes=%s\n",
+			gc_studio_overflow_count, Q_memprint( gc_studio_overflow_bytes ));
+	gc_studio_overflow_count = 0;
+	gc_studio_overflow_bytes = 0;
 	/* The animation slots are in the arena too: a slot kept across this reset
 	 * wrote the next animation file over the new map's skins. Two are placed
 	 * first, so a full arena still has animations; the others come on demand. */
@@ -2576,6 +3127,9 @@ void Mod_GCReleaseStudioArena( void )
 	gc_seqgroup_slot[0].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	gc_seqgroup_slot[1].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	Con_Reportf( "Xash3D GameCube: studio arena released models=%d bytes=%u\n", freed, (uint)before );
+#if XASH_DODGC_NETWORK
+	GC_PrefetchReleaseForMatch();
+#endif
 	GC_AramReport( "studio-release" );
 }
 

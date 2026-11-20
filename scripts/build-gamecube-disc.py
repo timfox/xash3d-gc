@@ -353,6 +353,9 @@ def write_bootstrap_pk3(
 		studio_count = inject_gc_studio_into_bootstrap(archive, data)
 		if studio_count:
 			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
+		player_count = inject_gc_player_models(archive, data)
+		if player_count:
+			print(f"GameCube player models: injected {player_count} file(s) into bootstrap pk3")
 		hud_count = inject_gc_hud_into_bootstrap(archive, data)
 		if hud_count:
 			print(f"GameCube HUD mirror: injected {hud_count} sprite(s) into bootstrap pk3")
@@ -545,7 +548,7 @@ MENU_RESOURCE_DIRS = (
 )
 
 
-SMOKE_HUD_RES = 320
+SMOKE_HUD_RES = 640  # the client lays the HUD out on a 640x480 screen
 
 SMOKE_HUD_SPRITES = (
 	"sprites/animglow01.spr",
@@ -818,7 +821,7 @@ def _gc_menu_nonblack_ratio(image) -> float:
 
 
 def _gc_menu_preserve_retail_tone(image):
-	"""Lift crushed HD steam tiles so the lambda/lab backdrop reads on TV.
+	"""Lift crushed HD menu background tiles so the lambda/lab backdrop reads on TV.
 
 	HD_BackgroundLayout composites sit near mean≈15 / p95≈30 (near-black on
 	a 320×240 soft HUD). Probe 20261104-235523 showed 4 dark quadrants with
@@ -1052,7 +1055,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 	gc_menu_bg_size = (320, 240)
 	bake_src_size = (640, 480)
 	if best is not None and best_ratio >= 0.02:
-		# Retail tone: the HD steam tiles as drawn by the PC menu (mean ~15,
+		# Retail tone: the HD menu background tiles as drawn by the retail menu (mean ~15,
 		# p95 ~31, the same as the retail screenshot).  The old lift to p95 168
 		# made up for an unreadable 320x240 soft HUD and washed the sheet out
 		# on the full-resolution GX menu.
@@ -1180,7 +1183,7 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 
 
 def _stage_gc_menu_btn_strips(source: Path, menu_dir: Path) -> None:
-	"""Bake WON/Steam btns_main rows used by the GameCube main menu."""
+	"""Bake retail btns_main rows used by the GameCube main menu."""
 	try:
 		from PIL import Image
 	except ImportError:
@@ -1430,10 +1433,22 @@ def stage_gc_loading_assets(source: Path, output: Path) -> bool:
 	return True
 
 
+# DoD third-person weapons (dod-gc src/dod_game.c weapon table); the engine
+# list is Mod_GCIsWeaponModelPath in engine/common/model.c.
+GC_STUDIO_PWEAPONS = (
+	"p_garand", "p_k98", "p_mp40", "p_tommy", "p_colt", "p_luger", "p_amerk", "p_spade", "p_grenade", "p_stick", "p_bren", "p_stg44", "p_spring", "p_30cal", "p_mg42pr", "p_bazooka", "p_pschreck",
+	# British (Allies on British maps) and para loadouts.
+	"p_barbu", "p_enfield", "p_enfields", "p_sten", "p_piat", "p_webley", "p_fairbairn", "p_mills", "p_m1carb", "p_grease", "p_fg42", "p_paraknife",
+	# Bipod down / up variants the game switches weaponmodel to when deployed.
+	"p_barbd", "p_brenbd", "p_brenbu", "p_fg42bd", "p_fg42bu", "p_scopedfg42bu", "p_mg34bd", "p_mg34bu", "p_mg42bd", "p_mg42bu",
+)
+
 # Small allowlist injected into gamecube-bootstrap.pk3 as gc_studio/*.mdl so
 # New Game can load real meshes without ISO9660 lookups in huge models/, and
 # without mounting an extra ZIP (which tips the New Game MEM1 cliff).
 GC_STUDIO_MODELS = (
+	# Player body (bots and the local player): without it the lean client draws no player.
+	"models/player.mdl",
 	"models/v_crowbar.mdl",
 	"models/v_9mmhandgun.mdl",
 	# DoD CapFaces team weapons (lean-stripped on inject; real names on disc).
@@ -1443,6 +1458,11 @@ GC_STUDIO_MODELS = (
 	"models/v_tommy.mdl",
 	"models/v_colt.mdl",
 	"models/v_luger.mdl",
+	# DoD melee: every class spawns holding one. Without a lean gc_studio copy
+	# they load from models/ at full size (192/227 KiB) and the deferred studio
+	# budget skips them, so the player had no viewmodel (ceres fxa, 2026-11-15).
+	"models/v_amerk.mdl",
+	"models/v_spade.mdl",
 	# DoD hand grenades: viewmodels lean-stripped, thrown bodies mesh-only.
 	"models/v_grenade.mdl",
 	"models/v_stick.mdl",
@@ -1459,6 +1479,62 @@ GC_STUDIO_MODELS = (
 	"models/v_panzerschreck.mdl",
 	"models/w_bazooka_rocket.mdl",
 	"models/w_crowbar.mdl",
+	# BAR, British and para view models: the game precaches them late, on the
+	# maps whose loadouts use them, and without a gc_studio copy they never load.
+	"models/v_bar.mdl",
+	"models/v_enfield.mdl",
+	"models/v_enfield_scoped.mdl",
+	"models/v_sten.mdl",
+	"models/v_piat.mdl",
+	"models/v_webley.mdl",
+	"models/v_fairbairn.mdl",
+	"models/v_mills.mdl",
+	"models/v_m1carbine.mdl",
+	"models/v_greasegun.mdl",
+	"models/v_fg42.mdl",
+	"models/v_paraknife.mdl",
+	"models/w_mills.mdl",
+	# Third-person weapons (what bots and other players hold): lean mesh plus
+	# a 64x64 skin companion, loaded when a player first holds one.
+	"models/p_garand.mdl",
+	"models/p_k98.mdl",
+	"models/p_mp40.mdl",
+	"models/p_tommy.mdl",
+	"models/p_colt.mdl",
+	"models/p_luger.mdl",
+	"models/p_amerk.mdl",
+	"models/p_spade.mdl",
+	"models/p_grenade.mdl",
+	"models/p_stick.mdl",
+	"models/p_bren.mdl",
+	"models/p_stg44.mdl",
+	"models/p_spring.mdl",
+	"models/p_30cal.mdl",
+	"models/p_mg42pr.mdl",
+	"models/p_bazooka.mdl",
+	"models/p_pschreck.mdl",
+	"models/p_barbu.mdl",
+	"models/p_enfield.mdl",
+	"models/p_enfields.mdl",
+	"models/p_sten.mdl",
+	"models/p_piat.mdl",
+	"models/p_webley.mdl",
+	"models/p_fairbairn.mdl",
+	"models/p_mills.mdl",
+	"models/p_m1carb.mdl",
+	"models/p_grease.mdl",
+	"models/p_fg42.mdl",
+	"models/p_paraknife.mdl",
+	"models/p_barbd.mdl",
+	"models/p_brenbd.mdl",
+	"models/p_brenbu.mdl",
+	"models/p_fg42bd.mdl",
+	"models/p_fg42bu.mdl",
+	"models/p_scopedfg42bu.mdl",
+	"models/p_mg34bd.mdl",
+	"models/p_mg34bu.mdl",
+	"models/p_mg42bd.mdl",
+	"models/p_mg42bu.mdl",
 	# DoD CapFaces map props (env_model / dod_object).
 	# Tip: skip forts/kingtiger; caen unique order saturates 6 slots before bulb.
 	"models/mapmodels/hk_satchel.mdl",
@@ -1508,17 +1584,10 @@ GC_STUDIO_MODELS = (
 	"models/islavet.mdl",
 )
 
-# Direct-load HUD sheets for lean New Game Redraw (ISO9660 sprites/ lookups
-# false-miss like models/). Keep the set tiny — bootstrap MEM is tight.
+# Sprites read early through the bootstrap search path (ISO9660 sprites/
+# lookups false-miss like models/). The HUD itself is the retail 640 set of
+# hud.txt, read from the disc by the client's HUD_VidInit.
 GC_HUD_SPRITES = (
-	# G288: lean single-frame aliases — fat retail soft-fails under tip.
-	("sprites/320_pain.spr", "sprites/gc_320_pain.spr"),
-	("sprites/320_train.spr", "sprites/gc_320_train.spr"),
-	("sprites/320hud2.spr", "sprites/gc_320hud2.spr"),
-	# G173: lean 64×64 downsample of fat 320hud1 (~66 KiB → ~5 KiB).
-	("sprites/320hud1.spr", "sprites/gc_320hud1.spr"),
-	# G174: lean 64×64 downsample of 128×128 crosshairs (~17 KiB → ~5 KiB).
-	("sprites/crosshairs.spr", "sprites/gc_crosshairs.spr"),
 	# G320: reactor electricity / env_beam (~7 KiB retail; tip-safe as-is).
 	"sprites/lgtning.spr",
 )
@@ -1942,21 +2011,44 @@ def wt_read_wads(source: Path, bsp: Path | None = None) -> dict:
 	return found
 
 
-def wt_encode(w: int, h: int, pixels: bytes, palette: bytes, alpha: bool) -> tuple[int, int, int, bytes]:
+def texgamma_table():
+	"""GoldSrc's texgamma table at the default cvars (gamma 2.5, texgamma 2.0:
+	engine/client/gamma.c BuildGammaTable): the palette of every Half-Life mip
+	and unmasked studio skin goes through it at load (imagelib LUMP_TEXGAMMA).
+	64 -> 84, 128 -> 146, 200 -> 209."""
+	import numpy as np
+
+	return np.minimum(255, (np.power(np.arange(256) / 255.0, 0.8) * 255.0).astype(np.int64)).astype(np.uint8)
+
+
+def wt_encode(
+	w: int, h: int, pixels: bytes, palette: bytes, alpha: bool, texgamma: bool = False
+) -> tuple[int, int, int, bytes]:
 	"""Palette texture to a CMPR mip chain, power-of-two sides (GX_REPEAT
-	needs them; UVs are normalised, so a resize does not move anything)."""
+	needs them; UVs are normalised, so a resize does not move anything).
+	texgamma applies GoldSrc's texture gamma to an opaque texture, as the
+	stock loader does; the baked packs skipped it and drew the world 15 to
+	20 percent darker in the midtones."""
 	import numpy as np
 	from PIL import Image
 
 	pal = np.frombuffer(palette, np.uint8).reshape(256, 3)
+	if texgamma and not alpha:
+		pal = texgamma_table()[pal]
 	idx = np.frombuffer(pixels, np.uint8).reshape(h, w)
 	rgb = pal[idx]
 	opaque = idx != 255 if alpha else np.ones((h, w), bool)
 	tw, th = 1 << max(3, (w - 1).bit_length()), 1 << max(3, (h - 1).bit_length())
 	if (tw, th) != (w, h):
-		resample = Image.Resampling.NEAREST if alpha else Image.Resampling.BICUBIC
-		rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), resample))
-		opaque = np.asarray(Image.fromarray(opaque).resize((tw, th), Image.Resampling.NEAREST))
+		# Pillow 12.1 raises SystemError on any size-changing NEAREST resize (and on
+		# bool images), so do nearest-neighbour with index maps (PIL pixel-centre rule).
+		ys = np.minimum(((np.arange(th) + 0.5) * h / th).astype(np.int64), h - 1)
+		xs = np.minimum(((np.arange(tw) + 0.5) * w / tw).astype(np.int64), w - 1)
+		if alpha:
+			rgb = rgb[ys][:, xs]
+		else:
+			rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), Image.Resampling.BICUBIC))
+		opaque = opaque[ys][:, xs]
 	levels = bytearray()
 	count = 0
 	fcol = rgb.astype(np.float32)
@@ -2079,6 +2171,22 @@ def build_loading_spans(source: Path, output: Path) -> list[tuple[str, Path]]:
 	return [("media/gc_loading.spn", out)]
 
 
+def world_dl_pair_ok(wd: Path) -> bool:
+	"""True when wd_<map>_sb.gcd sits next to this world DL and was written with
+	it: the runtime (model.c GC_StaticBrushes) ignores the static brush list
+	when its recorded pack size differs, and the server then sends every brush
+	entity as a packet entity (a stale 1.3 MB prebaked dod_avalanche pack
+	against a 2.88 MB fresh bake left objects missing)."""
+	sb = wd.with_name(wd.stem + "_sb.gcd")
+	try:
+		head = sb.read_bytes()[:12]
+	except OSError:
+		return False
+	if len(head) < 12 or head[:4] != b"GCsb" or int.from_bytes(head[4:6], "big") != 1:
+		return False
+	return int.from_bytes(head[8:12], "big") == wd.stat().st_size
+
+
 def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	"""media/wd_<map>.gcd for a GoldSrc map: the whole BSP as GX display lists
 	per PVS cluster (scripts/bake_worlddl_goldsrc.py, runtime
@@ -2089,14 +2197,20 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	st = bsp.stat()
 	out = cache / f"wd_{bsp.stem.lower()}.gcd"
 	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
-	key = f"{st.st_size}:{int(st.st_mtime)}:2"
-	if out.is_file() and stamp.is_file() and stamp.read_text() == key:
+	lf = cache / f"wd_{bsp.stem.lower()}_lf.gcd"
+	sb = cache / f"wd_{bsp.stem.lower()}_sb.gcd"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb2-lmpack3-lmcmpr"
+	if os.environ.get("DODGC_WD_LZ4", "") == "1":
+		key += ":lz4lm1lf3pvs1"
+	if out.is_file() and lf.is_file() and sb.is_file() and stamp.is_file() and stamp.read_text() == key:
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
 	try:
 		import bake_worlddl_goldsrc  # type: ignore
 
 		bake_worlddl_goldsrc.bake(bsp, out)
+		# Light points for studio models (ref_light.c): face table + lighting.
+		bake_worlddl_goldsrc.bake_lightfaces(bsp, lf)
 	except (Exception, SystemExit) as error:  # a map the baker cannot read keeps CapFaces
 		print(f"  world DL: bake failed for {bsp.name}: {error}")
 		return None
@@ -2111,6 +2225,13 @@ def build_world_dl_overlays(source: Path, output: Path, cache: Path) -> list[tup
 		wd = bake_world_dl(bsp, cache)
 		if wd:
 			overlays.append((f"media/{wd.name}", wd))
+			lf = wd.with_name(wd.stem + "_lf.gcd")
+			if lf.is_file():
+				overlays.append((f"media/{lf.name}", lf))
+			# Static brush entities baked into this pack (written with it).
+			sb = wd.with_name(wd.stem + "_sb.gcd")
+			if sb.is_file():
+				overlays.append((f"media/{sb.name}", sb))
 	print(f"  world DL: {len(overlays)} map(s) baked/cached")
 	return overlays
 
@@ -2149,6 +2270,77 @@ def build_music_overlays(source: Path, output: Path, cache: Path) -> list[tuple[
 	playlist.write_text("\n".join(lines) + "\n", encoding="ascii")
 	overlays.append(("media/cdaudio.txt", playlist))
 	print(f"  music: {len(overlays) - 1} CD tracks as 22 kHz WAV")
+	return overlays
+
+
+def build_prop_packs(
+	source: Path,
+	output: Path,
+	cache: Path,
+	map_stems: set[str] | None = None,
+) -> list[tuple[str, Path]]:
+	"""media/gp_<map>.gcp + media/pt_<map>.gct for every Day of Defeat map:
+	its unnamed env_model / dod_object props as instanced GX display lists
+	with their own CMPR textures (scripts/bake_props_goldsrc.py, runtime
+	ref/gx/r_gx_world.c R_GXProp*). The engine draws them from ARAM without
+	loading a studio model, so a map is no longer held to six prop models.
+	Cached by BSP size and mtime."""
+	sys.path.insert(0, str(Path(__file__).resolve().parent))
+	import bake_props_goldsrc  # type: ignore
+
+	cache.mkdir(parents=True, exist_ok=True)
+	roots = [source] + [
+		root for root in (
+			Path(os.environ.get("DODGC_FULL_DOD", "").strip() or "/nonexistent"),
+			source.parent / "dod",
+			Path("/home/tim/Desktop/dod-gc/content/dod"),
+			Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
+			source.parent / "valve",
+			Path("/home/tim/Desktop/dod-gc/content/valve"),
+		) if root.is_dir()
+	]
+	overlays: list[tuple[str, Path]] = []
+	failed: list[str] = []
+	missing_pack: list[str] = []
+	for bsp in sorted((source / "maps").glob("dod_*.bsp")):
+		stem = bsp.stem.lower()
+		if map_stems is not None and stem not in map_stems:
+			continue
+		st = bsp.stat()
+		gcp, gct, stamp = cache / f"gp_{stem}.gcp", cache / f"pt_{stem}.gct", cache / f"gp_{stem}.stamp"
+		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-13motion"
+		if not (stamp.is_file() and stamp.read_text() == key):
+			for stale in (gcp, gct):
+				stale.unlink(missing_ok=True)
+			stamp.unlink(missing_ok=True)
+			try:
+				stats = bake_props_goldsrc.bake(bsp, roots, gcp, gct, gx_cmpr_encode_blocks)
+			except (Exception, SystemExit) as error:  # the map keeps the engine's own static props
+				print(f"  props: bake failed for {bsp.name}: {error}")
+				stats = None
+				failed.append(stem)
+				for stale in (gcp, gct):
+					stale.unlink(missing_ok=True)
+			# A bake that could not find a model file is tried again next
+			# build, when the file may be there.
+			if stats is None or not stats["missing"]:
+				stamp.write_text(key)
+		if not (gcp.is_file() and gct.is_file()):
+			missing_pack.append(stem)
+			continue
+		for name, src in ((f"gp_{stem}.gcp", gcp), (f"pt_{stem}.gct", gct)):
+			dest = output / "media" / name
+			dest.parent.mkdir(parents=True, exist_ok=True)
+			shutil.copy2(src, dest)
+			overlays.append((f"media/{name}", dest))
+	print(f"  props: {len(overlays) // 2} map prop pack(s)")
+	# A map on the disc without its pack only loads GC_STATIC_PROP_MODELS (6) prop models, and most maps use 8 to 44.
+	# Fail the build rather than ship that silently; DODGC_ALLOW_MISSING_PROPPACK=1 keeps the old behaviour.
+	if missing_pack and os.environ.get("DODGC_ALLOW_MISSING_PROPPACK", "") != "1":
+		raise SystemExit(
+			"error: no prop pack (gp_<map>.gcp / pt_<map>.gct) for: " + ", ".join(sorted(missing_pack))
+			+ (" (bake failed: " + ", ".join(sorted(failed)) + ")" if failed else "")
+			+ ". Those maps would load only 6 prop models. Fix the bake, or set DODGC_ALLOW_MISSING_PROPPACK=1 to ship anyway.")
 	return overlays
 
 
@@ -2254,14 +2446,19 @@ def build_world_texture_packs(
 				continue
 			_, w, h, pixels, palette = mip
 			alpha = name.startswith("{")
-			key = hashlib.md5(bytes((alpha,)) + struct.pack("<II", w, h) + pixels + palette + b"2").hexdigest()
+			# Day of Defeat maps get the stock texture gamma; the Half-Life
+			# packs keep the look they were checked with.
+			texgamma = bsp.stem.lower().startswith("dod_") and not alpha
+			key = hashlib.md5(
+				bytes((alpha,)) + struct.pack("<II", w, h) + pixels + palette + (b"2g" if texgamma else b"2")
+			).hexdigest()
 			item = cache / f"{key}.bin"
 			if item.is_file():
 				cached = item.read_bytes()
 				tw, th, levels = struct.unpack_from("<HHH", cached)
 				body = cached[6:]
 			else:
-				tw, th, levels, body = wt_encode(w, h, pixels, palette, alpha)
+				tw, th, levels, body = wt_encode(w, h, pixels, palette, alpha, texgamma)
 				item.write_bytes(struct.pack("<HHH", tw, th, levels) + body)
 			entries.append((name, tw, th, levels, GC_WT_FLAG_ALPHA if alpha else 0, int(key[:4], 16), len(blob)))
 			blob += body
@@ -2496,10 +2693,211 @@ def lean_studio_tex_companion_bytes(src: Path, max_edge: int = 64) -> bytes | No
 	return bytes(out)
 
 
+STUDIO_NF_MASKED = 0x40
+STUDIO_NF_GC_CMPR = 1 << 28  # keep equal to STUDIO_NF_GC_CMPR in engine/studio.h
+STUDIO_NF_GC_CMPR_STREAM = 1 << 27  # keep equal to STUDIO_NF_GC_CMPR_STREAM in engine/studio.h
+
+
+def gc_cmpr_skin_edge(size: int, cap: int) -> int:
+	"""Baked edge for a source edge: the power of two nearest in log terms,
+	8..cap (same rule as R_GXCmprPow2 in ref/gx/r_gx_cmpr.c)."""
+	edge = 8
+	while edge < cap and 2 * edge * edge < size * size:
+		edge <<= 1
+	return edge
+
+
+def gc_cmpr_skin_companion_bytes(
+	src: Path, max_edge: int = 128, part_edge: int | None = None, stream_edge: int | None = None
+) -> bytes | None:
+	"""A gc_studio/<stem>t.mdl whose skins are already GX CMPR.
+
+	Same layout as lean_studio_tex_companion_bytes (header, texture structs,
+	skin table, texel blobs), but each texture carries STUDIO_NF_GC_CMPR and
+	its blob is width*height/2 bytes of big-endian CMPR blocks, 32-byte
+	aligned in the file. The engine copies them into the skin window as they
+	are (R_GCBakedCmprSkin): no palette decode and no encode at load.
+	Colour-remap textures (DM_Base, remap*) stay palettised.
+	stream_edge, when set (GC_PLAYER_SKIN_STREAM=256), bakes a skin whose edge would be stream_edge on both sides as
+	STUDIO_NF_GC_CMPR_STREAM: stream_edge x stream_edge CMPR texels followed by a half-size CMPR low mip. The header
+	keeps stream_edge as the texture size (the studio UV scale is 1/width); the engine keeps the low mip resident and
+	streams the full texels from ARAM where a skin window exists (R_GXSkinAttachCmpr), so a build without one draws a
+	plain 128 px skin.
+	part_edge, when set, caps the small parts (faces, hats, helmets, hair) at
+	that edge: they are a few dozen pixels on screen, and at full size a
+	team's six faces overflowed the studio skin window (ceres: Axis faces
+	"no room", grey heads).
+	"""
+	try:
+		import numpy as np
+		from PIL import Image
+	except ImportError:
+		return None
+	try:
+		raw = src.read_bytes()
+	except OSError:
+		return None
+	if len(raw) < 244 or raw[:4] not in (b"IDST", b"IDSQ"):
+		return None
+	numtextures = struct.unpack_from("<i", raw, 180)[0]
+	textureindex = struct.unpack_from("<i", raw, 184)[0]
+	numskinref = struct.unpack_from("<i", raw, 192)[0]
+	numskinfamilies = struct.unpack_from("<i", raw, 196)[0]
+	skinindex = struct.unpack_from("<i", raw, 200)[0]
+	if numtextures <= 0 or textureindex <= 0 or textureindex + numtextures * 80 > len(raw):
+		return None
+
+	skin_bytes = b""
+	if numskinref > 0 and numskinfamilies > 0 and skinindex > 0 \
+			and skinindex + numskinref * numskinfamilies * 2 <= len(raw):
+		skin_bytes = raw[skinindex : skinindex + numskinref * numskinfamilies * 2]
+	else:
+		numskinref = numskinfamilies = 0
+
+	tex_table = 244
+	skin_table = tex_table + numtextures * 80
+	out = bytearray(skin_table + len(skin_bytes))
+	out[0:4] = b"IDST"
+	struct.pack_into("<i", out, 4, 10)
+	out[8:72] = raw[8:72]
+	out[skin_table:] = skin_bytes
+	data_start = None
+
+	for i in range(numtextures):
+		off = textureindex + i * 80
+		name = raw[off : off + 64]
+		flags, width, height, index = struct.unpack_from("<iiii", raw, off + 64)
+		if width <= 0 or height <= 0 or index < 0 or index + width * height + 768 > len(raw):
+			return None
+		pixels = raw[index : index + width * height]
+		palette = raw[index + width * height : index + width * height + 768]
+		label = name.split(b"\0")[0].lower()
+		while len(out) % 32:
+			out.append(0)
+		if data_start is None:
+			data_start = len(out)
+		dst = tex_table + i * 80
+		out[dst : dst + 64] = name
+		if label.startswith(b"dm_base") or label.startswith(b"remap") or width < 8 or height < 8:
+			struct.pack_into("<iiii", out, dst + 64, flags, width, height, len(out))
+			out += pixels + palette
+			continue
+		edge = max_edge
+		if part_edge and label.startswith(GC_SKIN_PART_PREFIXES):
+			edge = min(edge, part_edge)
+		nw, nh = gc_cmpr_skin_edge(width, edge), gc_cmpr_skin_edge(height, edge)
+		pal = np.frombuffer(palette, np.uint8).reshape(256, 3)
+		idx = np.frombuffer(pixels, np.uint8).reshape(height, width)
+		masked = bool(flags & STUDIO_NF_MASKED)
+		opaque = (idx != 255) if masked else np.ones((height, width), bool)
+		rgb = pal[idx]
+		if masked and not opaque.all() and opaque.any():
+			# Cut-out texels take the mean opaque colour so the filter does
+			# not bleed the key colour into the edges.
+			rgb = rgb.copy()
+			rgb[~opaque] = rgb[opaque].mean(0).astype(np.uint8)
+		if (nw, nh) != (width, height):
+			rgb = np.asarray(Image.fromarray(rgb, "RGB").resize((nw, nh), Image.Resampling.LANCZOS))
+			opaque = np.asarray(
+				Image.fromarray(opaque.astype(np.uint8) * 255, "L").resize((nw, nh), Image.Resampling.NEAREST)
+			) >= 128
+		blob = gx_cmpr_encode_blocks(np.ascontiguousarray(rgb), np.ascontiguousarray(opaque))
+		if len(blob) != nw * nh // 2:
+			return None
+		# Chrome/additive are dropped as in the palettised companion.
+		keep = (flags & STUDIO_NF_MASKED) | STUDIO_NF_GC_CMPR
+		if stream_edge and (nw, nh) == (stream_edge, stream_edge):
+			lw, lh = nw // 2, nh // 2
+			lrgb = np.asarray(Image.fromarray(np.ascontiguousarray(rgb), "RGB").resize((lw, lh), Image.Resampling.LANCZOS))
+			lopaque = np.asarray(
+				Image.fromarray(opaque.astype(np.uint8) * 255, "L").resize((lw, lh), Image.Resampling.NEAREST)
+			) >= 128
+			low = gx_cmpr_encode_blocks(np.ascontiguousarray(lrgb), np.ascontiguousarray(lopaque))
+			if len(low) != lw * lh // 2:
+				return None
+			blob += low
+			keep |= STUDIO_NF_GC_CMPR_STREAM
+		struct.pack_into("<iiii", out, dst + 64, keep, nw, nh, len(out))
+		out += blob
+
+	struct.pack_into("<i", out, 72, len(out))
+	struct.pack_into("<i", out, 180, numtextures)
+	struct.pack_into("<i", out, 184, tex_table)
+	struct.pack_into("<i", out, 188, data_start if data_start is not None else len(out))
+	struct.pack_into("<i", out, 192, numskinref)
+	struct.pack_into("<i", out, 196, numskinfamilies)
+	struct.pack_into("<i", out, 200, skin_table if skin_bytes else 0)
+	return bytes(out)
+
+
+# engine/common/model.c GC_VM_SLOT_SIZE: a viewmodel above this cannot use a
+# reserved viewmodel slot.
+GC_VIEWMODEL_SLOT_BYTES = 128 * 1024
+GC_VIEWMODEL_PACK_PATH = "models/anim_%s.gca"
+
+
+def split_heavy_viewmodel(src: Path, stem: str, data: Path, splitter=None) -> bytes | None:
+	"""Mesh core for an oversized viewmodel; its animation pack goes loose in data."""
+	if splitter is None:
+		splitter = load_studio_splitter()
+	if splitter is None:
+		print(f"  viewmodel {stem}: split_studio_mdl.py not found (set DODGC_TOOLS); left whole")
+		return None
+	try:
+		files, _ = splitter.split(src.read_bytes(), stem, pack_path=GC_VIEWMODEL_PACK_PATH)
+	except Exception as exc:  # StudioError or a malformed file: keep the lean model
+		print(f"  viewmodel {stem}: split failed ({exc})")
+		return None
+	core = files.get(stem + ".mdl")
+	if core is None:
+		return None
+	for name, blob in files.items():
+		if not name.endswith(".gca"):
+			continue
+		dest = data / Path(GC_VIEWMODEL_PACK_PATH).parent / name
+		dest.parent.mkdir(parents=True, exist_ok=True)
+		if not dest.is_file() or dest.stat().st_size != len(blob):
+			dest.write_bytes(blob)
+		print(f"  viewmodel {stem}: core {len(core)} bytes, animation {name} ({len(blob)} bytes)")
+	if len(core) > GC_VIEWMODEL_SLOT_BYTES:
+		print(f"  viewmodel {stem}: core still over the {GC_VIEWMODEL_SLOT_BYTES} byte slot")
+	return core
+
+
+def dod_bsp_prop_models(data: Path) -> tuple[str, ...]:
+	"""Every studio model the staged DoD maps' entity lumps name.
+
+	The allowlist above held only a handful of props, so on dod_charlie 139 of
+	180 env_model / dod_object instances (hedgehogs, barbed wire, pipes, flak,
+	mortars, bushes...) had no model on the disc and were never drawn. Take
+	the full set from each map's entity lump instead.
+	"""
+	refs: set[str] = set()
+	maps = data / "maps"
+	if not maps.is_dir():
+		return ()
+	for bsp in sorted(maps.glob("dod_*.bsp")):
+		try:
+			raw = bsp.read_bytes()
+			off, length = struct.unpack_from("<ii", raw, 4)
+		except (OSError, struct.error):
+			continue
+		if off < 0 or length < 0 or off + length > len(raw):
+			continue
+		ents = raw[off : off + length].decode("latin1", "replace")
+		for m in re.findall(r'"model"\s+"(models/[^"]+\.mdl)"', ents, flags=re.I):
+			refs.add(m.replace("\\", "/").lower())
+	return tuple(sorted(refs))
+
+
 def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
 	"""Add allowlisted MDLs into an existing bootstrap ZIP under gc_studio/."""
 	staged = 0
-	all_stems = {Path(r).stem.lower() for r in GC_STUDIO_MODELS}
+	map_props = tuple(r for r in dod_bsp_prop_models(data) if r not in GC_STUDIO_MODELS)
+	map_prop_stems = {Path(r).stem.lower() for r in map_props}
+	if map_props:
+		print(f"  DoD map props from entity lumps: {len(map_props)} more models")
+	all_stems = {Path(r).stem.lower() for r in GC_STUDIO_MODELS + map_props}
 	# Smoke staging may omit campaign meshes; fall back to retail valve tree.
 	retail = Path(__file__).resolve().parent.parent / "Half-Life" / "valve"
 	# dod-gc content trees (private network-engine often lacks Half-Life/valve).
@@ -2511,19 +2909,30 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 		Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
 	)
 	dod_capfaces_stems = {
-		"v_garand", "v_mp40", "v_98k", "v_tommy", "v_colt", "v_luger",
+		"player", "v_garand", "v_mp40", "v_98k", "v_tommy", "v_colt", "v_luger",
 		"v_amerk", "v_spade", "v_crowbar", "w_crowbar",
 		"v_grenade", "v_stick", "w_grenade", "w_stick",
 		"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 		"v_bazooka", "v_panzerschreck", "w_bazooka_rocket",
+		"v_bar", "v_enfield", "v_enfield_scoped", "v_sten", "v_piat", "v_webley", "v_fairbairn", "v_mills", "v_m1carbine", "v_greasegun", "v_fg42", "v_paraknife", "w_mills",
+		*GC_STUDIO_PWEAPONS,
 		# CapFaces map props (env_model) — pull from Expansion1 / content/dod.
 		"sandbags", "bulb", "hk_satchel", "furniture", "by_rubble_set",
 		"arc_xer_tree2", "horse_statue", "by_canopy",
 		"sherman", "jagd", "by_banister", "flags",
+		*map_prop_stems,
 	}
-	for relative in GC_STUDIO_MODELS:
+	for relative in GC_STUDIO_MODELS + map_props:
 		src = data / relative
 		stem = Path(relative).stem.lower()
+		if relative == "models/player.mdl":
+			# DoD's own models/player.mdl is ~3.8 MB (over the 1.5 MB studio budget, the
+			# client then draws no player at all); the HL1 player body is 281 KB.
+			for root in (Path("/home/tim/Desktop/dod-gc/content/valve"), retail):
+				alt = root / relative
+				if alt.is_file():
+					src = alt
+					break
 		if not src.is_file() and retail.is_dir():
 			alt = retail / relative
 			if alt.is_file():
@@ -2553,6 +2962,8 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			"v_amerk", "v_spade", "v_grenade", "v_stick",
 			"v_bren", "v_mp44", "v_spring", "v_scoped98k", "v_30cal", "v_mg42",
 			"v_bazooka", "v_panzerschreck",
+			"v_bar", "v_enfield", "v_enfield_scoped", "v_sten", "v_piat", "v_webley", "v_fairbairn", "v_mills", "v_m1carbine", "v_greasegun", "v_fg42", "v_paraknife",
+			*GC_STUDIO_PWEAPONS,
 			# Other CapFaces map props stay lean-stripped for tip maps.
 			"bulb", "hk_satchel", "furniture", "by_rubble_set",
 			"arc_xer_tree2", "horse_statue", "by_canopy",
@@ -2560,6 +2971,8 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			# 184–288 KiB DoD studio BSS and tip≈6 KiB heap (ava-prop-2
 			# promote ok=0/4). Lean mesh + *t atlas = full fidelity in BSS.
 			"sandbags", "sherman", "jagd", "by_banister", "flags",
+			# Every other prop the maps name: same lean mesh + *t atlas.
+			*map_prop_stems,
 		}
 		dod_full_prop_skins = set()  # avalanche props moved to lean+*t
 		keep_skins = stem in ("forklift", "loader", "filecabinet", "nihilanth", "baby_headcrab") \
@@ -2570,6 +2983,19 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			del archive.NameToInfo[arcname]
 			archive.filelist = [zi for zi in archive.filelist if zi.filename != arcname]
 		payload = None if is_tex_companion or keep_skins else lean_studio_mesh_bytes(src)
+		# Heavy DoD viewmodels (lean v_30cal ~186 KiB, v_mg42 ~268 KiB) do
+		# not fit a 128 KiB engine viewmodel slot, and most of the bytes
+		# are animation. Split them like the team bodies: a mesh core in
+		# gc_studio/ plus an animation pack streamed one sequence at a time.
+		if (
+			payload is not None
+			and stem.startswith("v_")
+			and stem in dod_capfaces_lean
+			and len(payload) > GC_VIEWMODEL_SLOT_BYTES
+		):
+			core = split_heavy_viewmodel(src, stem, data)
+			if core is not None:
+				payload = core
 		if payload is None:
 			archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
 			if is_tex_companion:
@@ -2592,10 +3018,19 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 			# banister 128² OOM → 2x2 fallback).
 			prop_tex64 = {
 				"sandbags", "sherman", "jagd", "by_banister", "flags",
+				*GC_STUDIO_PWEAPONS,
 			}
 			edge = 64 if stem in prop_tex64 else 128
+			companion_cap = 96 * 1024
+			# View models (v_*): the skins are 256 px in the retail MDLs, and the ARAM skin stream
+			# (R_GXSkinAttachVM, ref/gx/r_gx_skins.c) streams any palettised source above the 128 px decode in
+			# full resolution. GC_VM_SKIN_EDGE=256 keeps them at 256 (one skin is 64 KiB of palette indices; the
+			# companion is read through the studio scratch, so raise GC_VM_COMPANION_KB with it).
+			if stem.startswith("v_") and stem not in prop_tex64:
+				edge = int(os.environ.get("GC_VM_SKIN_EDGE", "") or 256)
+				companion_cap = int(os.environ.get("GC_VM_COMPANION_KB", "") or 400) * 1024
 			tex_payload = lean_studio_tex_companion_bytes(src, max_edge=edge)
-			if tex_payload and len(tex_payload) > 96 * 1024:
+			if tex_payload and len(tex_payload) > companion_cap:
 				tex_payload = lean_studio_tex_companion_bytes(src, max_edge=64)
 			if tex_payload:
 				archive.writestr(tex_arc, tex_payload, compress_type=zipfile.ZIP_STORED)
@@ -2606,79 +3041,217 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 	return staged
 
 
-def lean_hl_spr_bytes(src: Path, scale: int = 2) -> bytes | None:
-	"""Nearest-neighbor downsample a single-frame HL SPR (G173/G174 lean HUD).
+# DoD team bodies. Each retail model is about 3.9 MB, of which 3.7 MB is
+# animation. The splitter in dod-gc (tools/split_studio_mdl.py) moves the
+# animation into a big-endian pack the engine streams one sequence at a time
+# (Mod_GCAnimPackGet), leaving a mesh core of about 250 KB for gc_studio/.
+GC_PLAYER_MODELS = ("axis-inf", "axis-para", "brit-inf", "us-inf", "us-para")
+GC_PLAYER_PACK_PATH = "models/player/anim_%s.gca"
 
-	G187: for SPR_ALPHATEST sheets, prefer any non-255 texel in the scale×scale
-	block so thin crosshair strokes survive 128→64 (plain NN often empties them).
-	"""
-	import math
 
-	try:
-		d = src.read_bytes()
-	except OSError:
-		return None
-	if len(d) < 44 or d[:4] != b"IDSP":
-		return None
-	ver = struct.unpack_from("<i", d, 4)[0]
-	if ver != 2:
-		return None
-	typ = struct.unpack_from("<i", d, 8)[0]
-	tex = struct.unpack_from("<i", d, 12)[0]
-	face = struct.unpack_from("<i", d, 32)[0]
-	sync = struct.unpack_from("<i", d, 36)[0]
-	ncolors = struct.unpack_from("<h", d, 40)[0]
-	if ncolors <= 0 or ncolors > 256:
-		return None
-	pal_off = 42
-	frame_off = pal_off + ncolors * 3
-	if frame_off + 20 > len(d):
-		return None
-	ftype = struct.unpack_from("<i", d, frame_off)[0]
-	if ftype != 0:
-		return None
-	ox, oy, w, h = struct.unpack_from("<iiii", d, frame_off + 4)
-	pix_off = frame_off + 20
-	if w <= 0 or h <= 0 or pix_off + w * h > len(d):
-		return None
-	if scale < 1 or (w % scale) or (h % scale):
-		return None
-	nw, nh = w // scale, h // scale
-	pix = d[pix_off : pix_off + w * h]
-	out_pix = bytearray(nw * nh)
-	# texFormat 3 = SPR_ALPHATEST — index 255 is transparent.
-	preserve_ink = tex == 3
-	for y in range(nh):
-		sy = y * scale
-		for x in range(nw):
-			sx = x * scale
-			sample = pix[sy * w + sx]
-			if preserve_ink and sample == 255:
-				found = 255
-				for dy in range(scale):
-					row = (sy + dy) * w
-					for dx in range(scale):
-						p = pix[row + sx + dx]
-						if p != 255:
-							found = p
-							break
-					if found != 255:
-						break
-				sample = found
-			out_pix[y * nw + x] = sample
-	br = math.sqrt((nw * 0.5) ** 2 + (nh * 0.5) ** 2)
+def animpack_prefilter(block: bytes) -> bytes:
+	"""Reversible: big-endian 16-bit deltas, then per 256 values the high bytes followed by the low bytes (an odd
+	trailing byte stays last). The engine undoes it in place (Mod_GCAnimUnpack). About 0.63 of the size with LZ4 where
+	plain LZ4 gets 0.82."""
+	import struct
+
+	n = len(block) // 2
+	vals = struct.unpack(">%dH" % n, block[: n * 2])
+	delta = [vals[0]] + [(vals[i] - vals[i - 1]) & 0xFFFF for i in range(1, n)] if n else []
+	raw = struct.pack(">%dH" % n, *delta)
 	out = bytearray()
-	out += b"IDSP"
-	out += struct.pack("<iii", 2, typ, tex)
-	out += struct.pack("<f", br)
-	out += struct.pack("<ii", nw, nh)
-	out += struct.pack("<iii", 1, face, sync)
-	out += struct.pack("<h", ncolors)
-	out += d[pal_off:frame_off]
-	out += struct.pack("<i", 0)
-	out += struct.pack("<iiii", ox // scale, oy // scale, nw, nh)
-	out += out_pix
-	return bytes(out)
+	for i in range(0, n, 256):
+		seg = raw[2 * i : 2 * (i + 256)]
+		out += seg[0::2] + seg[1::2]
+	return bytes(out) + block[n * 2 :]
+
+
+def compress_animpack(payload: bytes) -> bytes:
+	"""Lossless: LZ4-compress every sequence block of a GCAP v1 animation pack into a v2 pack.
+
+	The pack is the player MDL's animation data (about 65% of its size once compressed); the engine keeps the
+	whole pack in ARAM and decodes one sequence on demand (Mod_GCAnimPackFetch), in place, into its pool.
+	A block that does not shrink stays raw. Directory entries are (offset, size); bit 31 of size marks an LZ4 block,
+	which is stored as a big-endian u32 raw length followed by the LZ4 block of the prefiltered data (animpack_prefilter). DODGC_NO_ANIMPACK_LZ4=1 keeps v1."""
+	import struct
+
+	if os.environ.get("DODGC_NO_ANIMPACK_LZ4", "") == "1" or payload[:4] != b"GCAP":
+		return payload
+	try:
+		import lz4.block
+	except ImportError:
+		print("  animation pack: python lz4 not installed, pack stays uncompressed")
+		return payload
+	version, numseq, numbones, data_off, total, _pad = struct.unpack_from(">6I", payload, 4)
+	if version != 1 or len(payload) < total:
+		return payload
+	entries = [struct.unpack_from(">2I", payload, 32 + 8 * i) for i in range(numseq)]
+	head_len = (32 + numseq * 8 + 31) & ~31
+	body = bytearray()
+	new_entries = []
+	saved = 0
+	for off, size in entries:
+		if not off or not size:
+			new_entries.append((0, 0))
+			continue
+		block = payload[off : off + size]
+		comp = lz4.block.compress(animpack_prefilter(block), mode="high_compression", compression=12, store_size=False)
+		blob = struct.pack(">I", len(block)) + comp
+		start = head_len + len(body)
+		if len(blob) + 32 <= len(block) and len(block) >= 64:
+			new_entries.append((start, len(blob) | 0x80000000))
+			body += blob
+			saved += len(block) - len(blob)
+		else:
+			new_entries.append((start, len(block)))
+			body += block
+		while len(body) % 32:
+			body.append(0)
+	head = b"GCAP" + struct.pack(">6I", 2, numseq, numbones, head_len, head_len + len(body), 0) + b"\0\0\0\0"
+	head += b"".join(struct.pack(">2I", o, n) for o, n in new_entries)
+	head += b"\0" * (head_len - len(head))
+	out = bytes(head) + bytes(body)
+	print(f"  animation pack: {len(payload)} -> {len(out)} bytes (LZ4, {saved} saved)")
+	return out
+# Outfit variants (bodies, heads, helmets, gear) are ~70-80% of a core's mesh
+# bytes but one model per body part is drawn: their meshes go to a pack the
+# engine keeps in ARAM (Mod_GCStudioMeshBase), so both team cores fit MEM1.
+GC_PLAYER_MESH_PATH = "models/player/mesh_%s.gcm"
+# Longest edge of a baked player skin: 128 by default; GC_PLAYER_SKIN_EDGE=256 keeps the retail 256 px body skins
+# (CMPR 32 KiB each instead of 8; they stream through the 192 KiB skin window, so more of them cycle through it).
+GC_PLAYER_SKIN_EDGE = int(os.environ.get("GC_PLAYER_SKIN_EDGE", "") or 128)
+GC_PLAYER_PART_EDGE = 64  # faces, hats, helmets, hair
+GC_SKIN_PART_PREFIXES = (b"face", b"k43_face", b"hat", b"helmet", b"hair", b"head")
+
+
+def load_studio_splitter():
+	"""Import dod-gc's split_studio_mdl module, or None when it is not around."""
+	import importlib.util
+
+	here = Path(__file__).resolve().parent.parent
+	candidates = []
+	raw = os.environ.get("DODGC_TOOLS", "").strip()
+	if raw:
+		candidates.append(Path(raw))
+	candidates += [
+		here.parent / "dod-gc" / "tools",
+		here.parent / "tools",
+		Path("/home/tim/Desktop/dod-gc/tools"),
+	]
+	for root in candidates:
+		path = root / "split_studio_mdl.py"
+		if path.is_file():
+			spec = importlib.util.spec_from_file_location("split_studio_mdl", path)
+			module = importlib.util.module_from_spec(spec)
+			spec.loader.exec_module(module)
+			return module
+	return None
+
+
+def find_player_model(roots, stem: str, suffix: str) -> Path | None:
+	"""models/player/<stem>/<stem><suffix>.mdl, ignoring case (retail uses 'T')."""
+	want = f"{stem}{suffix}.mdl".lower()
+	for root in roots:
+		folder = root / "models" / "player" / stem
+		if not folder.is_dir():
+			continue
+		for child in folder.iterdir():
+			if child.name.lower() == want:
+				return child
+	return None
+
+
+def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=None) -> int:
+	"""Split the DoD team bodies: core into gc_studio/, animation pack loose in data."""
+	roots = [data]
+	raw = os.environ.get("DODGC_FULL_DOD", "").strip()
+	if raw:
+		roots.append(Path(raw))
+	roots += [
+		Path("/home/tim/Desktop/dod-gc/content/dod"),
+		Path("/run/media/tim/Expansion1/xash3d-gc/Half-Life/dod"),
+	]
+	found = [(stem, find_player_model(roots, stem, "")) for stem in GC_PLAYER_MODELS]
+	found = [(stem, src) for stem, src in found if src is not None]
+	if not found:
+		return 0
+	if splitter is None:
+		splitter = load_studio_splitter()
+	if splitter is None:
+		print("  player models: split_studio_mdl.py not found (set DODGC_TOOLS); team bodies not staged")
+		return 0
+	staged = 0
+	packs: dict[str, int] = {}
+	for stem, src in found:
+		try:
+			files, _ = splitter.split(src.read_bytes(), stem, pack_path=GC_PLAYER_PACK_PATH)
+			files = {n: (compress_animpack(p) if n.endswith('.gca') else p) for n, p in files.items()}
+		except Exception as exc:  # StudioError or a malformed file: skip this body
+			print(f"  player model {stem}: split failed ({exc})")
+			continue
+		core = files.get(stem + ".mdl")
+		if core is None:
+			continue
+		mesh_note = ""
+		if hasattr(splitter, "stream_meshes"):
+			try:
+				streamed, mesh_packs = splitter.stream_meshes(core, GC_PLAYER_MESH_PATH)
+			except Exception as exc:  # keep the resident-mesh core
+				print(f"  player model {stem}: meshes stay resident ({exc})")
+			else:
+				mesh_note = f", meshes {len(core) - len(streamed)} bytes to " + ", ".join(mesh_packs)
+				core = streamed
+				files.update(mesh_packs)
+		pack_rel = ""
+		for name, payload in files.items():
+			if not name.endswith((".gca", ".gcm")):
+				continue
+			if name.endswith(".gca"):
+				pack_rel = name
+			if name not in packs:
+				dest = data / Path(GC_PLAYER_PACK_PATH).parent / name
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				if not dest.is_file() or dest.stat().st_size != len(payload):
+					dest.write_bytes(payload)
+				packs[name] = len(payload)
+		arcname = f"gc_studio/{stem}.mdl"
+		if arcname in archive.NameToInfo:
+			continue
+		archive.writestr(arcname, core, compress_type=zipfile.ZIP_STORED)
+		staged += 1
+		print(f"  player model {stem}: {src.stat().st_size} → core {len(core)} bytes, animation {pack_rel}{mesh_note}")
+		# Skins: the retail <stem>T.mdl, or the textures the splitter took out.
+		tex_arc = f"gc_studio/{stem}t.mdl"
+		if tex_arc in archive.NameToInfo:
+			continue
+		tex_src = find_player_model(roots, stem, "t")
+		tex_payload = None
+		kind = "palettised"
+		if tex_src is not None:
+			# Native first: 128 px CMPR is 8 KB a skin, less than 64 px palettised.
+			stream = int(os.environ.get("GC_PLAYER_SKIN_STREAM", "") or 0)
+			tex_payload = gc_cmpr_skin_companion_bytes(
+				tex_src,
+				max_edge=stream or GC_PLAYER_SKIN_EDGE,
+				part_edge=GC_PLAYER_PART_EDGE,
+				stream_edge=stream or None,
+			)
+			if tex_payload:
+				kind = f"GX CMPR up to {GC_PLAYER_SKIN_EDGE} px"
+			else:
+				tex_payload = lean_studio_tex_companion_bytes(tex_src, max_edge=128)
+				if tex_payload and len(tex_payload) > 96 * 1024:
+					tex_payload = lean_studio_tex_companion_bytes(tex_src, max_edge=64)
+		if tex_payload:
+			archive.writestr(tex_arc, tex_payload, compress_type=zipfile.ZIP_STORED)
+			staged += 1
+			print(f"  player skins {stem}t.mdl: {tex_src.stat().st_size} → {len(tex_payload)} bytes ({kind})")
+		else:
+			print(f"  player skins {stem}: no {stem}T.mdl found, body will draw untextured")
+	if packs:
+		total = sum(packs.values())
+		print(f"  player animation and mesh packs: {len(packs)}, {total} bytes, in {data / 'models' / 'player'}")
+	return staged
 
 
 def inject_gc_font_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
@@ -2752,47 +3325,24 @@ def inject_gc_font_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int
 		full = bytes(blob[filepos : filepos + disksize])
 		archive.writestr("gfx/gc_creditsfont256.fnt", full, compress_type=zipfile.ZIP_STORED)
 		print(f"  full font CREDITSFONT: → gfx/gc_creditsfont256.fnt ({len(full)} bytes, 256x{src_h})")
+		# Hardware resolution menu text atlas (scripts/bake-hitext.py, Noto Sans, SIL OFL 1.1).
+		hitext = Path(__file__).with_name("gc_hitext.bin")
+		if hitext.is_file():
+			archive.writestr("gfx/gc_hitext.bin", hitext.read_bytes(), compress_type=zipfile.ZIP_STORED)
+			print(f"  hi-res text atlas: → gfx/gc_hitext.bin ({hitext.stat().st_size} bytes)")
 		return 1
 	return 0
 
 
 def inject_gc_hud_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
-	"""Add allowlisted HUD sprites into bootstrap under their disc paths."""
-	# G173/G174/G288: downsample fat sheets to ~5 KiB under gc_* aliases.
-	# Digit/ammo sheets are multi-frame; lean_hl_spr_bytes keeps only frame 0 and
-	# CapFaces HUD drew empty glyphs (hud6/hud7). Prefer full retail under gc_*
-	# when tip can afford it (~17–66 KiB). Crosshairs stay NN-downsampled.
-	lean_scale = {
-		"gc_crosshairs.spr": 2,  # 128→64, single-frame ALPHATEST
-	}
-	full_copy = {
-		"gc_320hud1.spr",
-		"gc_320hud2.spr",
-		"gc_320_train.spr",
-		"gc_320_pain.spr",
-	}
+	"""Add allowlisted early sprites into bootstrap under their disc paths."""
 	staged = 0
-	for entry in GC_HUD_SPRITES:
-		if isinstance(entry, tuple):
-			src_rel, arc_rel = entry
-		else:
-			src_rel = arc_rel = entry
-		src = data / src_rel
-		if not src.is_file():
+	for rel in GC_HUD_SPRITES:
+		src = data / rel
+		arcname = rel.lower()
+		if not src.is_file() or arcname in archive.NameToInfo:
 			continue
-		arcname = arc_rel.lower()
-		if arcname in archive.NameToInfo:
-			continue
-		arc_base = Path(arc_rel).name.lower()
-		if arc_base in full_copy:
-			archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
-		elif arc_base in lean_scale:
-			payload = lean_hl_spr_bytes(src, scale=lean_scale[arc_base])
-			if not payload:
-				continue
-			archive.writestr(arcname, payload, compress_type=zipfile.ZIP_STORED)
-		else:
-			archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
+		archive.write(src, arcname, compress_type=zipfile.ZIP_STORED)
 		staged += 1
 	return staged
 
@@ -2953,8 +3503,27 @@ def write_smoke_overrides(
 		lines.append("nativetex")
 	(output / "gamecube.cfg").write_text("\n".join(lines) + "\n", encoding="ascii")
 	media = output / "media"
+	if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+		lines.append("heapcensus")
 	media.mkdir(exist_ok=True)
 	(media / "StartupVids.txt").write_text("", encoding="ascii")
+
+
+def probe_cmd_cfg_lines(script: str, width: int = 100) -> list[str]:
+	"""Split a ';'-separated probe console script into "probecmd" cfg lines."""
+	lines: list[str] = []
+	cur = ""
+	for part in (p.strip() for p in script.split(";")):
+		if not part:
+			continue
+		if cur and len(cur) + 1 + len(part) > width:
+			lines.append("probecmd " + cur)
+			cur = part
+		else:
+			cur = f"{cur};{part}" if cur else part
+	if cur:
+		lines.append("probecmd " + cur)
+	return lines
 
 
 def write_probe_newgame_override(
@@ -3025,6 +3594,8 @@ def write_probe_newgame_override(
 		lines.append("nativetex")
 	(output / "gamecube.cfg").write_text("\n".join(lines) + "\n", encoding="ascii")
 
+	if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+		lines.append("heapcensus")
 
 def write_probe_phasetest_override(output: Path, phase: str) -> None:
 	"""Menu/retail boot with an intentional G82 phase fault (no map/newgame)."""
@@ -3224,6 +3795,7 @@ def create_retail_boot_overlays(
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
 	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
+	overlays.extend(build_prop_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-gp-cache"))
 	# Offline CapFaces packs (media/cf_<map>.gcp) — load-time DL for 60 FPS Flipper.
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore
 
@@ -3523,7 +4095,7 @@ def stage_smoke_data(
 	for relative in MENU_RESOURCE_DIRS:
 		copy_tree_if_present(source, output, relative)
 	# The fallback GameCube menu consumes the baked gc_menu atlas/background,
-	# not only the original Steam menu resources. Smoke menu probes must stage
+	# not only the original retail menu resources. Smoke menu probes must stage
 	# the same derived assets as retail discs or New Game stalls on blank UI.
 	if not stage_gc_menu_assets(source, output):
 		print("Warning: GameCube smoke menu background bake failed.", file=sys.stderr)
@@ -3616,6 +4188,12 @@ def stage_smoke_data(
 		Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache",
 		pack_stems,
 	)
+	build_prop_packs(
+		source,
+		output,
+		Path(__file__).resolve().parents[1] / "build" / "gc-gp-cache",
+		pack_stems,
+	)
 	from bake_capfaces_pack import build_capfaces_packs  # type: ignore
 
 	cf_overlays = build_capfaces_packs(
@@ -3638,23 +4216,51 @@ def stage_smoke_data(
 		name = f"wd_{stem}.gcd"
 		dest = media_out / name
 		src = None
+		stale = None
 		repo_root = Path(__file__).resolve().parents[3]  # .../dod-gc
 		for cand in (
 			source / "media" / name,
 			repo_root / "content" / "dod" / "media" / name,
 		):
 			if cand.is_file():
-				src = cand
-				break
+				if world_dl_pair_ok(cand):
+					src = cand
+					break
+				print(f"  world DL: ignoring {cand} (no matching static brush list; stale prebake)")
+				stale = stale or cand
 		if src is None:
 			bsp = source / "maps" / f"{stem}.bsp"
 			if bsp.is_file():
 				src = bake_world_dl(bsp, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache")
+		if src is None and stale is not None:
+			print(f"  world DL: WARNING: no fresh bake for {stem}; staging stale {stale} (brush entities go out as packet entities)")
+			src = stale
 		if src is None:
 			print(f"  world DL: no {name} (CapFaces/live BSP fallback)")
 			continue
 		shutil.copy2(src, dest)
 		print(f"  world DL: staged {name} ({dest.stat().st_size} bytes)")
+		# Light points (wd_<map>_lf.gcd) next to it, baked from the BSP if the
+		# world DL came prebaked without one.
+		lf = src.with_name(f"wd_{stem}_lf.gcd")
+		bsp = source / "maps" / f"{stem}.bsp"
+		if not lf.is_file() and bsp.is_file():
+			sys.path.insert(0, str(Path(__file__).resolve().parent))
+			try:
+				import bake_worlddl_goldsrc  # type: ignore
+
+				lf = Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache" / f"wd_{stem}_lf.gcd"
+				bake_worlddl_goldsrc.bake_lightfaces(bsp, lf)
+			except (Exception, SystemExit) as error:
+				print(f"  light faces: bake failed for {bsp.name}: {error}")
+		if lf.is_file():
+			shutil.copy2(lf, media_out / lf.name)
+			print(f"  light faces: staged {lf.name} ({lf.stat().st_size} bytes)")
+		# Static brush entity list: only the one written with this very pack.
+		sb = src.with_name(f"wd_{stem}_sb.gcd")
+		if sb.is_file():
+			shutil.copy2(sb, media_out / sb.name)
+			print(f"  static brushes: staged {sb.name} ({sb.stat().st_size} bytes)")
 
 	# Changelevel / New Game loading plaque (retail gfx.wad art, ~3 KiB).
 	build_loading_spans(source, output)
@@ -4033,12 +4639,23 @@ def stage_sd_card(
 	return valve
 
 
+def apply_wd_lz4_default() -> None:
+	"""The world DL packs (lightmap pages, light-face pack, PVS rows) are LZ4-packed unless DODGC_WD_LZ4=0.
+
+	Measured on charlie in Dolphin (docs/map-budget-audit.md): about 2.0 MiB less ARAM per map and no change in world
+	draw time or heap; the engine still loads files baked without the flag. The baker used on its own stays opt-in."""
+	os.environ.setdefault("DODGC_WD_LZ4", "1")
+
+
 def main() -> None:
+	apply_wd_lz4_default()
 	print(GC_BUILD_BANNER)
 	print("Xash3D GameCube: content build begins")
 	script_dir = Path(__file__).resolve().parent
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("--dol", type=Path, default=Path("OUT/bin/boot.dol"))
+	# XASH_GC_OUT: private install tree (scripts/build-gamecube.sh), default OUT.
+	gc_out = Path(os.environ.get("XASH_GC_OUT", "OUT"))
+	parser.add_argument("--dol", type=Path, default=gc_out / "bin" / "boot.dol")
 	parser.add_argument("--data", type=Path, default=Path("Half-Life/valve"))
 	parser.add_argument(
 		"--gamedir",
@@ -4057,7 +4674,7 @@ def main() -> None:
 		action="store_true",
 		help="do not auto-stage sibling gamedirs next to --data (dod, gearbox, …)",
 	)
-	parser.add_argument("--extras", type=Path, default=Path("OUT/valve/extras.pk3"))
+	parser.add_argument("--extras", type=Path, default=gc_out / "valve" / "extras.pk3")
 	parser.add_argument("--output", type=Path, default=Path("OUT/xash3d-gc.iso"))
 	parser.add_argument(
 		"--smoke-map",
@@ -4469,6 +5086,20 @@ def main() -> None:
 				if os.environ.get("XASH_GC_PROBE_AUTOHOP") == "1":
 					# Walk out of the tram on c0a0e into c1a0 (intro proof).
 					menu_lines.append("autohop")
+				if os.environ.get("XASH_GC_PROBE_STARTMAP"):
+					# Load test of a later chapter on the retail route: New Game
+					# starts this map instead of c0a0 (not a playthrough).
+					menu_lines.append("startmap " + os.environ["XASH_GC_PROBE_STARTMAP"])
+				if os.environ.get("XASH_GC_PROBE_AUTOCAMPAIGN"):
+					# Chapter sweep on the retail menu route: each map runs this
+					# many seconds, then the player is moved into the next
+					# unvisited trigger_changelevel (sv_gc_campaign.c).
+					menu_lines.append("autocampaign " + os.environ["XASH_GC_PROBE_AUTOCAMPAIGN"])
+				if os.environ.get("XASH_GC_PROBE_CMD"):
+					# Scripted console commands on the first spawned map
+					# (sv_gc_campaign.c probecmd; "@<sec>" waits). The cfg
+					# line buffer is short, so split into appended lines.
+					menu_lines.extend(probe_cmd_cfg_lines(os.environ["XASH_GC_PROBE_CMD"]))
 				if os.environ.get("XASH_GC_PROBE_MEMREPORT") == "1":
 					menu_lines.append("memreport")
 				if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
@@ -4479,6 +5110,8 @@ def main() -> None:
 					menu_lines.append("nonativetex")
 				if os.environ.get("XASH_GC_PROBE_NOTEXPACKS") == "1":
 					menu_lines.append("notexpacks")
+				if os.environ.get("XASH_GC_PROBE_HEAPCENSUS") == "1":
+					menu_lines.append("heapcensus")
 				(staged_data / "gamecube.cfg").write_text(
 					"\n".join(menu_lines) + "\n", encoding="ascii"
 				)

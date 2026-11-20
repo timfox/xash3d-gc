@@ -356,6 +356,9 @@ typedef struct
 	int      type;            // fixed width font or variable
 	convar_t *rendermode;     // user-defined default rendermode
 	qboolean	valid;           // all rectangles are valid
+#if XASH_GAMECUBE
+	int      gc_texw, gc_texh;  // atlas size when the texture is only a token (ARAM cells)
+#endif
 } cl_font_t;
 
 typedef struct scissor_state_s
@@ -660,16 +663,15 @@ typedef struct
 
 	// server's build number (might be zero)
 	int build_num;
-	uint8_t steamid[8];
-	uint64_t server_steamid;
+	uint8_t authid[8];
+	uint64_t server_authid;
 
 	// whether server allows cheats or not
 	// set differently depending on protocol and extensions
 	qboolean allow_cheats;
 
-	// if server declares steam auth method, we can use our broker software to get the ticket
-	qboolean steam_auth;
-	qboolean broker_wait;
+	// server declared GoldSrc auth type 3 in its challenge reply
+	qboolean gs_auth;
 	qboolean vac2_secure;
 } client_static_t;
 
@@ -889,6 +891,8 @@ model_t *CL_LoadModel( const char *modelname, int *index );
 #if XASH_GAMECUBE
 void CL_GCPreloadNewGameHudSprites( void );
 void CL_GCPreloadNewGameHudSpritesLate( void );
+qboolean CL_GCEnsureHudVidInit( const char *why );
+void CL_GCHudVidInitReset( void );
 #endif
 HSPRITE pfnSPR_LoadExt( const char *szPicName, uint texFlags );
 void SPR_AdjustSize( float *x, float *y, float *w, float *h );
@@ -1020,8 +1024,22 @@ void V_Shutdown( void );
 qboolean V_PreRender( void );
 void V_PostRender( void );
 void V_RenderView( void );
+
+//
+// cl_cine.c
+//
+void CL_CineInit( void );
+qboolean CL_CineActive( void );
+qboolean CL_CineView( vec3_t org, vec3_t ang, float *fov );
+qboolean CL_CineHideHUD( void );
+qboolean CL_GCCaptureMode( void );
+qboolean CL_CineHideViewModel( void );
+void CL_CineDraw2D( void );
 #if XASH_GAMECUBE
 qboolean V_RenderViewBoundedGC( void );
+#if XASH_GAMECUBE
+void V_GCPoseViewModelAt( const vec3_t vieworg, const vec3_t viewangles );
+#endif
 #endif
 
 //
@@ -1255,15 +1273,6 @@ void Mobile_StopVibration( void );
 void CL_GetSecuredClientAPI( CL_EXPORT_FUNCS F );
 
 //
-// cl_steam.c
-//
-void SteamBroker_Init( void );
-void SteamBroker_Shutdown( void );
-void SteamBroker_Frame( void );
-qboolean SteamBroker_InitiateGameConnection( netadr_t serveradr, int challenge );
-void SteamBroker_TerminateGameConnection( void );
-
-//
 // cl_video.c
 //
 void SCR_InitCinematic( void );
@@ -1299,6 +1308,7 @@ void Key_EnableTextInput( qboolean enable, qboolean force );
 void Key_SetTextInputRect( int x, int y, int w, int h );
 void Key_SetTextInputBuffer( const char *text );
 const char *Key_GetTextInputBuffer( void );
+qboolean Key_GetTextInputEditRect( int *x, int *y, int *w, int *h );
 int Key_ToUpper( int key );
 qboolean Cmd_GetKeysList( const char *s, char *completedname, int length, qboolean print_suggestions );
 
@@ -1329,6 +1339,10 @@ void UI_EnableBuiltInFallbackMenu( void );
 void UI_PreloadBuiltInFallbackMenuAssets( void );
 qboolean CL_GameCubePostReconnect( void );
 void CL_GameCubeLeanEmitBrushEntities( void );
+int CL_GCRelinkTempEnts( void );
+qboolean CL_GCStaticPropFromSignon( const entity_state_t *state );
+void CL_GCClearRemoteStaticProps( void );
+void CL_GCLinkRemoteStaticProps( void );
 #endif
 
 #endif//CLIENT_H

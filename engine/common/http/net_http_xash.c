@@ -107,9 +107,18 @@ States that yield:
   HTTP_FileFree          always, until HTTP_AutoClean removes the file
 */
 
+#if XASH_GAMECUBE
+// the console has no spare MEM1 for 64 KiB per connection (plus the same again on
+// the stack): server list requests are small, so keep every buffer tiny
+#define MAX_HTTP_BUFFER_SIZE (BIT( 11 ))
+#define MAX_HTTP_DECOMPRESSED_SIZE ( 64 * 1024 )
+#define MAX_HTTP_MEMORY_SIZE       ( 16 * 1024 )
+#else
 #define MAX_HTTP_BUFFER_SIZE (BIT( 16 ))
 #define MAX_HTTP_DECOMPRESSED_SIZE ( 64 * 1024 * 1024 )
 #define MAX_HTTP_MEMORY_SIZE       ( 4 * 1024 * 1024 )
+#endif
+#define MAX_HTTP_BODY_SIZE         512
 
 typedef struct httpserver_s
 {
@@ -161,6 +170,11 @@ typedef struct httpfile_s
 	http_memory_cb_t mem_cb;
 	void    *mem_user;
 	char     url[1024];
+
+	// request method and body of an in-memory request (HTTP_RequestToMemory)
+	char method[8];
+	char body[MAX_HTTP_BODY_SIZE];
+	int body_length;
 
 	char query_backup[1024];
 
@@ -434,14 +448,30 @@ static int HTTP_FilePrepareRequest( httpfile_t *file )
 
 	if( file->to_memory )
 	{
-		file->query_length = Q_snprintf( file->buf, MAX_HTTP_BUFFER_SIZE + 1,
-			"GET %s%s HTTP/1.1\r\n"
-			"Host: %s:%d\r\n"
-			"User-Agent: %s\r\n"
-			"Accept: */*\r\n\r\n",
-			file->server->path, path_suffix,
-			file->server->host, file->server->port,
-			useragent );
+		if( file->body_length > 0 )
+		{
+			file->query_length = Q_snprintf( file->buf, MAX_HTTP_BUFFER_SIZE + 1,
+				"%s %s%s HTTP/1.1\r\n"
+				"Host: %s:%d\r\n"
+				"User-Agent: %s\r\n"
+				"Accept: */*\r\n"
+				"Content-Type: application/json\r\n"
+				"Content-Length: %d\r\n\r\n%s",
+				file->method, file->server->path, path_suffix,
+				file->server->host, file->server->port,
+				useragent, file->body_length, file->body );
+		}
+		else
+		{
+			file->query_length = Q_snprintf( file->buf, MAX_HTTP_BUFFER_SIZE + 1,
+				"%s %s%s HTTP/1.1\r\n"
+				"Host: %s:%d\r\n"
+				"User-Agent: %s\r\n"
+				"Accept: */*\r\n\r\n",
+				file->method[0] ? file->method : "GET", file->server->path, path_suffix,
+				file->server->host, file->server->port,
+				useragent );
+		}
 	}
 	else
 	{
@@ -1334,6 +1364,32 @@ and handed to the callback when the request completes (success or failure).
 */
 qboolean HTTP_GetToMemory( const char *url, http_memory_cb_t cb, void *userdata )
 {
+	return HTTP_RequestToMemory( "GET", url, NULL, cb, userdata );
+}
+
+/*
+===================
+HTTP_RequestToMemory
+
+Like HTTP_GetToMemory with a method and an optional JSON body (at most
+MAX_HTTP_BODY_SIZE bytes, no CR/LF/NUL checks needed: it is sent verbatim after
+Content-Length, but the URL and method are validated).
+===================
+*/
+qboolean HTTP_RequestToMemory( const char *method, const char *url, const char *body, http_memory_cb_t cb, void *userdata )
+{
+	if( Q_strcmp( method, "GET" ) && Q_strcmp( method, "POST" ) && Q_strcmp( method, "DELETE" ))
+	{
+		Con_Printf( S_ERROR "%s: method %s not allowed\n", __func__, method );
+		return false;
+	}
+
+	if( body && Q_strlen( body ) >= MAX_HTTP_BODY_SIZE )
+	{
+		Con_Printf( S_ERROR "%s: body too large\n", __func__ );
+		return false;
+	}
+
 	if( Q_strpbrk( url, "\r\n" ))
 	{
 		Con_Printf( S_ERROR "%s: refused, URL contains CRLF\n", __func__ );
@@ -1356,6 +1412,12 @@ qboolean HTTP_GetToMemory( const char *url, http_memory_cb_t cb, void *userdata 
 	httpfile->server = server;
 	httpfile->own_server = true;
 	httpfile->to_memory = true;
+	Q_strncpy( httpfile->method, method, sizeof( httpfile->method ));
+	if( body )
+	{
+		Q_strncpy( httpfile->body, body, sizeof( httpfile->body ));
+		httpfile->body_length = Q_strlen( httpfile->body );
+	}
 	httpfile->mem_cb = cb;
 	httpfile->mem_user = userdata;
 	httpfile->pfn_process = HTTP_FileQueue;

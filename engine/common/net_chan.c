@@ -55,6 +55,7 @@ void Netchan_AddBufferToList( fragbuf_t **pplist, fragbuf_t *pbuf );
 typedef struct
 {
 	qboolean in_use;
+	qboolean loop_owned; // lent to a queued loopback packet
 	byte storage[sizeof( fragbuf_t ) + NETCHAN_GC_EMERGENCY_PAYLOAD];
 } netchan_gc_emergency_t;
 
@@ -67,10 +68,49 @@ void Netchan_GCResetEmergency( void )
 	int i;
 
 	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
-		s_gc_fragbuf_emergency[i].in_use = false;
+	{
+		if( !s_gc_fragbuf_emergency[i].loop_owned )
+			s_gc_fragbuf_emergency[i].in_use = false;
+	}
 	s_gc_waitlist_emergency_in_use = false;
 	memset( &s_gc_waitlist_emergency, 0, sizeof( s_gc_waitlist_emergency ));
 	Con_Reportf( "Xash3D GameCube: netchan emergency reset\n" );
+}
+
+/* A big reliable (c1a0c spawn: 4.9 KiB of baselines) can meet a MEM1 heap
+ * with no block that size. Dropping it is not recoverable in practice: the
+ * resend is the same size and the client sat at signon 0 forever. Lend an
+ * idle emergency slot to the loopback queue until the client reads it. */
+void *Netchan_GCBorrowEmergency( size_t bytes )
+{
+	int i;
+
+	if( bytes > sizeof( s_gc_fragbuf_emergency[0].storage ))
+		return NULL;
+	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
+	{
+		if( s_gc_fragbuf_emergency[i].in_use )
+			continue;
+		s_gc_fragbuf_emergency[i].in_use = true;
+		s_gc_fragbuf_emergency[i].loop_owned = true;
+		return s_gc_fragbuf_emergency[i].storage;
+	}
+	return NULL;
+}
+
+qboolean Netchan_GCReturnEmergency( const void *data )
+{
+	int i;
+
+	for( i = 0; i < NETCHAN_GC_EMERGENCY_SLOTS; i++ )
+	{
+		if( data != s_gc_fragbuf_emergency[i].storage )
+			continue;
+		s_gc_fragbuf_emergency[i].loop_owned = false;
+		s_gc_fragbuf_emergency[i].in_use = false;
+		return true;
+	}
+	return false;
 }
 
 static void Netchan_FreeFragbuf( fragbuf_t *buf )
@@ -596,7 +636,23 @@ Netchan_AllocFragbuf
 */
 static fragbuf_t *Netchan_AllocFragbuf( int fragment_size )
 {
+#if XASH_GAMECUBE
+	/* On the world-render route (Lost Coast) the heap has a few tens of KB
+	 * free at best. A 32 KB fragment from the pool used to fail there and
+	 * land in the BSS slots below; once other savings left 32 KB free it
+	 * succeeded instead and took the heap down to 2 KB, so the first file
+	 * opened in play (a voice line) failed. Those slots are already paid
+	 * for: use them first there. */
+	static int bss_first = -1;
+	fragbuf_t *buf;
+
+	if( bss_first < 0 )
+		bss_first = Sys_CheckParm( "-gcworldrender" ) ? 1 : 0;
+	buf = ( bss_first && fragment_size <= NETCHAN_GC_EMERGENCY_PAYLOAD ) ? NULL
+		: (fragbuf_t *)Mem_Calloc( net_mempool, sizeof( fragbuf_t ) + fragment_size );
+#else
 	fragbuf_t *buf = (fragbuf_t *)Mem_Calloc( net_mempool, sizeof( fragbuf_t ) + fragment_size );
+#endif
 #if XASH_GAMECUBE
 	/* Prefer Network Pool; on tip soft-NULL fall back to BSS so changelevel
 	 * restore messages are never dropped (probe 20261105-041454). */
@@ -621,6 +677,8 @@ static fragbuf_t *Netchan_AllocFragbuf( int fragment_size )
 				i, fragment_size );
 			break;
 		}
+		if( !buf && bss_first )
+			buf = (fragbuf_t *)Mem_Calloc( net_mempool, sizeof( fragbuf_t ) + fragment_size );
 		if( !buf )
 			return NULL;
 	}

@@ -114,13 +114,22 @@ static const gc_default_bind_t gc_default_binds[] =
 	{ K_X_BUTTON, "+reload" },
 	{ K_Y_BUTTON, "impulse 100" },
 	{ K_START_BUTTON, "cancelselect" },
-	{ K_DPAD_UP, "invprev" },
-	{ K_DPAD_DOWN, "invnext" },
-	{ K_DPAD_LEFT, "lastinv" },
+	/* invprev/invnext/lastinv are client HUD commands that need the HUD's weapon list and selection
+	 * overlay; the lean client does not run those, so the D-pad did nothing. The DoD game DLL handles
+	 * these server commands (cycle the carried weapons in slot order, and the last weapon). */
+	{ K_DPAD_UP, "dod_prevweapon" },
+	{ K_DPAD_DOWN, "dod_nextweapon" },
+	{ K_DPAD_LEFT, "dod_lastweapon" },
 	{ K_DPAD_RIGHT, "dod_score" },
 	{ K_L1_BUTTON, "+attack2" },
 	{ K_R1_BUTTON, "+attack" },
 	{ K_Z_BUTTON, "+duck" },
+	/* The analog trigger axes arrive as keys of their own (K_JOY1/K_JOY2) whose stock bindings are
+	 * +speed and +attack2. R and L are already bound as digital buttons above, so pulling R fired
+	 * +attack from the click and +attack2 from the axis; the weapon code handles IN_ATTACK2 first and
+	 * clears it, so the primary shot never fired. Leave the axis keys unbound. */
+	{ K_LTRIGGER, "" },
+	{ K_RTRIGGER, "" },
 };
 
 static qboolean GC_IsGameCubeControllerType( u32 type )
@@ -338,6 +347,12 @@ static void GC_UpdateButtons( u16 held )
 			if( Sys_CheckParm( "-gcprofile" ))
 				Con_Reportf( "Xash3D GameCube: pad press %s -> %s key_dest=%d\n",
 					btn->gc_name, Key_KeynumToString( btn->key ), cls.key_dest );
+			/* Z held + Y opens chat. Y alone stays impulse 100: the DoD voice menu. */
+			if( btn->key == K_Y_BUTTON && ( held & PAD_TRIGGER_Z ) && cls.key_dest == key_game )
+			{
+				Cbuf_AddText( "messagemode\n" );
+				continue;
+			}
 			Key_Event( btn->key, true );
 		}
 
@@ -785,6 +800,74 @@ static u16 GC_ProbeSyntheticHeldButtons( void )
 		Con_Reportf( "Xash3D GameCube: probe menu ready gate open\n" );
 	}
 
+	/* With -gcstartmap (Lost Coast title→map), dwell on the retail main menu
+	 * so the title plate is visible, then confirm New Game and force play-start
+	 * — same end state as -gcmenuplaystart, without skipping UI_Main_Menu. */
+	if( Sys_CheckParm( "-gcstartmap" ))
+	{
+		if( !gc_probe_action_logged )
+		{
+			gc_probe_action_logged = true;
+			gc_probe_action_stage = 0;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			gc_probe_action_diag_time = host.realtime;
+			Con_Reportf( "Xash3D GameCube: probe menuauto New Game dwell begin delay=%.2f\n",
+				GC_PROBE_MENU_NEWGAME_DWELL );
+			return 0;
+		}
+		if( gc_probe_action_stage == 0 )
+		{
+			if( host.realtime - gc_probe_action_time < GC_PROBE_MENU_NEWGAME_DWELL )
+				return 0;
+			gc_probe_action_stage = 1;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			Con_Reportf( "Xash3D GameCube: probe menuauto New Game confirm\n" );
+			return PAD_BUTTON_A;
+		}
+		if( gc_probe_action_stage == 1
+			&& GC_ProbeMenuStageReady( GC_PROBE_MENU_STEP_DELAY, GC_PROBE_MENU_STEP_FRAMES ))
+		{
+			gc_probe_action_stage = 2;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			Con_Reportf( "Xash3D GameCube: probe menuauto difficulty release\n" );
+			return 0;
+		}
+		if( gc_probe_action_stage == 2
+			&& host.realtime - gc_probe_action_time < 2.0 )
+			return 0;
+		if( gc_probe_action_stage == 2
+			&& GC_ProbeMenuStageReady( GC_PROBE_MENU_STEP_DELAY, GC_PROBE_MENU_STEP_FRAMES ))
+		{
+			gc_probe_action_stage = 3;
+			gc_probe_action_time = host.realtime;
+			gc_probe_action_frame = host.framecount;
+			Con_Reportf( "Xash3D GameCube: probe menuauto difficulty confirm\n" );
+			return PAD_BUTTON_A;
+		}
+		if( gc_probe_action_stage == 3
+			&& GC_ProbeMenuStageReady( GC_PROBE_MENU_STEP_DELAY, GC_PROBE_MENU_STEP_FRAMES ))
+		{
+			gc_probe_action_stage = 4;
+			gc_probe_action_time = host.realtime;
+			Con_Reportf( "Xash3D GameCube: probe menuauto difficulty final release\n" );
+			return 0;
+		}
+		if( gc_probe_action_stage == 4
+			&& host.realtime - gc_probe_action_time >= 0.75 )
+		{
+			gc_probe_action_stage = 7;
+			if( !CL_Active() && !SV_Active() )
+			{
+				Con_Reportf( "Xash3D GameCube: probe menuauto New Game force gc_playstart\n" );
+				Cbuf_AddText( "gc_playstart\n" );
+			}
+		}
+		return 0;
+	}
+
 	if( !gc_probe_action_logged )
 	{
 		gc_probe_action_logged = true;
@@ -949,6 +1032,16 @@ static void GC_UpdateProbeSyntheticAxes( void )
  * response already consumed and returned PAD_ERR_TRANSFER for every port,
  * so a real controller was never seen as ready ("no GameCube controller
  * detected"). Take the scanned state instead. */
+static int gc_pads_missing_frames;
+
+/* The "controller disconnected" prompt (drawn by OSK_Draw): no native pad on any port for about 0.75 s. Not shown for
+ * automated probes, which have no real pad packets. */
+qboolean GC_PadMissingNotice( void )
+{
+	/* -gcnohud is a capture run (gamecube.cfg 'nohud'): no overlay of any kind, and nobody is holding a pad */
+	return gc_pads_missing_frames > 45 && !GC_ShouldUseProbeInputFallback() && !Sys_CheckParm( "-gcnohud" );
+}
+
 static void GC_ReadPads( void )
 {
 	const u32 connected_mask = PAD_ScanPads();
@@ -972,6 +1065,7 @@ static void GC_ReadPads( void )
 		gc_pad[port].triggerL = PAD_TriggerL( port );
 		gc_pad[port].triggerR = PAD_TriggerR( port );
 	}
+	gc_pads_missing_frames = connected_mask & (( 1u << PAD_CHANMAX ) - 1u ) ? 0 : gc_pads_missing_frames + 1;
 }
 
 void Platform_RunEvents( void )
@@ -1192,8 +1286,15 @@ int Platform_JoyInit( void )
 		"Retail menu UI readiness marker for synthetic GameCube probes" );
 	Cvar_Get( "gc_menu_probe_auto", "0", 0,
 		"Retail menu probe auto-opens Options once mainui reports ready" );
+	/* mainui reads this to skip the valve/mainui localisation files on the
+	 * menu New Game route (MenuStrings.cpp): their UTF-16 conversion needs a
+	 * C++ new that aborts at the menu's MEM1 tip, which hung the guest after
+	 * "localization begin resource/valve_english.txt".  Dropped in 69246f37ba. */
+	Cvar_Get( "gc_menuplaystart", "0", 0,
+		"1 when -gcmenuplaystart: lean menu art so New Game fits MEM1 tip" );
 	Cvar_SetValue( "gc_menu_ready", 0.0f );
 	Cvar_SetValue( "gc_menu_probe_auto", 0.0f );
+	Cvar_SetValue( "gc_menuplaystart", Sys_CheckParm( "-gcmenuplaystart" ) ? 1.0f : 0.0f );
 	gc_bindings_applied = false;
 	gc_probe_action_stage = 0;
 	gc_probe_action_time = 0.0;

@@ -860,6 +860,9 @@ text to the screen.
 */
 void SCR_UpdateScreen( void )
 {
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "update screen enter" );
+#endif
 	qboolean screen_redraw = true; // assume screen has been redrawn
 #if XASH_GAMECUBE
 	static qboolean gc_newgame_probe_rearm_logged;
@@ -907,7 +910,6 @@ void SCR_UpdateScreen( void )
 		GC_PerfUpdate();
 		static qboolean gc_post_g36_world_ok;
 		static qboolean gc_vrv_path_logged;
-		static qboolean gc_hud_lean_logged;
 		static qboolean g159_ca_active_present_logged;
 		static unsigned g159_ca_active_presents;
 
@@ -960,36 +962,6 @@ void SCR_UpdateScreen( void )
 				Con_Reportf(
 					"Xash3D GameCube: G159 ca_active presents=%u gx=%d\n",
 					g159_ca_active_presents, GC_UseGxWorldDraw() ? 1 : 0 );
-			}
-			if( !gc_hud_lean_logged && cls.signon == SIGNONS
-				&& !GC_IsFrameBudgetProbeActive() )
-			{
-				/* CapFaces listen: HUD SPR_Load / lean draw Gurus after sustained
-				 * CapFaces (solo 20261107-123717). Keep Flipper world only. */
-				if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw() )
-				{
-					gc_hud_lean_logged = true;
-					Con_Reportf( "Xash3D GameCube: lean HUD skipped (CapFaces Flipper)\n" );
-				}
-				else
-				{
-				ref.dllFuncs.R_BeginFrame( false );
-				ref.dllFuncs.R_AllowFog( false );
-				ref.dllFuncs.R_Set2DMode( true );
-				CL_DrawHUD( CL_ACTIVE );
-				/* G327 defers the lean sheets until the first active HUD pass.
-				 * This draw-verified marker covers that low-memory route; the
-				 * prepare-time preload continues to emit the traditional G172
-				 * real-count marker when it is available. */
-				Con_Reportf( "Xash3D GameCube: G172 HUD sheets loaded draw-verified lean=1\n" );
-				/* Harness G506 still matches this historical marker string. */
-				Con_Reportf( "Xash3D GameCube: lean HUD sprites drawn\n" );
-				Con_Reportf( "Xash3D GameCube: HUD lean draw\n" );
-				ref.dllFuncs.R_AllowFog( true );
-				Platform_SetTimer( 0.0f );
-				ref.dllFuncs.R_EndFrame();
-				gc_hud_lean_logged = true;
-				}
 			}
 			if( !gc_post_g36_present_logged )
 			{

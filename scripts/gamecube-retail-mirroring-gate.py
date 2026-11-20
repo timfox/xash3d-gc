@@ -22,7 +22,7 @@ REQUIRED = (
     "Xash3D GameCube: G45 controller ready",
     "Xash3D GameCube: MAP_READY ",
     "Xash3D GameCube: G172 HUD sheets loaded",
-    "Xash3D GameCube: lean HUD sprites drawn",
+    "Xash3D GameCube: HUD sprites drawn",
     "Xash3D GameCube: G105 landmark viewmodel ready",
     "Xash3D GameCube: G164 studio gouraud shades=",
 	"Xash3D GameCube: G154 disc lightmap bind",  # also emitted for ARAM bake-only binds
@@ -45,7 +45,7 @@ ORDERED_PHASES = (
         "Xash3D GameCube: G105 landmark viewmodel ready",
         "Xash3D GameCube: MAP_READY ",
         "Xash3D GameCube: G172 HUD sheets loaded",
-        "Xash3D GameCube: lean HUD sprites drawn",
+        "Xash3D GameCube: HUD sprites drawn",
     ),
 )
 

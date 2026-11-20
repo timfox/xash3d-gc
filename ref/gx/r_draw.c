@@ -565,10 +565,9 @@ void GAME_EXPORT GL_UpdateTexture( int texnum, int cols, int rows, int width, in
 				if( !R_GCIsStaticCinematicPixels( tex->pixels[i] ))
 	#endif
 				{
-					if( i == 0 && tex->gc_pixels_base )
-						R_GCFreeMip( tex, 0 );
-					else
-						Mem_Free( tex->pixels[i] );
+					/* R_GCFreeMip knows every mip source (fx block, tiny
+					 * slots, skin overflow, texture region, heap). */
+					R_GCFreeMip( tex, i );
 				}
 				tex->pixels[i] = NULL;
 			}

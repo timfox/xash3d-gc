@@ -1,0 +1,39 @@
+From 8efc0857e5362bea93ee188f2f63c1257bea57fb Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Sun, 15 Nov 2026 19:15:08 -0800
+Subject: [PATCH] nodes: reset the graph when FLoadGraph fails part-way
+
+FLoadGraph memcpy's the saved CGraph header, which carries
+m_fGraphPresent/m_fGraphPointersSet = TRUE.  On a short file or a failed
+calloc it returned FALSE with those flags still set and NULL node/sort
+arrays; monster AI then called FindNearestNode and dereferenced m_di
+(GameCube DSI at c1a1b, 'Couldn't malloc 57 nodes').  Call InitGraph on
+the failure path so the level runs without a graph, as when the .nod is
+missing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/nodes.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/dlls/nodes.cpp b/dlls/nodes.cpp
+index fe54500b..acf5b78b 100644
+--- a/dlls/nodes.cpp
++++ b/dlls/nodes.cpp
+@@ -2618,6 +2618,13 @@ int CGraph::FLoadGraph( const char *szMapName )
+ ShortFile:
+ NoMemory:
+ 	FREE_FILE( aMemFile );
++	// The header memcpy above loaded m_fGraphPresent/m_fGraphPointersSet as
++	// they were saved (TRUE). A short file or a failed calloc must not leave
++	// the graph marked present with NULL node/sort arrays: FindNearestNode
++	// would walk m_di (DSI at c1a1b when 57 nodes could not be allocated).
++	// InitGraph frees whatever was allocated and clears the flags, so callers
++	// see "no graph" exactly as when the .nod is missing.
++	InitGraph();
+ 	return FALSE;
+ }
+ 
+-- 
+2.53.0
+

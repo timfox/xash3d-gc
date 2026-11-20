@@ -14,6 +14,16 @@ GNU General Public License for more details.
 */
 
 #include "r_local.h"
+#if XASH_GAMECUBE
+qboolean Mod_GCAramLightmapActive( void );
+qboolean Mod_GCLightPointsActive( const model_t *world );
+extern int r_gc_light_path;
+extern float r_gc_light_frac;
+extern void GC_ProfMark( const char *name );
+#define R_STUDIO_PROF( name ) GC_ProfMark( name )
+#else
+#define R_STUDIO_PROF( name )
+#endif
 #include "xash3d_mathlib.h"
 #include "const.h"
 #include "r_studioint.h"
@@ -106,6 +116,7 @@ typedef struct
 // studio-related cvars
 CVAR_DEFINE_AUTO( r_studio_sort_textures, "0", FCVAR_GLCONFIG, "change draw order for additive meshes" );
 static cvar_t *cl_righthand = NULL;
+static CVAR_DEFINE_AUTO( r_gc_aim_yaw_flip, "0", 0, "DoD aim grid: mirror the torso yaw row (test)" );
 
 static r_studio_interface_t *pStudioDraw;
 static studio_draw_state_t  g_studio;                   // global studio state
@@ -113,6 +124,9 @@ static studio_draw_state_t  g_studio;                   // global studio state
 // global variables
 static qboolean m_fDoRemap;
 static mstudiomodel_t *m_pSubModel;
+// mesh offsets are relative to this: the header, or (GameCube) the model's
+// blob fetched from its ARAM mesh pack
+static byte *m_pSubModelBase;
 static mstudiobodyparts_t *m_pBodyPart;
 static player_info_t *m_pPlayerInfo;
 static studiohdr_t *m_pStudioHeader;
@@ -133,6 +147,7 @@ void R_StudioInit( void )
 	// g-cont. cvar disabled by Valve
 //	gEngfuncs.Cvar_RegisterVariable( &r_shadows );
 
+	gEngfuncs.Cvar_RegisterVariable( &r_gc_aim_yaw_flip );
 	g_studio.interpolate = true;
 	g_studio.framecount = 0;
 	m_fDoRemap = false;
@@ -483,6 +498,35 @@ static void R_StudioPlayerBlend( mstudioseqdesc_t *pseqdesc, int *pBlend, float 
 	// calc up/down pointing
 	*pBlend = ( *pPitch * 3.0f );
 
+#if XASH_GAMECUBE
+	// DoD player models author the aim range high to low (blend XR 45 -45).
+	// The stock bounds test assumes start < end, so every pitch fell into
+	// the first or second branch and the aim was 0 or 255, never between.
+	// Walk the range in whichever direction the model gives it.
+	if( pseqdesc->blendstart[0] > pseqdesc->blendend[0] )
+	{
+		float b = *pPitch * 3.0f;
+		float lo = pseqdesc->blendend[0], hi = pseqdesc->blendstart[0];
+
+		if( b > hi )
+		{
+			*pPitch -= hi / 3.0f;
+			*pBlend = 0;
+		}
+		else if( b < lo )
+		{
+			*pPitch -= lo / 3.0f;
+			*pBlend = 255;
+		}
+		else
+		{
+			*pBlend = (int)( 255.0f * ( hi - b ) / ( hi - lo ));
+			*pPitch = 0.0f;
+		}
+		return;
+	}
+#endif
+
 	if( *pBlend < pseqdesc->blendstart[0] )
 	{
 		*pPitch -= pseqdesc->blendstart[0] / 3.0f;
@@ -817,6 +861,63 @@ static void R_StudioCalcRotations( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 
 /*
 ====================
+StudioCalcGridBlend
+
+Day of Defeat (and Counter-Strike) player sequences carry 9 animations: a
+3 x 3 grid, torso yaw along the row (blending[0]) and aim pitch down the
+column (blending[1]); 0-127 runs from the first cell to the middle one,
+128-255 from the middle to the last. The player models have no bone
+controllers, so this grid is the only torso twist they have. Sequences
+with 3 animations (sandbag, bipod) are one row of it. The stock code
+blended animation 0 with animation 1 whatever the count: a body turned
+hard to one side, looking up.
+====================
+*/
+// blend scratch, shared by StudioSetupBones and the grid blend
+static vec3_t pos2[MAXSTUDIOBONES], pos3[MAXSTUDIOBONES], pos4[MAXSTUDIOBONES];
+static vec4_t q2[MAXSTUDIOBONES], q3[MAXSTUDIOBONES], q4[MAXSTUDIOBONES];
+
+static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, mstudioseqdesc_t *pseqdesc,
+	mstudioanim_t *panim, float f, float s, float t )
+{
+	const int nb = m_pStudioHeader->numbones;
+	int col = 0, row = 0;
+
+	if( s > 127.0f )
+	{
+		s = 2.0f * ( s - 127.0f );
+		col = 1;
+	}
+	else s = 2.0f * s;
+	s = bound( 0.0f, s / 255.0f, 1.0f );
+
+	if( pseqdesc->numblends == 3 )
+	{
+		R_StudioCalcRotations( e, pos, q, pseqdesc, panim + col * nb, f );
+		R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( col + 1 ) * nb, f );
+		R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
+		return;
+	}
+
+	if( t > 127.0f )
+	{
+		t = 2.0f * ( t - 127.0f );
+		row = 1;
+	}
+	else t = 2.0f * t;
+	t = bound( 0.0f, t / 255.0f, 1.0f );
+
+	R_StudioCalcRotations( e, pos, q, pseqdesc, panim + ( row * 3 + col ) * nb, f );
+	R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( row * 3 + col + 1 ) * nb, f );
+	R_StudioCalcRotations( e, pos3, q3, pseqdesc, panim + (( row + 1 ) * 3 + col ) * nb, f );
+	R_StudioCalcRotations( e, pos4, q4, pseqdesc, panim + (( row + 1 ) * 3 + col + 1 ) * nb, f );
+	R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
+	R_StudioSlerpBones( nb, q3, pos3, q4, pos4, s );
+	R_StudioSlerpBones( nb, q, pos, q3, pos3, t );
+}
+
+/*
+====================
 StudioMergeBones
 
 ====================
@@ -832,7 +933,7 @@ static void R_StudioMergeBones( cl_entity_t *e, model_t *m_pSubModel )
 	static float     pos[MAXSTUDIOBONES][3];
 	float f;
 
-	if( e->curstate.sequence >= m_pStudioHeader->numseq )
+	if( e->curstate.sequence < 0 || e->curstate.sequence >= m_pStudioHeader->numseq )
 		e->curstate.sequence = 0;
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + e->curstate.sequence;
@@ -843,6 +944,39 @@ static void R_StudioMergeBones( cl_entity_t *e, model_t *m_pSubModel )
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim, f );
 	pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
 
+#if XASH_GAMECUBE
+	/* Once per weapon model: how much of its skeleton found the player's. */
+	{
+		static char logged[24][24];
+		int li, matched = 0, k;
+
+		for( li = 0; li < 24 && logged[li][0] && Q_strcmp( logged[li], m_pSubModel->name + 7 ); li++ );
+		if( li < 24 && !logged[li][0] )
+		{
+			char miss[160];
+
+			Q_strncpy( logged[li], m_pSubModel->name + 7, sizeof( logged[li] ));
+			miss[0] = 0;
+			for( i = 0; i < m_pStudioHeader->numbones; i++ )
+			{
+				for( k = 0; k < g_studio.cached_numbones; k++ )
+					if( !Q_stricmp( pbones[i].name, g_studio.cached_bonenames[k] ))
+						break;
+				if( k < g_studio.cached_numbones )
+					matched++;
+				else if( Q_strlen( miss ) + Q_strlen( pbones[i].name ) + 2 < sizeof( miss ))
+				{
+					Q_strncat( miss, pbones[i].name, sizeof( miss ));
+					Q_strncat( miss, ",", sizeof( miss ));
+				}
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: merge %s bones=%d matched=%d player_bones=%d seq=%d/%d unmatched=[%s] player0=%s\n",
+				m_pSubModel->name, m_pStudioHeader->numbones, matched, g_studio.cached_numbones,
+				e->curstate.sequence, m_pStudioHeader->numseq, miss,
+				g_studio.cached_numbones ? g_studio.cached_bonenames[0] : "-" );
+		}
+	}
+#endif
 	for( i = 0; i < m_pStudioHeader->numbones; i++ )
 	{
 		for( j = 0; j < g_studio.cached_numbones; j++ )
@@ -996,12 +1130,6 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	matrix3x4        bonematrix;
 	static vec3_t    pos[MAXSTUDIOBONES];
 	static vec4_t    q[MAXSTUDIOBONES];
-	static vec3_t    pos2[MAXSTUDIOBONES];
-	static vec4_t    q2[MAXSTUDIOBONES];
-	static vec3_t    pos3[MAXSTUDIOBONES];
-	static vec4_t    q3[MAXSTUDIOBONES];
-	static vec3_t    pos4[MAXSTUDIOBONES];
-	static vec4_t    q4[MAXSTUDIOBONES];
 	int i;
 #if XASH_GAMECUBE
 	{
@@ -1016,12 +1144,30 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	}
 #endif
 
-	if( e->curstate.sequence >= m_pStudioHeader->numseq )
+	if( e->curstate.sequence < 0 || e->curstate.sequence >= m_pStudioHeader->numseq )
 		e->curstate.sequence = 0;
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + e->curstate.sequence;
 
 	f = R_StudioEstimateFrame( e, pseqdesc, g_studio.time );
+
+#if XASH_GAMECUBE
+	/* Player bodies: sample the frame clock now and then, to tell a still
+	 * idle from a frozen clock (ceres ae635f9: byte-identical shots). */
+	if( e->player )
+	{
+		static int player_frame_calls, player_frame_logs;
+
+		if( player_frame_logs < 8 && ( player_frame_calls++ % 120 ) == 0 )
+		{
+			player_frame_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player bones %s seq=%d '%s' f=%.2f/%d time=%.2f animtime=%.2f framerate=%.2f frame=%.0f interp=%d\n",
+				e->model ? e->model->name : "?", e->curstate.sequence, pseqdesc->label, f, pseqdesc->numframes,
+				g_studio.time, e->curstate.animtime, e->curstate.framerate, e->curstate.frame,
+				g_studio.interpolate ? 1 : 0 );
+		}
+	}
+#endif
 
 #if XASH_GAMECUBE
 	/* G377: play group-0 sequences (idle/walk in-base). Seqgroup 1+ still
@@ -1059,9 +1205,19 @@ static void R_StudioSetupBones( cl_entity_t *e )
 #endif
 
 	panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, pseqdesc );
+	if( pseqdesc->numblends == 9 || pseqdesc->numblends == 3 )
+	{
+		const float dadt = R_StudioEstimateInterpolant( e );
+
+		R_StudioCalcGridBlend( e, pos, q, pseqdesc, panim, f,
+			e->curstate.blending[0] * dadt + e->latched.prevblending[0] * ( 1.0f - dadt ),
+			e->curstate.blending[1] * dadt + e->latched.prevblending[1] * ( 1.0f - dadt ));
+	}
+	else
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim, f );
 
-	if( pseqdesc->numblends > 1 && pseqdesc->numblends <= 16 )
+	if( pseqdesc->numblends > 1 && pseqdesc->numblends <= 16
+		&& pseqdesc->numblends != 9 && pseqdesc->numblends != 3 )
 	{
 		float s;
 		float dadt;
@@ -1103,9 +1259,13 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, pseqdesc );
 
 		// clip prevframe
+		if( pseqdesc->numblends == 9 || pseqdesc->numblends == 3 )
+			R_StudioCalcGridBlend( e, pos1b, q1b, pseqdesc, panim, e->latched.prevframe,
+				e->latched.prevseqblending[0], e->latched.prevseqblending[1] );
+		else
 		R_StudioCalcRotations( e, pos1b, q1b, pseqdesc, panim, e->latched.prevframe );
 
-		if( pseqdesc->numblends > 1 )
+		if( pseqdesc->numblends > 1 && pseqdesc->numblends != 9 && pseqdesc->numblends != 3 )
 		{
 			panim += m_pStudioHeader->numbones;
 			R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim, e->latched.prevframe );
@@ -1138,6 +1298,15 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		e->latched.prevframe = f;
 	}
 
+#if XASH_GAMECUBE
+	{
+		/* scene gestures (hat adjust, shrug, head tilts) over the base pose */
+		extern void R_GXGestureApply( const cl_entity_t *e, const studiohdr_t *hdr, vec4_t *q, vec3_t *pos, float time );
+
+		R_GXGestureApply( e, m_pStudioHeader, q, pos, (float)g_studio.time );
+	}
+#endif
+
 	pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
 
 	// calc gait animation
@@ -1145,7 +1314,7 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	{
 		qboolean copy_bones = true;
 
-		if( m_pPlayerInfo->gaitsequence >= m_pStudioHeader->numseq )
+		if( m_pPlayerInfo->gaitsequence < 0 || m_pPlayerInfo->gaitsequence >= m_pStudioHeader->numseq )
 			m_pPlayerInfo->gaitsequence = 0;
 
 		pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + m_pPlayerInfo->gaitsequence;
@@ -1314,8 +1483,8 @@ static void R_StudioBuildNormalTable( void )
 	{
 		short *ptricmds;
 
-		pmesh = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex ) + j;
-		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex );
+		pmesh = (mstudiomesh_t *)(m_pSubModelBase + m_pSubModel->meshindex ) + j;
+		ptricmds = (short *)(m_pSubModelBase + pmesh->triindex );
 
 		while(( i = *( ptricmds++ )))
 		{
@@ -1364,8 +1533,8 @@ static void R_StudioGenerateNormals( void )
 	{
 		short *ptricmds;
 
-		pmesh = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex ) + j;
-		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex );
+		pmesh = (mstudiomesh_t *)(m_pSubModelBase + m_pSubModel->meshindex ) + j;
+		ptricmds = (short *)(m_pSubModelBase + pmesh->triindex );
 
 		while(( i = *( ptricmds++ )))
 		{
@@ -1524,6 +1693,22 @@ static void R_StudioSetupModel( int bodypart, void **ppbodypart, void **ppsubmod
 	index = index % m_pBodyPart->nummodels;
 
 	m_pSubModel = (mstudiomodel_t *)((byte *)m_pStudioHeader + m_pBodyPart->modelindex ) + index;
+	m_pSubModelBase = (byte *)m_pStudioHeader;
+#if XASH_GAMECUBE
+	if( m_pSubModel->unused == GC_STUDIO_MESH_STREAMED )
+	{
+		extern byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel );
+		static mstudiomodel_t empty; /* not available this frame: draw nothing */
+
+		m_pSubModelBase = Mod_GCStudioMeshBase( m_pStudioHeader, m_pSubModel );
+		if( (uintptr_t)m_pSubModelBase < 0x80000000u )
+		{
+			memcpy( empty.name, m_pSubModel->name, sizeof( empty.name ));
+			m_pSubModel = &empty;
+			m_pSubModelBase = (byte *)m_pStudioHeader;
+		}
+	}
+#endif
 
 	if( ppbodypart )
 		*ppbodypart = m_pBodyPart;
@@ -1649,17 +1834,6 @@ static void R_StudioSetupLighting( alight_t *plight )
 
 	g_studio.ambientlight = plight->ambientlight;
 	g_studio.shadelight = plight->shadelight;
-#if XASH_GAMECUBE
-	/* Viewmodel MODULATE: soft gouraud only. Wide ambient/shade ranges
-	 * (72/96, 128/80) silhouetted the Garand under MODULATE (ava-play99-87/88).
-	 * 176/32 read almost flat (ava-play99-91/92) — open the band a little
-	 * so hands get definition without crushing wood. */
-	if( RI.currententity == tr.viewent )
-	{
-		g_studio.ambientlight = 152.0f;
-		g_studio.shadelight = 56.0f;
-	}
-#endif
 	VectorCopy( plight->plightvec, g_studio.lightvec );
 
 	for( int i = 0; i < m_pStudioHeader->numbones; i++ )
@@ -1670,6 +1844,11 @@ static void R_StudioSetupLighting( alight_t *plight )
 	}
 
 	VectorCopy( plight->color, g_studio.lightcolor );
+#if XASH_GAMECUBE
+	/* Bisect switch: white light colour, keep the light level. */
+	if( gEngfuncs.Sys_CheckParm( "-gcstudiowhite" ))
+		VectorSet( g_studio.lightcolor, 1.0f, 1.0f, 1.0f );
+#endif
 }
 
 /*
@@ -1874,6 +2053,38 @@ static void R_StudioSetupSkin( studiohdr_t *ptexturehdr, int index )
 		ptexture = gEngfuncs.CL_GetRemapInfoForEntity( RI.currententity )->ptexture;
 	if( !ptexture )
 		ptexture = (mstudiotexture_t *)((byte *)ptexturehdr + ptexturehdr->textureindex );        // fallback
+#if XASH_GAMECUBE
+	{
+		/* One line per carried gun (p_*): which texture its skin binds. */
+		static char gun_seen[8][24];
+		int g;
+
+		for( g = 0; Q_stristr( ptexturehdr->name, "p_" ) && g < 8; g++ )
+		{
+			const char *base = ptexturehdr->name, *c;
+
+			for( c = ptexturehdr->name; *c; c++ )   /* MDL names carry the modeller's path, \\ or / */
+				if( *c == '\\' || *c == '/' )
+					base = c + 1;
+			if( Q_strnicmp( base, "p_", 2 ))
+				break;
+			if( !Q_strncmp( gun_seen[g], base, sizeof( gun_seen[g] ) - 1 ))
+				break;
+			if( !gun_seen[g][0] )
+			{
+				const int ti = ptexture[index].index;
+				image_t *img = ( ti > 0 && (unsigned)ti < (unsigned)MAX_TEXTURES ) ? R_GetTexture( (unsigned)ti ) : NULL;
+
+				Q_strncpy( gun_seen[g], base, sizeof( gun_seen[g] ));
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gun skin %s skin[%d] %s %dx%d flags=%x remap=%d -> tex=%d img=%s %dx%d\n",
+					base, index, ptexture[index].name, ptexture[index].width, ptexture[index].height,
+					ptexture[index].flags, (int)m_fDoRemap, ti,
+					( img && img->name[0] ) ? img->name : "?", img ? img->width : 0, img ? img->height : 0 );
+				break;
+			}
+		}
+	}
+#endif
 
 	if( r_lightmap->value && !r_fullbright->value )
 	{
@@ -2026,6 +2237,9 @@ generic path
 #if XASH_GAMECUBE
 #define R_GX_STUDIO_COLOR_CACHE 2048
 static unsigned r_gx_studio_colors[R_GX_STUDIO_COLOR_CACHE]; /* packed RGBA per normal, 0 = not yet */
+static qboolean r_gc_studio_emit_logged; /* G376 one-time emit log done */
+static qboolean r_gx_studio_colors_ready; /* every normal of this submodel packed */
+static int r_gc_points_serial;	/* one per R_StudioDrawPoints */
 #endif
 
 static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float s, float t )
@@ -2042,7 +2256,52 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !R_GXStudioIsActive() )
 			R_GXStudioForceBegin( false );
 		/* G376: ForceBegin cleared bound_tex — rebind SetupSkin's texture. */
+		R_STUDIO_PROF( "studio: mesh setup (begin)" );
 		R_GXStudioRebindPending();
+		R_STUDIO_PROF( "studio: skin bind" );
+
+		/* World studios without dynamic lights: pack each normal's colour
+		 * once, then emit the tricmds straight into the FIFO. */
+		if( r_gc_studio_emit_logged && !g_studio.numlocallights && m_pSubModel
+			&& m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
+			&& ( RI.currententity != tr.viewent || R_GXStudioVmDirectReady() ))
+		{
+			const short *pc = ptricmds;
+			int n;
+
+			/* The viewmodel's behind-near verts go onto the near plane once
+			 * per submodel (the strip path did it per strip). */
+			if( RI.currententity == tr.viewent )
+			{
+				static int vm_pushed_serial = -1;
+
+				if( vm_pushed_serial != r_gc_points_serial )
+				{
+					vm_pushed_serial = r_gc_points_serial;
+					R_GXStudioVmPushVerts( g_studio.verts, m_pSubModel->numverts );
+				}
+			}
+			while( !r_gx_studio_colors_ready && ( n = *( pc++ )))
+			{
+				if( n < 0 )
+					n = -n;
+				for( ; n > 0; n--, pc += 4 )
+				{
+					if( !r_gx_studio_colors[pc[1]] )
+					{
+						R_StudioSetColorBegin( (short *)pc, pstudionorms );
+						r_gx_studio_colors[pc[1]] = R_GXGetTriColorRGBA();
+					}
+				}
+			}
+			R_STUDIO_PROF( "studio: color prepass" );
+			if( R_GXStudioEmitTricmds( ptricmds, (const float (*)[3])g_studio.verts,
+				m_pSubModel->numverts, r_gx_studio_colors, s, t ))
+			{
+				R_STUDIO_PROF( "studio: fifo emit" );
+				return;
+			}
+		}
 
 		{
 			static qboolean emit_bbox_logged;
@@ -2126,6 +2385,7 @@ static void R_StudioDrawNormalMesh( short *ptricmds, vec3_t *pstudionorms, float
 		if( !emit_bbox_logged && emit_n > 0 )
 		{
 			emit_bbox_logged = true;
+			r_gc_studio_emit_logged = true;
 			gEngfuncs.Con_Reportf(
 				"Xash3D GameCube: G376 studio emit %s n=%d oob=%d maxidx=%d first=%d bbox=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f)\n",
 				( RI.currentmodel && RI.currentmodel->name[0] ) ? RI.currentmodel->name : "?",
@@ -2313,6 +2573,9 @@ R_StudioDrawPoints
 
 ===============
 */
+#if XASH_GAMECUBE
+static qboolean r_gc_vm_bbox_logged;
+#endif
 static void R_StudioDrawPoints( void )
 {
 	int              i, j, k, m_skinnum;
@@ -2331,13 +2594,21 @@ static void R_StudioDrawPoints( void )
 	if( !m_pStudioHeader )
 		return;
 
-	m_skinnum = RI.currententity->curstate.skin;
-	pvertbone = ((byte *)m_pStudioHeader + m_pSubModel->vertinfoindex );
-	pnormbone = ((byte *)m_pStudioHeader + m_pSubModel->norminfoindex );
+#if XASH_GAMECUBE
+	/* Lost Coast characters: Flipper skins, lights and draws them from
+	 * prebuilt display lists (gc_studio/<name>.gca, r_gx_actor.c). */
+	if( GC_UseGxWorldDraw() && R_GXActorDraw( RI.currententity, RI.currentmodel,
+		m_pStudioHeader, g_studio.bonestransform ))
+		return;
+#endif
 
-	pmesh = (mstudiomesh_t *)((byte *)m_pStudioHeader + m_pSubModel->meshindex );
-	pstudioverts = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->vertindex );
-	pstudionorms = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->normindex );
+	m_skinnum = RI.currententity->curstate.skin;
+	pvertbone = (m_pSubModelBase + m_pSubModel->vertinfoindex );
+	pnormbone = (m_pSubModelBase + m_pSubModel->norminfoindex );
+
+	pmesh = (mstudiomesh_t *)(m_pSubModelBase + m_pSubModel->meshindex );
+	pstudioverts = (vec3_t *)(m_pSubModelBase + m_pSubModel->vertindex );
+	pstudionorms = (vec3_t *)(m_pSubModelBase + m_pSubModel->normindex );
 
 #if XASH_GAMECUBE
 	/* Mesh-only lean stubs (w_crowbar): textureindex/skinindex are 0. Treating
@@ -2385,9 +2656,10 @@ static void R_StudioDrawPoints( void )
 #if XASH_GAMECUBE
 		if(( gEngfuncs.Sys_CheckParm( "-gcnewgame" ) || GC_UseGxWorldDraw())
 			&& m_pSubModel->numverts > 0
-			&& RI.currententity == tr.viewent )
+			&& RI.currententity == tr.viewent
+			&& !r_gc_vm_bbox_logged ) /* one-time log: no per-frame vertex scan */
 		{
-			static qboolean bbox_logged;
+			qboolean bbox_logged = false;
 			float mn[3], mx[3];
 			int b0 = pvertbone[0];
 
@@ -2408,6 +2680,7 @@ static void R_StudioDrawPoints( void )
 				float dmin = 1e9f, dmax = -1e9f;
 
 				bbox_logged = true;
+				r_gc_vm_bbox_logged = true;
 				AngleVectors( RI.rvp.viewangles, eye_fwd, NULL, NULL );
 				for( i = 0; i < m_pSubModel->numverts; i++ )
 				{
@@ -2429,6 +2702,8 @@ static void R_StudioDrawPoints( void )
 		}
 #endif
 	}
+
+	R_STUDIO_PROF( "studio: vertex transform" );
 
 	// generate shared normals for properly scaling glowing shell
 	if( RI.currententity->curstate.renderfx == kRenderFxGlowShell )
@@ -2470,18 +2745,6 @@ static void R_StudioDrawPoints( void )
 					R_StudioLighting( &lv_tmp, -1, g_nFaceFlags, g_studio.norms[k] );
 				else
 					R_StudioLighting( &lv_tmp, *pnormbone, g_nFaceFlags, (float *)pstudionorms );
-#if XASH_GAMECUBE
-				/* Soft-clamp viewmodel luminance so MODULATE cannot crush
-				 * backfaces into black silhouettes (ava-play99-88). Floor
-				 * eased with ambient 152/56 so hands keep some shape. */
-				if( RI.currententity == tr.viewent )
-				{
-					if( lv_tmp < 0.55f )
-						lv_tmp = 0.55f;
-					else if( lv_tmp > 0.98f )
-						lv_tmp = 0.98f;
-				}
-#endif
 
 				if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
 					R_StudioSetupChrome( g_studio.chrome[k], *pnormbone, (float *)pstudionorms );
@@ -2490,6 +2753,8 @@ static void R_StudioDrawPoints( void )
 		}
 	}
 
+	R_STUDIO_PROF( "studio: normal lighting" );
+
 	if( r_studio_sort_textures.value && need_sort )
 	{
 		// resort opaque and translucent meshes draw order
@@ -2497,11 +2762,49 @@ static void R_StudioDrawPoints( void )
 	}
 
 	// NOTE: rewind normals at start
-	pstudionorms = (vec3_t *)((byte *)m_pStudioHeader + m_pSubModel->normindex );
+	pstudionorms = (vec3_t *)(m_pSubModelBase + m_pSubModel->normindex );
 
 #if XASH_GAMECUBE
-	memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
-		* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	/* Without dynamic lights a vertex colour is its normal's light value
+	 * (R_LightLambert scales it by 255): pack every normal's once here
+	 * instead of walking each mesh's tricmds for it. */
+	r_gx_studio_colors_ready = false;
+	if( !g_studio.numlocallights && m_pSubModel->numnorms <= R_GX_STUDIO_COLOR_CACHE
+		&& !gEngfuncs.Sys_CheckParm( "-gcnocolorpack" ))
+	{
+		for( i = 0; i < m_pSubModel->numnorms; i++ )
+		{
+			const float *lv = g_studio.lightvalues[i];
+			const unsigned cr = (byte)( lv[0] * 255.0f ), cg = (byte)( lv[1] * 255.0f ), cb = (byte)( lv[2] * 255.0f );
+
+			r_gx_studio_colors[i] = ( cr << 24 ) | ( cg << 16 ) | ( cb << 8 ) | 0xFFu;
+		}
+		{
+			/* What the packed light looks like (Tim: bodies dark / tinted). */
+			static double next_pack_log;
+			static int pack_logs;
+
+			if( pack_logs < 16 && g_studio.time >= next_pack_log && m_pSubModel->numnorms > 2 )
+			{
+				const float *a = g_studio.lightvalues[0], *b = g_studio.lightvalues[m_pSubModel->numnorms / 2];
+
+				next_pack_log = g_studio.time + 2.0;
+				pack_logs++;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio pack %s vm=%d lc=(%.2f,%.2f,%.2f) amb=%.0f shade=%.0f lv0=(%.3f,%.3f,%.3f)=%08x lvm=(%.3f,%.3f,%.3f)=%08x\n",
+					m_pSubModel->name, RI.currententity == tr.viewent ? 1 : 0,
+					g_studio.lightcolor[0], g_studio.lightcolor[1], g_studio.lightcolor[2],
+					g_studio.ambientlight, g_studio.shadelight,
+					a[0], a[1], a[2], r_gx_studio_colors[0], b[0], b[1], b[2],
+					r_gx_studio_colors[m_pSubModel->numnorms / 2] );
+			}
+		}
+		r_gx_studio_colors_ready = true;
+	}
+	else
+		memset( r_gx_studio_colors, 0, sizeof( r_gx_studio_colors[0] )
+			* Q_min( m_pSubModel->numnorms, R_GX_STUDIO_COLOR_CACHE ));
+	r_gc_points_serial++;
+	R_STUDIO_PROF( "studio: sort+color clear" );
 #endif
 	for( j = 0; j < m_pSubModel->nummesh; j++ )
 	{
@@ -2510,7 +2813,7 @@ static void R_StudioDrawPoints( void )
 		float s, t;
 
 		pmesh = g_studio.meshes[j].mesh;
-		ptricmds = (short *)((byte *)m_pStudioHeader + pmesh->triindex );
+		ptricmds = (short *)(m_pSubModelBase + pmesh->triindex );
 
 		if( mesh_only )
 		{
@@ -2544,7 +2847,9 @@ static void R_StudioDrawPoints( void )
 			// else pglBlendFunc( GL_SRC_ALPHA, GL_ONE );
 		}
 
+		R_STUDIO_PROF( "studio: mesh flags" );
 		R_StudioSetupSkin( m_pStudioHeader, mesh_only ? 0 : pskinref[pmesh->skinref] );
+		R_STUDIO_PROF( "studio: setup skin" );
 
 		{
 			if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
@@ -2570,6 +2875,7 @@ static void R_StudioDrawPoints( void )
 		r_stats.c_studio_polys += pmesh->numtris;
 		tr.blend = oldblend;
 	}
+	R_STUDIO_PROF( "studio: mesh emit" );
 }
 
 /*
@@ -2663,6 +2969,9 @@ static model_t *R_StudioSetupPlayerModel( int index )
 {
 	player_info_t  *info = gEngfuncs.pfnPlayerInfo( index );
 	player_model_t *state;
+#if XASH_GAMECUBE
+	char mirror[MAX_QPATH];
+#endif
 
 	if( index < 0 || index >= gp_cl->maxclients )
 		return NULL;
@@ -2681,6 +2990,17 @@ static model_t *R_StudioSetupPlayerModel( int index )
 
 			if( gEngfuncs.fsapi->FileExists( state->modelname, false ))
 				state->model = gEngfuncs.Mod_ForName( state->modelname, false, true );
+#if XASH_GAMECUBE
+			/* The lean disc carries team bodies only as split gc_studio/<name>.mdl
+			 * cores (the studio loader reads that mirror for the retail path). */
+			else if( Q_snprintf( mirror, sizeof( mirror ), "gc_studio/%s.mdl", info->model ) > 0
+				&& gEngfuncs.fsapi->FileExists( mirror, false ))
+			{
+				state->model = gEngfuncs.Mod_ForName( state->modelname, false, true );
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d body %s %s\n", index,
+					state->modelname, state->model ? "loaded" : "load failed" );
+			}
+#endif
 			else
 				state->model = NULL;
 
@@ -2967,14 +3287,6 @@ static void R_StudioRenderFinal( void )
 	{
 		for( i = 0; i < m_pStudioHeader->numbodyparts; i++ )
 		{
-#if XASH_GAMECUBE
-			/* Sleeve bodypart is a separate 82-vert paddle that reads as
-			 * prism arms under Flipper (ava-play99-80). Gun mesh0 already
-			 * carries hands.bmp arms — skip the cloth overlay for viewent. */
-			if(( GC_UseGxWorldDraw() || gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
-				&& RI.currententity == tr.viewent && i > 0 )
-				continue;
-#endif
 			R_StudioSetupModel( i, (void **)&m_pBodyPart, (void **)&m_pSubModel );
 
 			GL_StudioSetRenderMode( rendermode );
@@ -3103,21 +3415,39 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 {
 	mstudioseqdesc_t *pseqdesc;
 	int   iBlend;
+	qboolean grid;
 	float dt, flYaw; // view direction relative to movement
 
-	if( RI.currententity->curstate.sequence >= m_pStudioHeader->numseq )
+	if( RI.currententity->curstate.sequence < 0 || RI.currententity->curstate.sequence >= m_pStudioHeader->numseq )
 		RI.currententity->curstate.sequence = 0;
 
 	dt = bound( 0.0f, g_studio.frametime, 1.0f );
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + RI.currententity->curstate.sequence;
 
+	grid = pseqdesc->numblends == 9 || pseqdesc->numblends == 3;
+	if( pseqdesc->numblends == 9 )
+	{
+		// 3 x 3 aim grid: the pitch goes down the column (blending[1]),
+		// first row up (+45), last row down (-45)
+		const float b = RI.currententity->angles[PITCH] * 3.0f;
+
+		iBlend = b <= -45.0f ? 255 : b >= 45.0f ? 0 : (int)(( 45.0f - b ) / 90.0f * 255.0f );
+		RI.currententity->angles[PITCH] = 0.0f;
+		RI.currententity->latched.prevangles[PITCH] = 0.0f;
+		RI.currententity->curstate.blending[1] = iBlend;
+		RI.currententity->latched.prevblending[1] = iBlend;
+		RI.currententity->latched.prevseqblending[1] = iBlend;
+	}
+	else
+	{
 	R_StudioPlayerBlend( pseqdesc, &iBlend, &RI.currententity->angles[PITCH] );
 
 	RI.currententity->latched.prevangles[PITCH] = RI.currententity->angles[PITCH];
 	RI.currententity->curstate.blending[0] = iBlend;
 	RI.currententity->latched.prevblending[0] = RI.currententity->curstate.blending[0];
 	RI.currententity->latched.prevseqblending[0] = RI.currententity->curstate.blending[0];
+	}
 	R_StudioEstimateGait( pplayer );
 
 	// calc side to side turning
@@ -3141,6 +3471,25 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 		flYaw = flYaw + 180.0f;
 	}
 
+	if( grid )
+	{
+		// the row of the grid turns the torso from the legs to the aim:
+		// 90 degrees either way, the middle cell straight ahead
+		float by = ( flYaw / 90.0f ) * 128.0f + 127.0f;
+		int   iy;
+
+		by = bound( 0.0f, by, 255.0f );
+		iy = r_gc_aim_yaw_flip.value ? (int)by : (int)( 255.0f - by );
+		if( pseqdesc->numblends == 3 )
+		{
+			// one row: sandbag and bipod aim, pitch only
+			iy = RI.currententity->curstate.blending[0];
+		}
+		RI.currententity->curstate.blending[0] = iy;
+		RI.currententity->latched.prevblending[0] = iy;
+		RI.currententity->latched.prevseqblending[0] = iy;
+	}
+
 	// adjust torso
 	RI.currententity->curstate.controller[0] = (( flYaw / 4.0f ) + 30.0f ) / ( 60.0f / 255.0f );
 	RI.currententity->curstate.controller[1] = (( flYaw / 4.0f ) + 30.0f ) / ( 60.0f / 255.0f );
@@ -3156,7 +3505,7 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 		RI.currententity->angles[YAW] += 360.0f;
 	RI.currententity->latched.prevangles[YAW] = RI.currententity->angles[YAW];
 
-	if( pplayer->gaitsequence >= m_pStudioHeader->numseq )
+	if( pplayer->gaitsequence < 0 || pplayer->gaitsequence >= m_pStudioHeader->numseq )
 		pplayer->gaitsequence = 0;
 
 	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + pplayer->gaitsequence;
@@ -3171,6 +3520,88 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 	m_pPlayerInfo->gaitframe = m_pPlayerInfo->gaitframe - (int)( m_pPlayerInfo->gaitframe / pseqdesc->numframes ) * pseqdesc->numframes;
 	if( m_pPlayerInfo->gaitframe < 0 )
 		m_pPlayerInfo->gaitframe += pseqdesc->numframes;
+}
+
+/*
+===============
+R_StudioDrawWeaponModel
+
+The third-person weapon (p_*.mdl) on the current entity's saved bones: a player's,
+or (GameCube) a scripted film actor's, which carries one the same way.
+===============
+*/
+static void R_StudioDrawWeaponModel( int number, int weaponmodel, alight_t *lighting )
+{
+	cl_entity_t saveent = *RI.currententity;
+	model_t     *pweaponmodel = CL_ModelHandle( weaponmodel );
+
+	m_pStudioHeader = pweaponmodel ? (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel ) : NULL;
+#if XASH_GAMECUBE
+	{
+		static int weapon_logs;
+
+		if( weapon_logs < 4 )
+		{
+			weapon_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s carrier remap=%d\n",
+				number, weaponmodel, pweaponmodel ? pweaponmodel->name : "(null)",
+				m_pStudioHeader ? "yes" : "no", (int)m_fDoRemap );
+		}
+	}
+	/* The lean precache can stand a resident w_crowbar in for a
+	 * p_*.mdl that is not loaded; merged onto player bones it lay
+	 * as a white crowbar at the bot's feet (ceres fmg). Attach
+	 * only real third-person weapon models. */
+	/* Bisect switch for the third-person weapon draw. */
+	if( m_pStudioHeader && gEngfuncs.Sys_CheckParm( "-gcnopweapondraw" ))
+		m_pStudioHeader = NULL;
+	/* A runtime-loaded p_ whose cache was reused would hand MergeBones
+	 * a garbage header (a wild seqdesc in EstimateFrame). */
+	if( m_pStudioHeader && ( m_pStudioHeader->ident != IDSTUDIOHEADER
+		|| m_pStudioHeader->numseq <= 0 || m_pStudioHeader->numbones <= 0
+		|| m_pStudioHeader->numbones > MAXSTUDIOBONES ))
+	{
+		static int bad_logs;
+
+		if( bad_logs++ < 4 )
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: player weapon %s header is not a studio header (ident %08x); not drawn\n",
+				pweaponmodel->name, (unsigned)m_pStudioHeader->ident );
+		m_pStudioHeader = NULL;
+	}
+	if( m_pStudioHeader && !Q_stristr( pweaponmodel->name, "/p_" ))
+	{
+		static int stand_in_logs;
+
+		if( stand_in_logs < 4 )
+		{
+			stand_in_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player weapon %d is %s, not a p_ model; not attached\n",
+				weaponmodel, pweaponmodel->name );
+		}
+		m_pStudioHeader = NULL;
+	}
+#endif
+
+	/* The third-person p_*.mdl may not be resident on GameCube (the
+	 * studio budget defers it); a NULL header crashed MergeBones
+	 * (ceres 1ff66ba, DAR 0xA4 = studiohdr numseq). Skip the gun. */
+	if( m_pStudioHeader )
+	{
+		/* The gun has its own skins. The carrier's colour remap (left on
+		 * by R_StudioSetRemapColors for a player model with remappable
+		 * skins) would index the carrier's remapped texture table with
+		 * the gun's skin refs: the gun drawn in the uniform's textures. */
+		const qboolean remap = m_fDoRemap;
+
+		m_fDoRemap = false;
+		R_StudioMergeBones( RI.currententity, pweaponmodel );
+		R_StudioSetupLighting( lighting );
+		R_StudioRenderModel( );
+		R_StudioCalcAttachments( );
+		m_fDoRemap = remap;
+	}
+
+	*RI.currententity = saveent;
 }
 
 /*
@@ -3241,6 +3672,54 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 		vec3_t orig_angles = Vec3( RI.currententity->angles );
 
 		R_StudioProcessGait( pplayer );
+#if XASH_GAMECUBE
+		{
+			/* Aim check: the blend the pitch became (127 = level). */
+			static double next_blend_log[MAX_CLIENTS + 1];
+			const int pi = m_nPlayerIndex + 1;
+
+			if( pi > 0 && pi <= MAX_CLIENTS && gp_host->realtime >= next_blend_log[pi] )
+			{
+				next_blend_log[pi] = gp_host->realtime + 2.0;
+				const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + RI.currententity->curstate.sequence;
+
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio aim player %d pitch in %.1f blend %d seq %d '%s' (blend type %d %.1f..%.1f, %d blends) gait %d\n",
+					pi, orig_angles[PITCH], RI.currententity->curstate.blending[0],
+					RI.currententity->curstate.sequence, sd->label, sd->blendtype[0],
+					sd->blendstart[0], sd->blendend[0], sd->numblends, pplayer->gaitsequence );
+				/* Yaw check: aim yaw, legs yaw, torso controller (127 = no
+				 * twist), and once per body which bone controllers exist. */
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: studio yaw player %d aim %.1f legs %.1f twist ctl %d %d %d %d gaitmove %.1f\n",
+					pi, orig_angles[YAW], m_pPlayerInfo ? m_pPlayerInfo->gaityaw : -999.0f,
+					RI.currententity->curstate.controller[0], RI.currententity->curstate.controller[1],
+					RI.currententity->curstate.controller[2], RI.currententity->curstate.controller[3],
+					m_flGaitMovement );
+				{
+					static const studiohdr_t *ctl_logged[8];
+					int k, seen = 0;
+
+					for( k = 0; k < 8; k++ )
+						if( ctl_logged[k] == m_pStudioHeader )
+							seen = 1;
+					if( !seen )
+					{
+						const mstudiobonecontroller_t *bc = (const mstudiobonecontroller_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->bonecontrollerindex );
+						const mstudiobone_t *bones = (const mstudiobone_t *)((const byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+						for( k = 0; k < 8 && ctl_logged[k]; k++ );
+						if( k < 8 )
+							ctl_logged[k] = m_pStudioHeader;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: body %s has %d bone controllers\n",
+							m_pStudioHeader->name, m_pStudioHeader->numbonecontrollers );
+						for( k = 0; k < m_pStudioHeader->numbonecontrollers && k < 8; k++ )
+							gEngfuncs.Con_Reportf( "Xash3D GameCube:   controller %d index %d bone %s type 0x%x range %.0f..%.0f\n",
+								k, bc[k].index, ( bc[k].bone >= 0 && bc[k].bone < m_pStudioHeader->numbones ) ? bones[bc[k].bone].name : "?",
+								bc[k].type, bc[k].start, bc[k].end );
+					}
+				}
+			}
+		}
+#endif
 
 		m_pPlayerInfo->gaitsequence = pplayer->gaitsequence;
 		m_pPlayerInfo = NULL;
@@ -3281,6 +3760,7 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 	m_pPlayerInfo = pfnPlayerInfo( m_nPlayerIndex );
 	R_StudioSetupBones( RI.currententity );
 	R_StudioSaveBones( );
+	R_STUDIO_PROF( "studio: bones" );
 
 	m_pPlayerInfo->renderframe = tr.realframecount;
 	m_pPlayerInfo = NULL;
@@ -3311,16 +3791,54 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			RI.currententity->curstate.body = 255;
 		}
 
-		if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && ( RI.currentmodel == RI.currententity->model ))
+		if( !( !gpGlobals->developer && gp_cl->maxclients == 1 ) && ( RI.currentmodel == RI.currententity->model )
+#if XASH_GAMECUBE
+			/* DoD player bodies are class body x helmet x head x gear; body 1
+			 * is another class's uniform (a blank one on brit-inf), not a
+			 * helmet. The game picks it. */
+			&& !( RI.currentmodel && ( Q_stristr( RI.currentmodel->name, "-inf/" ) || Q_stristr( RI.currentmodel->name, "-para/" )))
+#endif
+			)
 			RI.currententity->curstate.body = 1; // force helmet
 
 		lighting.plightvec = dir;
 		R_EntityDynamicLight( RI.currententity, &lighting, FBitSet( RI.rvp.flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
 
 		R_StudioEntityLight( &lighting );
+#if XASH_GAMECUBE
+		/* Bisect switch: light the bodies from the opposite side. */
+		if( gEngfuncs.Sys_CheckParm( "-gclightflip" ))
+			VectorNegate( lighting.plightvec, lighting.plightvec );
+#endif
 
 		// model and frame independant
 		R_StudioSetupLighting( &lighting );
+#if XASH_GAMECUBE
+		/* Every ~4 s: what lights a player body (Tim: bots lit from below). */
+		{
+			static double next_log;
+			static int light_logs;
+
+			if( light_logs < 12 && g_studio.time >= next_log )
+			{
+				const movevars_t *mv = gp_movevars;
+
+				next_log = g_studio.time + 4.0;
+				light_logs++;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: player light ent=%d org=(%.0f,%.0f,%.0f) amb=%d shade=%d vec=(%.2f,%.2f,%.2f) color=(%.2f,%.2f,%.2f) floor=(%d,%d,%d) skyvec=(%.2f,%.2f,%.2f) skycolor=(%.0f,%.0f,%.0f) bone0vec=(%.2f,%.2f,%.2f) aramlm=%d lp=%d skytrace=%d frac=%.3f\n",
+					RI.currententity->index, RI.currententity->origin[0], RI.currententity->origin[1], RI.currententity->origin[2],
+					lighting.ambientlight, lighting.shadelight,
+					lighting.plightvec[0], lighting.plightvec[1], lighting.plightvec[2],
+					lighting.color[0], lighting.color[1], lighting.color[2],
+					RI.currententity->cvFloorColor.r, RI.currententity->cvFloorColor.g, RI.currententity->cvFloorColor.b,
+					mv ? mv->skyvec[0] : 0.0f, mv ? mv->skyvec[1] : 0.0f, mv ? mv->skyvec[2] : 0.0f,
+					mv ? mv->skycolor[0] : 0.0f, mv ? mv->skycolor[1] : 0.0f, mv ? mv->skycolor[2] : 0.0f,
+					g_studio.blightvec[0][0], g_studio.blightvec[0][1], g_studio.blightvec[0][2],
+					Mod_GCAramLightmapActive() ? 1 : 0, Mod_GCLightPointsActive( gp_cl->models[1] ) ? 1 : 0,
+					r_gc_light_path, r_gc_light_frac );
+			}
+		}
+#endif
 
 		m_pPlayerInfo = pfnPlayerInfo( m_nPlayerIndex );
 
@@ -3338,24 +3856,13 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 			g_nBottomColor = 360;
 
 		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+		R_STUDIO_PROF( "studio: events+light setup" );
 
 		R_StudioRenderModel( );
 		m_pPlayerInfo = NULL;
 
 		if( pplayer->weaponmodel )
-		{
-			cl_entity_t saveent = *RI.currententity;
-			model_t     *pweaponmodel = CL_ModelHandle( pplayer->weaponmodel );
-
-			m_pStudioHeader = (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel );
-
-			R_StudioMergeBones( RI.currententity, pweaponmodel );
-			R_StudioSetupLighting( &lighting );
-			R_StudioRenderModel( );
-			R_StudioCalcAttachments( );
-
-			*RI.currententity = saveent;
-		}
+			R_StudioDrawWeaponModel( pplayer->number, pplayer->weaponmodel, &lighting );
 	}
 
 	return 1;
@@ -3382,7 +3889,11 @@ static int R_StudioDrawModel( int flags )
 			return 0;
 
 		// get copy of player
-		deadplayer = *R_StudioGetPlayerState( RI.currententity->curstate.renderamt - 1 );
+		const entity_state_t *dead_src = R_StudioGetPlayerState( RI.currententity->curstate.renderamt - 1 );
+
+		if( !dead_src )
+			return 0;	/* a corpse of a slot this client has no state for */
+		deadplayer = *dead_src;
 
 		// clear weapon, movement state
 		deadplayer.number = RI.currententity->curstate.renderamt;
@@ -3441,12 +3952,51 @@ static int R_StudioDrawModel( int flags )
 			return 1;
 	}
 
+#if XASH_GAMECUBE
+	/* A scripted film actor (dod-gc) is not a player, but plays like one: its legs
+	 * walk a gait sequence under the weapon's upper-body aim sequence. The gait
+	 * comes in controller[2] and the low bits of controller[3], flagged by bit 7 of
+	 * controller[3] (DoD player models have no bone controllers), and walks at the
+	 * entity's own frame. */
+	player_info_t *film_saved_pi = m_pPlayerInfo;
+	static player_info_t film_gait;
+
+	/* The film actor sets its frame and blend every server frame with no
+	 * interpolation to do: the blend lerp's stale latched half (0, the grid's
+	 * top row) had every man looking up whatever the server sent. */
+	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 ))
+	{
+		RI.currententity->latched.prevblending[0] = RI.currententity->curstate.blending[0];
+		RI.currententity->latched.prevblending[1] = RI.currententity->curstate.blending[1];
+	}
+
+	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 )
+		&& m_pStudioHeader && m_pStudioHeader->numbonecontrollers == 0 )
+	{
+		const int gs = RI.currententity->curstate.controller[2]
+			| (( RI.currententity->curstate.controller[3] & 0x7f ) << 8 );
+
+		if( gs > 0 && gs < m_pStudioHeader->numseq )
+		{
+			const mstudioseqdesc_t *gd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + gs;
+
+			memset( &film_gait, 0, sizeof( film_gait ));
+			film_gait.gaitsequence = gs;
+			film_gait.gaitframe = RI.currententity->curstate.frame * ( gd->numframes > 1 ? gd->numframes - 1 : 0 ) / 256.0f;
+			m_pPlayerInfo = &film_gait;
+		}
+	}
+#endif
 	if( RI.currententity->curstate.movetype == MOVETYPE_FOLLOW )
 		R_StudioMergeBones( RI.currententity, RI.currentmodel );
 	else
 		R_StudioSetupBones( RI.currententity );
+#if XASH_GAMECUBE
+	m_pPlayerInfo = film_saved_pi;
+#endif
 
 	R_StudioSaveBones();
+	R_STUDIO_PROF( "studio: bones" );
 
 	if( flags & STUDIO_EVENTS )
 	{
@@ -3478,8 +4028,14 @@ static int R_StudioDrawModel( int flags )
 		g_nBottomColor = ( RI.currententity->curstate.colormap & 0xFF00 ) >> 8;
 
 		R_StudioSetRemapColors( g_nTopColor, g_nBottomColor );
+		R_STUDIO_PROF( "studio: events+light setup" );
 
 		R_StudioRenderModel();
+#if XASH_GAMECUBE
+		/* Only the lean emitter sets weaponmodel on a non-player: scripted film actors. */
+		if( RI.currententity->curstate.weaponmodel )
+			R_StudioDrawWeaponModel( RI.currententity->index, RI.currententity->curstate.weaponmodel, &lighting );
+#endif
 	}
 
 	return 1;
@@ -3501,7 +4057,13 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	if(( gEngfuncs.Sys_CheckParm( "-gcnewgame" ) || GC_UseGxWorldDraw())
 		&& !gEngfuncs.Sys_CheckParm( "-gcfullphysics" ))
 	{
+#if XASH_DODGC_NETWORK
+		/* DoD: the view model keeps its studio events, which is where retail
+		 * takes the muzzle flash (5001) and the shell casings (6001/6002). */
+		flags &= STUDIO_RENDER | ( e == tr.viewent ? STUDIO_EVENTS : 0 );
+#else
 		flags &= STUDIO_RENDER;
+#endif
 		if( !flags || !e )
 			return;
 		if( e->player )
@@ -3521,8 +4083,12 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	else
 	{
 		// select the properly method
-		if( e->player )
-			pStudioDraw->StudioDrawPlayer( flags, R_StudioGetPlayerState( e->index - 1 ));
+		/* A player-flagged entity past the client slots (scripted actors, ceres caen 12 bots: DAR 0x4 in the
+		 * client's StudioDrawPlayer at pplayer->number) has no player state: draw it as a model instead. */
+		entity_state_t *pstate = e->player ? R_StudioGetPlayerState( e->index - 1 ) : NULL;
+
+		if( pstate )
+			pStudioDraw->StudioDrawPlayer( flags, pstate );
 		else
 			pStudioDraw->StudioDrawModel( flags );
 	}
@@ -3646,8 +4212,12 @@ void R_RunViewmodelEvents( void )
 {
 	int    i;
 
+#if !XASH_DODGC_NETWORK
+	/* The DoD route leaves r_drawviewmodel at 0 and draws the gun through
+	 * the lean view model path; its events must still run. */
 	if( r_drawviewmodel->value == 0 )
 		return;
+#endif
 
 	if( ENGINE_GET_PARM( PARM_THIRDPERSON ))
 		return;
@@ -3683,11 +4253,28 @@ void R_DrawViewModel( void )
 	qboolean gx_studio = false;
 	extern qboolean GC_CapFacesWantViewmodel( void );
 	const qboolean lean_vm = (( gEngfuncs.Sys_CheckParm( "-gcnewgame" )
-			|| GC_CapFacesWantViewmodel())
+			|| GC_CapFacesWantViewmodel()
+			|| ( view && view->curstate.modelindex > 0 ))
 		&& !gEngfuncs.Sys_CheckParm( "-gcfullphysics" )
 		&& view && view->model && view->model->type == mod_studio
 		&& view->model->cache.data
 		&& ( GC_UseLowResWorldProbe() || GC_UseGxWorldDraw() ));
+#endif
+
+#if XASH_GAMECUBE
+	/* The video stress test flythrough has no weapon in hand. Its skin is
+	 * also not resident on this route, so it drew as a white hook. */
+	if( gEngfuncs.Sys_CheckParm( "-gcvst" ))
+		return;
+	/* A cinematic camera owns the view (cine_play) and cine_viewmodel is 0.
+	 * Checked before lean_vm below, which draws a held weapon whatever
+	 * r_drawviewmodel says, so the gun showed in every film shot. */
+	{
+		extern qboolean CL_CineHideViewModel( void );
+
+		if( CL_CineHideViewModel( ))
+			return;
+	}
 #endif
 
 	R_GatherPlayerLight( view );
@@ -3704,7 +4291,13 @@ void R_DrawViewModel( void )
 		static qboolean cap_vm_skip_logged;
 		static qboolean cap_vm_allow_logged;
 
-		if( !GC_CapFacesWantViewmodel())
+		/* The server handing us a held weapon (bound by the lean emitter
+		 * with its model index) is as good as a menu team pick: bot
+		 * matches and auto-joins never set the CapFaces pick latches. */
+		const qboolean held = view && view->model && view->curstate.modelindex > 0
+			&& view->model->type == mod_studio && view->model->cache.data;
+
+		if( !GC_CapFacesWantViewmodel() && !held )
 		{
 			if( !cap_vm_skip_logged )
 			{
@@ -3931,6 +4524,40 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 	const byte *gc_skin_src = NULL;
 #endif
 
+#if XASH_GAMECUBE
+	/* Baked by the disc build: GX CMPR texels, used as they are. */
+	if( FBitSet( ptexture->flags, STUDIO_NF_GC_CMPR ))
+	{
+		Q_strncpy( mdlname, mod->name, sizeof( mdlname ));
+		COM_FileBase( ptexture->name, name, sizeof( name ));
+		COM_StripExtension( mdlname );
+		Q_snprintf( texname, sizeof( texname ), "#%s/%s.mdl", mdlname, name );
+		if( FBitSet( ptexture->flags, STUDIO_NF_GC_CMPR_STREAM ))
+		{
+			/* width x height CMPR texels, then a half-size low mip: the low mip is the resident skin (same cost as a
+			 * 128 px skin), the full texels go to the ARAM skin stream where a window pool exists. */
+			const byte *full = (const byte *)phdr + ptexture->index;
+			const int lw = ptexture->width >> 1, lh = ptexture->height >> 1;
+			const qboolean masked = FBitSet( ptexture->flags, STUDIO_NF_MASKED ) ? true : false;
+
+			ptexture->index = R_GCBakedCmprSkin( texname, full + R_GXCmprBytes( ptexture->width, ptexture->height ),
+				lw, lh, masked );
+			if( ptexture->index )
+				R_GXSkinAttachCmpr( R_GetTexture( (unsigned)ptexture->index ), full, ptexture->width, ptexture->height, masked );
+			ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR|STUDIO_NF_GC_CMPR_STREAM );
+			if( !ptexture->index )
+				ptexture->index = tr.defaultTexture;
+			return;
+		}
+		ptexture->index = R_GCBakedCmprSkin( texname, (const byte *)phdr + ptexture->index,
+			ptexture->width, ptexture->height, FBitSet( ptexture->flags, STUDIO_NF_MASKED ));
+		ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR );	/* index is a texture number from here on */
+		if( !ptexture->index )
+			ptexture->index = tr.defaultTexture;
+		return;
+	}
+#endif
+
 	if( ptexture->flags & STUDIO_NF_NORMALMAP )
 		flags |= ( TF_NORMALMAP );
 
@@ -4015,6 +4642,28 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		/* Viewmodel skins must live in the persistent overflow BSS — temppool
 		 * reclaim left hands.mdl soft pixels as 0x0000 and the Garand latticed
 		 * (ava-play99-28). WorldDL listen is not -gcnewgame, so pin v_* always. */
+		/* A carried gun's (p_*) skin: what it is made from, and whether the
+		 * name was already a texture (GL_LoadTexture then keeps the old one). */
+		if( Q_stristr( mdlname, "models/p_" ))
+		{
+			static int gun_tex_logs;
+
+			if( gun_tex_logs++ < 8 )
+			{
+				const byte *px = (const byte *)phdr + ptexture->index;
+				/* The header size can be the UV domain (255x256), not the baked 64x64: read the palette
+				 * after the pixels only when that stays inside a 64x64 skin, else show zeros. */
+				static const byte nopal[768];
+				const byte *pal = ptexture->width * ptexture->height <= 64 * 64
+					? px + ptexture->width * ptexture->height : nopal;
+
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gun skin load %s %dx%d src+%d existed=%d "
+					"px=%02x%02x%02x%02x%02x%02x%02x%02x pal0=%02x%02x%02x pal1=%02x%02x%02x pal255=%02x%02x%02x\n",
+					texname, ptexture->width, ptexture->height, ptexture->index, GL_FindTexture( texname ),
+					px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7],
+					pal[0], pal[1], pal[2], pal[3], pal[4], pal[5], pal[765], pal[766], pal[767] );
+			}
+		}
 		r_gc_studio_skins_in_arena = GC_MenuRunsServer()
 			|| gEngfuncs.Sys_CheckParm( "-gcnewgame" )
 			|| gEngfuncs.Sys_CheckParm( "-gcworldrender" )
@@ -4059,8 +4708,11 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 	{
 		extern qboolean Mod_GCForceStudioSkinUploadActive( void );
 
+		/* A listen server (the DoD play route) loads its team bodies after the map: they would draw white if their
+		 * skins were skipped like the CapFaces bake's. */
 		if( gEngfuncs.Sys_CheckParm( "-gcmap" )
 			&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" )
+			&& !gEngfuncs.Sys_CheckParm( "-gclistenserver" )
 			&& !Mod_GCForceStudioSkinUploadActive())
 			return;
 	}
@@ -4110,6 +4762,16 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 #endif
 		}
 #if XASH_GAMECUBE
+		/* A character body whose skins did not all load draws white: say so, whatever the route. */
+		if( Q_stristr( mod->name, "models/player/" ))
+		{
+			extern size_t R_GCStudioSkinOverflowUsed( void );
+			extern size_t R_GCStudioSkinOverflowCapacity( void );
+
+			gEngfuncs.Con_Reportf( "%sXash3D GameCube: player skins '%s' %d/%d fallback=%d overflow=%u/%u\n",
+				( loaded < phdr->numtextures ) ? S_WARN : "", mod->name, loaded, phdr->numtextures, fallback,
+				(uint)R_GCStudioSkinOverflowUsed(), (uint)R_GCStudioSkinOverflowCapacity());
+		}
 		if( gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
 		{
 			extern size_t R_GCStudioSkinOverflowUsed( void );

@@ -21,9 +21,41 @@ iso="${1:?disc.iso}"; probe_dir="${2:?probe log dir}"; until_map="${3:-}"; minut
 DOLPHIN_EXE="$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin"
 [[ -x "$DOLPHIN_EXE" ]] || DOLPHIN_EXE="$ROOT/3rdparty/dolphin/build/Binaries/dolphin-emu"
 
-out=".ai/logs/ride-$(date +%Y%m%d-%H%M%S)"
+out=".ai/logs/ride-$(date +%Y%m%d-%H%M%S)${GC_PROBE_TAG:+-$GC_PROBE_TAG}"
 mkdir -p "$out/dolphin-user"
 cp -r "$probe_dir/dolphin-user/Config" "$out/dolphin-user/"
+# Smoke probes default to the deterministic interpreter (CPUCore 0), which
+# runs the guest at ~15% of real time.  A ride follows the campaign, so use
+# the JIT and CPU thread unless the caller asks otherwise.
+sed -i -e "s/^CPUCore = .*/CPUCore = ${RIDE_CPU_CORE:-1}/" \
+	-e "s/^CPUThread = .*/CPUThread = ${RIDE_CPU_THREAD:-True}/" \
+	"$out/dolphin-user/Config/Dolphin.ini"
+# Retail probes dump every frame (DumpFrames/DumpFramesAsImages); a ride of
+# that config wrote 20 GB of stills and filled the disk.  Rides record video
+# through playtest-record.py instead.
+sed -i -e "s/^DumpFrames = .*/DumpFrames = False/" "$out/dolphin-user/Config/Dolphin.ini"
+# RIDE_GPU_LOG=1: Dolphin's own GPU log channels (command processor, graphics
+# pipe, pixel engine, processor interface, video) for FIFO/GPU hangs.
+if [[ "${RIDE_GPU_LOG:-0}" == "1" && -f "$out/dolphin-user/Config/Logger.ini" ]]; then
+	sed -i -e 's/^CP = .*/CP = True/' -e 's/^GP = .*/GP = True/' -e 's/^PE = .*/PE = True/' \
+		-e 's/^PI = .*/PI = True/' -e 's/^Video = .*/Video = True/' "$out/dolphin-user/Config/Logger.ini"
+fi
+# RIDE_HEAP_CENSUS=1: Dolphin maps 64 MiB of MEM1 (RAM override) so the heap
+# census table above 24 MiB (mem_gamecube.c, disc "heapcensus") is real
+# memory; libogc's heap still ends at 24 MiB, so the guest layout is retail.
+if [[ "${RIDE_HEAP_CENSUS:-0}" == "1" ]]; then
+	sed -i -e 's/^\[Core\]$/[Core]\nRAMOverrideEnable = True\nMEM1Size = 67108864/' "$out/dolphin-user/Config/Dolphin.ini"
+fi
+# Rides are muted unless RIDE_MUTE_AUDIO=0 (host volume only; guest audio still runs).
+if [[ "${RIDE_MUTE_AUDIO:-1}" != "0" ]]; then
+	if grep -q '^Volume = ' "$out/dolphin-user/Config/Dolphin.ini"; then
+		sed -i -e "s/^Volume = .*/Volume = 0/" "$out/dolphin-user/Config/Dolphin.ini"
+	else
+		printf '[DSP]\nVolume = 0\n' >> "$out/dolphin-user/Config/Dolphin.ini"
+	fi
+fi
+[[ -f "$out/dolphin-user/Config/GFX.ini" ]] && \
+	sed -i -e "s/^DumpFramesAsImages = .*/DumpFramesAsImages = False/" "$out/dolphin-user/Config/GFX.ini"
 user="$ROOT/$out/dolphin-user"
 log="$user/Logs/dolphin.log"
 
@@ -40,8 +72,32 @@ if [[ "${RIDE_RECORD:-1}" == "1" ]] && command -v ffmpeg >/dev/null; then
 		--json-out "$out/playtest.txt" > "$out/playtest-record.log" 2>&1 &
 	rec_pid=$!
 fi
-"$DOLPHIN_EXE" -u "$user" -l -e "$iso" -v OGL > "$out/stdout.log" 2> "$out/stderr.log" &
+# RIDE_GDB=1: attach powerpc-eabi-gdb through Dolphin's GDB stub so a stall
+# can be located (PC, LR, backtrace into OUT/bin/xash).  The stub holds the
+# CPU at boot until gdb continues it.  RIDE_GDB_ELF overrides the symbol file.
+gdb_pid=; gdb_port=; GDB="${DEVKITPPC:-/opt/devkitpro/devkitPPC}/bin/powerpc-eabi-gdb"
+if [[ "${RIDE_GDB:-0}" == "1" && -x "$GDB" ]]; then
+	gdb_port=$(( 23000 + $$ % 2000 ))
+	printf '[General]\nGDBPort = %s\n' "$gdb_port" >> "$out/dolphin-user/Config/Dolphin.ini"
+fi
+"$DOLPHIN_EXE" -u "$user" -l -e "$iso" -v "${RIDE_VIDEO:-OGL}" > "$out/stdout.log" 2> "$out/stderr.log" &
 dpid=$!
+if [[ -n "$gdb_port" ]]; then
+	mkfifo "$out/gdb.in"
+	"$GDB" -q -nx "${RIDE_GDB_ELF:-$ROOT/OUT/bin/xash}" < "$out/gdb.in" > "$out/gdb.log" 2>&1 &
+	gdb_pid=$!
+	exec 8> "$out/gdb.in"
+	sleep 3
+	printf 'set pagination off\nset confirm off\nset width 0\ntarget remote :%s\ncontinue &\n' "$gdb_port" >&8
+fi
+gdb_dumped=0
+gdb_stall_dump() {
+	[[ -n "$gdb_pid" && "$gdb_dumped" == 0 ]] || return 0
+	gdb_dumped=1
+	printf 'interrupt\n' >&8; sleep 3
+	printf 'echo ==STALL==\\n\ninfo registers pc lr ctr r1 r3\nbt 25\nx/8i $pc-16\necho ==END==\\n\n' >&8
+	sleep 5
+}
 echo "==> ride $out dolphin=$dpid until=${until_map:-time} ${minutes}m"
 end=$(( $(date +%s) + minutes * 60 ))
 while kill -0 "$dpid" 2>/dev/null && (( $(date +%s) < end )); do
@@ -50,8 +106,24 @@ while kill -0 "$dpid" 2>/dev/null && (( $(date +%s) < end )); do
 		break
 	fi
 	grep -aqs "fatal breadcrumb held" "$log" && break
+	# RIDE_STALL_SEC: stop early once the guest log has not grown for this
+	# long (a freeze); the time is recorded in summary.txt.
+	if [[ -n "${RIDE_STALL_SEC:-}" && -f "$log" ]] \
+		&& (( $(date +%s) - $(stat -c %Y "$log") > RIDE_STALL_SEC )); then
+		stalled=$(( $(date +%s) - $(stat -c %Y "$log") ))
+		gdb_stall_dump
+		break
+	fi
 	sleep 5
 done
+# Without RIDE_STALL_SEC a stall still gets one dump when the ride ends.
+if [[ -n "$gdb_pid" && -f "$log" ]] && (( $(date +%s) - $(stat -c %Y "$log") > ${RIDE_GDB_STALL_SEC:-60} )); then
+	gdb_stall_dump
+fi
+if [[ -n "$gdb_pid" ]]; then
+	exec 8>&-
+	kill "$gdb_pid" 2>/dev/null
+fi
 kill "$dpid" 2>/dev/null; sleep 3; kill -9 "$dpid" 2>/dev/null
 [[ -n "$rec_pid" ]] && wait "$rec_pid" 2>/dev/null
 
@@ -62,6 +134,8 @@ kill "$dpid" 2>/dev/null; sleep 3; kill -9 "$dpid" 2>/dev/null
 	echo "fatal: $(grep -a -m1 -o 'fatal message=.*' "$log")"
 	echo "titles=$(grep -aho 'env_message, firing ([^)]*)' "$log" | sort -u | wc -l)"
 	echo "repeated_alerts=$(grep -ac 'previous alert repeated' "$log")"
+	echo "stalled_sec=${stalled:-0}"
 	echo "last: $(tail -1 "$log" | cut -c60-200)"
+	[[ -f "$out/gdb.log" ]] && sed -n '/==STALL==/,/==END==/p' "$out/gdb.log" | grep -E '^(pc|lr) |^#[0-9]' | head -12 | sed 's/^/gdb: /'
 	grep -a 'PLAYTEST\|mp4' "$out/playtest-record.log" 2>/dev/null | tail -1
 } | tee "$out/summary.txt"

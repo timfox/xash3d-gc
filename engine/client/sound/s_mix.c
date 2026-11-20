@@ -559,6 +559,9 @@ void S_ClearBuffers( int num_samples )
 
 void S_PaintChannels( int endtime )
 {
+#if XASH_GAMECUBE
+	{ void GC_HeapCheckArmed( const char *tag ); GC_HeapCheckArmed( "paint channels enter" ); }
+#endif
 	int gain = S_GetMasterVolume() * 256;
 
 	while( snd.paintedtime < endtime )
@@ -583,6 +586,18 @@ void S_PaintChannels( int endtime )
 		if( room_channels > 0 || cls.key_dest != key_menu )
 			S_MixBufferWithGain( paintbuffer, roombuffer, num_samples, gain );
 
+#if XASH_GAMECUBE
+		{
+			// Source soundscape voices (platform/gamecube/soundscape_gamecube.c)
+			extern void GC_SoundscapeMix( int *paint, int count, int gain );
+
+			GC_SoundscapeMix( (int *)paintbuffer, num_samples, gain );
+			// an actor's voice line off the disc (platform/gamecube/voice_stream.c)
+			extern void GC_VoiceStreamMix( int *paint, int count, int gain );
+
+			GC_VoiceStreamMix( (int *)paintbuffer, num_samples, gain );
+		}
+#endif
 		// transfer out according to DMA format
 		S_TransferPaintBuffer( paintbuffer, end );
 		snd.paintedtime = end;

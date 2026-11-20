@@ -20,6 +20,7 @@ GNU General Public License for more details.
 
 #if XASH_GAMECUBE
 #include "platform/platform.h"
+#include "platform/gamecube/mem_gamecube.h"
 /* Client-side sprite loading cannot access the renderer's GC_GetVisualQuality()
  * because r_local.h is a renderer-local header. Use a compile-time consistent
  * low-memory guard instead. Runtime quality adjustments for sprites are handled
@@ -30,6 +31,82 @@ static char  sprite_name[MAX_QPATH];
 static char  group_suffix[8];
 static uint  r_texFlags = 0;
 static int   sprite_version;
+#if XASH_GAMECUBE
+static qboolean sprite_masked;	/* SPR_ALPHTEST: index 255 is the hole */
+static const byte *sprite_pal;	/* the sprite's palette as stored (RGB) */
+static int sprite_pal_count;
+static int sprite_tex_format;
+/* Set by cl_tent.c around effect sprite loads (muzzle flashes, explosions,
+ * smoke, blood). Their frames are drawn small and briefly, but at full size
+ * ten of them took ~70 KiB of MEM1 and starved the crosshair and viewmodel
+ * skins (38 texture OOMs in a charlie match). */
+qboolean gc_sprite_effect_load;
+static int sprite_fx_cap;
+/* Frames of the sprite being loaded were already shrunk by this factor when
+ * read from disc (CL_GCLoadEffectSpriteShrunk, cl_game.c): they are drawn at
+ * their source size. */
+int gc_sprite_fx_prescale = 1;
+int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
+/* Half-Life's 640 HUD keeps every sheet in ARAM with a token resident copy;
+ * Day of Defeat keeps its own sizes (64 px fallback copies). */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#define GC_HUD_SHEETS_IN_ARAM 1
+#else
+#define GC_HUD_SHEETS_IN_ARAM 0
+#endif
+void R_GXHudHiSetTexnum( int handle, int texnum );
+
+/* The palette the image loader would install for this sprite (see
+ * Image_SetPalette), as RGBA, for the renderer's full-resolution HUD cells. */
+static qboolean Mod_SpriteHudPalette( byte *rgba )
+{
+	int i;
+
+	if( !sprite_pal || sprite_pal_count < 1 || sprite_pal_count > 256 )
+		return false;
+	memset( rgba, 0, 256 * 4 );
+	for( i = 0; i < sprite_pal_count; i++ )
+	{
+		const byte *c = sprite_pal + i * 3;
+		byte *d = rgba + i * 4;
+
+		switch( sprite_tex_format )
+		{
+		case SPR_INDEXALPHA:
+		{
+			const byte *last = sprite_pal + ( sprite_pal_count - 1 ) * 3;
+
+			d[0] = last[0];
+			d[1] = last[1];
+			d[2] = last[2];
+			d[3] = (byte)i;
+			break;
+		}
+		case SPR_ALPHTEST:
+			d[0] = c[0];
+			d[1] = c[1];
+			d[2] = c[2];
+			d[3] = i == 255 ? 0 : 255;
+			break;
+		default:
+			d[0] = TextureToGamma( c[0] );
+			d[1] = TextureToGamma( c[1] );
+			d[2] = TextureToGamma( c[2] );
+			d[3] = 255;
+			break;
+		}
+	}
+	if( sprite_tex_format == SPR_INDEXALPHA )
+	{
+		for( ; i < 256; i++ )
+		{
+			memcpy( rgba + i * 4, rgba + ( sprite_pal_count - 1 ) * 4, 3 );
+			rgba[i * 4 + 3] = (byte)i;
+		}
+	}
+	return true;
+}
+#endif
 
 /*
 ================
@@ -165,6 +242,58 @@ static qboolean Mod_SpriteSearchForTextureReplacement( char *out, size_t size, c
 	return false;
 }
 
+#if XASH_GAMECUBE
+/* Shrink an indexed frame in place by f (a power of two). Each texel covers
+ * an f x f block; in alphatest sprites keep the opaque texel nearest the
+ * block centre when the block holds at least f opaque texels, so thin art
+ * survives. Writes land at or before the block being read. Returns the new
+ * frame header (also written over the old one). */
+static dspriteframe_t Mod_GCSpriteShrinkFrame( const void *pin, dspriteframe_t pinframe, int f )
+{
+	dspriteframe_t small = pinframe;
+	byte *px = (byte *)pin + sizeof( dspriteframe_t );
+	int x, y;
+
+	small.width = pinframe.width / f;
+	small.height = pinframe.height / f;
+	for( y = 0; y < small.height; y++ )
+	{
+		for( x = 0; x < small.width; x++ )
+		{
+			const byte *blk = px + ( y * f ) * pinframe.width + x * f;
+			int bx, by, opaque = 0, best = -1, best_d = 0x7fffffff;
+			byte pick = 255;
+
+			for( by = 0; by < f; by++ )
+			{
+				for( bx = 0; bx < f; bx++ )
+				{
+					const byte c = blk[by * pinframe.width + bx];
+					int d;
+
+					if( c == 255 )
+						continue;
+					opaque++;
+					d = ( 2 * bx + 1 - f ) * ( 2 * bx + 1 - f ) + ( 2 * by + 1 - f ) * ( 2 * by + 1 - f );
+					if( d < best_d )
+					{
+						best_d = d;
+						best = c;
+					}
+				}
+			}
+			if( !sprite_masked )
+				pick = blk[0];
+			else if( best >= 0 && opaque >= f )
+				pick = (byte)best;
+			px[y * small.width + x] = pick;
+		}
+	}
+	memcpy( (void *)pin, &small, sizeof( small ));
+	return small;
+}
+#endif
+
 static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspriteframe_t **ppframe, int num )
 {
 	dspriteframe_t pinframe;
@@ -181,8 +310,90 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 	// build unique frame name
 	if( FBitSet( mod->flags, MODEL_CLIENT )) // it's a HUD sprite
 	{
+		size_t load_bytes = pinframe.width * pinframe.height * bytes;
+#if XASH_GAMECUBE
+		int hud_hires = -1;
+#endif
+
 		Q_snprintf( texname, sizeof( texname ), "#HUD/%s(%s:%i%i).spr", sprite_name, group_suffix, num / 10, num % 10 );
-		gl_texturenum = ref.dllFuncs.GL_LoadTexture( texname, pin, pinframe.width * pinframe.height * bytes, r_texFlags );
+#if XASH_GAMECUBE
+		/* DoD's clip sheets are 256x256 and load mid-match, when MEM1 can no
+		 * longer hold their RGBA expansion (texture=0, never drawn). The HUD
+		 * is laid out at 640 and drawn at 320, so a sheet past 128 px is
+		 * shown at half size anyway: shrink its indexed pixels in place
+		 * (nearest) before the upload. The frame keeps its source size, so
+		 * SPR_DrawHoles rectangles map onto the smaller texture unchanged. */
+		/* A 128 px sheet (DoD's crosshair) needs 32 KiB of contiguous heap
+		 * mid-match and failed with ~28 KiB free, and again with 130 KiB
+		 * free but in pieces: it always takes the same ARAM full-resolution
+		 * route with a small resident copy. */
+		/* Half-Life's 640 HUD (640hud1-9 256x256/256x128/256x64, the 128x48
+		 * pain arrows, 96x96 train dial, 128x128 crosshairs) is drawn 1:1 on
+		 * the 640x480 EFB: every sheet from 64 px up keeps its full-resolution
+		 * indices in ARAM and is drawn from cells built on demand, so MEM1
+		 * holds only a token resident copy of it. */
+		if( bytes == 1 && ( gc_sprite_effect_load || !GC_HUD_SHEETS_IN_ARAM
+			? GC_MapLoadMemoryOpt() && ( pinframe.width >= 128 || pinframe.height >= 128 )
+			: ( pinframe.width >= 64 || pinframe.height >= 64 )))
+		{
+			/* 128 keeps the art at the size it is drawn, but its texture
+			 * needs contiguous heap: on dod_caen 101 KiB free still could not
+			 * hold the 16 KiB pixels and the sheet fell to a 2x2 fallback.
+			 * Below 256 KiB free, 64 fits the small HUD slots. */
+			/* Full-resolution copy in ARAM first: HUD draws then use cells
+			 * built from it at full size, and the resident shrunk copy is
+			 * only the fallback, so it can be the small one. */
+			byte hud_rgba[256 * 4];
+			const qboolean hires = Mod_SpriteHudPalette( hud_rgba )
+				&& ( hud_hires = R_GXHudHiRegister( texname, pinframe.width, pinframe.height,
+					(const byte *)pin + sizeof( dspriteframe_t ), hud_rgba )) >= 0;
+			/* With the ARAM copy the resident texture is never sampled
+			 * (R_GXHudHiBind draws cells), so it only needs to exist. */
+			const int cap = ( hires && GC_HUD_SHEETS_IN_ARAM ) ? 8
+				: ( hires || Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
+			int f = 1;
+
+			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
+				&& ( pinframe.width / f > cap || pinframe.height / f > cap ))
+				f *= 2;
+			if( f > 1 )
+			{
+				const dspriteframe_t small = Mod_GCSpriteShrinkFrame( pin, pinframe, f );
+
+				load_bytes = small.width * small.height;
+				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
+					texname, pinframe.width, pinframe.height, small.width, small.height,
+					Q_memprint( GC_MemHeapFreeBytes( )));
+			}
+		}
+		else if( bytes == 1 && sprite_fx_cap > 0 && ( pinframe.width > sprite_fx_cap || pinframe.height > sprite_fx_cap ))
+		{
+			static int fx_logs;
+			int f = 1;
+
+			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
+				&& ( pinframe.width / f > sprite_fx_cap || pinframe.height / f > sprite_fx_cap ))
+				f *= 2;
+			if( f > 1 )
+			{
+				const dspriteframe_t small = Mod_GCSpriteShrinkFrame( pin, pinframe, f );
+
+				load_bytes = small.width * small.height;
+				if( fx_logs++ < 12 )
+					Con_Reportf( "Xash3D GameCube: effect sprite %s %dx%d shrunk to %dx%d (heap %s)\n",
+						texname, pinframe.width, pinframe.height, small.width, small.height,
+						Q_memprint( GC_MemHeapFreeBytes( )));
+			}
+		}
+#endif
+		gl_texturenum = ref.dllFuncs.GL_LoadTexture( texname, pin, load_bytes, r_texFlags );
+#if XASH_GAMECUBE
+		if( gl_texturenum && hud_hires >= 0 )
+			R_GXHudHiSetTexnum( hud_hires, gl_texturenum );
+		if( !gl_texturenum )
+			Con_Reportf( S_WARN "Xash3D GameCube: HUD sprite %s texture failed (%dx%d)\n",
+				texname, pinframe.width, pinframe.height );
+#endif
 	}
 	else
 	{
@@ -212,6 +423,15 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 	pspriteframe->left = pinframe.origin[0];
 	pspriteframe->down = pinframe.origin[1] - pinframe.height;
 	pspriteframe->right = pinframe.width + pinframe.origin[0];
+#if XASH_GAMECUBE
+	if( gc_sprite_fx_prescale > 1 )
+	{
+		pspriteframe->width = pinframe.width * gc_sprite_fx_prescale;
+		pspriteframe->height = pinframe.height * gc_sprite_fx_prescale;
+		pspriteframe->down = pinframe.origin[1] - pspriteframe->height;
+		pspriteframe->right = pspriteframe->width + pinframe.origin[0];
+	}
+#endif
 	pspriteframe->gl_texturenum = gl_texturenum;
 	*ppframe = pspriteframe;
 
@@ -269,6 +489,18 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 
 	r_texFlags = mod->numtexinfo;
 	sprite_version = pin->version;
+#if XASH_GAMECUBE
+	sprite_masked = false;
+	sprite_pal = NULL;
+	sprite_pal_count = 0;
+	sprite_tex_format = psprite->texFormat;
+	/* 64 px per frame: the renderer stores opaque and cut-out frames as CMPR
+	 * (ref/gx/r_image.c). Animations with a real alpha channel (indexalpha
+	 * smoke) stay RGB565 and keep 32 px. CL_GCLoadEffectSpriteShrunk
+	 * (cl_game.c) follows the same rule. */
+	sprite_fx_cap = gc_sprite_effect_load
+		? (( mod->numframes <= 4 || psprite->texFormat != SPR_INDEXALPHA ) ? 64 : 32 ) : 0;
+#endif
 	Q_strncpy( sprite_name, mod->name, sizeof( sprite_name ));
 	COM_StripExtension( sprite_name );
 
@@ -286,6 +518,11 @@ void Mod_SpriteLoadTextures( model_t *mod, const void *buffer )
 		rgbdata_t  *pal;
 		size_t      pal_bytes = *numi * 3;
 
+#if XASH_GAMECUBE
+		sprite_masked = psprite->texFormat == SPR_ALPHTEST;
+		sprite_pal = src;
+		sprite_pal_count = *numi;
+#endif
 		// install palette
 		switch( psprite->texFormat )
 		{

@@ -70,12 +70,200 @@ static entity_state_t gc_singleplayer_packet_entities[SINGLEPLAYER_BACKUP * NUM_
  * on clients[0] (dod_donner probe 121415). Paired with mapload_pad cut. */
 /* 2 full slots as before; with slim slots GC_SV_MAX_SLOTS (people in the first
  * two, bots in the rest). */
+#if XASH_GC_LOSTCOAST
+/* Lost Coast is one player: the second slot was 91 KB the heap needs (the
+ * fisherman's voice could not open its file). A listen server asking for
+ * more falls through to the heap, as any table over the BSS size does. */
+#define GC_LISTEN_CLIENTS_BSS 1
+#else
 #define GC_LISTEN_CLIENTS_BSS GC_SV_MAX_SLOTS
+#endif
 static sv_client_t gc_listen_clients[GC_LISTEN_CLIENTS_BSS] __attribute__((aligned( 32 )));
 
 qboolean SV_IsStaticPacketEntities( const entity_state_t *ents )
 {
 	return ents == gc_singleplayer_packet_entities;
+}
+
+/*
+SV_GCSizePacketEntities
+
+Retail Half-Life sends up to 256 visible entities a frame; the 4 x 32 static
+history overflowed past 128 ("Ignored 87 entities" on c1a2a) and, because one
+frame filled the whole ring, every frame went out uncompressed. Size the frame
+build list and SV_UPDATE_BACKUP frames of history per map from the free tail
+of the map arena (World DL route: the live surface table it was sized for is
+never built). Falls back to fewer history frames, then to the static tables.
+*/
+extern entity_state_t *sv_gc_frame_scratch;
+extern int sv_gc_visible_cap;
+
+int SV_GCEntityCount( void )
+{
+	return svgame.numEntities;
+}
+
+#if XASH_DODGC_NETWORK
+/* Room left in the map arena for what loads there after the rings: the
+ * player body models (us-inf.mdl 86 KB, p_ models) take overflow slices. */
+#define GC_DOD_ARENA_KEEP ( 160u * 1024u )
+/* Never given up to the rings: the held view model's streamed skin window
+ * (v_garand 65.6 KB) loads into the arena after them. With the last reserve
+ * level at 0, caen's rings took the whole 177 KB gap and the player's rifle
+ * and hands drew magenta ("streamed skins ... no window", ceres GPU run on
+ * master 4e591475c0). */
+#define GC_DOD_VM_SKIN_KEEP ( 80u * 1024u )
+static entity_state_t *sv_gc_local_ring;
+static int sv_gc_local_ring_entries;
+
+/* The local client's packet ring for this map, sized with the server's. */
+entity_state_t *SV_GCLocalClientRing( int *entries )
+{
+	if( !sv_gc_local_ring || sv.state == ss_dead )
+		return NULL;
+	*entries = sv_gc_local_ring_entries;
+	return sv_gc_local_ring;
+}
+#endif
+
+void SV_GCSizePacketEntities( void )
+{
+	static entity_state_t *fallback_scratch;
+	const int visible = MAX_VISIBLE_PACKET;
+	int frames;
+
+	if( !fallback_scratch )
+		fallback_scratch = sv_gc_frame_scratch; // the static 128 list
+	/* New storage: no client may delta from a frame of the old one. */
+	svs.next_client_entities = 0;
+	if( svs.clients )
+	{
+		int i;
+
+		for( i = 0; i < svs.maxclients; i++ )
+		{
+			svs.clients[i].delta_sequence = -1;
+			if( svs.clients[i].frames )
+				memset( svs.clients[i].frames, 0, sizeof( client_frame_t ) * SV_UPDATE_BACKUP );
+		}
+	}
+	/* DoD listen server too: at the 128 fallback dod_avalanche left 125 to
+	 * 130 visible entities out of every packet (ceres), so objects went
+	 * missing on screen. Bots take no frames, the ring serves real clients. */
+#if XASH_DODGC_NETWORK
+	/* One block for the server and its local client: the frame list, two
+	 * frames of server ring and two frames of client ring, all at the same
+	 * count. Sized separately, the server took 340 KB for three frames, the
+	 * client then found no room and fell back to 128, and the server cap
+	 * followed it down (ceres, avalanche and charlie: still "Ignored 125").
+	 * The count is what the largest arena gap holds after leaving room for
+	 * the body models that load into the arena later. */
+	sv_gc_local_ring = NULL;
+	sv_gc_local_ring_entries = 0;
+	{
+		/* Per frame cap C: the retail 256 visible-entity limit. The real play route (menu start, the game's own AddToFullPack) put 111 entities
+		 * in one frame on dod_caen, 89 on charlie and 62 on avalanche (release pass, 4 bots); the lean boot-override route carries only seats + 4
+		 * brushes (17), which is not what ships. Each ring (server, local client) holds E entries, i.e. E / peak frames, up to 256 when the
+		 * arena allows: the largest arena gap after leaving room for the entity text to move off the heap and for the body models
+		 * (GC_DOD_ARENA_KEEP); when that leaves less than E_MIN, the text reservation and then the keep-out are given up before
+		 * the ring is, because the static 128 tables overflow at 111+ entities (149 "Ignored" lines on caen). */
+		extern size_t Mod_GCWorldEntityTextHeapBytes( void );
+		const size_t gap = GC_MapArenaLargestGap();
+		const size_t es = sizeof( entity_state_t );
+		const size_t text = ( Mod_GCWorldEntityTextHeapBytes() + 1023u ) / 1024u * 1024u;
+		/* Levels: [0] keep the body room and the entity text move, [1] give up the text, [2] half the body room,
+		 * [3] only the view model skin window, [4] the same with the frame list in the static 128-entry BSS table
+		 * (per-frame cap 128: caen's peak is 111-121) so the whole arena claim is the two rings. */
+		const size_t reserve[5] = { GC_DOD_ARENA_KEEP + text, GC_DOD_ARENA_KEEP, GC_DOD_ARENA_KEEP / 2,
+			GC_DOD_VM_SKIN_KEEP, GC_DOD_VM_SKIN_KEEP };
+		const int E_MIN = 128;
+		int level;
+
+		for( level = 0; level < 5; level++ )
+		{
+			const qboolean static_scratch = level == 4;
+			const int cap = static_scratch ? 128 : visible;
+			/* E_MAX: one visible cap per ring, i.e. two frames at caen's 111 peak, ~3 at charlie's 89. A listen
+			 * server's client acks the previous frame, so deltas need only the last two; a missed delta base is a
+			 * full update, not a lost entity. 2 x visible took 472 + 472 entries (408 KB) on charlie and left the
+			 * world texture slots no arena room. */
+			const int E_MAX = visible;
+			const size_t scratch = static_scratch ? 0 : es * (size_t)cap;
+			const size_t need = reserve[level] + scratch;
+			int E = gap > need ? (int)(( gap - need ) / ( 2 * es )) : 0;
+			size_t bytes, at;
+			entity_state_t *block;
+
+			E = Q_min( E, E_MAX ) & ~7;
+			if( E < E_MIN )
+				continue;
+			bytes = scratch + es * 2 * (size_t)E;
+			at = GC_MapArenaFind( bytes );
+			block = at == (size_t)-1 ? NULL : (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+			if( !block )
+				continue;
+			memset( block, 0, bytes );
+			svs.packet_entities = block;
+			svs.num_client_entities = E;
+			sv_gc_frame_scratch = static_scratch ? fallback_scratch : block + E;
+			sv_gc_visible_cap = cap;
+			sv_gc_local_ring = static_scratch ? block + E : block + E + cap;
+			sv_gc_local_ring_entries = E;
+			Con_Reportf( "Xash3D GameCube: %spacket entities map=%s per-frame cap %d%s, rings %d + %d entries, bytes=%s arena_tail_left=%s reserve level %d (text %s)\n",
+				level ? "Warning: reduced reserve " : "", sv.name, cap, static_scratch ? " (static list)" : "", E, E,
+				Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), level, Q_memprint( text ));
+			/* Levels 3 and 4 kept only the skin window's room: claim it now, or the studio region's overflow slices
+			 * (weapon models precached for every bot, sleeve view models) take it before a weapon's skins stream
+			 * (ceres caen, master 63fccf66e0: 76.9 KB left after the rings, then 211 "no window" lines). */
+			if( level >= 3 )
+			{
+				extern void Mod_GCSetSkinWindow( byte *window, size_t size );
+				const size_t wat = GC_MapArenaFind( GC_DOD_VM_SKIN_KEEP );
+				byte *win = wat == (size_t)-1 ? NULL : (byte *)GC_MapLoadBufferTailAlloc( wat, GC_DOD_VM_SKIN_KEEP );
+
+				Mod_GCSetSkinWindow( win, GC_DOD_VM_SKIN_KEEP );
+				Con_Reportf( "Xash3D GameCube: view model skin window %s (%s)\n", win ? "claimed" : "NOT claimed",
+					Q_memprint( GC_DOD_VM_SKIN_KEEP ));
+			}
+			return;
+		}
+	}
+	if( false )
+#else
+	if( GC_MenuRunsServer() && svs.maxclients == 1 )
+#endif
+	{
+		for( frames = SV_UPDATE_BACKUP - 1; frames >= 2; frames-- )
+		{
+			const size_t entries = (size_t)visible * ( frames + 1 );
+			const size_t at = GC_MapArenaFind( sizeof( entity_state_t ) * entries );
+			entity_state_t *block = at == (size_t)-1 ? NULL
+				: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, sizeof( entity_state_t ) * entries );
+
+			if( !block )
+				continue;
+			memset( block, 0, sizeof( entity_state_t ) * entries );
+			svs.packet_entities = block;
+			svs.num_client_entities = visible * frames;
+			sv_gc_frame_scratch = block + visible * frames;
+			sv_gc_visible_cap = visible;
+			Con_Reportf( "Xash3D GameCube: %sserver packet entities map=%s visible=%d frames=%d/%d bytes=%s arena_tail_left=%s\n",
+				frames < SV_UPDATE_BACKUP ? "Warning: REDUCED " : "", sv.name, visible, frames, SV_UPDATE_BACKUP,
+				Q_memprint( sizeof( entity_state_t ) * entries ),
+				Q_memprint( GC_MapArenaLargestGap()));
+			return;
+		}
+	}
+	svs.packet_entities = gc_singleplayer_packet_entities;
+	svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
+	sv_gc_frame_scratch = fallback_scratch;
+	sv_gc_visible_cap = 128;
+#if !XASH_DODGC_NETWORK
+	if( GC_MenuRunsServer( ))
+#endif
+		Con_Reportf( S_WARN "Xash3D GameCube: REDUCED server packet entities map=%s visible=128 frames=1/%d (static fallback, arena_tail_left=%s)\n",
+			sv.name, SV_UPDATE_BACKUP,
+			Q_memprint( GC_MapArenaLargestGap()));
 }
 
 qboolean SV_IsStaticListenClients( const sv_client_t *clients )
@@ -760,11 +948,29 @@ void SV_ActivateServer( int runPhysics )
 #if XASH_GAMECUBE
 		if( GC_MapLoadMemoryOpt() && !Sys_CheckParm( "-gcfullphysics" ))
 		{
+			/* Reset the channel but keep who it belongs to. Zeroed outright
+			 * it had no pfnBlockSize, and on a changelevel the still
+			 * connected local client got the reliable datagram through it
+			 * (SV_SendClientMessages) before its "new" set it up again:
+			 * ISI at PC 0 in Netchan_CreateFragments_. */
+			const netadr_t keep_adr = cl->netchan.remote_address;
+			const int keep_qport = cl->netchan.qport;
+			int ( *keep_pfn )( void *, fragsize_t ) = cl->netchan.pfnBlockSize;
+			uint keep_flags = 0;
+
+			if( cl->netchan.use_munge ) SetBits( keep_flags, NETCHAN_USE_MUNGE );
+			if( cl->netchan.use_bz2 ) SetBits( keep_flags, NETCHAN_USE_BZIP2 );
+			if( cl->netchan.use_lzss ) SetBits( keep_flags, NETCHAN_USE_LZSS );
+			if( cl->netchan.gs_netchan ) SetBits( keep_flags, NETCHAN_GOLDSRC );
+			if( cl->netchan.use_cookie ) SetBits( keep_flags, NETCHAN_USE_COOKIE );
 			memset( &cl->netchan, 0, sizeof( cl->netchan ));
 #if XASH_GC_SLIM_CLIENTS
 			SV_GCBindClientBuffers( cl );
 #endif
-			Con_Reportf( "Xash3D GameCube: local client netchan reset for map route\n" );
+			if( keep_pfn )
+				Netchan_Setup( NS_SERVER, &cl->netchan, keep_adr, keep_qport, cl, keep_pfn, keep_flags );
+			Con_Reportf( "Xash3D GameCube: local client netchan reset for map route (%s)\n",
+				keep_pfn ? "channel kept" : "not set up yet" );
 		}
 		else
 #endif
@@ -1337,6 +1543,11 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 {
 	int		i;
 
+#if XASH_GAMECUBE
+	/* The old map's arena and spill are about to be reset: no more claims
+	 * against them, and the world canary stops comparing. */
+	GC_MapLoadBufferWorldSettled( false );
+#endif
 	SV_SetupClients();
 
 	if( !SV_InitGame( false ))
@@ -1362,6 +1573,16 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
 	{
 		Con_Reportf( "Xash3D GameCube: G201 delta reinit skipped (newgame/gcmap)\n" );
 	}
+#if XASH_DODGC_NETWORK
+	/* DoD: the game DLL load already parsed delta.lst and the file does not
+	 * change between maps. Reading it again (three loads with the diagnostic
+	 * below) at a level change failed on the fragmented heap with 117 KB
+	 * free and was fatal (ceres, charlie to avalanche, soak run 7). */
+	else if( Delta_IsInitialized( ))
+	{
+		Con_Reportf( "Xash3D GameCube: delta reinit skipped (already initialized)\n" );
+	}
+#endif
 	else
 	{
 		/* Temporary G201 evidence: FS_FileExists and FS_LoadFile use separate

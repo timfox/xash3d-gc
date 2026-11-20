@@ -1,0 +1,46 @@
+From c93445183816e4b7901519de12a6ab6693a34bc6 Mon Sep 17 00:00:00 2001
+From: Tim Fox <timfox@outlook.com>
+Date: Wed, 18 Nov 2026 17:24:48 -0800
+Subject: [PATCH] gamecube: lean PostThink counts weapon timers down
+ (flashlight on the menu route)
+
+The menu New Game route runs a lean CBasePlayer::PostThink that only
+calls ItemPostFrame and returns. With CLIENT_WEAPONS, m_flNextAttack and
+the weapon timers count down at pt_end, so after the first weapon deploy
+m_flNextAttack stayed above zero for good and ItemPostFrame returned
+before ImpulseCommands: impulse 100 (Y, flashlight) and 201 (spray) did
+nothing. The lean branch now finishes through pt_end, as retail does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/player.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/player.cpp b/dlls/player.cpp
+index 3b63719b..21a9c706 100644
+--- a/dlls/player.cpp
++++ b/dlls/player.cpp
+@@ -2621,14 +2621,18 @@ void CBasePlayer::PostThink()
+ {
+ #if defined(__GAMECUBE__)
+ 	/* Lean Pure Flipper: full PostThink (fall/tank/…) hung Host_Frame on
+-	 * c0a0. Keep weapon ItemPostFrame so PrimaryAttack / UTIL_TraceLine run. */
++	 * c0a0. Keep weapon ItemPostFrame so PrimaryAttack / UTIL_TraceLine run,
++	 * then finish at pt_end as retail does: with CLIENT_WEAPONS that is where
++	 * m_flNextAttack and the weapon timers count down. Returning before it
++	 * left m_flNextAttack above zero after the first weapon deploy, and
++	 * ItemPostFrame then never reached ImpulseCommands (flashlight, spray). */
+ 	if( ( g_engfuncs.CheckParm( (char *)"-gcnewgame", NULL )
+ 		|| g_engfuncs.CheckParm( (char *)"-gcmenuplaystart", NULL ) )
+ 		&& !g_engfuncs.CheckParm( (char *)"-gcfullphysics", NULL ))
+ 	{
+ 		if( !g_fGameOver && IsAlive() )
+ 			ItemPostFrame();
+-		return;
++		goto pt_end;
+ 	}
+ #endif
+ 	if( g_fGameOver )
+-- 
+2.53.0
+

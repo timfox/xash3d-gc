@@ -32,6 +32,8 @@ void GC_MemBreadcrumb( const char *stage );
 void GC_MemHeapMark( const char *stage );
 /* Boot arena over the idle map-load pad (before the first map load only). */
 void *GC_BootArenaAlloc( size_t size );
+void *GC_BootArenaAllocSmall( size_t size );
+void *GC_BootArenaPinnedLow( void );
 qboolean GC_BootArenaFree( void *ptr );
 qboolean GC_BootArenaOwns( const void *ptr );
 size_t GC_BootArenaClose( void );
@@ -77,7 +79,17 @@ qboolean GC_IsMapLoadBufferAddress( const void *ptr );
 size_t GC_MapLoadBufferCapacity( void );
 /* Unused bytes after a borrowed BSP image inside the static map-load arena. */
 void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need );
+void *GC_MapLoadBufferTailEnd( void );
+qboolean GC_MapLoadBufferIsWorldSettled( void );
+void GC_MapLoadBufferWorldSettled( qboolean settled );
 size_t GC_MapLoadBufferTailHighwater( void );
+size_t GC_MapLoadBufferTailPeak( void );
+const byte *GC_MapLoadBufferBase( void );
+size_t GC_MapArenaFind( size_t bytes );
+size_t GC_MapArenaLargestGap( void );
+/* Called before the arena is borrowed for another map or released: a
+ * post-load claim that outlives its map (client temp entities) drops itself. */
+void GC_SetMapArenaResetHook( void (*hook)( void ));
 /* Only lowers the mark (spilled/abandoned tail residents). Never raises it. */
 void GC_MapLoadBufferLowerTailHighwater( size_t highwater );
 /* ARAM manager (aram_core.c). Session blocks last the boot and come from the
@@ -106,6 +118,7 @@ unsigned int GC_AramVideoReserve( unsigned int size );
 void GC_AramVideoRelease( void );
 /* One map-owned ARAM window, reused across transitions without new blocks. */
 unsigned int GC_AramMapReserve( unsigned int size );
+unsigned int GC_AramWorldDLReserve( unsigned int size );
 void GC_AramMapReset( void );
 unsigned int GC_AramMapCapacity( void );
 qboolean GC_StageMapHotLumps( const void *bsp, size_t bsp_size );
@@ -116,6 +129,7 @@ void GC_AramCopy( unsigned int aram, void *buf, unsigned int len, qboolean write
 void GC_PrefetchMenuIdle( void );
 /* Reuse the session-owned ARAM window without allocating another block. */
 void GC_PrefetchResetForMenu( void );
+void GC_PrefetchReleaseForMatch( void );
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries );
 qboolean GC_PrefetchRead( const char *path, void *buffer, unsigned int size );
 qboolean GC_PrefetchContains( const char *path, unsigned int size );
@@ -125,7 +139,13 @@ void GC_BeginMapLoadMemoryOpt( void );
 void GC_EndMapLoadMemoryOpt( void );
 void GC_ClearMapLoadMemoryOpt( void );
 qboolean GC_MapLoadMemoryOpt( void );
+void GC_SetMapLoadMemoryOptSession( qboolean on );
 size_t GC_MemHeapFreeBytes( void );
+/* Walks newlib bins and chunks; logs and returns false on the first bad link. */
+qboolean GC_HeapCheck( const char *tag );
+void GC_HeapCheckArm( qboolean on );
+/* GC_HeapCheck only while armed; disarms itself on the first failure. */
+void GC_HeapCheckArmed( const char *tag );
 /* Free bytes inside the current MEM1 arena only (excludes unclaimed top). */
 size_t GC_MemArenaFreeBytes( void );
 
@@ -156,6 +176,7 @@ static inline void GC_MemBreadcrumb( const char *stage ) { (void)stage; }
 static inline void GC_MemHeapMark( const char *stage ) { (void)stage; }
 static inline size_t GC_MemArenaFreeBytes( void ) { return 0; }
 static inline void *GC_BootArenaAlloc( size_t size ) { (void)size; return NULL; }
+static inline void *GC_BootArenaAllocSmall( size_t size ) { (void)size; return NULL; }
 static inline qboolean GC_BootArenaFree( void *ptr ) { (void)ptr; return false; }
 static inline qboolean GC_BootArenaOwns( const void *ptr ) { (void)ptr; return false; }
 static inline size_t GC_BootArenaClose( void ) { return 0; }
@@ -202,6 +223,14 @@ static inline void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need 
 	return NULL;
 }
 static inline size_t GC_MapLoadBufferTailHighwater( void ) { return 0; }
+static inline size_t GC_MapLoadBufferTailPeak( void ) { return 0; }
+static inline void *GC_MapLoadBufferTailEnd( void ) { return NULL; }
+static inline qboolean GC_MapLoadBufferIsWorldSettled( void ) { return false; }
+static inline void GC_MapLoadBufferWorldSettled( qboolean settled ) { (void)settled; }
+static inline const byte *GC_MapLoadBufferBase( void ) { return NULL; }
+static inline size_t GC_MapArenaFind( size_t bytes ) { (void)bytes; return (size_t)-1; }
+static inline size_t GC_MapArenaLargestGap( void ) { return 0; }
+static inline void GC_SetMapArenaResetHook( void (*hook)( void )) { (void)hook; }
 static inline void GC_MapLoadBufferLowerTailHighwater( size_t highwater ) { (void)highwater; }
 static inline void GC_BeginMapLoadMemoryOpt( void ) { }
 static inline void GC_EndMapLoadMemoryOpt( void ) { }
@@ -209,6 +238,7 @@ static inline void GC_ClearMapLoadMemoryOpt( void ) { }
 static inline qboolean GC_MapLoadMemoryOpt( void ) { return false; }
 static inline void GC_PrefetchMenuIdle( void ) { }
 static inline void GC_PrefetchResetForMenu( void ) { }
+static inline void GC_PrefetchReleaseForMatch( void ) { }
 static inline void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )
 {
 	if( used ) *used = 0; if( capacity ) *capacity = 0; if( entries ) *entries = 0;

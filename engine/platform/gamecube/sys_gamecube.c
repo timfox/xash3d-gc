@@ -5,6 +5,7 @@ Copyright (C) 2026 xash3d-gc contributors
 Platform layer ported from Division-Zero-GX/xash3d-wii.
 */
 #include "platform/platform.h"
+#include "common.h"
 #include "cvar.h"
 #include "net_ws.h"
 #include "system.h"
@@ -91,15 +92,23 @@ static bool GCube_DVDReadSectors( sec_t sector, sec_t count, void *buffer );
 static qboolean GCube_MountDisc( void );
 static void GCube_EnsureFatMounted( void );
 static void GCube_LoadDiscBootOverrides( void );
+void GC_ShrinkEarlyXFBForMatch( void );
 static void GCube_ReinjectMissingBootArgv( void );
 static qboolean GCube_FatHasGameData( void );
 /* Declared later; used when logging multi-game detection onto FAT. */
 void GCube_AppendSwissEvidence( const char *fmt, ... );
 
+static qboolean gc_dvd_mount_failed;
+
 static qboolean GCube_MountDisc( void )
 {
 	if( gc_dvd_mounted )
 		return true;
+	/* A failed first mount can hang on DVD_Init/ISO9660 retry under Dolphin.
+	 * Skip remount so Platform_Init can continue (cfg reinject still needs a
+	 * successful first mount — diagnostics land on that attempt). */
+	if( gc_dvd_mount_failed )
+		return false;
 
 	SYS_Report( "Xash3D GameCube: DVD mount begin\n" );
 	DVD_Init();
@@ -117,6 +126,7 @@ static qboolean GCube_MountDisc( void )
 	{
 		SYS_Report( "Xash3D GameCube: mounting DVD filesystem failed\n" );
 		gc_dvd_mounted = false;
+		gc_dvd_mount_failed = true;
 		return false;
 	}
 
@@ -131,17 +141,47 @@ static bool GCube_DVDReadSectors( sec_t sector, sec_t count, void *buffer )
 	u8 *output = buffer;
 	sec_t i;
 
-	/* libiso9660 3.1.0 always requests a 32 KiB cache fill even when it
-	 * calculated that one sector is sufficient. Split that transfer because
-	 * __io_gcdvd can otherwise complete with a zero-filled DMA buffer. */
+	/* __io_gcdvd.readSectors (DVD_ReadPrio) can return before its DMA has
+	 * landed in the buffer. The caller then copied the previous request's
+	 * data: zero or 0x20 fill, or sector 834 of the path table in place of
+	 * 835, and the mount failed in two boots of three (Dolphin, ceres).
+	 * The drive status is already idle at that point, so the buffer itself
+	 * is the only signal: fill the sector with a marker, flush, read, then
+	 * wait until its head and tail have left the marker. One re-issue on
+	 * timeout. libiso9660 asks for 32 KiB fills: keep the single-sector
+	 * split. */
 	for( i = 0; i < count; i++ )
 	{
-		if( !__io_gcdvd.readSectors( sector + i, 1, output + i * 0x800 ))
+		u8 *o = output + i * 0x800;
+		int attempt, wait = 0;
+		bool rc = false;
+
+		for( attempt = 0; attempt < 2; attempt++ )
+		{
+			memset( o, 0xEE, 0x800 );
+			DCFlushRange( o, 0x800 );
+			DCInvalidateRange( o, 0x800 );
+			rc = __io_gcdvd.readSectors( sector + i, 1, o );
+			for( wait = 0; wait < 400; wait++ )
+			{
+				const u32 *w = (const u32 *)o;
+
+				DCInvalidateRange( o, 0x800 );
+				if(( w[0] & w[1] ) != 0xEEEEEEEEu && ( w[0x1FE] & w[0x1FF] ) != 0xEEEEEEEEu
+					&& DVD_GetDriveStatus() != DVD_STATE_BUSY )
+					break;
+				usleep( 250 );
+			}
+			if( wait < 400 )
+				break;
+		}
+		DCInvalidateRange( o, 0x800 );
+		if( !rc )
 			return false;
 		if( gc_mem_watch_enabled )
 		{
 			char tag[48];
-			Q_snprintf( tag, sizeof( tag ), "dvd sector %u to %p", (unsigned)( sector + i ), (void *)( output + i * 0x800 ));
+			Q_snprintf( tag, sizeof( tag ), "dvd sector %u to %p", (unsigned)( sector + i ), (void *)o );
 			GC_MemWatch( tag );
 		}
 	}
@@ -225,12 +265,66 @@ platform_orientation_t Platform_GetDisplayOrientation( void )
 	return ORIENTATION_UNKNOWN;
 }
 
+#if defined( __has_include )
+#if __has_include( <tuxedo/ppc/exception.h> )
+#define GC_HAVE_PANIC_FN 1
+#endif
+#endif
+#if defined( GC_HAVE_PANIC_FN )
+#include <tuxedo/ppc/exception.h>
+#include <tuxedo/ppc/context.h>
+
+/* A guest exception used to end in libogc's "press RESET" screen with nothing in the log (the Dolphin host log just stops). Print what
+ * the panic handler knows first: the exception number, pc, lr, the fault address (DAR/DSISR for a data fault) and a walk of the stack, so
+ * the crash can be resolved against the ELF (addr2line) without a debugger. */
+static PPCExcptPanicFn gc_prev_panic;
+
+static void GCube_PanicReport( unsigned exid, PPCContext *ctx )
+{
+	u32 dar, dsisr, sp;
+	int i;
+
+	__asm__ volatile( "mfdsisr %0" : "=r"( dsisr ));
+	__asm__ volatile( "mfdar %0" : "=r"( dar ));
+	SYS_Report( "Xash3D GameCube: PANIC exception %u pc=%08x lr=%08x ctr=%08x msr=%08x dar=%08x dsisr=%08x\n",
+		exid, ctx->pc, ctx->lr, ctx->ctr, ctx->msr, dar, dsisr );
+	SYS_Report( "Xash3D GameCube: PANIC r0-r7 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[0], ctx->gpr[1], ctx->gpr[2], ctx->gpr[3],
+		ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], ctx->gpr[7] );
+	SYS_Report( "Xash3D GameCube: PANIC r8-r15 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[8], ctx->gpr[9], ctx->gpr[10], ctx->gpr[11],
+		ctx->gpr[12], ctx->gpr[13], ctx->gpr[14], ctx->gpr[15] );
+	SYS_Report( "Xash3D GameCube: PANIC r16-r23 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[16], ctx->gpr[17], ctx->gpr[18], ctx->gpr[19],
+		ctx->gpr[20], ctx->gpr[21], ctx->gpr[22], ctx->gpr[23] );
+	SYS_Report( "Xash3D GameCube: PANIC r24-r31 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[24], ctx->gpr[25], ctx->gpr[26], ctx->gpr[27],
+		ctx->gpr[28], ctx->gpr[29], ctx->gpr[30], ctx->gpr[31] );
+	sp = ctx->gpr[1];
+	for( i = 0; i < 32 && sp >= 0x80000000u && sp < 0x81800000u && !( sp & 3 ); i++ )
+	{
+		const u32 back = *(const u32 *)sp;
+		const u32 lr = *(const u32 *)( sp + 4 );
+
+		SYS_Report( "Xash3D GameCube: PANIC frame %d sp=%08x lr=%08x\n", i, sp, lr );
+		if( back <= sp || back >= 0x81800000u )
+			break;
+		sp = back;
+	}
+	if( gc_prev_panic )
+		gc_prev_panic( exid, ctx );
+	for( ;; )
+		;
+}
+#endif
+
+
 
 
 void GCube_EarlyInit( void )
 {
 #if XASH_GAMECUBE
 	/* Probe scripts match this marker as the guest bootstrap heartbeat. */
+#if defined( GC_HAVE_PANIC_FN )
+	gc_prev_panic = PPCExcptCurPanicFn;
+	PPCExcptCurPanicFn = GCube_PanicReport;
+#endif
 	SYS_Report( "Xash3D GameCube: bootstrap\n" );
 #if defined(XASH_GAMECUBE_LIBOGC2) && XASH_GAMECUBE_LIBOGC2
 #if defined(XASH_GAMECUBE_LIBDVM) && XASH_GAMECUBE_LIBDVM
@@ -1043,10 +1137,18 @@ static qboolean gc_smoke_map_configured;
 static qboolean gc_listenserver_configured;
 static qboolean gc_dumpeye_configured;
 static qboolean gc_vst_configured;
+static qboolean gc_vm256_configured;
+/* "cvar <name> <value>" lines of gamecube.cfg: set once the cvar system is up (GCube_ApplyCfgCvars). */
+#define GC_CFG_CVARS_MAX 8
+static struct { char name[48]; char value[64]; } gc_cfg_cvars[GC_CFG_CVARS_MAX];
+static int gc_cfg_cvar_count;
+static qboolean gc_cvars_up;	/* Cvar_Init has run: a cfg re-read applies its cvar lines at once */
+void GCube_ApplyCfgCvars( void );
 static qboolean gc_connect_configured;
 static qboolean gc_newgame_configured;
 static qboolean gc_menu_newgame_configured;
 static qboolean gc_retail_newgame_configured;
+static qboolean gc_menuauto_configured;
 static qboolean gc_phase_test_configured;
 static qboolean gc_changelevel_configured;
 static qboolean gc_landmark_configured;
@@ -1057,9 +1159,11 @@ static qboolean gc_landmark3_configured;
 static qboolean gc_leanpvs_configured;
 static qboolean gc_fullphysics_configured;
 static qboolean gc_worldrender_configured;
+static qboolean gc_nohud_configured;	/* gamecube.cfg 'nohud': the engine's lean HUD is not drawn (spectator footage) */
 static qboolean gc_capfaces_smoke_configured;
 static qboolean gc_tas_configured;
 static qboolean gc_dumpframes_configured;
+static qboolean gc_capture_configured;	/* gccapture: -gccapture, offline film capture */
 static qboolean gc_swissquit_configured;
 static int gc_swissquit_frames = -1; /* -1 idle, >=0 countdown, -2 done */
 static u64 gc_swissquit_last_poll_ticks; /* coalesce vid+input polls same frame */
@@ -1094,6 +1198,13 @@ static qboolean gc_notexpacks_configured;
 static qboolean gc_autohop_configured;
 static qboolean gc_autocampaign_configured;
 static char gc_autocampaign_delay[16];
+/* Test-only: the retail menu New Game starts this map instead of c0a0, so a
+ * later chapter can be load-tested on the real route (not a playthrough). */
+static qboolean gc_startmap_configured;
+static char gc_startmap[32];
+/* Probe-only: gamecube.cfg "probecmd <script>" → -gcprobecmd (sv_gc_campaign.c). */
+static qboolean gc_probecmd_configured;
+static char gc_probecmd[512];
 static qboolean gc_modeltrace_configured;
 static qboolean gc_net_configured;
 static qboolean gc_netfast_configured;
@@ -1114,6 +1225,8 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_dumpeye_configured = false;
 	gc_dumpeye_arg[0] = '\0';
 	gc_vst_configured = false;
+	gc_vm256_configured = false;
+	gc_cfg_cvar_count = 0;
 	gc_connect_configured = false;
 	gc_connect_addr[0] = '\0';
 	gc_net_ip_configured = false;
@@ -1121,6 +1234,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_newgame_configured = false;
 	gc_menu_newgame_configured = false;
 	gc_retail_newgame_configured = false;
+	gc_menuauto_configured = false;
 	gc_newsaveload_configured = false;
 	gc_configroundtrip_configured = false;
 	gc_saveinterrupt_configured = false;
@@ -1136,9 +1250,11 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_leanpvs_configured = false;
 	gc_fullphysics_configured = false;
 	gc_worldrender_configured = false;
+	gc_nohud_configured = false;
 	gc_capfaces_smoke_configured = false;
 	gc_tas_configured = false;
 	gc_dumpframes_configured = false;
+	gc_capture_configured = false;
 	gc_swissquit_configured = false;
 	gc_memreport_configured = false;
 	gc_net_configured = false;
@@ -1152,6 +1268,9 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_notexpacks_configured = false;
 	gc_autohop_configured = false;
 	gc_autocampaign_configured = false;
+	gc_startmap_configured = false;
+	gc_probecmd_configured = false;
+	gc_probecmd[0] = '\0';
 	gc_modeltrace_configured = false;
 	gc_phase_test[0] = '\0';
 	gc_changelevel_map[0] = '\0';
@@ -1281,6 +1400,15 @@ static void GCube_LoadDiscBootOverrides( void )
 			SYS_Report( "Xash3D GameCube: disc boot override modeltrace\n" );
 			continue;
 		}
+		if( !Q_strnicmp( cursor, "heapcensus", 10 ))
+		{
+			/* Diagnostic probe builds only: the census table lives above
+			 * 24 MiB, which Dolphin backs and real hardware does not. */
+			extern void GC_HeapCensusEnable( void );
+			GC_HeapCensusEnable();
+			SYS_Report( "Xash3D GameCube: disc boot override heapcensus (Dolphin only)\n" );
+			continue;
+		}
 		if( !Q_strnicmp( cursor, "autocampaign", 12 ))
 		{
 			const char *arg = cursor + 12;
@@ -1298,6 +1426,43 @@ static void GCube_LoadDiscBootOverrides( void )
 				Q_strncpy( gc_autocampaign_delay, "20", sizeof( gc_autocampaign_delay ));
 			gc_autocampaign_configured = true;
 			SYS_Report( "Xash3D GameCube: disc boot override autocampaign %s\n", gc_autocampaign_delay );
+			continue;
+		}
+
+		if( !Q_strnicmp( cursor, "probecmd", 8 ) && ( cursor[8] == ' ' || cursor[8] == '\t' ))
+		{
+			/* Repeated lines append (';'-joined): the cfg line buffer is short. */
+			const char *arg = cursor + 8;
+			int n = (int)Q_strlen( gc_probecmd );
+
+			while( *arg == ' ' || *arg == '\t' )
+				arg++;
+			if( n > 0 && n < (int)sizeof( gc_probecmd ) - 1 )
+				gc_probecmd[n++] = ';';
+			while( *arg && *arg != '\r' && *arg != '\n' && n < (int)sizeof( gc_probecmd ) - 1 )
+				gc_probecmd[n++] = *arg++;
+			gc_probecmd[n] = '\0';
+			gc_probecmd_configured = n > 0;
+			SYS_Report( "Xash3D GameCube: disc boot override probecmd %s\n", gc_probecmd );
+			continue;
+		}
+
+		if( !Q_strnicmp( cursor, "startmap", 8 ))
+		{
+			const char *arg = cursor + 8;
+			int n = 0;
+
+			while( *arg == ' ' || *arg == '\t' )
+				arg++;
+			while( arg[n] && arg[n] != ' ' && arg[n] != '\t' && arg[n] != '\r' && arg[n] != '\n'
+				&& n < (int)sizeof( gc_startmap ) - 1 )
+			{
+				gc_startmap[n] = arg[n];
+				n++;
+			}
+			gc_startmap[n] = '\0';
+			gc_startmap_configured = n > 0;
+			SYS_Report( "Xash3D GameCube: disc boot override startmap %s\n", gc_startmap );
 			continue;
 		}
 
@@ -1367,6 +1532,31 @@ static void GCube_LoadDiscBootOverrides( void )
 			{
 				gc_retail_newgame_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override retailnewgame\n" );
+				continue;
+			}
+		}
+
+		/* Show the retail main menu, then synthetic pad selects New Game.
+		 * Unlike menunewgame, UI_Main_Menu still opens so the title plate is
+		 * visible before play-start (Lost Coast LCG-7). */
+		if( !Q_strnicmp( cursor, "menuauto", 8 ))
+		{
+			char ch = cursor[8];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_menuauto_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override menuauto\n" );
+				continue;
+			}
+		}
+
+		if( !Q_strnicmp( cursor, "nohud", 5 ))
+		{
+			char ch = cursor[5];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_nohud_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override nohud\n" );
 				continue;
 			}
 		}
@@ -1518,6 +1708,21 @@ static void GCube_LoadDiscBootOverrides( void )
 				SYS_Report( "Xash3D GameCube: disc boot override tas %s\n", gc_tas_name );
 			}
 			continue;
+		}
+
+		/* Film capture: draw everything, frame rate second (CL_GCCaptureMode). */
+		if( !Q_strnicmp( cursor, "gccapture", 9 ))
+		{
+			char ch = cursor[9];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_capture_configured = true;
+				/* Film footage never wants the lean HUD (HP, team, ammo over the
+				 * camera player's frames): capture implies nohud. */
+				gc_nohud_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override gccapture (and nohud)\n" );
+				continue;
+			}
 		}
 
 		/* G347: soft DumpFrames latch for Dolphin PNG evidence. */
@@ -1743,6 +1948,50 @@ static void GCube_LoadDiscBootOverrides( void )
 			continue;
 		}
 
+		/* View-model skins at their 256 px source size (see -gcvm256 in r_image.c / img_utils.c). */
+		if( !Q_strnicmp( cursor, "gcvm256", 7 ))
+		{
+			char ch = cursor[7];
+
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_vm256_configured = true;
+				continue;
+			}
+		}
+
+		/* cvar <name> <value>: the game's cvars (dod_bots, dod_gc_autojoin...) cannot be set by a plain cfg line, the
+		 * console is not running when this file is read. */
+		if( !Q_strnicmp( cursor, "cvar ", 5 ) && gc_cfg_cvar_count < GC_CFG_CVARS_MAX )
+		{
+			char *tok = cursor + 5, *end;
+			size_t n;
+
+			while( *tok == ' ' || *tok == '\t' )
+				tok++;
+			for( end = tok; *end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n'; end++ );
+			n = (size_t)( end - tok );
+			if( n > 0 && n < sizeof( gc_cfg_cvars[0].name ))
+			{
+				char *val = end, *vend;
+
+				while( *val == ' ' || *val == '\t' )
+					val++;
+				if( *val == '"' )
+					val++;
+				for( vend = val; *vend && *vend != '"' && *vend != '\r' && *vend != '\n'; vend++ );
+				if( (size_t)( vend - val ) < sizeof( gc_cfg_cvars[0].value ))
+				{
+					memcpy( gc_cfg_cvars[gc_cfg_cvar_count].name, tok, n );
+					gc_cfg_cvars[gc_cfg_cvar_count].name[n] = '\0';
+					memcpy( gc_cfg_cvars[gc_cfg_cvar_count].value, val, (size_t)( vend - val ));
+					gc_cfg_cvars[gc_cfg_cvar_count].value[vend - val] = '\0';
+					gc_cfg_cvar_count++;
+					continue;
+				}
+			}
+		}
+
 		/* On-rails VST. Wins over dumpeye: the camera rides the path. */
 		if( !Q_strnicmp( cursor, "gcvst", 5 ))
 		{
@@ -1802,6 +2051,9 @@ static void GCube_LoadDiscBootOverrides( void )
 				gc_listenserver_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override listenserver %s\n",
 					gc_listenserver_map );
+#if XASH_DODGC_NETWORK
+				GC_ShrinkEarlyXFBForMatch();
+#endif
 			}
 			continue;
 		}
@@ -1826,6 +2078,9 @@ static void GCube_LoadDiscBootOverrides( void )
 				gc_connect_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override connect %s\n",
 					gc_connect_addr );
+#if XASH_DODGC_NETWORK
+				GC_ShrinkEarlyXFBForMatch();
+#endif
 			}
 			continue;
 		}
@@ -1850,6 +2105,8 @@ static void GCube_LoadDiscBootOverrides( void )
 	}
 
 	fclose( file );
+	if( gc_cvars_up )
+		GCube_ApplyCfgCvars();
 #endif
 }
 
@@ -1918,6 +2175,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 
 	if( gc_worldrender_configured && !Sys_CheckParm( "-gcworldrender" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcworldrender";
+	if( gc_nohud_configured && !Sys_CheckParm( "-gcnohud" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcnohud";
 	if( gc_capfaces_smoke_configured && !Sys_CheckParm( "-gccapfacessmoke" ) && n + 1 < cap )
 		gc_argv[n++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured && !Sys_CheckParm( "-gcmap" ) && n + 2 < cap )
@@ -1925,6 +2184,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 		gc_argv[n++] = "-gcmap";
 		gc_argv[n++] = gc_smoke_map;
 	}
+	if( gc_vm256_configured && !Sys_CheckParm( "-gcvm256" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcvm256";
 	if( gc_vst_configured && !Sys_CheckParm( "-gcvst" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcvst";
 	else if( !gc_vst_configured && gc_dumpeye_configured && gc_dumpeye_arg[0]
@@ -1935,6 +2196,58 @@ static void GCube_ReinjectMissingBootArgv( void )
 	}
 	if( gc_dumpframes_configured && !Sys_CheckParm( "-gcdumpframes" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcdumpframes";
+	if( gc_capture_configured && !Sys_CheckParm( "-gccapture" ) && n + 1 < cap )
+		gc_argv[n++] = "-gccapture";
+	/* LCG-7: GetArgv often misses gamecube.cfg before DVD/chdir is ready.
+	 * CapFaces reinject covers smoke; retail title menu needs the same for
+	 * menuauto + startmap so New Game still reaches d2_lostcoast. */
+	if( gc_menuauto_configured && !Sys_CheckParm( "-gcmenuauto" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcmenuauto";
+	if( gc_startmap_configured && !Sys_CheckParm( "-gcstartmap" ) && n + 2 < cap )
+	{
+		gc_argv[n++] = "-gcstartmap";
+		gc_argv[n++] = gc_startmap;
+	}
+
+	/* The rest of the routes GCube_GetArgv builds from gamecube.cfg. A disc whose cfg is only readable after
+	 * chdir got a menu-only argv, and without these a "listenserver MAP" disc stayed in the retail menu (the
+	 * log said "disc boot override listenserver" and then "boot phase=menu"). Each flag is added only if
+	 * it is missing, in the same form the builder uses. */
+#define REINJECT_FLAG( cond, flag ) \
+	do { if(( cond ) && !Sys_CheckParm( flag ) && n + 1 < cap ) gc_argv[n++] = (char *)( flag ); } while( 0 )
+#define REINJECT_ARG( cond, flag, value ) \
+	do { if(( cond ) && !Sys_CheckParm( flag ) && n + 2 < cap ) { gc_argv[n++] = (char *)( flag ); gc_argv[n++] = (char *)( value ); } } while( 0 )
+	REINJECT_FLAG( gc_newgame_configured, "-gcnewgame" );
+	REINJECT_FLAG( gc_menu_newgame_configured, "-gcmenuplaystart" );
+	REINJECT_FLAG( gc_menu_newgame_configured, "-gcfullactors" );
+	REINJECT_ARG( gc_listenserver_configured, "-gclistenserver", gc_listenserver_map );
+	REINJECT_ARG( gc_listenserver_configured && !gc_smoke_map_configured, "-gcmap", gc_listenserver_map );
+	REINJECT_ARG( gc_connect_configured, "-gcconnect", gc_connect_addr );
+	if( gc_retail_newgame_configured && !gc_menu_newgame_configured )
+	{
+		REINJECT_FLAG( true, "-gcmenuplaystart" );
+		REINJECT_FLAG( true, "-gcfullactors" );
+		REINJECT_FLAG( true, "-gcplayerinput" );
+	}
+	REINJECT_FLAG( gc_memreport_configured, "-gcmemreport" );
+	REINJECT_FLAG( gc_net_configured, "-net" );
+	REINJECT_FLAG( gc_netfast_configured, "-netfast" );
+	REINJECT_FLAG( gc_netstatic_configured, "-netstatic" );
+	REINJECT_ARG( gc_net_ip_configured, "-gcnetip", gc_net_ip_override );
+	REINJECT_ARG( gc_net_mask_override[0], "-gcnetmask", gc_net_mask_override );
+	REINJECT_ARG( gc_net_gw_override[0], "-gcnetgw", gc_net_gw_override );
+	REINJECT_FLAG( gc_headless_configured, "-gcheadless" );
+	REINJECT_FLAG(( gc_listenserver_configured || gc_connect_configured ) && !gc_headless_configured, "-gcplayerinput" );
+	REINJECT_FLAG( gc_profile_configured, "-gcprofile" );
+	REINJECT_FLAG( gc_nolivepvs_configured, "-gcnolivepvs" );
+	REINJECT_FLAG( gc_nonativetex_configured, "-gcnonativetex" );
+	REINJECT_FLAG( gc_leanpvs_configured, "-gcleanpvs" );
+	REINJECT_FLAG( gc_fullphysics_configured, "-gcfullphysics" );
+	REINJECT_ARG( gc_video_mode_configured, "-gcvideo", gc_video_mode );
+	REINJECT_FLAG( gc_nativetex_configured, "-gcnativetex" );
+	REINJECT_FLAG( gc_notexpacks_configured, "-gcnotexpacks" );
+#undef REINJECT_FLAG
+#undef REINJECT_ARG
 
 	if( n != host.argc )
 	{
@@ -1979,8 +2292,12 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	 * flag makes the full-AI/sentence/node-graph profile unambiguous. */
 	if( gc_menu_newgame_configured )
 		gc_argv[fake_argc++] = "-gcfullactors";
+	if( gc_menuauto_configured )
+		gc_argv[fake_argc++] = "-gcmenuauto";
 	if( gc_worldrender_configured )
 		gc_argv[fake_argc++] = "-gcworldrender";
+	if( gc_nohud_configured )
+		gc_argv[fake_argc++] = "-gcnohud";
 	if( gc_capfaces_smoke_configured )
 		gc_argv[fake_argc++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured )
@@ -1988,6 +2305,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 		gc_argv[fake_argc++] = "-gcmap";
 		gc_argv[fake_argc++] = gc_smoke_map;
 	}
+	if( gc_vm256_configured )
+		gc_argv[fake_argc++] = "-gcvm256";
 	if( gc_vst_configured )
 		gc_argv[fake_argc++] = "-gcvst";
 	else if( gc_dumpeye_configured && gc_dumpeye_arg[0] )
@@ -2079,6 +2398,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	}
 	if( gc_dumpframes_configured )
 		gc_argv[fake_argc++] = "-gcdumpframes";
+	if( gc_capture_configured )
+		gc_argv[fake_argc++] = "-gccapture";
 	if( gc_swissquit_configured )
 		gc_argv[fake_argc++] = "-gcswissquit";
 	if( gc_retail_newgame_configured && !gc_menu_newgame_configured )
@@ -2134,6 +2455,16 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	{
 		gc_argv[fake_argc++] = "-gcautocampaign";
 		gc_argv[fake_argc++] = gc_autocampaign_delay;
+	}
+	if( gc_startmap_configured )
+	{
+		gc_argv[fake_argc++] = "-gcstartmap";
+		gc_argv[fake_argc++] = gc_startmap;
+	}
+	if( gc_probecmd_configured )
+	{
+		gc_argv[fake_argc++] = "-gcprobecmd";
+		gc_argv[fake_argc++] = gc_probecmd;
 	}
 	if( gc_modeltrace_configured )
 		gc_argv[fake_argc++] = "-gcmodeltrace";
@@ -2206,4 +2537,65 @@ void GCube_Shutdown( void )
 	gc_fat_write_root[0] = '\0';
 	gc_fat_base_root[0] = '\0';
 #endif
+}
+
+/*
+================
+GC_PrintBuildInfo
+
+build-info.txt is the short stamp dod-gc's scripts/build-info.sh puts in the disc's game
+directory: which repos and commits the disc was built from. Print it once at boot so every log
+says what it was running.
+================
+*/
+void GC_PrintBuildInfo( void )
+{
+	fs_offset_t size = 0;
+	byte *data = FS_LoadFile( "build-info.txt", &size, false );
+	const char *p, *end;
+	int lines = 0;
+
+	if( !data )
+	{
+		SYS_Report( "Xash3D GameCube: build-info.txt not on this disc\n" );
+		return;
+	}
+
+	p = (const char *)data;
+	end = p + size;
+	while( p < end && lines < 24 )
+	{
+		char line[200];
+		size_t len = 0;
+
+		while( p + len < end && p[len] != '\n' && p[len] != '\r' && len < sizeof( line ) - 1 )
+			len++;
+		memcpy( line, p, len );
+		line[len] = '\0';
+		if( len )
+			SYS_Report( "Xash3D GameCube: build-info: %s\n", line );
+		p += len;
+		while( p < end && *p != '\n' )
+			p++;
+		if( p < end )
+			p++;
+		lines++;
+	}
+	Mem_Free( data );
+}
+
+
+/* Called by Host_InitCommon once Cvar_Init has run: create the cvars the disc cfg named, so the game's own registration
+ * finds (and, through Dod_CvarRegisterKeep, keeps) them. */
+void GCube_ApplyCfgCvars( void )
+{
+	int i;
+
+	gc_cvars_up = true;
+	for( i = 0; i < gc_cfg_cvar_count; i++ )
+	{
+		Cvar_Get( gc_cfg_cvars[i].name, gc_cfg_cvars[i].value, FCVAR_TEMPORARY, "disc cfg" );
+		Cvar_DirectSet( Cvar_FindVar( gc_cfg_cvars[i].name ), gc_cfg_cvars[i].value );
+		SYS_Report( "Xash3D GameCube: disc cfg cvar set\n" );
+	}
 }

@@ -132,6 +132,14 @@ int S_RetrieveAudioSamples( const wavdata_t *source, const void **output_buffer,
 	// calculate the size of each sample frame
 	int frame_size = Q_max( 1, source->width * source->channels );
 
+#if XASH_GAMECUBE
+	if( FBitSet( source->flags, GC_SOUND_ARAM_BACKED ))
+	{
+		*output_buffer = S_GCWavSpan( source, start_position, &num_samples );
+		return num_samples;
+	}
+#endif
+
 	// convert sample position to byte offset
 	start_position *= frame_size;
 
@@ -666,13 +674,35 @@ void S_GCVoiceStop( void );
 qboolean S_GCVoiceStart( const char *path );
 void S_GCVoiceUpdate( void );
 
+/* Larger than the ARAM sound store takes in one piece (it keeps half of
+ * its 2 MiB for others): DoD's round-win fanfares, ambience/uswin.wav,
+ * britwin.wav and germanwin.wav, are 0.9-1.1 MB. A whole-file load needs
+ * that much MEM1 and failed, so they stream from the disc on the
+ * soundtrack channel, like the announcer. Non-positional, at music volume. */
+#define GC_SND_DISC_STREAM_BYTES ( 900u * 1024u )
+
 static qboolean S_GCStreamVoice( const sfx_t *sfx, int flags )
 {
 	char path[MAX_QPATH];
 
-	if( !GC_MenuRunsServer() || Q_strnicmp( sfx->name, "tride/", 6 ))
+	/* A DoD match is not the menu route, and it is the one with the fanfares. */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+	if( !GC_MenuRunsServer( ))
 		return false;
-	Q_snprintf( path, sizeof( path ), "media/%s", sfx->name + 6 );
+#endif
+	if( Q_strnicmp( sfx->name, "tride/", 6 ))
+	{
+		const char *name = sfx->name[0] == '*' ? sfx->name + 1 : sfx->name;
+
+		/* Only sounds that never made it into a cache are candidates. */
+		if( sfx->cache || name[0] == '!' )
+			return false;
+		Q_snprintf( path, sizeof( path ), "sound/%s%s", name, COM_FileExtension( name )[0] ? "" : ".wav" );
+		if( FS_FileSize( path, false ) <= (fs_offset_t)GC_SND_DISC_STREAM_BYTES )
+			return false;
+	}
+	else
+		Q_snprintf( path, sizeof( path ), "media/%s", sfx->name + 6 );
 	if( FBitSet( flags, SND_STOP ))
 	{
 		if( !Q_stricmp( S_GCVoiceCurrent( ), path ))
@@ -1808,6 +1838,9 @@ Called once each time through the main loop
 */
 void SND_UpdateSound( void )
 {
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "sound update enter" );
+#endif
 	if( !snd.initialized ) return;
 
 	if( clgame.soundFuncs.pfnS_UpdateSound )
@@ -2234,6 +2267,13 @@ qboolean S_Init( void )
 	}
 #if XASH_GAMECUBE
 	Con_Reportf( "Xash3D GameCube: sound dma init ready\n" );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	{
+		extern void S_GCSoundStoreClaimEarly( void );
+
+		S_GCSoundStoreClaimEarly();
+	}
+#endif
 #endif
 
 	snd.soundtime = 0;
@@ -2267,7 +2307,7 @@ qboolean S_Init( void )
 	{
 		Con_Reportf( "Xash3D GameCube: vox init skipped for map-load memopt\n" );
 	}
-	else if( cls.state != ca_active )
+	else if( cls.state != ca_active && !GC_MenuRunsServer())
 	{
 		/* Speech data is not needed by the startup cinematic or main menu. */
 		Con_Reportf( "Xash3D GameCube: vox init deferred until active client\n" );

@@ -9,7 +9,7 @@ Default layout on port 1 (any port works; the first pad with input takes over).
 | A | jump (`+jump`) | confirm |
 | B | use (`+use`) | back |
 | X | reload (`+reload`) | |
-| Y | flashlight (`impulse 100`) | |
+| Y | flashlight (`impulse 100`); the DoD voice menu | Z held + Y opens chat (the built-in keyboard, Start sends) |
 | Z | duck (`+duck`) | |
 | R | fire (`+attack`) | |
 | L | alt fire (`+attack2`) | |

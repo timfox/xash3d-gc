@@ -104,7 +104,7 @@ void CL_GameCubeArmLeanPlayActive( void )
 	{
 		memset( &loopback, 0, sizeof( loopback ));
 		NET_NetadrSetType( &loopback, NA_LOOPBACK );
-		Netchan_Setup( NS_CLIENT, &cls.netchan, loopback, 0, NULL,
+		Netchan_Setup( NS_CLIENT, &cls.netchan, loopback, Cvar_VariableInteger( "net_qport" ), NULL,
 			CL_GetFragmentSize, 0 );
 		Con_Reportf( "Xash3D GameCube: direct-map client loopback netchan primed\n" );
 	}
@@ -470,6 +470,8 @@ static void CL_CheckClientState( void )
 		cls.state = ca_active;
 #if XASH_DODGC_NETWORK
 		Con_Reportf( "GameCube DoD: gameplay active server=%s signon=%d\n", cls.servername, cls.signon );
+		GC_HeapCheck( "gameplay active" );
+		GC_HeapCheckArm( true );
 		GC_NetReportStatus( "gameplay" );
 		GCube_AppendSwissEvidence( "GameCube DoD: gameplay active signon=%d", cls.signon );
 #endif
@@ -1405,7 +1407,7 @@ static void CL_GetCDKey( char *protinfo, size_t protinfosize )
 	Info_SetValueForKey( protinfo, "cdkey", key, protinfosize );
 }
 
-static void CL_WriteSteamTicket( sizebuf_t *send )
+static void CL_WriteGoldSrcTicket( sizebuf_t *send )
 {
 	string key;
 	netadr_t adr = { .type = NA_LOOPBACK, }; // goldsrc servers don't get unique key as xashid isn't sent raw to them
@@ -1427,8 +1429,8 @@ static void CL_WriteSteamTicket( sizebuf_t *send )
 	MSG_WriteBytes( send, buf, i );
 
 	// RevEmu2013: pTicket[1] = revHash (low), pTicket[5] = 0x01100001 (high)
-	*(uint32_t*)cls.steamid = LittleLong( ((uint32_t*)buf)[1] );
-	*(uint32_t*)(cls.steamid + 4) = LittleLong( ((uint32_t*)buf)[5] );
+	*(uint32_t*)cls.authid = LittleLong( ((uint32_t*)buf)[1] );
+	*(uint32_t*)(cls.authid + 4) = LittleLong( ((uint32_t*)buf)[5] );
 }
 
 void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticket, size_t ticketlen )
@@ -1439,8 +1441,9 @@ void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticke
 
 	protinfo[0] = 0;
 
-	Info_SetValueForKey( protinfo, "prot", "3", sizeof( protinfo )); // steam auth type
+	Info_SetValueForKey( protinfo, "prot", "3", sizeof( protinfo )); // GoldSrc auth type 3
 	Info_SetValueForKeyf( protinfo, "unique", sizeof( protinfo ), "%i", 0xffffffff );
+	// wire protocol: GoldSrc servers expect raw="steam" (not a Steam service dependency)
 	Info_SetValueForKey( protinfo, "raw", "steam", sizeof( protinfo ));
 	CL_GetCDKey( protinfo, sizeof( protinfo ));
 	const char *name = Info_ValueForKey( cls.userinfo, "name" );
@@ -1453,7 +1456,7 @@ void CL_SendGoldSrcConnectPacket( netadr_t adr, int challenge, const void *ticke
 		PROTOCOL_GOLDSRC_VERSION, challenge, protinfo, cls.userinfo );
 	MSG_SeekToBit( &send, -8, SEEK_CUR ); // rewrite null terminator
 	if( ticket == NULL )
-		CL_WriteSteamTicket( &send );
+		CL_WriteGoldSrcTicket( &send );
 	else
 		MSG_WriteBytes( &send, ticket, ticketlen );
 
@@ -1507,24 +1510,10 @@ static void CL_SendConnectPacket( connprotocol_t proto, int challenge )
 		Info_SetValueForKey( protinfo, "a", Q_buildarch(), sizeof( protinfo ) );
 	}
 
-	cls.broker_wait = false;
 	cls.netchan_pending_cookie = 0;
 
 	if( proto == PROTO_GOLDSRC )
 	{
-		// if the cl_ticket_generator is set to "steam" we need to get ticket
-		// from steam broker, which is asynchronous process by nature
-		if( !Q_stricmp( cl_ticket_generator.string, "steam" ))
-		{
-			if( SteamBroker_InitiateGameConnection( adr, challenge ))
-			{
-				// we are waiting for the broker response...
-				cls.broker_wait = true;
-				cls.timestart = Platform_DoubleTime();
-				return;
-			}
-		}
-
 		CL_SendGoldSrcConnectPacket( adr, challenge, NULL, 0 );
 	}
 	else
@@ -1602,6 +1591,8 @@ static void CL_SendBandwidthTest( netadr_t to, qboolean start )
 
 static void CL_SendGetChallenge( netadr_t to )
 {
+	// wire protocol: GoldSrc servers expect the literal token "steam" here;
+	// it is not a Steam service dependency
 	// always send GoldSrc-styled getchallenge message
 	// Xash servers will ignore it but for GoldSrc it will help
 	// in auto-detection
@@ -1729,7 +1720,7 @@ static void CL_CheckForResend( void )
 		else
 			CL_SendBandwidthTest( adr, false );
 	}
-	else if( !cls.broker_wait )
+	else
 	{
 		Con_Printf( "Connecting to %s... (retry #%i)\n", cls.servername, cls.connect_retry );
 		CL_SendGetChallenge( adr );
@@ -1774,6 +1765,22 @@ static void CL_Connect_f( void )
 	}
 
 	Q_strncpy( server, Cmd_Argv( 1 ), sizeof( server ));
+
+#if XASH_GAMECUBE
+	/* Without a working network link the connect attempt used to run into the socket layer and crash
+	 * the console. The link is brought up on first use; if that does not give an address, say so. */
+	{
+		extern int GC_NetEnsureReady( void );
+
+		if( !GC_NetEnsureReady( ))
+		{
+			Con_Printf( S_ERROR "Network is not available, not connecting to %s\n", server );
+			if( !UI_ShowMessageBox( "Network is not available.\nCheck the Broadband Adapter and the Network page in Options." ))
+				Con_Printf( "Network is not available (see Options > Network)\n" );
+			return;
+		}
+	}
+#endif
 
 	// if running a local server, kill it and reissue
 	if( SV_Active( ))
@@ -2065,7 +2072,6 @@ void CL_Disconnect( void )
 
 	// send a disconnect message to the server
 	CL_SendDisconnectMessage( cls.net_protocol );
-	SteamBroker_TerminateGameConnection();
 	CL_ClearState ();
 
 	S_StopBackgroundTrack ();
@@ -2221,8 +2227,17 @@ static void CL_Reconnect_f( void )
 	{
 		connprotocol_t proto = cls.net_protocol;
 
+#if XASH_GAMECUBE
+		const qboolean gc_keep_memopt = SV_Active() && GC_MapLoadMemoryOpt();
+#endif
 		if( cls.state >= ca_connected )
 			CL_Disconnect();
+#if XASH_GAMECUBE
+		/* CL_Disconnect clears the lean map route; a local reconnect
+		 * (same-map changelevel on the listen route) must keep it. */
+		if( gc_keep_memopt )
+			GC_SetMapLoadMemoryOptSession( true );
+#endif
 
 		cls.connect_time = MAX_HEARTBEAT;	// fire immediately
 		cls.demonum = cls.movienum = -1;	// not in the demo loop now
@@ -2366,6 +2381,10 @@ static void CL_ParseStatusMessage( netadr_t from, sizebuf_t *msg )
 	if( !COM_StringEmptyOrNULL( Info_ValueForKey( infostring, "gs" )))
 		return;
 
+	// only DoD GC servers are joinable: same marker the connect handshake checks
+	if( Q_strcmp( Info_ValueForKey( infostring, DODGC_NET_KEY ), DODGC_NET_VERSION ))
+		return;
+
 	maxcl = Q_atoi( Info_ValueForKey( infostring, "maxcl" ));
 	numcl = Q_atoi( Info_ValueForKey( infostring, "numcl" ));
 	i = Q_atoi( Info_ValueForKey( infostring, "p" ));
@@ -2374,6 +2393,8 @@ static void CL_ParseStatusMessage( netadr_t from, sizebuf_t *msg )
 	if( maxcl > MAX_CLIENTS || numcl > MAX_CLIENTS || numcl > maxcl || i != PROTOCOL_VERSION )
 		return;
 
+	Con_Reportf( "Xash3D GameCube: find servers: listed %s host=%s map=%s %s/%s\n", NET_AdrToString( from ),
+		Info_ValueForKey( infostring, "host" ), Info_ValueForKey( infostring, "map" ), Info_ValueForKey( infostring, "numcl" ), Info_ValueForKey( infostring, "maxcl" ));
 	UI_AddServerToList( from, infostring );
 }
 
@@ -3007,14 +3028,14 @@ static void CL_Challenge( const char *c, netadr_t from, sizebuf_t *msg )
 	{
 		cls.net_protocol = PROTO_GOLDSRC;
 
-		cls.steam_auth = Q_atoi( Cmd_Argv( 2 )) == 3;
+		cls.gs_auth = Q_atoi( Cmd_Argv( 2 )) == 3;
 
-		if( Cmd_Argc( ) == 5 && cls.steam_auth )
+		if( Cmd_Argc( ) == 5 && cls.gs_auth )
 		{
-			// arg 2 auth protocol, we only support steam
-			// arg 3 if steam is server's steam id
-			// arg 4 if steam is server's VAC status
-			cls.server_steamid = strtoull( Cmd_Argv( 3 ), NULL, 10 );
+			// arg 2 auth protocol, we only support type 3
+			// arg 3 is the server's auth id
+			// arg 4 is the server's VAC status
+			cls.server_authid = strtoull( Cmd_Argv( 3 ), NULL, 10 );
 			cls.vac2_secure = Q_atoi( Cmd_Argv( 4 ));
 		}
 	}
@@ -3151,6 +3172,7 @@ static void CL_ServerList( netadr_t from, sizebuf_t *msg )
 			break;
 
 		NET_Config( true, false ); // allow remote
+		Con_Reportf( "Xash3D GameCube: find servers: master %s listed %s\n", NET_AdrToString( from ), NET_AdrToString( servadr ));
 		NET_QueryServerByAddress( servadr, proto );
 	}
 
@@ -4114,6 +4136,11 @@ static void CL_InitLocal( void )
 	Cvar_Get( "password", "", FCVAR_USERINFO, "server password" );
 	Cvar_Get( "team", "", FCVAR_USERINFO, "player team" );
 	Cvar_Get( "skin", "", FCVAR_USERINFO, "player skin" );
+#if XASH_GAMECUBE
+	/* Registered here, before listenserver.cfg runs, so a plain
+	 * "gc_facebot 1" line in it takes effect (see the lean emitter). */
+	Cvar_Get( "gc_facebot", "0", 0, "GameCube test: 1 aims the view at the nearest other player, 2 also moves next to it once" );
+#endif
 
 	Cvar_RegisterVariable( &cl_nosmooth );
 	Cvar_RegisterVariable( &cl_nointerp );
@@ -4280,7 +4307,6 @@ void Host_ClientBegin( void )
 	// if running the server locally, make intentions now
 	if( SV_Active( )) CL_SendCommand ();
 
-	SteamBroker_Frame();
 }
 
 /*
@@ -4301,6 +4327,9 @@ int gc_menu_step_frames;
 
 void Host_ClientFrame( void )
 {
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "client frame enter" );
+#endif
 #if XASH_GAMECUBE
 	static int gc_fullphysics_client_log;
 	static int gc_connect_frame_log;
@@ -4459,6 +4488,12 @@ void Host_ClientFrame( void )
 		CL_CheckForResend();
 		GC_UpdateNewGameIntroAudio();
 		GC_TryG94SaveLoad();
+		GC_ProfMark( "client: packets+state" );
+		{
+			void CL_GCLeanPlayerEffects( void );
+
+			CL_GCLeanPlayerEffects();
+		}
 		/* Changelevel dest re-arms the G36 probe while g36_done stays sticky
 		 * from the source map. Full SCR CapFaces then scored ≈62ms WEAK
 		 * (c4a3→c5a1 probe 20261105-105312). Score presents without a world
@@ -4468,7 +4503,9 @@ void Host_ClientFrame( void )
 			ref.dllFuncs.R_EndFrame();
 		else
 			SCR_UpdateScreen();
+		GC_ProfMark( "client: screen tail" );
 		SND_UpdateSound();
+		GC_ProfMark( "client: sound" );
 		if( gc_scr_sustain_log < 4 )
 		{
 			Con_Reportf( "Xash3D GameCube: post-G36 SCR sustain ClientFrame (G278 snd) state=%d signon=%d/%d\n",
@@ -4613,6 +4650,7 @@ void CL_Init( void )
 		return; // nothing running on the client
 
 	CL_InitLocal();
+	CL_CineInit();
 #if XASH_GAMECUBE
 	Con_Reportf( "Xash3D GameCube: client local init ready\n" );
 	GC_MemHeapMark( "client_local_init_ready" );
@@ -4668,7 +4706,6 @@ void CL_Init( void )
 		Con_Reportf( "Xash3D GameCube: client sound init ready\n" );
 	}
 	Con_Reportf( "Xash3D GameCube: client identity skipped\n" );
-	Con_Reportf( "Xash3D GameCube: steam broker skipped\n" );
 	memset( &clgame.drawFuncs, 0, sizeof( clgame.drawFuncs ));
 	cls.build_num = 0;
 	cls.initialized = true;
@@ -4690,7 +4727,6 @@ void CL_Init( void )
 
 	{
 		ID_Init();
-		SteamBroker_Init();
 	}
 
 	/* client must be always initialized last so it can fetch all cvars */
@@ -4855,7 +4891,6 @@ void CL_Shutdown( void )
 	Mobile_Shutdown ();
 	SCR_Shutdown ();
 	CL_UnloadProgs ();
-	SteamBroker_Shutdown();
 	cls.initialized = false;
 
 	VGui_Shutdown();

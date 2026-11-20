@@ -201,6 +201,50 @@ static void V_GCRetailViewModelPose( const ref_params_t *pp )
 }
 
 /*
+Routes that draw the world without V_RenderView (the DoD CapFaces /
+-gcworldrender listen) used to copy the raw camera into the viewmodel.
+The studio transform negates pitch, so the gun tilted against the view,
+with no bob and no retail 1-unit drop. Pose it the retail way at the
+camera the route uses.
+*/
+void V_GCPoseViewModelAt( const vec3_t vieworg, const vec3_t viewangles )
+{
+	ref_params_t pp;
+
+	memset( &pp, 0, sizeof( pp ));
+	VectorCopy( vieworg, pp.simorg );
+	VectorCopy( viewangles, pp.viewangles );
+	VectorCopy( viewangles, pp.cl_viewangles );
+	pp.cl_viewangles[ROLL] = 0.0f;
+	VectorCopy( cl.simvel, pp.simvel );
+	pp.time = cl.time;
+	pp.frametime = host.frametime;
+	pp.onground = ( cl.local.onground != -1 );
+	pp.viewsize = scr_viewsize.value;
+	V_GCRetailViewModelPose( &pp );
+
+	/* V_SetupViewModel never runs on this route either, so the weapon's
+	 * animations (draw, fire, reload, idle) never reached the viewmodel: it
+	 * played sequence 0 once and froze on its last frame, hands and all
+	 * (ceres hal run: seq=0 f=60 for 679 of 738 samples while firing).
+	 * Apply the animation CL_WeaponAnim recorded, the way V_SetupViewModel
+	 * does. */
+	{
+		cl_entity_t *view = &clgame.viewent;
+
+		if( view->model && view->model->type == mod_studio )
+		{
+			if( !cl.local.weaponstarttime )
+				cl.local.weaponstarttime = cl.time;
+			view->curstate.sequence = V_GCViewAnimSequence( view->model, cl.local.weaponsequence );
+			view->curstate.animtime = cl.local.weaponstarttime;
+			view->curstate.frame = 0.0f;
+			view->curstate.framerate = 1.0f;
+		}
+	}
+}
+
+/*
 True when the HL1 animation is one step of a longer one (a shotgun shell or
 the closing pump) that the DoD model plays as a single reload: the caller
 leaves the playing sequence and its start time alone.
@@ -296,6 +340,22 @@ static void V_SetupViewModel( void )
 	view->index = cl.playernum + 1;
 	view->model = CL_ModelHandle( cl.local.viewmodel );
 	view->curstate.modelindex = cl.local.viewmodel;
+#if XASH_GAMECUBE
+	{
+		/* Trace where the first-person model comes from (ceres: vm=0). */
+		static int last_vm = -1, vm_logs;
+		const int server_vm = cl.frames[cl.parsecountmod].clientdata.viewmodel;
+
+		if( cl.local.viewmodel != last_vm && vm_logs < 8 )
+		{
+			vm_logs++;
+			last_vm = cl.local.viewmodel;
+			Con_Reportf( "Xash3D GameCube: viewmodel index local=%d server=%d model=%s lw=%.0f\n",
+				cl.local.viewmodel, server_vm,
+				view->model ? view->model->name : "(null)", cl_lw.value );
+		}
+	}
+#endif
 	view->curstate.sequence = cl.local.weaponsequence;
 	view->curstate.rendermode = kRenderNormal;
 
@@ -306,7 +366,9 @@ static void V_SetupViewModel( void )
 	{
 		static int gc_vm_tried_index = -1;
 
+		/* Not while a cinematic shot hides the weapon (cine_viewmodel 0). */
 		if( view->model && view->model->name[0] && Q_stristr( view->model->name, ".mdl" )
+			&& !CL_CineHideViewModel()
 			&& ( view->model->type != mod_studio || !view->model->cache.data )
 			&& cl.local.viewmodel != gc_vm_tried_index )
 		{
@@ -652,6 +714,30 @@ static void V_ApplyRefUnderwater( ref_viewpass_t *rvp )
 
 /*
 ==================
+V_ApplyCineCamera
+
+a playing cinematic shot (cl_cine.c) owns the eye, the angles and the fov
+==================
+*/
+static void V_ApplyCineCamera( ref_viewpass_t *rvp )
+{
+	float fov;
+
+	if( !CL_CineView( rvp->vieworigin, rvp->viewangles, &fov ))
+		return;
+
+	rvp->fov_x = bound( 10.0f, fov, 150.0f );
+	rvp->fov_y = V_CalcFov( &rvp->fov_x, clgame.viewport[2], clgame.viewport[3] );
+	if( refState.wideScreen && r_adjust_fov.value )
+		V_AdjustFov( &rvp->fov_x, &rvp->fov_y, clgame.viewport[2], clgame.viewport[3], false );
+
+	// viewentity stays the player, so the cameraman's own body is not drawn
+	if( CL_CineHideViewModel( ))
+		clgame.viewent.model = NULL;
+}
+
+/*
+==================
 V_RenderView
 
 ==================
@@ -700,6 +786,8 @@ void V_RenderView( void )
 			clgame.viewent.curstate.animtime = cl.local.weaponstarttime;
 
 		V_GetRefParams( &rp, &rvp );
+		if( viewnum == 0 )
+			V_ApplyCineCamera( &rvp );
 		V_RefApplyOverview( &rvp );
 		V_ApplyRefUnderwater( &rvp );
 
@@ -918,6 +1006,7 @@ void V_PostRender( void )
 		Con_DrawDebug(); // must be last
 		Touch_Draw();
 		OSK_Draw();
+		OSK_DrawBuildStamp();
 		Platform_DrawCursor();
 
 		S_ExtraUpdate();

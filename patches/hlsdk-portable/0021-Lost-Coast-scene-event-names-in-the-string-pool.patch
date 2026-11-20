@@ -1,0 +1,52 @@
+From 3bfb2ca56bd31a7f9102eadb37bc627fb64b8470 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Wed, 18 Nov 2026 00:05:14 -0800
+Subject: [PATCH] Lost Coast: scene event names in the string pool
+
+Eight scenes of forty events with a 52-byte name inline were 27 KB of
+static memory. With the gesture and look work the GameCube heap ran out
+and the intro scene failed to load (a 2.4 KB allocation). The name is
+now a pointer into the engine's string pool: 10 KB, heap free back from
+4 KB to 25 KB.
+---
+ dlls/lostcoast_npcs.cpp | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 57919c40..e0638398 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -308,11 +308,14 @@ typedef struct
+ {
+ 	char	type;
+ 	char	started;
+-	float	t0, t1;
+-	float	a, b;		// speak: volume, attenuation; moveto: distance
+-	char	arg[52];	// the longest voice path is 48 characters
+ 	unsigned char	ntags;	// gesture: timing tags, (event, sequence) fractions * 255
+ 	unsigned char	tags[8];
++	float	t0, t1;
++	float	a, b;		// speak: volume, attenuation; moveto: distance
++	// speak: the wave; gesture: the sequence. In the engine's string pool:
++	// eight scenes of forty events with the name inline were 27 KB of the
++	// GameCube's last free memory, and the intro stopped loading.
++	const char	*arg;
+ } lc_event_t;
+ 
+ typedef struct
+@@ -415,10 +418,10 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 		ev->t1 = t1;
+ 		ev->a = a;
+ 		ev->b = b;
+-		strncpy( ev->arg, arg, sizeof( ev->arg ) - 1 );
++		ev->arg = ( ev->type == LCE_SPEAK || ev->type == LCE_GESTURE ) ? STRING( ALLOC_STRING( arg )) : "";
+ 		sc->n++;
+ 		if( ev->type == LCE_SPEAK )
+-			PRECACHE_SOUND( (char *)STRING( ALLOC_STRING( ev->arg )));
++			PRECACHE_SOUND( (char *)ev->arg );
+ 	}
+ 	FREE_FILE( data );
+ 	return sc;
+-- 
+2.53.0
+

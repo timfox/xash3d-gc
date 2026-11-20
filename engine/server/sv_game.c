@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "server.h"
+#include "sv_lazy_logic.h"
 #include "net_encode.h"
 #include "event_flags.h"
 #include "library.h"
@@ -194,6 +195,65 @@ static qboolean gc_ent_priv_overflow_from_tip;
 static byte gc_ent_priv_overflow_bits[GC_ENTITY_OVERFLOW_BYTES / 16 / 8];
 static size_t gc_ent_priv_overflow_capacity;
 static size_t gc_ent_priv_overflow_used;
+#if XASH_DODGC_NETWORK
+/* Weapon boxes (a dead player's drop, 384 B of private data) come and go all match long, and at the end of a crowded match both the
+ * slab and the heap had nothing left for one: the game wrote into a NULL block and hung (dod_donner, 4 bots, ~265 s). A small fixed
+ * pool serves them first so they never need the heap. Other non-essential classes that miss everywhere get a shared scratch block
+ * and their edict is freed again (see SV_GCNonEssentialClass). */
+#define GC_BOX_PRIV_SLOTS 12
+#define GC_BOX_PRIV_BYTES 512
+static byte gc_box_priv[GC_BOX_PRIV_SLOTS][GC_BOX_PRIV_BYTES] __attribute__((aligned( 32 )));
+static unsigned gc_box_priv_used;
+static byte gc_nonessential_scratch[1024] __attribute__((aligned( 32 )));
+static int gc_box_pool_misses, gc_nonessential_drops, gc_box_pool_logs;
+
+/* dod_gc_boxstress (debug, default 0, never in a shipped cfg; the game registers it): 1 starves the slab and the overflow for weapon
+ * boxes so the fixed pool has to serve them, 2 takes the pool away too so the scratch fallback and the freed edict fire. */
+static int SV_GCBoxStress( void )
+{
+	convar_t *cv = Cvar_FindVar( "dod_gc_boxstress" );
+
+	return cv ? (int)cv->value : 0;
+}
+
+static void *SV_GCBoxPrivAlloc( size_t size )
+{
+	int i;
+
+	if( size > GC_BOX_PRIV_BYTES || SV_GCBoxStress() >= 2 )
+		return NULL;
+	for( i = 0; i < GC_BOX_PRIV_SLOTS; i++ )
+		if( !( gc_box_priv_used & ( 1u << i )))
+		{
+			gc_box_priv_used |= 1u << i;
+			if( SV_GCBoxStress() && gc_box_pool_logs++ < 4 )
+				Con_Reportf( "Xash3D GameCube: weapon box private block from the pool, slot %d (live mask 0x%x)\n", i, gc_box_priv_used );
+			return gc_box_priv[i];
+		}
+	return NULL;
+}
+
+static qboolean SV_GCBoxPrivFree( const void *ptr )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( p < &gc_box_priv[0][0] || p >= &gc_box_priv[0][0] + sizeof( gc_box_priv ))
+		return false;
+	gc_box_priv_used &= ~( 1u << (( p - &gc_box_priv[0][0] ) / GC_BOX_PRIV_BYTES ));
+	return true;
+}
+
+static qboolean SV_GCNonEssentialClass( const char *cn )
+{
+	return !Q_stricmp( cn, "weaponbox" ) || !Q_stricmp( cn, "gib" ) || !Q_strnicmp( cn, "env_", 4 )
+		|| !Q_stricmp( cn, "spark_shower" ) || !Q_stricmp( cn, "beam" ) || !Q_stricmp( cn, "smokepuff" );
+}
+
+qboolean SV_GCIsNonEssentialScratch( const void *ptr )
+{
+	return ptr == gc_nonessential_scratch;
+}
+#endif
 
 /* Borrow only the unused tail of this world's retained map arena. The server
  * releases it after all entity private-data destructors have run. */
@@ -877,6 +937,58 @@ const char *SV_GCSoundPrecacheName( int index )
 }
 #endif
 
+#if XASH_GAMECUBE
+/*
+=======================
+SV_GCQueueLocalTempEnt
+
+GameCube listen route: temp entities bound for the local client did not reach
+its parser (fx diag TE=0 through a whole scripted shot while the game sent dozens
+of bursts and tracers). Same process, same thread: hand them to the client
+directly through a small queue it drains every frame (CL_GCDrainLocalTempEnts).
+=======================
+*/
+static byte	gc_local_tent_data[4096];	/* drained every client frame; MEM1 is tight */
+static sizebuf_t	gc_local_tent_buf;
+static qboolean	gc_local_tent_init;
+unsigned	gc_local_tent_queued, gc_local_tent_dropped;
+
+static qboolean SV_GCQueueLocalTempEnt( sizebuf_t *multicast )
+{
+	const int bits = MSG_GetNumBitsWritten( multicast );
+
+	if( !gc_local_tent_init )
+	{
+		MSG_Init( &gc_local_tent_buf, "GCLocalTempEnts", gc_local_tent_data, sizeof( gc_local_tent_data ));
+		gc_local_tent_init = true;
+	}
+	if( MSG_GetNumBitsLeft( &gc_local_tent_buf ) <= bits + 8 )
+	{
+		gc_local_tent_dropped++;
+		return true;	/* full this frame: drop it rather than send it the way that loses it */
+	}
+	MSG_WriteBits( &gc_local_tent_buf, MSG_GetData( multicast ), bits );
+	gc_local_tent_queued++;
+	return true;
+}
+
+/* The client side: copy out what was queued since the last call and empty the queue. */
+int SV_GCTakeLocalTempEnts( byte *out, int size )
+{
+	int bytes;
+
+	if( !gc_local_tent_init || !MSG_GetNumBitsWritten( &gc_local_tent_buf ))
+		return 0;
+	bytes = MSG_GetNumBytesWritten( &gc_local_tent_buf );
+	if( bytes > size )
+		bytes = 0;
+	else
+		memcpy( out, MSG_GetData( &gc_local_tent_buf ), bytes );
+	MSG_Clear( &gc_local_tent_buf );
+	return bytes;
+}
+#endif
+
 static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboolean usermessage, qboolean filter )
 {
 	byte		*mask = NULL;
@@ -944,6 +1056,24 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		return 0;
 	}
 
+#if XASH_GAMECUBE
+	/* Scripted shots: why a temp entity does or does not reach a client. */
+	{
+		static int te_logs;
+
+		if( te_logs < 24 && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity )
+		{
+			sv_client_t *c = svs.clients;
+
+			te_logs++;
+			Con_Reportf( "Xash3D GameCube: temp entity multicast dest=%d clients=%d c0 state=%d local=%d fake=%d edict=%d\n",
+				dest, numclients, c ? c->state : -1,
+				c ? NET_IsLocalAddress( c->netchan.remote_address ) : -1,
+				c ? FBitSet( c->flags, FCL_FAKECLIENT ) != 0 : -1, c && c->edict ? 1 : 0 );
+		}
+	}
+#endif
 	// send the data to all relevent clients (or once only)
 	for( j = 0, cl = current; j < numclients; j++, cl++ )
 	{
@@ -970,6 +1100,16 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		if( !SV_CheckClientVisiblity( cl, mask ))
 			continue;
 
+#if XASH_GAMECUBE
+		if( !specproxy && !reliable && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity
+			&& NET_IsLocalAddress( cl->netchan.remote_address )
+			&& SV_GCQueueLocalTempEnt( &sv.multicast ))
+		{
+			numsends++;
+			continue;
+		}
+#endif
 		if( specproxy ) MSG_WriteBits( &sv.spec_datagram, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
 		else if( reliable ) MSG_WriteBits( &cl->netchan.message, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
 		else MSG_WriteBits( &cl->datagram, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
@@ -1398,7 +1538,9 @@ static void SV_FreeEntityScript( char *ents )
 #if XASH_GAMECUBE
 	if( ents && ents == sv_gc_ents_borrowed )
 	{
+		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 		sv_gc_ents_borrowed = NULL;
+		R_GCReleaseSurfaceCacheStore( "entities" );
 		return;
 	}
 #endif
@@ -1461,14 +1603,25 @@ static char *SV_ReadEntityScript( const char *filename, int *flags )
 		/* The 64 KiB entity text can fail on the fragmented heap at a
 		 * changelevel. Validation is brief and the GX world does not use the
 		 * soft surface cache, so borrow its store (the transition save takes
-		 * it next anyway). */
+		 * it next anyway). DoD too: the 50 KB text failed at a level change
+		 * with 93 KB of heap free (ceres soak run 7). */
+#if XASH_DODGC_NETWORK
+		if( true )
+#else
 		if( GC_MenuRunsServer())
+#endif
 		{
-			extern byte *R_GCBorrowSurfaceCacheStore( size_t *size );
+			extern byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner );
+			extern void R_GCReleaseSurfaceCacheStore( const char *owner );
 			size_t store_size = 0;
-			byte *store = R_GCBorrowSurfaceCacheStore( &store_size );
+			byte *store = R_GCClaimSurfaceCacheStore( &store_size, "entities" );
 
-			if( store && store_size > (size_t)lumplen )
+			if( store && store_size <= (size_t)lumplen )
+			{
+				R_GCReleaseSurfaceCacheStore( "entities" );
+				store = NULL;
+			}
+			if( store )
 			{
 				memset( store, 0, lumplen + 1 );
 				ents = (char *)store;
@@ -1610,6 +1763,12 @@ static void GAME_EXPORT SV_FreePrivateData( edict_t *pEdict )
 #if XASH_GAMECUBE
 	if( pEdict->pvPrivateData == gc_player_private_fallback )
 		; /* static New Game player fallback — never free() */
+#if XASH_DODGC_NETWORK
+	else if( pEdict->pvPrivateData == gc_nonessential_scratch )
+		; /* shared scratch of a non-essential entity that got no block: never free() */
+	else if( SV_GCBoxPrivFree( pEdict->pvPrivateData ))
+		; /* fixed weapon box pool slot */
+#endif
 	else if( pEdict->pvPrivateData == gc_soundent_private_fallback )
 	{
 		gc_soundent_fallback_used = false;
@@ -1731,13 +1890,47 @@ edict_t *GAME_EXPORT SV_AllocEdict( void )
 	if( i >= GI->max_edicts )
 	{
 #if XASH_GAMECUBE
+		/* The table is full but edicts freed in the last half second are
+		 * waiting out the reuse delay: take the oldest of them rather than
+		 * hand the game NULL, which a GetClassPtr/CREATE_NAMED_ENTITY caller
+		 * dereferences (a scripted film cast replaced shot to shot froze
+		 * Dolphin here). The delay only spares a client interpolating a
+		 * just-removed entity, a glitch of one frame at worst. */
+		{
+			edict_t *oldest = NULL;
+			int j;
+
+			for( j = svs.maxclients + 1; j < svgame.numEntities; j++ )
+			{
+				edict_t *f = SV_EdictNum( j );
+
+				if( f && f->free && ( !oldest || f->freetime < oldest->freetime ))
+					oldest = f;
+			}
+			if( oldest )
+			{
+				static int early_logs;
+
+				if( early_logs < 4 )
+				{
+					early_logs++;
+					Con_Reportf( "Xash3D GameCube: edicts full (%d), reusing one freed %.2f s ago\n",
+						GI->max_edicts, sv.time - oldest->freetime );
+				}
+				SV_InitEdict( oldest );
+				return oldest;
+			}
+		}
 		/* CapFaces Flipper: tip edict BSS stays at 460. Dense DoD maps
 		 * (caen ~621 ents) soft-skip decorative classes instead of FATAL —
 		 * pack owns world draw; remaining slots keep players/triggers. */
 		if( Sys_CheckParm( "-gcworldrender" ))
 		{
-			Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d) — soft-skip further spawns\n",
-				GI->max_edicts );
+			static int gc_tip_logs;
+
+			if( gc_tip_logs++ < 4 )
+				Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d) — soft-skip further spawns\n",
+					GI->max_edicts );
 			return NULL;
 		}
 #endif
@@ -1770,6 +1963,20 @@ static LINK_ENTITY_FUNC SV_GetEntityClass( const char *pszClassName )
 	return (LINK_ENTITY_FUNC)COM_GetProcAddress( svgame.hInstance, pszClassName );
 }
 
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+#define GC_EDICT_ESSENTIAL_RESERVE 16
+/* True when fewer than GC_EDICT_ESSENTIAL_RESERVE edicts are free: no free slot below the tip and the free ones already counted. */
+static qboolean SV_GCNamedSpawnBlocked( void )
+{
+	int i, used = 0;
+
+	for( i = 0; i < svgame.numEntities; i++ )
+		if( !svgame.edicts[i].free )
+			used++;
+	return GI->max_edicts - used <= GC_EDICT_ESSENTIAL_RESERVE;
+}
+#endif
+
 /*
 ==============
 SV_AllocPrivateData
@@ -1794,7 +2001,32 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 	if( !ent )
 	{
 		// allocate a new one
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+		/* The last few edicts belong to what the game cannot do without: a spawning player's loadout (crowbar, sidearm, primary, grenades),
+		 * objectives, and rockets and grenades made through GetClassPtr (no name here, cannot take a NULL). Only the cosmetic or droppable
+		 * classes (weapon boxes, gibs, sparks, effects: SV_GCNonEssentialClass) stop short of them. */
+		if( !ent && svgame.numEntities > svs.maxclients && SV_GCNonEssentialClass( pszClassName ) && SV_GCNamedSpawnBlocked())
+		{
+			static int gc_reserve_logs;
+
+			if( gc_reserve_logs++ < 4 )
+				Con_Reportf( S_WARN "Xash3D GameCube: edict reserve: \"%s\" not created (%d so far)\n", pszClassName, gc_reserve_logs );
+			return NULL;
+		}
+#endif
 		ent = SV_AllocEdict();
+#if XASH_GAMECUBE
+		/* No free edict (the 460 tip): the caller gets NULL and carries on. Writing the classname through the NULL edict was a data
+		 * fault (DAR 0x288) that froze every crowded match at the cap: CEnvExplosion::Use, a dying player's weapon box, a grenade... */
+		if( !ent )
+		{
+			static int gc_noedict_logs;
+
+			if( gc_noedict_logs++ < 8 )
+				Con_Reportf( S_WARN "Xash3D GameCube: no free edict for \"%s\" (%d so far), not created\n", pszClassName, gc_noedict_logs );
+			return NULL;
+		}
+#endif
 	}
 	else if( ent->free )
 	{
@@ -1832,6 +2064,17 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 
 	SpawnEdict( &ent->v );
 
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+	if( ent->pvPrivateData && SV_GCIsNonEssentialScratch( ent->pvPrivateData ))
+	{
+		if( gc_nonessential_drops++ < 3 )
+			Con_Reportf( S_WARN "Xash3D GameCube: no private block for %s (heap_free=%s), edict %d freed again (%d so far)\n",
+				pszClassName, Q_memprint( GC_MemHeapFreeBytes() ), NUM_FOR_EDICT( ent ), gc_nonessential_drops );
+		ent->pvPrivateData = NULL;	/* skip the game's free callback: the object lived in the shared scratch */
+		SV_FreeEdict( ent );
+		return NULL;
+	}
+#endif
 #if XASH_GAMECUBE
 	/* Tip MEM1: brush furniture / pickups can miss a private block without
 	 * ending the whole map. Boss/combat NPCs still abort after reclaim. */
@@ -2259,6 +2502,96 @@ static void GAME_EXPORT pfnChangePitch( edict_t* ent )
 	ent->v.angles[PITCH] = SV_AngleMod( ent->v.idealpitch, ent->v.angles[PITCH], ent->v.pitch_speed );
 }
 
+#if XASH_GAMECUBE
+/* Lazy map logic (sv_gc_lazy_logic 1, default 0): relays, retargeters, info_targets and targeted ambient sounds that the
+ * parity budget skips are remembered by their lump text position and spawned the first time something looks them up by
+ * targetname (sv_lazy_logic.c); the game DLL's own code then handles them as if they had been spawned at load. */
+static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index );
+static qboolean gc_lazy_active;
+static int gc_lazy_logs;
+
+static qboolean SV_GCLazyLogicCvar( void )
+{
+	convar_t *cv = Cvar_FindVar( "sv_gc_lazy_logic" );	/* not Cvar_Get: that would reset the disc cfg's FCVAR_TEMPORARY value */
+
+	return cv && cv->value != 0.0f;
+}
+
+static qboolean SV_GCLazyEligibleClass( const char *classname )
+{
+	return !Q_strcmp( classname, "trigger_relay" ) || !Q_strcmp( classname, "trigger_changetarget" )
+		|| !Q_strcmp( classname, "info_target" ) || !Q_strcmp( classname, "ambient_generic" );
+}
+
+/* The targetname inside one entity block of the lump (text positioned just after its '{'). */
+static qboolean SV_GCLazyBlockTargetname( const char *text, char *out, size_t size )
+{
+	char key[128], value[256];
+
+	out[0] = '\0';
+	while(( text = COM_ParseFile( text, key, sizeof( key ))) != NULL )
+	{
+		if( key[0] == '}' )
+			break;
+		if(( text = COM_ParseFile( text, value, sizeof( value ))) == NULL )
+			break;
+		if( !Q_strcmp( key, "targetname" ))
+		{
+			Q_strncpy( out, value, size );
+			return true;
+		}
+	}
+	return false;
+}
+
+typedef struct { const char *name; } sv_lazy_ctx_t;
+
+static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
+{
+	const sv_lazy_ctx_t *lc = (const sv_lazy_ctx_t *)ctx;
+	const char *base = sv.worldmodel ? sv.worldmodel->entities : NULL;
+	char tname[64], *p;
+	edict_t *ent;
+	int r;
+
+	( void )len;
+	if( !base || GC_MemHeapFreeBytes() < 4u * 1024u )
+		return -1;
+	SV_GCLazyBlockTargetname( base + ofs, tname, sizeof( tname ));
+	if( Q_strcmp( tname, lc->name ))
+		return 0;	/* hash collision: another name */
+	ent = SV_AllocEdict();
+	if( !ent )
+		return -1;
+	p = (char *)base + ofs;
+	if( !SV_ParseEdict( &p, ent, -1 ) || !SV_IsValidEdict( ent ))
+	{
+		if( ent && !ent->free )
+			SV_FreeEdict( ent );
+		return -1;
+	}
+	r = svgame.dllFuncs.pfnSpawn( ent );
+	if( r == -1 && !FBitSet( ent->v.flags, FL_KILLME ))
+	{
+		SV_FreeEdict( ent );
+		return 1;	/* the game rejected it, exactly as it would have at load */
+	}
+	return 1;
+}
+
+static void SV_GCLazyMaterialize( const char *name )
+{
+	sv_lazy_ctx_t ctx;
+	int n;
+
+	ctx.name = name;
+	n = LazyLogic_Materialize( LazyLogic_Hash( name ), SV_GCLazySpawn, &ctx );
+	if( n && gc_lazy_logs++ < 24 )
+		Con_Reportf( "Xash3D GameCube: lazy logic spawned %d x '%s' (pending %d of %d, edicts %d, heap %s)\n",
+			n, name, LazyLogic_Pending(), LazyLogic_Total(), svgame.numEntities, Q_memprint( GC_MemHeapFreeBytes( )));
+}
+#endif
+
 /*
 =========
 SV_FindEntityByString
@@ -2274,6 +2607,12 @@ static edict_t *GAME_EXPORT SV_FindEntityByString( edict_t *pStartEdict, const c
 		return svgame.edicts;
 
 	if( pStartEdict ) e = NUM_FOR_EDICT( pStartEdict );
+
+#if XASH_GAMECUBE
+	/* The start of a scan by name: bring in the deferred logic entities of that name first. */
+	if( gc_lazy_active && e == 0 && LazyLogic_Pending() > 0 && !Q_strcmp( pszField, "targetname" ))
+		SV_GCLazyMaterialize( pszValue );
+#endif
 
 	for( int i = 0; i < ARRAYSIZE( gEntvarsDescription ); i++ )
 	{
@@ -2894,6 +3233,15 @@ void GAME_EXPORT SV_StartSound( edict_t *ent, int chan, const char *sample, floa
 				gc_intro_snd_log++;
 			}
 		}
+		/* Entities are drawn from their edicts on the world-render route and
+		 * no client reads this message: a voice line is streamed instead. */
+		if( chan == CHAN_VOICE && sample && Sys_CheckParm( "-gcworldrender" )
+			&& !FBitSet( flags, SND_STOP|SND_CHANGE_VOL|SND_CHANGE_PITCH ))
+		{
+			extern qboolean GC_VoiceStreamStart( int ent, const char *sample, float vol, float attn );
+
+			GC_VoiceStreamStart( NUM_FOR_EDICT( ent ), sample, vol, attn );
+		}
 #endif
 		SV_Multicast( msg_dest, origin, NULL, false, filter );
 	}
@@ -2946,8 +3294,12 @@ static void GAME_EXPORT pfnTraceLine( const float *v1, const float *v2, int fNoM
 
 #if XASH_GAMECUBE
 	/* CapFaces: hull0/planes may still sit in BSP scratch. UpdateStatusBar →
-	 * SV_Move → PM_RecursiveHullCheck Guru'd after drawn=365 (014249/015156). */
-	if( Sys_CheckParm( "-gcworldrender" ))
+	 * SV_Move → PM_RecursiveHullCheck Guru'd after drawn=365 (014249/015156).
+	 * With a WorldDL pack the load keeps real hull0 clipnodes (bots already
+	 * PM_Move on them), and stubbing every trace to fraction 1 meant no
+	 * bullet ever hit a player or the floor (ceres lt3: frac=1.00 into a
+	 * target's box). Only stub when hull0 was collapsed. */
+	if( Sys_CheckParm( "-gcworldrender" ) && !Mod_GCWorldTraceReady( sv.worldmodel ))
 	{
 		memset( &trace, 0, sizeof( trace ));
 		trace.fraction = 1.0f;
@@ -3870,7 +4222,22 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 			 * holes left by destroyed entities before requesting heap memory. */
 			/* Prefer slab/overflow up through 2 KiB so GetClassPtr never sees
 			 * NULL mid-construction when tip heap is empty (c1a1f ~entity 408). */
+#if XASH_DODGC_NETWORK
+			if( !pEdict->pvPrivateData && NUM_FOR_EDICT( pEdict ) > svs.maxclients && !Q_stricmp( SV_ClassName( pEdict ), "weaponbox" ))
+			{
+				if(( pEdict->pvPrivateData = SV_GCBoxPrivAlloc( size )) != NULL )
+				{
+					memset( pEdict->pvPrivateData, 0, size );
+					used_fallback = true;
+				}
+				else if( gc_box_pool_misses++ == 0 )
+					Con_Reportf( S_WARN "Xash3D GameCube: weapon box pool of %d is full, taking the slab or heap\n", GC_BOX_PRIV_SLOTS );
+			}
+#endif
 			if( !pEdict->pvPrivateData && size <= 2048
+#if XASH_DODGC_NETWORK
+				&& !( SV_GCBoxStress() >= 1 && !Q_stricmp( SV_ClassName( pEdict ), "weaponbox" ))
+#endif
 				&& (( pEdict->pvPrivateData = SV_GCPrivateSlabAlloc( size )) != NULL
 					|| ( pEdict->pvPrivateData = SV_GCPrivateOverflowAlloc( size )) != NULL ))
 			{
@@ -3892,6 +4259,18 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 				Con_Reportf( S_WARN "Xash3D GameCube: ent private slab+overflow miss size=%zu edict=%d classname=%s\n",
 					size, NUM_FOR_EDICT( pEdict ), SV_ClassName( pEdict ));
 			}
+#if XASH_DODGC_NETWORK
+			/* A non-essential entity (weapon box, gib, effect) that finds no block anywhere: the game constructs into a NULL pointer
+			 * and hangs. Hand it a shared scratch block instead; SV_AllocPrivateData frees the edict again right after the
+			 * constructor returns (the class is only ever created through that path). */
+			if( !pEdict->pvPrivateData && NUM_FOR_EDICT( pEdict ) > svs.maxclients && size <= sizeof( gc_nonessential_scratch )
+				&& SV_GCNonEssentialClass( SV_ClassName( pEdict )))
+			{
+				memset( gc_nonessential_scratch, 0, size );
+				pEdict->pvPrivateData = gc_nonessential_scratch;
+				used_fallback = true;
+			}
+#endif
 			/* Player spawn must not return NULL — GetClassPtr crashes. Keep a
 			 * static fallback for the single-player client edict under New Game. */
 			if( !pEdict->pvPrivateData
@@ -4855,7 +5234,18 @@ static void GAME_EXPORT pfnSetClientMaxspeed( const edict_t *pEdict, float fNewM
 		return;
 
 	// GoldSrc doesn't bound the value to the movevar here
-	fNewMaxspeed = bound( -svgame.movevars.maxspeed, fNewMaxspeed, svgame.movevars.maxspeed );
+	{
+		float limit = svgame.movevars.maxspeed;
+
+		/* The game sets client maxspeed at spawn; on the GameCube listen
+		 * route that can run before SV_UpdateMovevars( true ) fills
+		 * movevars, and bounding by 0 froze every player (ceres 2b22b9b:
+		 * bots and the human at maxspeed=0). Fall back to the cvar. */
+		if( limit <= 0.0f )
+			limit = Cvar_VariableValue( "sv_maxspeed" );
+		if( limit > 0.0f )
+			fNewMaxspeed = bound( -limit, fNewMaxspeed, limit );
+	}
 
 	// There isn't any reference to "maxspd" anywhere except some commented-out code in SDK
 	Info_SetValueForKeyf( cl->physinfo, "maxspd", MAX_INFO_STRING, "%.f", fNewMaxspeed );
@@ -5999,25 +6389,382 @@ static qboolean SV_GCMapEntityDiagVerbose( void )
 
 /* CapFaces progressive spawn: decorative ents are optional when Flipper draws
  * from cf_*.gcp. Soft-skip them so dense maps fit the 460 tip edict BSS. */
-static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
+/* Point entities a match cannot start without: team spawn points and the
+ * capture points. When the heap tip runs out during entity load they are still
+ * spawned (each needs only its private slab slot); everything else is skipped. */
+static qboolean SV_GCEntityKeptWhenStarved( const char *classname )
+{
+	return classname
+		&& ( !Q_strncmp( classname, "info_player_", 12 ) || !Q_strcmp( classname, "dod_control_point" ));
+}
+
+/* Entities retail DoD maps need for parity: brush walls players collide with
+ * or see, and the map logic their target chains run through. They spawn on
+ * the DoD route unless the entity slab or edict table is nearly spent; then they
+ * fall back to the old soft-skip so the map still loads. */
+static qboolean SV_GCParityEntity( const char *classname )
+{
+	return !Q_strcmp( classname, "func_wall" )
+		|| !Q_strcmp( classname, "func_illusionary" )
+		|| !Q_strcmp( classname, "func_wall_toggle" )
+		|| !Q_strcmp( classname, "info_target" )
+		|| !Q_strcmp( classname, "trigger_relay" )
+		|| !Q_strcmp( classname, "trigger_auto" )
+		|| !Q_strcmp( classname, "trigger_changetarget" )
+		/* Map sound and scripted effects, kept within the edict budget:
+		 * the round-win fanfares (ambience/uswin.wav, germanwin.wav,
+		 * britwin.wav) are ambient_generics fired by the win relays, and
+		 * map ambience, scripted blasts and smoke come from these too. */
+		|| !Q_strcmp( classname, "ambient_generic" )
+		|| !Q_strcmp( classname, "env_explosion" )
+		|| !Q_strcmp( classname, "env_shooter" )
+		|| !Q_strcmp( classname, "env_sprite" )
+		|| !Q_strcmp( classname, "env_shake" );
+}
+
+/* Their private data comes from the static entity slab, not the heap (on
+ * dod_charlie the heap is already under 48 KiB during the entity loop, which
+ * skipped every func_wall). So the guard is the slab and the edict table,
+ * plus a true heap floor for the strings and links each one adds. */
+/* How many parity entities this map can keep: what the edict table holds
+ * after the entities that always spawn (SV_GCBudgetParityEntities), so the
+ * ones late in the lump (doors, capture areas, round logic) still fit. */
+static int gc_parity_budget = 0x7fffffff;
+static int gc_parity_kept;
+/* Parity tiers, kept in this order when the budget is short: 0 brush walls
+ * players collide with, 1 map logic (target chains, ambient_generic sounds,
+ * env_explosion), 2 switchable lights and decorative effects. */
+#define GC_PARITY_TIERS 3
+static int gc_parity_tier_budget[GC_PARITY_TIERS] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
+static int gc_parity_tier_kept[GC_PARITY_TIERS];
+static int gc_parity_tier_count[GC_PARITY_TIERS];	/* the census's per-tier totals, for the static wall credit */
+/* Slots left free for run-time entities (weapons, grenades, weapon boxes,
+ * temp ents). DoD builds have five client slots; four bots and a player
+ * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
+#define GC_PARITY_RUNTIME_RESERVE 32
+/* Per player: a DoD loadout is three or four weapon entities plus grenades in
+ * flight; the fixed 32 was sized for five slots and ran out at 12 bots (kalt,
+ * 8 bots, reached 445 of 460 edicts). Eight more cover weapon boxes
+ * (DOD_MAX_BOXES 6) and temp ents. */
+#define GC_PARITY_RUNTIME_PER_CLIENT 4
+static int SV_GCParityRuntimeReserve( void )
+{
+	const int scaled = GC_PARITY_RUNTIME_PER_CLIENT * svs.maxclients + 8;
+
+	return scaled > GC_PARITY_RUNTIME_RESERVE ? scaled : GC_PARITY_RUNTIME_RESERVE;
+}
+
+/* The edicts a map's own entities may fill. A capture build's bigger table
+ * (XASH_GC_MAX_EDICTS) is for the scripted cast: with the map allowed into
+ * it, dod_charlie's optional entities took ~100 of the extra slots and a
+ * 48-actor cast still came up 24 short. */
+#ifndef GC_MAP_EDICT_CAP
+#define GC_MAP_EDICT_CAP 460
+#endif
+static int SV_GCMapEdictCap( void )
+{
+	return GI->max_edicts < GC_MAP_EDICT_CAP ? GI->max_edicts : GC_MAP_EDICT_CAP;
+}
+
+/* The heap a parity entity needs to spawn. Solid walls (tier 0) and pure logic entities (relays, retargeters, auto
+ * triggers, info_target: an edict and a 112-byte slab entry, no model/sound/sprite load) cost almost no heap, so they
+ * only give way at 4 KB; everything else keeps the 16 KB guard. Charlie's entities spawn with 13-16 KB free: at a flat
+ * 16 KB its whole objective logic (relays/changetargets) was dropped from run to run. */
+static unsigned SV_GCParityHeapFloorKB( const char *classname, int tier )
+{
+	if( tier == 0 || !Q_strcmp( classname, "trigger_relay" ) || !Q_strcmp( classname, "trigger_changetarget" )
+		|| !Q_strcmp( classname, "trigger_auto" ) || !Q_strcmp( classname, "info_target" ))
+		return 4;
+	return 16;
+}
+
+static int SV_GCParityTier( const char *classname )
+{
+	if( !Q_strcmp( classname, "func_wall" ) || !Q_strcmp( classname, "func_wall_toggle" )
+		|| !Q_strcmp( classname, "func_illusionary" ))
+		return 0;
+	if( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )
+		|| !Q_strcmp( classname, "env_shooter" ) || !Q_strcmp( classname, "env_sprite" )
+		|| !Q_strcmp( classname, "env_shake" ))
+		return 2;
+	return 1;
+}
+
+/* Which condition tripped, for the per-class tally (heap, slab, edicts, budget). */
+static int gc_parity_why[4];
+
+static qboolean SV_GCEntityPressure( unsigned floor_kb )
+{
+	/* Tier 0 (func_wall family) is solid geometry players walk into and shoot at: it costs an edict and a 112-byte slab
+	 * entry, almost no heap, so it only gives way at 4 KB. The rest keeps the 16 KB guard. (Charlie sat at 13-16 KB
+	 * when the entities spawned: whether ALL its parity entities, walls included, were dropped depended on noise.) */
+	const qboolean heap = GC_MemHeapFreeBytes() < floor_kb * 1024u;
+	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
+	const qboolean ents = svgame.numEntities >= SV_GCMapEdictCap() - SV_GCParityRuntimeReserve();
+
+	if( heap )
+		gc_parity_why[0]++;
+	else if( slab )
+		gc_parity_why[1]++;
+	else if( ents )
+		gc_parity_why[2]++;
+	return heap || slab || ents;
+}
+
+/* An unnamed func_illusionary is non-solid decoration nothing can target:
+ * the CapFaces world bake already draws its faces, so an edict for it would
+ * only cost a networked entity per frame (dod_charlie has 95). */
+static qboolean SV_GCBakedIllusionary( const char *classname, qboolean named )
+{
+	return !named && !Q_strcmp( classname, "func_illusionary" );
+}
+
+/* GoldSrc's CLight removes itself unless it has a targetname; a named light
+ * is a switchable light style and counts as a parity entity. */
+static qboolean SV_GCParityLight( const edict_t *ent, const char *classname )
+{
+	return ( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" ))
+		&& ent && ent->v.targetname;
+}
+
+/* Per-class tally of the parity gate (kept / skipped), printed once at the "entity spawn" stage. */
+static struct { char name[32]; int kept, skipped; } gc_parity_tally[32];
+
+static void SV_GCParityTally( const char *classname, qboolean skip )
+{
+	int i;
+
+	for( i = 0; i < ARRAYSIZE( gc_parity_tally ) && gc_parity_tally[i].name[0]; i++ )
+		if( !Q_strcmp( gc_parity_tally[i].name, classname ))
+			break;
+	if( i >= ARRAYSIZE( gc_parity_tally ))
+		return;
+	if( !gc_parity_tally[i].name[0] )
+		Q_strncpy( gc_parity_tally[i].name, classname, sizeof( gc_parity_tally[i].name ));
+	if( skip )
+		gc_parity_tally[i].skipped++;
+	else
+		gc_parity_tally[i].kept++;
+}
+
+void SV_GCParityReport( void )
+{
+	char line[512];
+	int i, n = 0;
+
+	for( i = 0; i < ARRAYSIZE( gc_parity_tally ) && gc_parity_tally[i].name[0]; i++ )
+		n += Q_snprintf( line + n, sizeof( line ) - n, " %s=%d/%d", gc_parity_tally[i].name,
+			gc_parity_tally[i].kept, gc_parity_tally[i].skipped );
+	if( n > 0 )
+		Con_Reportf( "Xash3D GameCube: DoD parity tally (kept/skipped):%s | pressure: heap<16KB %d, private slab %d, edicts %d; budget/tier skips are the rest\n", line,
+			gc_parity_why[0], gc_parity_why[1], gc_parity_why[2] );
+	memset( gc_parity_why, 0, sizeof( gc_parity_why ));
+	memset( gc_parity_tally, 0, sizeof( gc_parity_tally ));
+}
+
+/* gc_static_walls: 0 off, 3 records without edict and without the draw path (diagnostic), 1 unnamed plain func_walls become static records with no edict (collision only until the
+ * client side draws them), 2 records AND edicts (the self test compares them at spawn complete). */
+int SV_GCStaticWallsMode( void )
+{
+	/* Not Cvar_Get: that would replace the FCVAR_TEMPORARY cvar the disc cfg ("cvar gc_static_walls 2") created with a
+	 * fresh default. The console (server.cfg / autoexec) can still create it. */
+	convar_t *cv = Cvar_FindVar( "gc_static_walls" );
+
+	return cv ? (int)cv->value : 0;
+}
+
+static qboolean SV_GCStaticWallRecord( edict_t *ent )
+{
+	const char *name = SV_GetString( ent->v.model );
+	model_t *mod;
+	int mi;
+
+	if( !name || name[0] != '*' || ent->v.targetname || ent->v.rendermode != kRenderNormal || ent->v.renderfx != kRenderFxNone
+		|| !VectorIsNull( ent->v.angles ))
+		return false;
+	if(( mi = SV_ModelIndex( name )) <= 0 || mi >= MAX_MODELS )
+		return false;
+	mod = sv.models[mi];
+	if( !mod )
+		mod = Mod_ForName( sv.model_precache[mi], false, false );
+	if( !mod || mod->type != mod_brush )
+		return false;
+	if( !SV_GCStaticWallAdd( mi, ent->v.origin, mod->mins, mod->maxs ))
+		return false;
+	/* In mode 1 this wall never gets an edict: its tier-0 slot in the edict budget is free for the map logic (tier 1),
+	 * which the census sized as if every wall were an edict. */
+	if(( SV_GCStaticWallsMode() == 1 || SV_GCStaticWallsMode() == 3 ) && gc_parity_tier_budget[1] < gc_parity_tier_count[1] )
+	{
+		gc_parity_tier_budget[1]++;
+		gc_parity_budget++;
+	}
+	return true;
+}
+
+/* Self test (mode 2, at spawn complete): the same trace against each record's hull and against its func_wall edict must
+ * agree exactly; prints the mismatch count and the first few. */
+void SV_GCStaticWallsSelfTest( void )
+{
+	static const float hulls[3][6] = {
+		{ 0, 0, 0, 0, 0, 0 }, { -16, -16, -36, 16, 16, 36 }, { -16, -16, -18, 16, 16, 18 } };
+	int i, k, tests = 0, bad = 0, noedict = 0, n = SV_GCStaticWallCount();
+
+	if( SV_GCStaticWallsMode() != 2 || n <= 0 )
+		return;
+	for( i = 0; i < n; i++ )
+	{
+		vec3_t amin, amax;
+		int mi, j;
+		edict_t *ed = NULL;
+
+		SV_GCStaticWallBounds( i, amin, amax, &mi );
+		for( j = 1; j < svgame.numEntities; j++ )
+		{
+			edict_t *e = SV_EdictNum( j );
+
+			if( !e->free && e->v.modelindex == mi && e->v.solid == SOLID_BSP && !Q_strcmp( SV_ClassName( e ), "func_wall" ))
+			{
+				ed = e;
+				break;
+			}
+		}
+		if( !ed )
+		{
+			noedict++;
+			continue;
+		}
+		for( k = 0; k < 96; k++ )
+		{
+			vec3_t start, end, mins, maxs;
+			trace_t a, b;
+			const float *hl = hulls[k % 3];
+			int c;
+
+			for( c = 0; c < 3; c++ )
+			{
+				start[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+				end[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+				mins[c] = hl[c];
+				maxs[c] = hl[3 + c];
+			}
+			SV_ClipMoveToEntity( ed, start, mins, maxs, end, &a );
+			SV_GCStaticWallTrace( i, start, mins, maxs, end, &b );
+			tests++;
+			if( a.fraction != b.fraction || a.startsolid != b.startsolid || a.allsolid != b.allsolid
+				|| !VectorCompare( a.plane.normal, b.plane.normal ) || !VectorCompare( a.endpos, b.endpos ))
+			{
+				if( bad++ < 4 )
+					Con_Reportf( S_ERROR "Xash3D GameCube: static wall %d mismatch: frac %f/%f solid %d/%d normal (%.2f %.2f %.2f)/(%.2f %.2f %.2f)\n",
+						i, a.fraction, b.fraction, a.startsolid, b.startsolid, a.plane.normal[0], a.plane.normal[1], a.plane.normal[2],
+						b.plane.normal[0], b.plane.normal[1], b.plane.normal[2] );
+			}
+		}
+	}
+	{
+		/* Whole-path check: SV_Move with the records on (records + the edicts) against the edicts alone must agree on
+		 * everything except which edict a wall hit reports (the world for a record). */
+		extern qboolean gc_static_walls_disable;
+		int mv_tests = 0, mv_bad = 0, mv_world = 0, mv_startsolid = 0;
+
+		for( i = 0; i < n; i++ )
+		{
+			vec3_t amin, amax;
+			int mi, hk;
+
+			SV_GCStaticWallBounds( i, amin, amax, &mi );
+			for( k = 0; k < 120; k++ )
+			{
+				vec3_t start, end, mins, maxs;
+				trace_t a, b;
+				const float *hl = hulls[k % 3];
+				int c;
+
+				for( c = 0; c < 3; c++ )
+				{
+					start[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+					end[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+					mins[c] = hl[c];
+					maxs[c] = hl[3 + c];
+				}
+				gc_static_walls_disable = false;
+				a = SV_Move( start, mins, maxs, end, ( k & 1 ) ? MOVE_NOMONSTERS : MOVE_NORMAL, NULL, false );
+				gc_static_walls_disable = true;
+				b = SV_Move( start, mins, maxs, end, ( k & 1 ) ? MOVE_NOMONSTERS : MOVE_NORMAL, NULL, false );
+				gc_static_walls_disable = false;
+				mv_tests++;
+				if( a.ent == SV_EdictNum( 0 ) && b.ent != SV_EdictNum( 0 ))
+					mv_world++;
+				if( a.fraction != b.fraction || a.startsolid != b.startsolid || a.allsolid != b.allsolid
+					|| !VectorCompare( a.plane.normal, b.plane.normal ) || !VectorCompare( a.endpos, b.endpos ))
+				{
+					/* A trace that STARTS inside a solid is order dependent in World_CombineTraces (a startsolid trace
+					 * replaces whatever was combined before it), and the records run after the area-node walk: report
+					 * those separately from real disagreements. */
+					if( a.startsolid || b.startsolid || a.allsolid || b.allsolid )
+						mv_startsolid++;
+					else if( mv_bad++ < 6 )
+						Con_Reportf( S_ERROR "Xash3D GameCube: static wall SV_Move mismatch rec %d: frac %f/%f ent %d/%d\n",
+							i, a.fraction, b.fraction, a.ent ? NUM_FOR_EDICT( a.ent ) : -1, b.ent ? NUM_FOR_EDICT( b.ent ) : -1 );
+				}
+			}
+		}
+		Con_Reportf( "Xash3D GameCube: static wall SV_Move test: %d traces, %d mismatches (+%d start-solid order cases), %d hits reported as the world edict\n",
+			mv_tests, mv_bad, mv_startsolid, mv_world );
+	}
+	Con_Reportf( "Xash3D GameCube: static wall self test: %d records, %d traces, %d mismatches, %d records without an edict\n",
+		n, tests, bad, noedict );
+}
+
+static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *classname )
 {
 	if( COM_StringEmpty( classname ))
 		return false;
+	if( ent && SV_GCBakedIllusionary( classname, ent->v.targetname != 0 ))
+		return true;
+	if( ent && !Q_strcmp( classname, "func_wall" ) && SV_GCStaticWallsMode() >= 1 && SV_GCStaticWallRecord( (edict_t *)ent ))
+	{
+		if( SV_GCStaticWallsMode() == 1 || SV_GCStaticWallsMode() == 3 )
+			return true;	/* record only: no edict, no networked entity (3: and no draw path, to see what the world bake shows) */
+	}
+	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
+	{
+		static int kept, skipped;
+		const int tier = SV_GCParityTier( classname );
+		if( !kept && !skipped )
+		{
+			extern void GC_HeapCensusReport( const char *stage );
+			GC_HeapCensusReport( "first parity entity" );
+		}
+		const qboolean skip = SV_GCEntityPressure( SV_GCParityHeapFloorKB( classname, tier )) || gc_parity_kept >= gc_parity_budget
+			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
+
+		if( !skip )
+		{
+			gc_parity_kept++;
+			gc_parity_tier_kept[tier]++;
+		}
+
+		if( skip ) skipped++; else kept++;
+		SV_GCParityTally( classname, skip );
+		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
+			Con_Reportf( "Xash3D GameCube: DoD parity entity %s %s (kept=%d skipped=%d slab=%zu heap=%s edicts=%d)\n",
+				classname, skip ? "skipped" : "kept", kept, skipped, gc_ent_priv_slab_used,
+				Q_memprint( GC_MemHeapFreeBytes( )), svgame.numEntities );
+		return skip;
+	}
+
 	/* Tip-safe CapFaces: drop decorative ents early so players / triggers /
-	 * doors keep tip slots on dense maps (caen 621>460). Keeping func_wall /
-	 * cycler (props1) tip-starved caen to a black EFB — leave them skipped.
-	 * (20261110-032103 capped-32 allow also blacked caen; bake walls into
-	 * CapFaces spatial or defer post-densify instead.) */
+	 * doors keep tip slots on dense maps (caen 621>460). The func_wall
+	 * family and map logic below are only reached under pressure (see
+	 * SV_GCParityEntity); keeping them once tip-starved caen to a black EFB
+	 * (20261110-032103), before the heap guard existed.
+	 * multi_manager stays: DoD's round flow (allieswin_mm / axiswin_mm on
+	 * dod_charlie) runs through it, so without it no round ever ended. */
 	if( !Q_strcmp( classname, "func_wall" )
 		|| !Q_strcmp( classname, "func_illusionary" )
 		|| !Q_strcmp( classname, "func_wall_toggle" )
-		|| !Q_strcmp( classname, "ambient_generic" )
 		|| !Q_strcmp( classname, "infodecal" )
-		|| !Q_strcmp( classname, "env_sprite" )
 		|| !Q_strcmp( classname, "env_glow" )
-		|| !Q_strcmp( classname, "env_shooter" )
-		|| !Q_strcmp( classname, "env_explosion" )
-		|| !Q_strcmp( classname, "env_shake" )
 		|| !Q_strcmp( classname, "env_fade" )
 		|| !Q_strcmp( classname, "env_message" )
 		|| !Q_strcmp( classname, "env_beam" )
@@ -6025,11 +6772,12 @@ static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 		|| !Q_strcmp( classname, "env_bubbles" )
 		|| !Q_strcmp( classname, "light" )
 		|| !Q_strcmp( classname, "light_spot" )
-		|| !Q_strcmp( classname, "light_environment" )
+		/* light_environment stays: its Spawn sets sv_skyvec (KeyValue
+		 * alone set only the sky colour), and studio models take their
+		 * outdoor light direction from it, as in GoldSrc. */
 		|| !Q_strcmp( classname, "info_null" )
 		|| !Q_strcmp( classname, "info_target" )
 		|| !Q_strcmp( classname, "info_landmark" )
-		|| !Q_strcmp( classname, "multi_manager" )
 		|| !Q_strcmp( classname, "trigger_auto" )
 		|| !Q_strcmp( classname, "trigger_relay" )
 		|| !Q_strcmp( classname, "trigger_changetarget" )
@@ -6038,24 +6786,490 @@ static qboolean SV_GCCapFacesOptionalEntity( const char *classname )
 	return false;
 }
 
+/* Per-class entity census for the edict budget log (top classes first). */
+#define GC_CENSUS_MAX 64
+typedef struct { char name[32]; int count; } gc_census_t;
+
+static void SV_GCCensusAdd( gc_census_t *c, int *n, const char *classname )
+{
+	int i;
+
+	for( i = 0; i < *n; i++ )
+	{
+		if( !Q_strncmp( c[i].name, classname, sizeof( c[i].name ) - 1 ))
+		{
+			c[i].count++;
+			return;
+		}
+	}
+	if( *n >= GC_CENSUS_MAX )
+		return;
+	Q_strncpy( c[*n].name, classname, sizeof( c[*n].name ));
+	c[*n].count = 1;
+	( *n )++;
+}
+
+static void SV_GCCensusReport( const char *mapname, const char *what, gc_census_t *c, int n )
+{
+	char line[256];
+	int i, j, len = 0;
+
+	/* Insertion sort, most entities first. */
+	for( i = 1; i < n; i++ )
+	{
+		gc_census_t t = c[i];
+
+		for( j = i; j > 0 && c[j - 1].count < t.count; j-- )
+			c[j] = c[j - 1];
+		c[j] = t;
+	}
+	line[0] = '\0';
+	for( i = 0; i < n; i++ )
+	{
+		len += Q_snprintf( line + len, sizeof( line ) - len, " %s=%d", c[i].name, c[i].count );
+		if( len > 180 || i == n - 1 )
+		{
+			Con_Reportf( "Xash3D GameCube: %s census %s:%s\n", mapname, what, line );
+			line[0] = '\0';
+			len = 0;
+		}
+	}
+}
+
+/*
+ * Static props: retail DoD maps place most of their decoration as env_model /
+ * dod_object (dod_charlie: 177 of 904 entities). An unnamed one can never be
+ * targeted, so nothing in the map can change it; it is only a model at a
+ * place. Those skip the edict table (they used 150+ of charlie's 460 slots,
+ * leaving none for its walls and map logic) and go into this compact list,
+ * which the lean emit draws like the props it draws from edicts.
+ */
+gc_static_prop_t gc_static_props[GC_STATIC_PROPS_MAX];
+int gc_num_static_props;
+static char gc_static_prop_models[GC_STATIC_PROP_MODELS][64];
+static int gc_static_prop_nmodels, gc_static_prop_deferred;
+
+static qboolean SV_GCStaticPropClass( const char *classname )
+{
+	return !Q_strcmp( classname, "env_model" ) || !Q_strcmp( classname, "dod_object" );
+}
+
+/* A dod_object is a carried satchel/TNT charge when a dod_capture_area of the map asks for its object_group (charlie's tnt, escape's
+ * allies_obj, glider's bunkerbomb, jagd's documents, vicenza's tnt). The game spawns those as entities; every other dod_object (charlie's
+ * dev42, escape's axis_obj, caen's twelve tnt with no area) stays a static prop and costs no edict. The groups come from a pre-scan of the
+ * entity lump (SV_GCScanObjectGroups), run before the census and the spawn loop. */
+#define GC_OBJECT_GROUPS_MAX 8
+static char gc_object_groups[GC_OBJECT_GROUPS_MAX][32];
+static int gc_num_object_groups;
+
+static void SV_GCScanObjectGroups( char *entities )
+{
+	char key[256], value[256], classname[64], group[32];
+	int i;
+
+	gc_num_object_groups = 0;
+	while( entities && ( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
+	{
+		if( key[0] != '{' )
+			return;
+		classname[0] = group[0] = '\0';
+		for( ;; )
+		{
+			if(( entities = COM_ParseFile( entities, key, sizeof( key ))) == NULL )
+				return;
+			if( key[0] == '}' && key[1] == '\0' )
+				break;
+			if(( entities = COM_ParseFile( entities, value, sizeof( value ))) == NULL )
+				return;
+			if( !Q_strcmp( key, "classname" ))
+				Q_strncpy( classname, value, sizeof( classname ));
+			else if( !Q_strcmp( key, "area_object_group" ))
+				Q_strncpy( group, value, sizeof( group ));
+		}
+		if( Q_strcmp( classname, "dod_capture_area" ) || !group[0] )
+			continue;
+		for( i = 0; i < gc_num_object_groups; i++ )
+			if( !Q_strcmp( gc_object_groups[i], group ))
+				break;
+		if( i == gc_num_object_groups && gc_num_object_groups < GC_OBJECT_GROUPS_MAX )
+			Q_strncpy( gc_object_groups[gc_num_object_groups++], group, sizeof( gc_object_groups[0] ));
+	}
+}
+
+static qboolean SV_GCFunctionalObject( const char *classname, const char *group )
+{
+	int i;
+
+	if( !group || !group[0] || Q_strcmp( classname, "dod_object" ))
+		return false;
+	for( i = 0; i < gc_num_object_groups; i++ )
+		if( !Q_strcmp( gc_object_groups[i], group ))
+			return true;
+	return false;
+}
+
+/* media/gp_<map>.gcp (scripts/bake_props_goldsrc.py): every unnamed
+ * env_model / dod_object of the map as instanced display lists with their
+ * own textures, drawn by the renderer straight from ARAM on the host and on
+ * every client. With it no prop model is loaded at all, so nothing here is
+ * capped: the entities are only consumed. */
+static qboolean gc_static_prop_pack;
+static int gc_static_prop_packed;
+
+static void SV_GCStaticPropsReset( void )
+{
+	char path[96];
+
+	gc_num_static_props = 0;
+	gc_static_prop_nmodels = 0;
+	gc_static_prop_deferred = 0;
+	gc_static_prop_packed = 0;
+	Q_snprintf( path, sizeof( path ), "media/gp_%s.gcp", sv.name );
+	gc_static_prop_pack = !Sys_CheckParm( "-gcnoproppack" ) && FS_FileExists( path, false );
+}
+
+/* Model index for a static prop. Unique paths are capped like the game's own
+ * env_model cap (each lean studio costs MEM1); props past it stay unloaded,
+ * as they were when the game deferred them. */
+static int SV_GCStaticPropModel( const char *path )
+{
+	int i;
+
+	for( i = 0; i < gc_static_prop_nmodels; i++ )
+		if( !Q_stricmp( gc_static_prop_models[i], path ))
+			return SV_ModelIndex( path );
+	if( gc_static_prop_nmodels >= GC_STATIC_PROP_MODELS )
+		return 0;
+	i = pfnPrecacheModel( path );
+	if( i > 0 )
+		Q_strncpy( gc_static_prop_models[gc_static_prop_nmodels++], path, sizeof( gc_static_prop_models[0] ));
+	return i;
+}
+
+/* Named map props drawn from the prop pack (charlie's 88s, mortars, radio,
+ * pipes: the game's cap of six map models never loaded most of them).  The
+ * pack instance carries the ordinal of its entity: the count of named
+ * env_model/dod_object with a .mdl, in lump order, which is the order the
+ * edicts spawn in (scripts/bake_props_goldsrc.py static_props).  The edict
+ * stays for the game's logic and the pack draws the prop while the edict is
+ * drawable, so env_render shows and hides the good/destroyed pairs as in
+ * retail.  A remote client has no edicts and draws every named prop until
+ * the visibility bits are sent to it. */
+#define GC_NAMED_PROPS_MAX 255
+static short gc_named_prop_edict[GC_NAMED_PROPS_MAX];
+static int gc_named_prop_serial[GC_NAMED_PROPS_MAX];
+static int gc_named_prop_n;
+
+static void SV_GCIndexNamedProps( void )
+{
+	int e;
+
+	gc_named_prop_n = 0;
+	if( !gc_static_prop_pack )
+		return;
+	for( e = 1; e < svgame.numEntities && gc_named_prop_n < GC_NAMED_PROPS_MAX; e++ )
+	{
+		edict_t *ed = SV_EdictNum( e );
+		const char *cls, *mdl;
+		size_t l;
+
+		if( !SV_IsValidEdict( ed ) || !ed->v.targetname || !ed->v.model )
+			continue;
+		cls = SV_ClassName( ed );
+		if( !SV_GCStaticPropClass( cls ))
+			continue;
+		mdl = SV_GetString( ed->v.model );
+		l = mdl ? Q_strlen( mdl ) : 0;
+		if( l < 4 || Q_stricmp( mdl + l - 4, ".mdl" ))
+			continue;
+		gc_named_prop_serial[gc_named_prop_n] = ed->serialnumber;
+		gc_named_prop_edict[gc_named_prop_n++] = (short)e;
+	}
+	Con_Reportf( "Xash3D GameCube: named props %d indexed for the prop pack\n", gc_named_prop_n );
+}
+
+int SV_GCNamedPropVisible( int ord )
+{
+	edict_t *ed;
+
+	if( sv.state != ss_active || ord < 0 || ord >= gc_named_prop_n )
+		return 1;
+	ed = SV_EdictNum( gc_named_prop_edict[ord] );
+	/* Removed by the game (killtarget), or its slot was given to another entity. */
+	if( !SV_IsValidEdict( ed ) || ed->free || ed->serialnumber != gc_named_prop_serial[ord] )
+		return 0;
+	if( FBitSet( ed->v.effects, EF_NODRAW ))
+		return 0;
+	if( ed->v.rendermode != kRenderNormal && ed->v.renderamt <= 0.0f )
+		return 0;
+	return 1;
+}
+
+qboolean SV_GCEdictIsPackNamed( const edict_t *ent )
+{
+	const int e = NUM_FOR_EDICT( ent );
+
+	for( int i = 0; i < gc_named_prop_n; i++ )
+	{
+		if( gc_named_prop_edict[i] == e )
+			return ent->serialnumber == gc_named_prop_serial[i];
+	}
+	return false;
+}
+
+/* If the entity block at *pfile (just after its '{') is an unnamed env_model
+ * or dod_object, consume it into the static prop list and return true.
+ * Otherwise leave *pfile where it was. */
+static qboolean SV_GCTryStaticProp( char **pfile )
+{
+	char key[256], value[256], model[64], classname[64] = "", group[32] = "";
+	char *p = *pfile;
+	qboolean is_prop = false, named = false;
+	gc_static_prop_t prop;
+
+	/* -gcnostaticprops: spawn them as edicts again (A/B testing). */
+	if( !Sys_CheckParm( "-gcworldrender" ) || Sys_CheckParm( "-gcnostaticprops" ) || !p )
+		return false;
+	memset( &prop, 0, sizeof( prop ));
+	prop.scale = 1.0f;
+	prop.framerate = 1.0f;
+	prop.renderamt = 255;
+	model[0] = '\0';
+	for( ;; )
+	{
+		if(( p = COM_ParseFile( p, key, sizeof( key ))) == NULL )
+			return false;
+		if( key[0] == '}' && key[1] == '\0' )
+			break;
+		if(( p = COM_ParseFile( p, value, sizeof( value ))) == NULL )
+			return false;
+		if( !Q_strcmp( key, "classname" ))
+		{
+			if( !SV_GCStaticPropClass( value ))
+				return false;
+			Q_strncpy( classname, value, sizeof( classname ));
+			is_prop = true;
+		}
+		else if( !Q_strcmp( key, "object_group" ))
+			Q_strncpy( group, value, sizeof( group ));
+		else if( !Q_strcmp( key, "targetname" ) && value[0] )
+			named = true;
+		else if( !Q_strcmp( key, "model" ))
+			Q_strncpy( model, value, sizeof( model ));
+		else if( !Q_strcmp( key, "origin" ))
+			sscanf( value, "%f %f %f", &prop.origin[0], &prop.origin[1], &prop.origin[2] );
+		else if( !Q_strcmp( key, "angles" ))
+			sscanf( value, "%f %f %f", &prop.angles[0], &prop.angles[1], &prop.angles[2] );
+		else if( !Q_strcmp( key, "angle" ))
+		{
+			/* GoldSrc's "angle": yaw, with -1 up and -2 down. */
+			const float a = Q_atof( value );
+
+			if( a == -1.0f ) prop.angles[0] = -90.0f;
+			else if( a == -2.0f ) prop.angles[0] = 90.0f;
+			else prop.angles[1] = a;
+		}
+		else if( !Q_strcmp( key, "scale" ) && Q_atof( value ) > 0.0f )
+			prop.scale = Q_atof( value );
+		else if( !Q_strcmp( key, "framerate" ))
+			prop.framerate = Q_atof( value );
+		else if( !Q_strcmp( key, "sequence" ))
+			prop.sequence = (short)Q_atoi( value );
+		else if( !Q_strcmp( key, "skin" ))
+			prop.skin = (short)Q_atoi( value );
+		else if( !Q_strcmp( key, "body" ))
+			prop.body = (short)Q_atoi( value );
+		else if( !Q_strcmp( key, "rendermode" ))
+			prop.rendermode = (byte)Q_atoi( value );
+		else if( !Q_strcmp( key, "renderamt" ))
+			prop.renderamt = (byte)Q_atoi( value );
+		else if( !Q_strcmp( key, "renderfx" ))
+			prop.renderfx = (byte)Q_atoi( value );
+		else if( !Q_strcmp( key, "rendercolor" ))
+		{
+			int r = 0, g = 0, b = 0;
+
+			sscanf( value, "%d %d %d", &r, &g, &b );
+			prop.rendercolor.r = (byte)r;
+			prop.rendercolor.g = (byte)g;
+			prop.rendercolor.b = (byte)b;
+		}
+	}
+	if( !is_prop || named || SV_GCFunctionalObject( classname, group ) || ( !gc_static_prop_pack && gc_num_static_props >= GC_STATIC_PROPS_MAX ))
+		return false;
+
+	*pfile = p;
+	if( gc_static_prop_pack )
+	{
+		gc_static_prop_packed++;
+		return true;	/* the renderer draws it from the map's prop pack */
+	}
+	if( model[0] )
+		prop.modelindex = (short)SV_GCStaticPropModel( model );
+	if( prop.modelindex <= 0 )
+	{
+		gc_static_prop_deferred++;
+		return true;	/* no model (or past the cap): nothing to draw */
+	}
+	gc_static_props[gc_num_static_props++] = prop;
+	return true;
+}
+
+/* Send the static props to remote clients in the signon, as GoldSrc sends
+ * its static entities (svc_spawnstatic, no edict). The listen host already
+ * draws them from gc_static_props and skips these messages; a remote client
+ * fills its own copy of the list from them (cl_parse.c). */
+static void SV_GCSignonStaticProps( void )
+{
+	entity_state_t nullstate, state;
+	int i, sent = 0;
+	size_t before;
+
+	if( svs.maxclients <= 1 || gc_num_static_props <= 0 )
+		return;
+	before = (size_t)MSG_GetNumBytesWritten( &sv.signon );
+	memset( &nullstate, 0, sizeof( nullstate ));
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+
+		if( MSG_GetNumBytesLeft( &sv.signon ) < 64 )
+			break;
+		memset( &state, 0, sizeof( state ));
+		state.entityType = ENTITY_NORMAL;
+		state.modelindex = sp->modelindex;
+		VectorCopy( sp->origin, state.origin );
+		VectorCopy( sp->angles, state.angles );
+		state.scale = sp->scale;
+		state.framerate = sp->framerate;
+		state.sequence = sp->sequence;
+		state.skin = sp->skin;
+		state.body = sp->body;
+		state.rendermode = sp->rendermode;
+		state.renderamt = sp->renderamt;
+		state.renderfx = sp->renderfx;
+		state.rendercolor = sp->rendercolor;
+		MSG_BeginServerCmd( &sv.signon, svc_spawnstatic );
+		MSG_WriteDeltaEntity( &nullstate, &state, &sv.signon, true, DELTA_STATIC, sv.time, 0 );
+		sent++;
+	}
+	Con_Reportf( "Xash3D GameCube: static props signon %d/%d (%s)\n", sent, gc_num_static_props,
+		Q_memprint( (size_t)MSG_GetNumBytesWritten( &sv.signon ) - before ));
+}
+
+/* Pre-scan the entity lump: count the entities that always take an edict
+ * (everything but the soft-skipped decoration, classes the game DLL has no
+ * spawn function for, and the parity set), and give the parity set what the
+ * edict table has left after them, keeping 64 slots for run-time entities. */
+static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
+{
+	char key[2048], value[2048], classname[64];
+	int total = 0, parity = 0, optional = 0, nofunc = 0, statics = 0, must;
+	static gc_census_t census_must[GC_CENSUS_MAX], census_parity[GC_CENSUS_MAX];
+	int n_must = 0, n_parity = 0;
+	qboolean named;
+
+	int tier_count[GC_PARITY_TIERS] = { 0, 0, 0 }, baked = 0, t, left;
+	char object_group[32];
+
+	SV_GCScanObjectGroups( entities );
+	gc_parity_kept = 0;
+	gc_parity_budget = 0x7fffffff;
+	for( t = 0; t < GC_PARITY_TIERS; t++ )
+	{
+		gc_parity_tier_kept[t] = 0;
+		gc_parity_tier_budget[t] = 0x7fffffff;
+	}
+	if( !entities || !Sys_CheckParm( "-gcworldrender" ))
+		return;
+	while(( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
+	{
+		if( key[0] != '{' )
+			return;	/* malformed: leave it to the real parser */
+		classname[0] = object_group[0] = '\0';
+		named = false;
+		for( ;; )
+		{
+			if(( entities = COM_ParseFile( entities, key, sizeof( key ))) == NULL )
+				return;
+			if( key[0] == '}' && key[1] == '\0' )
+				break;
+			if(( entities = COM_ParseFile( entities, value, sizeof( value ))) == NULL )
+				return;
+			if( !Q_strcmp( key, "classname" ))
+				Q_strncpy( classname, value, sizeof( classname ));
+			else if( !Q_strcmp( key, "targetname" ) && value[0] )
+				named = true;
+			else if( !Q_strcmp( key, "object_group" ))
+				Q_strncpy( object_group, value, sizeof( object_group ));
+		}
+		if( !classname[0] || !Q_strcmp( classname, "worldspawn" ))
+			continue;
+		total++;
+		if( SV_GCStaticPropClass( classname ) && !named && !SV_GCFunctionalObject( classname, object_group ) && !Sys_CheckParm( "-gcnostaticprops" ))
+		{
+			statics++;
+			continue;
+		}
+		if( SV_GCBakedIllusionary( classname, named ))
+		{
+			baked++;
+			continue;
+		}
+		if( SV_GCParityEntity( classname )
+			|| (( !Q_strcmp( classname, "light" ) || !Q_strcmp( classname, "light_spot" )) && named ))
+		{
+			parity++;
+			tier_count[SV_GCParityTier( classname )]++;
+			SV_GCCensusAdd( census_parity, &n_parity, classname );
+		}
+		else if( SV_GCCapFacesOptionalEntity( NULL, classname ))
+			optional++;
+		else if( !SV_GetEntityClass( classname ))
+			nofunc++;
+		else
+			SV_GCCensusAdd( census_must, &n_must, classname );
+	}
+	must = total - parity - optional - nofunc - statics - baked;
+	gc_parity_budget = SV_GCMapEdictCap() - SV_GCParityRuntimeReserve() - ( svs.maxclients + 1 ) - must;
+	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
+		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
+	/* Walls first, then map logic, then lights. */
+	for( t = 0; t < GC_PARITY_TIERS; t++ )
+		gc_parity_tier_count[t] = tier_count[t];
+	for( t = 0, left = gc_parity_budget; t < GC_PARITY_TIERS; t++ )
+	{
+		gc_parity_tier_budget[t] = Q_min( tier_count[t], left );
+		left -= gc_parity_tier_budget[t];
+	}
+	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d static-props=%d (edicts %d, run-time reserve %d)\n",
+		mapname, total, must, parity, gc_parity_budget, optional, nofunc, statics, GI->max_edicts, SV_GCParityRuntimeReserve( ));
+	Con_Reportf( "Xash3D GameCube: %s parity tiers walls %d/%d logic %d/%d lights %d/%d, baked illusionary %d\n",
+		mapname, gc_parity_tier_budget[0], tier_count[0], gc_parity_tier_budget[1], tier_count[1],
+		gc_parity_tier_budget[2], tier_count[2], baked );
+	SV_GCCensusReport( mapname, "always", census_must, n_must );
+	SV_GCCensusReport( mapname, "parity", census_parity, n_parity );
+}
+
 /* Consume one `{ ... }` entity block without allocating an edict. */
 static qboolean SV_GCSkipBraceEntity( char **pfile )
 {
 	char token[2048];
-	int depth = 1;
 
 	if( !pfile || !*pfile )
 		return false;
-	while( depth > 0 )
+	/* Walk key/value pairs: a value such as "{CRACK4" (a texture name on
+	 * dod_charlie's func_walls) is not a brace, so counting every token that
+	 * starts with one read on to EOF and Host_Error'd the load. */
+	for( ;; )
 	{
 		if(( *pfile = COM_ParseFile( *pfile, token, sizeof( token ))) == NULL )
 			return false;
-		if( token[0] == '{' )
-			depth++;
-		else if( token[0] == '}' )
-			depth--;
+		if( token[0] == '}' && token[1] == '\0' )
+			return true;
+		if(( *pfile = COM_ParseFile( *pfile, token, sizeof( token ))) == NULL )
+			return false;
 	}
-	return true;
 }
 
 /* G433: Replace policy-based entity inhibition with measured budgeting
@@ -6180,10 +7394,22 @@ static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index )
 		if( !Q_strcmp( keyname, "classname" ))
 		{
 #if XASH_DODGC_NETWORK
-			/* The current game DLL selects DM spawns by classname. Merely
-			 * exporting DoD aliases left both players at info_player_start. */
-			if( !Q_strcmp( value, "info_player_allies" ) || !Q_strcmp( value, "info_player_axis" ))
-				Q_strncpy( value, "info_player_deathmatch", sizeof( value ));
+			/* Team spawns keep their retail classname when the game DLL
+			 * exports it. A DLL that only knows DM starts gets them as
+			 * info_player_deathmatch, with the side kept in v.team
+			 * (1 Allies, 2 Axis) so spawns stay on the right side. */
+			int spawn_team = 0;
+
+			if( !Q_strcmp( value, "info_player_allies" ))
+				spawn_team = 1;
+			else if( !Q_strcmp( value, "info_player_axis" ))
+				spawn_team = 2;
+			if( spawn_team )
+			{
+				ent->v.team = spawn_team;
+				if( !SV_GetEntityClass( value ))
+					Q_strncpy( value, "info_player_deathmatch", sizeof( value ));
+			}
 #endif
 			KeyValueData kvd = {
 				.szClassName = NULL,
@@ -6365,6 +7591,27 @@ static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index )
 		}
 
 		pkvd[i].szClassName = (char *)classname;
+		/* light_environment: "pitch" overrides the pitch of "angles" whatever
+		 * the key order (the compile tools read it that way). dod_charlie
+		 * writes pitch first, so "angles" reset it to 0 and the sun lay flat. */
+		if( !Q_strcmp( classname, "light_environment" ) && !Q_strcmp( keyname, "pitch" ))
+		{
+			int k;
+
+			for( k = i + 1; k < numpairs; k++ )
+				if( !Q_strcmp( pkvd[k].szKeyName, "angles" ) || !Q_strcmp( pkvd[k].szKeyName, "angle" ))
+					break;
+			if( k < numpairs )
+			{
+				/* Swap it behind the later angles key; handled there. */
+				KeyValueData tmp = pkvd[i];
+
+				pkvd[i] = pkvd[k];
+				pkvd[k] = tmp;
+				i--;
+				continue;
+			}
+		}
 		svgame.dllFuncs.pfnKeyValue( ent, &pkvd[i] );
 
 		SV_FreeKeyValueString( keyname );
@@ -6394,12 +7641,46 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	Assert( entities != NULL );
 #if XASH_GAMECUBE
 	SV_GCCampaignScanEntities( mapname, entities );
+	/* The BSP loader reserves private-data overflow only for ≥64 KiB entity
+	 * lumps. c1a2c's lump is smaller, yet its own entities plus the ones a
+	 * transition restores overran the 128 KiB slab, and an ammo_glockclip
+	 * was constructed into a NULL block. On the World DL route the world is
+	 * fully loaded by now and the arena tail above it is free (the live
+	 * surface table it was sized for is never built), so reserve here.
+	 * Start above the tail peak, not the highwater: a lean load lowers the
+	 * highwater to 0 while the world-texture carves above it stay live. */
+	if( GC_MenuRunsServer( ))
+	{
+		extern void Mod_GCWorldCanaryCheck( const char *when );
+		Mod_GCWorldCanaryCheck( "after load, before arena claims" );
+	}
+	if( GC_MenuRunsServer() && !SV_GCPrivateOverflowReserved())
+	{
+		SV_GCReservePrivateOverflow( GC_MapArenaFind( GC_ENTITY_OVERFLOW_BYTES ),
+			GC_ENTITY_OVERFLOW_BYTES );
+		if( !SV_GCPrivateOverflowReserved())
+			Con_Reportf( S_WARN "Xash3D GameCube: entity overflow unavailable at spawn (tail high-water %s)\n",
+				Q_memprint( GC_MapLoadBufferTailHighwater()));
+	}
+	if( GC_MenuRunsServer( ))
+		Con_Reportf( "Xash3D GameCube: arena budget map=%s entity_overflow=%s arena_tail_left=%s\n", mapname,
+			SV_GCPrivateOverflowReserved() ? "64 Kb" : "none",
+			Q_memprint( GC_MapArenaLargestGap()));
+	SV_GCSizePacketEntities();
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;
 	memset( gc_ent_priv_slab_bits, 0, sizeof( gc_ent_priv_slab_bits ));
+#if XASH_DODGC_NETWORK
+	gc_box_priv_used = 0;
+#endif
 	gc_ent_priv_slab_hits = 0;
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;
+	SV_GCStaticPropsReset();
+	SV_GCBudgetParityEntities( mapname, entities );
+	LazyLogic_Reset();
+	gc_lazy_logs = 0;
+	gc_lazy_active = SV_GCLazyLogicCvar() && Sys_CheckParm( "-gcworldrender" );
 #endif
 
 	// user dll can override spawn entities function (Xash3D extension)
@@ -6409,6 +7690,8 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 		int entity_index = 0;
 #if XASH_GAMECUBE
 		int gc_cf_opt_skip = 0;
+		const char *gc_ents_base = entities;
+		const char *gc_blk = NULL;
 #endif
 
 		// parse ents
@@ -6431,6 +7714,13 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 				create_world = false;
 				ent = SV_EdictNum( 0 ); // already initialized
 			}
+#if XASH_GAMECUBE
+			else if( SV_GCTryStaticProp( &entities ))
+			{
+				entity_index++;
+				continue;
+			}
+#endif
 			else ent = SV_AllocEdict();
 #if XASH_GAMECUBE
 			/* CapFaces tip: no free edict — skip remaining brace blocks. */
@@ -6458,6 +7748,9 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 
 			if( SV_GCMapEntityDiagVerbose() && entity_index >= 400 )
 				Con_Reportf( "Xash3D GameCube: entity parse begin=%d\n", entity_index );
+#if XASH_GAMECUBE
+			gc_blk = entities;	/* just after this entity's '{' */
+#endif
 			if( !SV_ParseEdict( &entities, ent, entity_index++ ))
 			{
 #if XASH_GAMECUBE
@@ -6531,7 +7824,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			/* Progressive CapFaces: drop decorative ents early so players /
 			 * triggers / doors keep tip slots on dense maps (caen 621>460). */
 			if( Sys_CheckParm( "-gcworldrender" )
-				&& SV_GCCapFacesOptionalEntity( SV_ClassName( ent )))
+				&& SV_GCCapFacesOptionalEntity( ent, SV_ClassName( ent )))
 			{
 				if( gc_cf_opt_skip < 12 )
 				{
@@ -6539,6 +7832,14 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 						entity_index - 1, SV_ClassName( ent ));
 				}
 				gc_cf_opt_skip++;
+				/* Lazy logic: keep where this one's text is, spawn it when something looks its name up. */
+				if( gc_lazy_active && ent->v.targetname && gc_blk && SV_GCLazyEligibleClass( SV_ClassName( ent )))
+				{
+					const char *tn = SV_GetString( ent->v.targetname );
+
+					if( tn && tn[0] )
+						LazyLogic_Add( LazyLogic_Hash( tn ), (uint32_t)( gc_blk - gc_ents_base ), (uint32_t)( entities - gc_blk ));
+				}
 				SV_FreeEdict( ent );
 				inhibited++;
 				continue;
@@ -6562,13 +7863,21 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			if( entity_index > 1 && GC_MemHeapFreeBytes() <
 				( !Q_strnicmp( sv.name, "dod_", 4 ) ? 2u * 1024u : 8u * 1024u ))
 			{
-				Con_Reportf( S_WARN "Xash3D GameCube: %s tip-starved before spawn entity=%d class=%s tip=%s; stop entity load\n",
-					__func__, entity_index - 1, SV_ClassName( ent ),
-					Q_memprint( GC_MemHeapFreeBytes() ));
-				if( ent && !ent->free && NUM_FOR_EDICT( ent ) != 0 )
-					SV_FreeEdict( ent );
-				inhibited++;
-				break;
+				static int gc_starved_logged;
+
+				if( !SV_GCEntityKeptWhenStarved( SV_ClassName( ent )))
+				{
+					/* Skip this entity and keep going: the spawn points and capture
+					 * points further down the lump must still load. */
+					if( gc_starved_logged++ < 8 )
+						Con_Reportf( S_WARN "Xash3D GameCube: %s tip-starved before spawn entity=%d class=%s tip=%s; skipping\n",
+							__func__, entity_index - 1, SV_ClassName( ent ),
+							Q_memprint( GC_MemHeapFreeBytes() ));
+					if( ent && !ent->free && NUM_FOR_EDICT( ent ) != 0 )
+						SV_FreeEdict( ent );
+					inhibited++;
+					continue;
+				}
 			}
 #endif
 			spawn_result = svgame.dllFuncs.pfnSpawn( ent );
@@ -6634,6 +7943,10 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 			}
 		}
 		Con_Reportf( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
+		Con_Reportf( "Xash3D GameCube: static props %d drawn from %d models, %d without a model, %d in the prop pack; edicts in use %d\n",
+			gc_num_static_props, gc_static_prop_nmodels, gc_static_prop_deferred, gc_static_prop_packed, svgame.numEntities );
+		SV_GCIndexNamedProps();
+		SV_GCSignonStaticProps();
 		SYS_Report( "Xash3D GameCube: entity spawn complete; game-rejected=%d\n", inhibited );
 #endif
 	}

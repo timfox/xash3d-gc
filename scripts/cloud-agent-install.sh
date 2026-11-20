@@ -114,7 +114,7 @@ SERVER_ARCHIVE="$REPO_ROOT/OUT/hlsdk-gamecube/valve/dlls/libhl_gamecube_ppc.a"
 
 if [ ! -d "$HLSDK_DIR/.git" ]; then
 	log "Cloning hlsdk-portable (mobile_hacks)"
-	git clone --depth 1 -b mobile_hacks https://github.com/FWGS/hlsdk-portable "$HLSDK_DIR"
+	git clone --depth 1 -b mobile_hacks https://github.com/timfox/hlsdk-portable "$HLSDK_DIR"
 fi
 
 log "Applying GameCube hooks to hlsdk-portable (idempotent)"

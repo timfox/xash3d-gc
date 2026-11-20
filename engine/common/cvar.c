@@ -291,8 +291,49 @@ static qboolean Cvar_ValidateVarName( const char *s, qboolean isvalue )
 	return true;
 }
 
+#if XASH_GAMECUBE
+/* Client DLL cvars (linked into the DOL, string literal names) keep their
+ * name pointer, and every cvar's auto description ("client archived cvar"
+ * and a few more) is shared from this table: HUD_Init registers ~100. */
+#define FCVAR_GC_STATICNAME ( 1U << 24 )
+static char gc_cvar_desc_pool[512];
+static size_t gc_cvar_desc_used;
+
+static qboolean Cvar_GCDescShared( const char *p )
+{
+	return p >= gc_cvar_desc_pool && p < gc_cvar_desc_pool + sizeof( gc_cvar_desc_pool );
+}
+
+static char *Cvar_GCShareDesc( const char *desc )
+{
+	size_t at = 0, len;
+
+	if( !desc )
+		return NULL;
+	len = Q_strlen( desc ) + 1;
+	while( at < gc_cvar_desc_used )
+	{
+		if( !Q_strcmp( gc_cvar_desc_pool + at, desc ))
+			return gc_cvar_desc_pool + at;
+		at += Q_strlen( gc_cvar_desc_pool + at ) + 1;
+	}
+	/* Only short, repeated descriptions are worth a slot. */
+	if( len > 40 || gc_cvar_desc_used + len > sizeof( gc_cvar_desc_pool ))
+		return NULL;
+	memcpy( gc_cvar_desc_pool + gc_cvar_desc_used, desc, len );
+	gc_cvar_desc_used += len;
+	return gc_cvar_desc_pool + gc_cvar_desc_used - len;
+}
+#endif
+
 static void Cvar_Free( convar_t *var )
 {
+#if XASH_GAMECUBE
+	if( FBitSet( var->flags, FCVAR_GC_STATICNAME ))
+		var->name = NULL;
+	if( Cvar_GCDescShared( var->desc ))
+		var->desc = NULL;
+#endif
 	freestring( var->name );
 	freestring( var->string );
 	freestring( var->def_string );
@@ -466,8 +507,29 @@ convar_t *Cvar_Get( const char *name, const char *value, uint32_t flags, const c
 				Con_Reportf( "%s change description from %s to %s\n", var->name, var->desc, var_desc );
 
 			// update description if needs
+#if XASH_GAMECUBE
+			{
+				char *shared = Cvar_GCShareDesc( var_desc );
+
+				if( shared )
+				{
+					if( !Cvar_GCDescShared( var->desc ))
+						Mem_Free( var->desc );
+					var->desc = shared;
+				}
+				else
+				{
+					if( Cvar_GCDescShared( var->desc ))
+						var->desc = Mem_Malloc( cvar_pool, len );
+					else
+						var->desc = Mem_Realloc( cvar_pool, var->desc, len );
+					Q_strncpy( var->desc, var_desc, len );
+				}
+			}
+#else
 			var->desc = Mem_Realloc( cvar_pool, var->desc, len );
 			Q_strncpy( var->desc, var_desc, len );
+#endif
 		}
 
 		return var;
@@ -475,12 +537,24 @@ convar_t *Cvar_Get( const char *name, const char *value, uint32_t flags, const c
 
 	// allocate a new cvar
 	var = Mem_Malloc( cvar_pool, sizeof( *var ));
+#if XASH_GAMECUBE
+	if( FBitSet( flags, FCVAR_CLIENTDLL ))
+		var->name = (char *)name;
+	else
+#endif
 	var->name = copystringpool( cvar_pool, name );
 	var->string = copystringpool( cvar_pool, value );
 	var->def_string = copystringpool( cvar_pool, value );
+#if XASH_GAMECUBE
+	if(( var->desc = Cvar_GCShareDesc( var_desc )) == NULL )
+#endif
 	var->desc = copystringpool( cvar_pool, var_desc );
 	var->value = Q_atof( var->string );
 	var->flags = flags|FCVAR_ALLOCATED;
+#if XASH_GAMECUBE
+	if( FBitSet( flags, FCVAR_CLIENTDLL ))
+		SetBits( var->flags, FCVAR_GC_STATICNAME );
+#endif
 
 	// link the variable in alphanumerical order
 	for( cur = NULL, find = cvar_vars; find && Q_strcmp( find->name, var->name ) < 0; cur = find, find = find->next );

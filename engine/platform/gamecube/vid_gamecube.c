@@ -19,6 +19,7 @@ Ported from Division-Zero-GX/xash3d-wii with libogc GX output for GameCube.
 #include "gamecube/mem_gamecube.h"
 #include "cl_tent.h"
 #include "platform/gamecube/tas_gamecube.h"
+#include "platform/gamecube/spec_cam.h"
 
 qboolean CL_GCSeedFlipperEfxProof( const float *org );
 
@@ -250,7 +251,9 @@ static void GC_AllocXFB( int i, GXRModeObj *mode )
 		return;
 	if( xfb[i] )
 		free( MEM_K1_TO_K0( xfb[i] ));
+	GC_MemSample( "pre-XFB" );
 	raw = SYS_AllocateFramebuffer( mode );
+	GC_MemSample( "post-XFB" );
 	if( !raw )
 	{
 		xfb[i] = NULL;
@@ -273,6 +276,62 @@ static void GC_FlipXFB( void )
 	else
 		which_fb = 0;
 }
+
+/* Late flip pacing. The main present queues the finished XFB with
+ * VIDEO_SetNextFramebuffer and returns without waiting for the retrace; the
+ * wait moves to just before the next EFB->XFB copy, which is the first point
+ * that writes the buffer VI may still be scanning out. A frame that runs a
+ * little over 16.7ms then costs its own time instead of locking the game to
+ * 33.4ms (30 FPS), and the swap still lands on a retrace (no tearing, 60 cap).
+ * -gcstrictvsync restores the old wait-after-present behaviour. */
+static qboolean gc_flip_pending;
+static u32 gc_flip_retrace;
+/* libogc has no retrace counter getter: count retraces from the VI
+ * post-retrace callback (registered once, on first use). */
+static volatile u32 gc_retrace_count;
+static qboolean gc_retrace_hooked;
+static VIRetraceCallback gc_retrace_prev;
+
+static void GC_PostRetrace( u32 retrace_cnt )
+{
+	gc_retrace_count++;
+	if( gc_retrace_prev )
+		gc_retrace_prev( retrace_cnt );
+}
+
+static u32 GC_RetraceNow( void )
+{
+	if( !gc_retrace_hooked )
+	{
+		gc_retrace_hooked = true;
+		gc_retrace_prev = VIDEO_SetPostRetraceCallback( GC_PostRetrace );
+	}
+	return gc_retrace_count;
+}
+static double gc_flip_wait_ms_total;
+static u32 gc_flip_wait_count;
+static u32 gc_flip_late_presents;	/* single XFB: presents that skipped the wait */
+
+static void GC_WaitPendingFlip( void )
+{
+	if( gc_flip_pending && GC_RetraceNow() == gc_flip_retrace )
+	{
+		const double t0 = Sys_FloatTime();
+		while( GC_RetraceNow() == gc_flip_retrace )
+			VIDEO_WaitVSync();
+		gc_flip_wait_ms_total += ( Sys_FloatTime() - t0 ) * 1000.0;
+		gc_flip_wait_count++;
+	}
+	gc_flip_pending = false;
+}
+
+static qboolean GC_LateFlipEnabled( void )
+{
+	static int cached = -1;
+	if( cached < 0 )
+		cached = Sys_CheckParm( "-gcstrictvsync" ) ? 0 : 1;
+	return cached ? true : false;
+}
 static GXRModeObj *rmode = NULL;
 #if XASH_DODGC_NETWORK
 static GXRModeObj gc_network_video_mode;
@@ -282,7 +341,11 @@ static GXRModeObj *GC_NetworkVideoMode( GXRModeObj *preferred )
 	gc_network_video_mode = *preferred;
 	/* VI scales the 320-pixel XFB to the mode's existing 640-pixel output.
 	 * Preserve its scanline count and television timing (480i/480p/PAL). */
-	gc_network_video_mode.fbWidth = 320;
+	/* 640 wide only for the menu build (hi-res GX menu text, #226). A boot straight into a
+	 * listen host or a connecting peer never shows that menu and falls back to the soft text
+	 * in a match anyway, and the 640 XFB costs 300 KiB of the BBA-linked heap that the
+	 * host needs (SV_InitGame / map load ran out of memory with it). */
+	gc_network_video_mode.fbWidth = ( Sys_CheckParm( "-gclistenserver" ) || Sys_CheckParm( "-gcconnect" )) ? 320 : 640;
 	return &gc_network_video_mode;
 }
 #endif
@@ -307,7 +370,7 @@ static unsigned int gc_present_count;
  * than silently dropping a requested viewmodel state. */
 static void GC_EnsureDrawViewmodelCvar( void )
 {
-	Cvar_Get( "r_drawviewmodel", "1", 0, "draw firstperson weapon model" );
+	Cvar_Get( "r_drawviewmodel", !Q_stricmp( XASH_GAMEDIR, "lostcoast" ) ? "0" : "1", 0, "draw firstperson weapon model" );
 }
 
 /* GX_DrawDone sleeps until Flipper retires the draw-done token and has no
@@ -1224,6 +1287,8 @@ static int gc_water_face_count;
 #define GC_WATER_RAW_MAX 512
 static byte gc_water_stage[128] __attribute__(( aligned( 32 )));
 static int gc_water_stage_i = -1;
+static byte *gc_water_mem;
+static qboolean gc_water_mem_tried;
 static u32 gc_water_aram;
 static int gc_water_raw_count;
 static float gc_water_scroll2_u, gc_water_scroll2_v;
@@ -1234,6 +1299,25 @@ static const byte *GC_WaterRec( int index )
 {
 	if( !gc_water_aram || index < 0 || index >= gc_water_raw_count )
 		return NULL;
+	/* Resident mirror of the whole table once a large world has opened the
+	 * idle map-load arena (34 KB for 266 faces). The renderer asks for each
+	 * face several times a frame and every miss was a 128-byte ARAM DMA. */
+	if( !gc_water_mem && !gc_water_mem_tried && GC_MapLoadBufferTailHighwater() > 0 )
+	{
+		const u32 bytes = (u32)gc_water_raw_count * 128u;
+		byte *p;
+
+		gc_water_mem_tried = true;
+		p = (byte *)GC_MapLoadBufferTailAlloc( Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes );
+		if( p )
+		{
+			GC_AramTransfer( gc_water_aram, p, bytes, false );
+			gc_water_mem = p;
+		}
+		Con_Reportf( "Xash3D GameCube: water mirror %s (%u bytes)\n", p ? "resident" : "FAIL, ARAM per face", bytes );
+	}
+	if( gc_water_mem )
+		return gc_water_mem + (u32)index * 128u;
 	if( gc_water_stage_i != index )
 	{
 		GC_AramTransfer( gc_water_aram + (u32)index * 128u, gc_water_stage, 128, false );
@@ -1242,12 +1326,9 @@ static const byte *GC_WaterRec( int index )
 	return gc_water_stage;
 }
 static qboolean gc_g286_water_logged;
-/* GX scroll water CMPR (media/water_gx.cmp) — 64×64. */
-#define GC_WATER_TEX_SIZE	64
-#define GC_WATER_TEX_BYTES	( GC_WATER_TEX_SIZE * GC_WATER_TEX_SIZE / 2 )
-static u8 gc_water_tex_data[GC_WATER_TEX_BYTES] __attribute__(( aligned( 32 )));
-static GXTexObj gc_water_tex_obj;
-static qboolean gc_water_tex_ready;
+/* The water normal map lives with the renderer now (r_gx_world.c loads
+ * media/water_gx.ia8 into the map arena); the old scroll-texture path is off. */
+static const qboolean gc_water_tex_ready = false;
 /* G225: ARAM page + aligned MEM1 DMA stage. */
 static u32 gc_aram_fill_base;
 static int gc_aram_fill_count;
@@ -2601,6 +2682,32 @@ qboolean GC_GetWaterFaceFog( int index, byte rgb[3], u8 *reflect_x100 )
 	return true;
 }
 
+/* VMT $fogstart/$fogend and $cheapwater*distance from .gcw bytes 120–127. */
+qboolean GC_GetWaterFaceFogRange( int index, float *fog_start, float *fog_end,
+	float *cheap_start, float *cheap_end )
+{
+	const byte *rec = GC_WaterRec( index );
+	uint16_t fs, fe, cs, ce;
+
+	if( !rec )
+	{
+		if( fog_start ) *fog_start = 1.0f;
+		if( fog_end ) *fog_end = 100.0f;
+		if( cheap_start ) *cheap_start = 500.0f;
+		if( cheap_end ) *cheap_end = 1000.0f;
+		return false;
+	}
+	fs = GC_Be16( rec + 120 );
+	fe = GC_Be16( rec + 122 );
+	cs = GC_Be16( rec + 124 );
+	ce = GC_Be16( rec + 126 );
+	if( fog_start ) *fog_start = fs ? (float)fs : 1.0f;
+	if( fog_end ) *fog_end = fe ? (float)fe : 100.0f;
+	if( cheap_start ) *cheap_start = cs ? (float)cs * 4.0f : 500.0f;
+	if( cheap_end ) *cheap_end = ce ? (float)ce * 4.0f : 1000.0f;
+	return true;
+}
+
 qboolean GC_WaterTexReady( void )
 {
 	return gc_water_tex_ready;
@@ -2608,7 +2715,7 @@ qboolean GC_WaterTexReady( void )
 
 void *GC_GetWaterTexObj( void )
 {
-	return gc_water_tex_ready ? (void *)&gc_water_tex_obj : NULL;
+	return NULL;
 }
 
 qboolean GC_WaterFacePlane( int index, mplane_t *out, int *out_flags )
@@ -2662,6 +2769,8 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 	gc_water_face_count = 0;
 	gc_water_raw_count = 0;
 	gc_water_stage_i = -1;
+	gc_water_mem = NULL;
+	gc_water_mem_tried = false;
 	gc_water_scroll2_u = 0.0f;
 	gc_water_scroll2_v = 0.0f;
 	if( gc_water_aram )
@@ -2669,7 +2778,6 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 		GC_AramFree( gc_water_aram );
 		gc_water_aram = 0;
 	}
-	gc_water_tex_ready = false;
 	gc_g286_water_logged = false;
 	memset( gc_water_faces, 0, sizeof( gc_water_faces ));
 	if( !mod || !mod->name || !mod->name[0] )
@@ -2845,25 +2953,6 @@ static qboolean GC_TryLoadWaterPack( model_t *mod )
 	}
 	FS_Close( f );
 
-	/* Scroll CMPR */
-	{
-		file_t *tf = FS_Open( "media/water_gx.cmp", "rb", false );
-		if( !tf )
-			tf = FS_Open( "media/water_gx.cmp", "rb", true );
-		if( tf && FS_FileLength( tf ) == GC_WATER_TEX_BYTES
-			&& FS_Read( tf, gc_water_tex_data, GC_WATER_TEX_BYTES ) == GC_WATER_TEX_BYTES )
-		{
-			DCFlushRange( gc_water_tex_data, sizeof( gc_water_tex_data ));
-			GX_InitTexObj( &gc_water_tex_obj, gc_water_tex_data,
-				GC_WATER_TEX_SIZE, GC_WATER_TEX_SIZE, GX_TF_CMPR,
-				GX_REPEAT, GX_REPEAT, GX_FALSE );
-			GX_InitTexObjLOD( &gc_water_tex_obj, GX_LINEAR, GX_LINEAR,
-				0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1 );
-			gc_water_tex_ready = true;
-		}
-		if( tf )
-			FS_Close( tf );
-	}
 	Con_Reportf( "Xash3D GameCube: water pack loaded %s faces=%d tex=%d aram=%d scroll2=%.3f,%.3f\n",
 		path, GC_GetWaterFaceCount(), gc_water_tex_ready ? 1 : 0,
 		gc_water_aram ? 1 : 0, gc_water_scroll2_u, gc_water_scroll2_v );
@@ -8060,6 +8149,39 @@ void Platform_Minimize_f( void )
 {
 }
 
+#if XASH_DODGC_NETWORK
+/* Called once gamecube.cfg has selected a listen host or a peer connect: no 640x480 menu follows, so
+ * trade the early splash's 614 KB XFB for a 320-wide one (307 KB) before the heap fills up. The block is
+ * freed and the smaller one is carved from the same hole, so the other 307 KB stays usable. */
+void GC_ShrinkEarlyXFBForMatch( void )
+{
+	u32 need;
+
+	if( !rmode || !xfb[0] || rmode->fbWidth <= 320 )
+		return;
+	rmode->fbWidth = 320;
+	need = VIDEO_GetFrameBufferSize( rmode );
+	if( xfb_bytes[0] <= need )
+		return;
+	VIDEO_SetBlack( true );
+	VIDEO_Flush();
+	VIDEO_WaitVSync();
+	free( MEM_K1_TO_K0( xfb[0] ));
+	xfb[0] = NULL;
+	xfb_bytes[0] = 0;
+	GC_AllocXFB( 0, rmode );
+	VIDEO_Configure( rmode );
+	if( xfb[0] )
+		VIDEO_SetNextFramebuffer( xfb[0] );
+	VIDEO_Flush();
+	VIDEO_SetBlack( false );
+	SYS_Report( "Xash3D GameCube: XFB shrunk to %ux%u for the match route\n", (unsigned)rmode->fbWidth, (unsigned)rmode->xfbHeight );
+}
+#endif
+
+static qboolean gc_boot_progressive;	/* the player's answer, kept for the session */
+static qboolean GC_BootProgressivePrompt( void );
+
 void GC_EarlyBootSplash( void )
 {
 #if XASH_GAMECUBE
@@ -8081,6 +8203,23 @@ void GC_EarlyBootSplash( void )
 	GC_AllocXFB( 0, rmode );
 	if( !xfb[0] )
 		return;
+	/* Progressive scan, as GameCube releases offer it: only with a component cable on an NTSC console and B held at boot. */
+	if( GC_BootProgressivePrompt( ))
+	{
+		GXRModeObj *prog = &TVNtsc480Prog;
+#if XASH_DODGC_NETWORK
+		prog = GC_NetworkVideoMode( prog );
+#endif
+		/* the same 640x480 frame: no new allocation. A mode that needed a bigger XFB is refused. */
+		if( prog && VIDEO_GetFrameBufferSize( prog ) <= xfb_bytes[0] )
+		{
+			rmode = prog;
+			gc_boot_progressive = true;
+			VIDEO_Configure( rmode );
+		}
+		else
+			SYS_Report( "Xash3D GameCube: progressive scan needs a larger XFB; staying interlaced\n" );
+	}
 
 	dst = (unsigned short *)xfb[0];
 	/* Retail parity: boot shows black until the startup video. The XFB is
@@ -8128,6 +8267,11 @@ static GXRModeObj *GC_ResolveVideoMode( const char **out_tag )
 	GXRModeObj *pref = VIDEO_GetPreferredMode( NULL );
 	const char *tag = "preferred";
 
+	if( gc_boot_progressive )
+	{
+		tag = "ntsc480p";
+		pref = &TVNtsc480Prog;
+	}
 	if( Sys_GetParmFromCmdLine( "-gcvideo", mode ) && mode[0] )
 	{
 		if( !Q_stricmp( mode, "ntsc" ) || !Q_stricmp( mode, "ntsc480i" )
@@ -8295,8 +8439,20 @@ static u16 gc_tiled_rgb565[GC_GX_TILE_MAX_W * GC_GX_TILE_MAX_H] __attribute__((a
 static unsigned short gc_probe_rgb565[GC_VIDEO_NEWGAME_PROBE_WIDTH * GC_VIDEO_NEWGAME_PROBE_HEIGHT] __attribute__((aligned( 32 )));
 static qboolean gc_buffer_owns_heap;
 
+static int gc_tiled_tex_w;
+static int gc_tiled_tex_h;
+static void *gc_tiled_tex_ptr;
+
 static void GC_InitPresentTexture( void )
 {
+	/* gc_present_tex now points at the linear buffer: forget the tiled
+	 * staging cache so the next GC_InitPresentTextureTiled re-inits the
+	 * TexObj instead of sampling linear RGB565 as 4x4 tiles (the loading
+	 * plaque showed as four squeezed strips after the map-load restore). */
+	gc_tiled_tex_ptr = NULL;
+	gc_tiled_tex_w = 0;
+	gc_tiled_tex_h = 0;
+
 	if( !gc.buffer || gc.width <= 0 || gc.height <= 0 )
 	{
 		gc_present_tex_ready = false;
@@ -8309,9 +8465,6 @@ static void GC_InitPresentTexture( void )
 	gc_present_tex_ready = true;
 }
 
-static int gc_tiled_tex_w;
-static int gc_tiled_tex_h;
-static void *gc_tiled_tex_ptr;
 static qboolean gc_gx_present_pipe_ready;
 /* G151: live New Game draws world tris into EFB; DumpFrames stay on soft. */
 static qboolean gc_gx_world_live;
@@ -8551,10 +8704,19 @@ static void GC_PresentBufferViaGX( void )
 	GX_TexCoord2f32( 0.0f, 1.0f );
 	GX_End();
 
+	{
+		extern qboolean GC_HiTextFlush( float fb_w, float fb_h );
+
+		// menu text at 640x480: the flush rewrites the GX pipe, so the next present rebuilds it
+		if( GC_HiTextFlush( fb_w, fb_h ))
+			gc_gx_present_pipe_ready = false;
+	}
+
 	GC_GXDrawDoneTimed( "soft present" );
 	/* G191: keep soft RGB565 on EFB during dump latch — Dolphin DumpFramesAsImages
 	 * after changelevel tracks EFB; CopyDisp clear left flat sky in dumps. */
 	copy_clear = dump_latch ? GX_FALSE : GX_TRUE;
+	GC_WaitPendingFlip();
 	GX_CopyDisp( xfb[which_fb], copy_clear );
 	/* Flush only — a second DrawDone after CopyDisp was locking soft presents
 	 * near 33ms. VIDEO_WaitVSync (retail) covers copy retirement. */
@@ -8862,6 +9024,7 @@ static void GC_PresentBuffer( void )
 			if( gc_gx_world_efb_ready )
 			{
 				GC_GXDrawDoneTimed( "transition hold" );
+				GC_WaitPendingFlip();
 				GX_CopyDisp( xfb[which_fb], GX_TRUE );
 				GX_Flush();
 				gc_gx_world_efb_ready = false;
@@ -8998,6 +9161,12 @@ static void GC_PresentBuffer( void )
 			 * (probe 093557 hung after G197, no timeout/watchdog). Flush is
 			 * enough for the first denser presents; fence later once EXI/GP
 			 * have settled. */
+			{
+				extern qboolean GC_HiTextFlush( float fb_w, float fb_h );
+
+				if( GC_HiTextFlush( fb_w, fb_h ))
+					gc_gx_present_pipe_ready = false;
+			}
 			if( skip_drawdone )
 				GX_Flush();
 			else
@@ -9006,6 +9175,8 @@ static void GC_PresentBuffer( void )
 			if( gc_present_count == 20 || gc_present_count == 28 || gc_present_count == 36 )
 				Con_Reportf( "Xash3D GameCube: present Flipper DrawDone end presents=%u\n",
 					gc_present_count );
+			GC_WaitPendingFlip();
+			GC_ProfMark( "present: flip wait" );
 			GX_CopyDisp( xfb[which_fb], GX_FALSE );
 			GX_Flush();
 			GC_ProfMark( "present: CopyDisp" );
@@ -9094,7 +9265,17 @@ static void GC_PresentBuffer( void )
 		 * need every CopyDisp to encode (Null/OGL starvation otherwise). */
 		{
 		extern int R_GXEfbDumpHoldLeft( void );
-		if( GC_IsCaptureDiagnostics()
+		/* A disc that parks a free-look eye (dumpeye, no ride or replay) is
+		 * play, not capture: every frame swaps and waits for the retrace.
+		 * Without the wait frames finish every ~13ms against a 16.7ms field,
+		 * so the display takes them unevenly and steady motion (the water
+		 * ripples) visibly hops every few seconds. */
+		static int g194_play = -1;
+
+		if( g194_play < 0 )
+			g194_play = ( Sys_CheckParm( "-gcdumpeye" ) && !Sys_CheckParm( "-gcvst" )
+				&& !Sys_CheckParm( "-gctas" )) ? 1 : 0;
+		if( !g194_play && GC_IsCaptureDiagnostics()
 			&& ( Sys_CheckParm( "-gcdumpframes" ) || Sys_CheckParm( "-gcdump" ))
 			&& R_GXEfbDumpHoldLeft() <= 0 )
 		{
@@ -9123,10 +9304,47 @@ static void GC_PresentBuffer( void )
 			 * Flipper work (vsync locked every sample to ~16.7ms). Retail and
 			 * post-sample presents still VI-pace at 60 fields/sec. */
 			GC_ProfMark( "present: pre-vsync" );
-			if( !budget_no_vsync )
+			if( budget_no_vsync )
+				gc_flip_pending = false;
+			else if( GC_LateFlipEnabled() && xfb[0] && xfb[1] )
+			{
+				/* VI takes the queued XFB at the next retrace; the
+				 * next EFB->XFB copy waits for it (GC_WaitPendingFlip). */
+				gc_flip_retrace = GC_RetraceNow();
+				gc_flip_pending = true;
+			}
+			else if( GC_LateFlipEnabled() && xfb[0] && !xfb[1] )
+			{
+				/* Single XFB (DoD: no MEM1 for a second one). The copy
+				 * already lands in the scanned-out buffer, so the wait only
+				 * paces. Wait while still inside the retrace interval of the
+				 * last present (60 cap); a frame that already ran past it
+				 * presents now instead of losing a whole extra retrace. */
+				static u32 last_present_retrace;
+				const u32 now = GC_RetraceNow();
+
+				if( now == last_present_retrace )
+				{
+					while( GC_RetraceNow() == now )
+						VIDEO_WaitVSync();
+				}
+				else
+					gc_flip_late_presents++;
+				last_present_retrace = GC_RetraceNow();
+			}
+			else
 				VIDEO_WaitVSync();
 			GC_ProfMark( "present: VI vsync wait" );
 			GC_FlipXFB();
+			if(( gc_present_count % 600u ) == 0u && ( gc_flip_wait_count || gc_flip_late_presents ))
+			{
+				Con_Reportf( "Xash3D GameCube: late flip waits=%u avg=%.2fms late presents=%u over 600 presents\n",
+					gc_flip_wait_count, gc_flip_wait_count ? gc_flip_wait_ms_total / gc_flip_wait_count : 0.0,
+					gc_flip_late_presents );
+				gc_flip_wait_count = 0;
+				gc_flip_wait_ms_total = 0.0;
+				gc_flip_late_presents = 0;
+			}
 			if( gc_present_count == 20 || gc_present_count == 28 || gc_present_count == 36 )
 				Con_Reportf( "Xash3D GameCube: present Flipper vsync done presents=%u\n",
 					gc_present_count );
@@ -10075,6 +10293,77 @@ static unsigned short GC_RGB8To565( int r, int g, int b )
 	return (unsigned short)((( r >> 3 ) << 11 ) | (( g >> 2 ) << 5 ) | ( b >> 3 ));
 }
 
+/* One 160x120 RGB565 panel shared by the fatal breadcrumb and the boot prompt (38 KiB of .bss that already existed). */
+static unsigned short gc_text_panel[160 * 120];
+
+/*
+ * Progressive scan prompt, drawn on the boot splash before the video mode is final. Shown only when a component cable is
+ * detected on an NTSC console and B is held at boot; A = yes, B / Start / a 10 s timeout = no (the safe answer).
+ * Returns true for yes. The frame is the same 640x480 XFB, so nothing is allocated.
+ */
+static qboolean GC_BootProgressivePrompt( void )
+{
+	int frame, sec, last_sec = -1, row, col;
+	qboolean held = false;
+	char line[32];
+
+	if( !rmode || !xfb[0] || VIDEO_GetCurrentTvMode() != VI_NTSC || !VIDEO_HaveComponentCable())
+		return false;
+	PAD_Init();
+	/* give the pads a few frames to answer, then look for B */
+	for( frame = 0; frame < 12; frame++ )
+	{
+		PAD_ScanPads();
+		if( PAD_ButtonsHeld( 0 ) & PAD_BUTTON_B )
+			held = true;
+		VIDEO_WaitVSync();
+	}
+	if( !held )
+		return false;
+
+	for( frame = 0; frame < 60 * 10 + 1; frame++ )
+	{
+		u16 down;
+		unsigned int *dst;
+
+		PAD_ScanPads();
+		down = PAD_ButtonsDown( 0 );
+		if( down & PAD_BUTTON_A )
+			return true;
+		if( down & ( PAD_BUTTON_B | PAD_BUTTON_START ))
+			return false;
+		sec = 10 - frame / 60;
+		if( sec != last_sec )
+		{
+			last_sec = sec;
+			/* retail palette, 1 px border on the 5% safe area (x 8..151, y 6..113 of the 160x120 panel) */
+			for( row = 0; row < 120; row++ )
+				for( col = 0; col < 160; col++ )
+				{
+					const int edge = (( row == 6 || row == 113 ) && col >= 8 && col <= 151 )
+						|| (( col == 8 || col == 151 ) && row >= 6 && row <= 113 );
+
+					gc_text_panel[row * 160 + col] = edge ? 0xABE0 : 0x3143;
+				}
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 10, "PROGRESSIVE SCAN (480P)", 0xFD80, 1, 22 );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 28, "Use 480p? Your TV and", 0xFFFF, 1, 22 );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 37, "cable must support it.", 0xFFFF, 1, 22 );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 62, "A  Yes       B  No", 0xFFE0, 1, 22 );
+			Q_snprintf( line, sizeof( line ), "No in %d s", sec );
+			GC_StatusDrawLine( gc_text_panel, 160, 160, 120, 12, 98, line, 0x07E0, 1, 22 );
+			dst = (unsigned int *)MEM_K1_TO_K0( xfb[0] );
+			GC_BlitSoftwareBufferScaled( gc_text_panel, 160, 120, 160, dst, rmode->fbWidth, rmode->xfbHeight,
+				rmode->fbWidth / 2 );
+			DCFlushRange( dst, (u32)( rmode->fbWidth * rmode->xfbHeight * sizeof( unsigned short )));
+			VIDEO_SetNextFramebuffer( xfb[0] );
+			VIDEO_Flush();
+		}
+		VIDEO_WaitVSync();
+	}
+	return false;
+}
+
+
 #if XASH_GAMECUBE
 /* HL1-themed loading plaque (baked at disc build). Keep tiny for MEM1. */
 #define GC_LOADING_BG_W		160
@@ -10084,7 +10373,13 @@ static qboolean gc_loading_bg_ready;
 static float gc_loading_progress;
 #define GC_EARLY_XFB_STAGE_W	320
 #define GC_EARLY_XFB_STAGE_H	240
-static unsigned short gc_early_xfb_stage[GC_EARLY_XFB_STAGE_W * GC_EARLY_XFB_STAGE_H];
+/* Boot/loading plaque stage shares the 150 KiB GX tile staging buffer instead of
+ * owning its own BSS: the two are never live together (the stage is only used
+ * when gc.buffer is gone or boot failed, and GC_PresentBufferViaGX waits for
+ * draw-done before returning). Frees 150 KiB of MEM1 for the libc heap. */
+typedef char gc_early_stage_fits_tile_buf[
+	( GC_EARLY_XFB_STAGE_W * GC_EARLY_XFB_STAGE_H <= GC_GX_TILE_MAX_W * GC_GX_TILE_MAX_H ) ? 1 : -1];
+#define gc_early_xfb_stage ((unsigned short *)gc_tiled_rgb565 )
 
 void GC_SetLoadingProgress( float progress )
 {
@@ -10843,6 +11138,9 @@ enum
 	GC_VGUI_PROGRESS_R = 202, GC_VGUI_PROGRESS_G = 153, GC_VGUI_PROGRESS_B = 42
 };
 
+/* Title shown in the loading plaque header (the glyph font is upper-case only). */
+#define GC_LOADING_PLAQUE_TITLE "DAY OF DEFEAT"
+
 static void GC_FillRect565( unsigned short *dst, int width, int height, int stride,
 	int x, int y, int w, int h, unsigned short color )
 {
@@ -10981,6 +11279,20 @@ static const char *GC_StatusFitText( const char *text, int max_chars )
 	return text + ( len - max_chars );
 }
 
+/* Fatal-panel status text: message line plus fitted detail line. */
+static void GC_DrawStatusPanelLines( unsigned short *dst, int width, int height, int stride,
+	int text_x, int msg_y, int det_y, const char *message, const char *details,
+	unsigned short text, int text_scale, int line_scale, int max_chars )
+{
+	const char *detail_line;
+
+	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
+		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
+	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
+	GC_StatusDrawLine( dst, stride, width, height, text_x, det_y,
+		detail_line, text, line_scale, max_chars );
+}
+
 static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int height, int stride,
 	const char *message, const char *details, qboolean top_aligned )
 {
@@ -10999,7 +11311,10 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	int max_chars;
 	int bar_x, bar_y, bar_w, bar_h;
 	unsigned short text = GC_RGB8To565( GC_VGUI_TEXT_R, GC_VGUI_TEXT_G, GC_VGUI_TEXT_B );
-	const char *detail_line;
+	/* Loading plaque (every game, DoD included): title bar plus a centred
+	 * progress bar, no status lines. The callers log the status text.
+	 * Fatal panels (top_aligned) keep the full layout. */
+	const qboolean compact = !top_aligned;
 
 	panel_x = width * GC_VIDEO_SAFE_AREA_PERCENT / 100;
 	panel_w = width - panel_x * 2;
@@ -11022,6 +11337,13 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( header_h > panel_h / 3 )
 		header_h = panel_h / 3;
 
+	if( compact )
+	{
+		bar_h = height >= 240 ? 10 : 6;
+		panel_h = header_h + bar_h + pad * 3;
+		panel_y = height - panel_h - height * GC_VIDEO_SAFE_AREA_PERCENT / 100;
+	}
+
 	GC_DrawVguiBevelPanel( dst, width, height, stride, panel_x, panel_y, panel_w, panel_h, header_h );
 
 	text_x = panel_x + pad + 2;
@@ -11034,21 +11356,36 @@ static void GC_DrawStatusPanelToBufferEx( unsigned short *dst, int width, int he
 	if( max_chars < 8 )
 		max_chars = 8;
 
-	GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
-		"HALF-LIFE", text, text_scale, 24 );
-	GC_StatusDrawLine( dst, stride, width, height, text_x, msg_y,
-		message ? message : "PLEASE WAIT", text, text_scale, max_chars );
-	detail_line = GC_StatusFitText( details ? details : "LOADING", max_chars );
-	GC_StatusDrawLine( dst, stride, width, height, text_x, det_y,
-		detail_line, text, line_scale, max_chars );
+	{
+		/* Header = the game's own title (gameinfo.txt "title" / liblist
+		 * "game"), upper-cased for the panel font. */
+		char title[25];
+		int ti;
+
+		Q_strncpy( title, ( GI && GI->title[0] ) ? GI->title : GC_LOADING_PLAQUE_TITLE, sizeof( title ));
+		for( ti = 0; title[ti]; ti++ )
+			title[ti] = Q_toupper( title[ti] );
+		GC_StatusDrawLine( dst, stride, width, height, text_x, title_y,
+			title, text, text_scale, 24 );
+	}
+#if XASH_GAMECUBE
+	if( compact )
+	{
+		bar_x = panel_x + pad * 2;
+		bar_w = panel_w - pad * 4;
+		bar_y = panel_y + header_h + ( panel_h - header_h - bar_h ) / 2;
+		GC_DrawProgressBar( dst, width, height, stride, bar_x, bar_y, bar_w, bar_h, gc_loading_progress );
+		return;
+	}
+#endif
+	GC_DrawStatusPanelLines( dst, width, height, stride, text_x, msg_y, det_y,
+		message, details, text, text_scale, line_scale, max_chars );
 
 #if XASH_GAMECUBE
 	bar_x = panel_x + pad + 2;
 	bar_w = panel_w - 2 * pad - 4;
 	bar_h = height >= 240 ? 12 : 6;
-	bar_y = panel_y + panel_h - bar_h - pad;
-	if( bar_y < det_y + 7 * line_scale + 2 )
-		bar_y = det_y + 7 * line_scale + 2;
+	bar_y = panel_y + header_h + ( panel_h - header_h - bar_h ) / 2;
 	GC_DrawProgressBar( dst, width, height, stride, bar_x, bar_y, bar_w, bar_h, gc_loading_progress );
 #else
 	(void)bar_x; (void)bar_y; (void)bar_w; (void)bar_h;
@@ -12862,29 +13199,35 @@ void GC_DrawFatalBreadcrumb( const char *message, const char *details )
 	const int panel_w = 160;
 	const int panel_h = 120;
 	const int row_pairs = rmode ? ( rmode->fbWidth / 2 ) : 0;
-	/* Static panel — never Mem_Alloc during fatal (MEM1 is already exhausted). */
-	static unsigned short fatal_panel[160 * 120];
+	/* Static panel (shared with the boot prompt) — never Mem_Alloc during fatal (MEM1 is already exhausted). */
 
 	if( !gc.initialized )
 		return;
 	if( !rmode || !rmode->fbWidth || !rmode->xfbHeight || !xfb[0] )
 		return;
 
-	panel = fatal_panel;
+	/* Retail palette (ViewportBG 55 43 29, ClassMenuLight 175 127 1, gold title) and a 1 px border on the 5% title-safe
+	 * area of the 160x120 panel (x 8..151, y 6..113): nothing is drawn nearer the screen edge than that. */
+	panel = gc_text_panel;
 	for( row = 0; row < panel_h; row++ )
 	{
 		unsigned short *rowdst = panel + row * panel_w;
 		for( col = 0; col < panel_w; col++ )
-			rowdst[col] = 0xF81F; /* magenta RGB565 */
+		{
+			const int edge = (( row == 6 || row == 113 ) && col >= 8 && col <= 151 )
+				|| (( col == 8 || col == 151 ) && row >= 6 && row <= 113 );
+
+			rowdst[col] = edge ? 0xABE0 : 0x3143;
+		}
 	}
 	GC_StatusDrawLine( panel, panel_w, panel_w, panel_h,
-		4, 4, "XASH3D GAMECUBE FATAL", 0xFFFF, 1, 24 );
-	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 4, 20,
-		message ? message : "UNKNOWN ERROR", 0xFFE0, 1, 25, 2 );
-	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 4, 40,
-		details ? details : "NO DETAILS", 0xFFFF, 1, 25, 6 );
+		12, 10, "DAY OF DEFEAT - ERROR", 0xFD80, 1, 22 );
+	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 12, 22,
+		message ? message : "UNKNOWN ERROR", 0xFFE0, 1, 22, 3 );
+	GC_FatalDrawWrapped( panel, panel_w, panel_w, panel_h, 12, 52,
+		details ? details : "NO DETAILS", 0xFFFF, 1, 22, 5 );
 	GC_StatusDrawLine( panel, panel_w, panel_w, panel_h,
-		4, panel_h - 14, "HALTED: POWER CYCLE OR RESET", 0x07E0, 1, 28 );
+		12, 102, "POWER CYCLE OR RESET", 0x07E0, 1, 22 );
 
 	/* Always CPU-blit into XFB RAM so the panel stays readable even when
 	 * Flipper CopyDisp / DisableCopyToVRAM leave the soft latch empty. */
@@ -13128,15 +13471,11 @@ static void GC_TryDeferredHudSheets( void )
 	}
 	Con_Reportf( "Xash3D GameCube: G290 deferred HUD sheets present=%u\n",
 		gc_present_count );
-	/* G327 deferred VidInit with the sheets; bring both up together. */
+	/* G327 deferred HUD_VidInit: once per map, after the world presents. */
 	if( Sys_CheckParm( "-gcnewgame" ) && !Sys_CheckParm( "-gcfullphysics" ))
 	{
 		SCR_LoadCreditsFont();
-		if( clgame.dllFuncs.pfnVidInit )
-		{
-			clgame.dllFuncs.pfnVidInit();
-			Con_Reportf( "Xash3D GameCube: newgame lean HUD VidInit after world present\n" );
-		}
+		CL_GCEnsureHudVidInit( "after world present" );
 	}
 	CL_GCPreloadNewGameHudSpritesLate();
 #endif
@@ -13158,6 +13497,11 @@ static void GC_TryDeferredViewmodel( void )
 	model_t *vm;
 	char old_vm[16];
 
+	/* Lost Coast has no first-person weapon on the GameCube yet: the landmark
+	 * crowbar drew untextured white and floated in the sky (the camera is the
+	 * scripted eye, not the player's). */
+	if( !Q_stricmp( XASH_GAMEDIR, "lostcoast" ))
+		return;
 	if( !gc_newgame_world_ready )
 		return;
 	if( !( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gcmenuplaystart" )) )
@@ -13732,6 +14076,15 @@ void GC_EnableGxWorldLive( void )
 		return;
 	}
 	gc_gx_world_live = true;
+	/* The soft DumpFrames latch is a capture diagnostic. A latch the loading
+	 * plaque of a reload (same-map changelevel) left armed kept the renderer
+	 * on the CPU path for the second map and it died there. */
+	if( gc_cpu_dump_presents_left > 0
+		&& !Sys_CheckParm( "-gcdumpframes" ) && !Sys_CheckParm( "-gcdump" ))
+	{
+		Con_Reportf( "Xash3D GameCube: dump latch %d cleared for GX world\n", gc_cpu_dump_presents_left );
+		gc_cpu_dump_presents_left = 0;
+	}
 	Con_Reportf( "Xash3D GameCube: G151 GX world live enabled (Flipper EFB)\n" );
 #endif
 }
@@ -16483,6 +16836,115 @@ void GC_CaptureNewGamePVS( void )
 }
 
 /*
+GC_SpectatorEye
+
+These routes build the camera from server edict 1 and never run the client's
+V_CalcRefdef, so an observer's chase/in-eye target (iuser1/iuser2) was ignored
+and a DoD spectator sat still where it joined. Do what the stock HLSDK
+spectator view does: in-eye takes the target's eye and aim; chase sits 96
+units behind the target's eye along the view direction (the target's aim
+when locked, the observer's own look when free), pulled in at walls.
+*/
+static void GC_SpectatorEye( edict_t *player, vec3_t eye, vec3_t angles )
+{
+	enum { GC_OBS_CHASE_LOCKED = 1, GC_OBS_CHASE_FREE = 2, GC_OBS_IN_EYE = 4, GC_OBS_MAP_CHASE = 6 };
+	const int mode = player->v.iuser1;
+	edict_t *target;
+	vec3_t target_eye, forward, back;
+	trace_t tr;
+
+	if( mode != GC_OBS_CHASE_LOCKED && mode != GC_OBS_CHASE_FREE
+		&& mode != GC_OBS_IN_EYE && mode != GC_OBS_MAP_CHASE )
+		return;
+	if( player->v.iuser2 < 1 || player->v.iuser2 > svs.maxclients )
+		return;
+	target = SV_EdictNum( player->v.iuser2 );
+	if( !SV_IsValidEdict( target ) || target == player )
+		return;
+
+	VectorAdd( target->v.origin, target->v.view_ofs, target_eye );
+	if( mode == GC_OBS_IN_EYE )
+	{
+		VectorCopy( target_eye, eye );
+		VectorCopy( target->v.v_angle, angles );
+		return;
+	}
+	if( mode == GC_OBS_CHASE_LOCKED )
+	{
+		VectorCopy( target->v.v_angle, angles );
+		angles[PITCH] = 0.0f;
+	}
+	/* The observer's look can be pitched far down after the join (ceres:
+	 * the chase camera hung straight over the bot's helmet). Keep the
+	 * orbit to a shoulder-height arc like the client chase camera. */
+	if( angles[PITCH] > 30.0f )
+		angles[PITCH] = 30.0f;
+	else if( angles[PITCH] < -30.0f )
+		angles[PITCH] = -30.0f;
+	AngleVectors( angles, forward, NULL, NULL );
+	VectorMA( target_eye, -96.0f, forward, back );
+
+	/* dod_spec_cine 1: cinematic mode. Moving shots around the followed player
+	 * (orbit, track, crane, flyby, low push-in; spec_cam.h) cutting every 6 s or
+	 * when the director switches player. */
+	{
+		static convar_t *cine_cvar;
+		static DodCamCine cine;
+		static DodCamState smooth;
+		static double last_time;
+		qboolean cine_on;
+		vec3_t want, want_ang, aim;
+
+		if( !cine_cvar )
+			cine_cvar = Cvar_FindVar( "dod_spec_cine" );
+		cine_on = cine_cvar && cine_cvar->value != 0.0f && mode != GC_OBS_MAP_CHASE;
+		/* coming back to a chase camera after in-eye or free-fly: snap, don't swoop */
+		if( sv.time - last_time > 0.25 || sv.time < last_time )
+			DodCam_Reset( &smooth );
+		last_time = sv.time;
+
+		if( cine_on )
+		{
+			vec3_t feet;
+			float t;
+
+			if( DodCam_CineStep( &cine, player->v.iuser2, (float)sv.time, &t ))
+			{
+				cine.yaw = target->v.angles[YAW];
+				DodCam_Reset( &smooth );
+			}
+			VectorCopy( target->v.origin, feet );
+			feet[2] -= 36.0f;
+			DodCam_ShotPose( cine.shot, t, feet, cine.yaw, player->v.iuser2 + cine.shot, want, want_ang );
+		}
+		else
+		{
+			VectorCopy( back, want );
+			VectorCopy( angles, want_ang );
+		}
+		/* The target moves on server frames: glide the camera. The key folds in
+		 * the camera kind so switching between them snaps (spec_cam.h also snaps
+		 * on a new target, a respawn or a hitch). */
+		DodCam_Smooth( &smooth, DODCAM_CHASE_FREE,
+			player->v.iuser2 * 4 + ( cine_on ? 1 : 0 ) + ( mode == GC_OBS_CHASE_LOCKED ? 2 : 0 ),
+			want, want_ang, (float)host.frametime, want, want_ang );
+
+		/* Never through the world: trace from the target's eye to the camera and
+		 * stop a few units short of whatever it hits. */
+		tr = SV_Move( target_eye, vec3_origin, vec3_origin, want, MOVE_NOMONSTERS, target, false );
+		DodCam_PullIn( target_eye, want, tr.fraction, 6.0f, eye );
+		if( cine_on )
+		{
+			VectorCopy( target->v.origin, aim );
+			aim[2] += 20.0f;
+			DodCam_LookAt( eye, aim, angles );
+		}
+		else
+			VectorCopy( want_ang, angles );
+	}
+}
+
+/*
  * G90: single New Game world pass for V_RenderViewBoundedGC.
  * Caller owns R_BeginFrame / R_EndFrame (V_PreRender / V_PostRender).
  */
@@ -16529,6 +16991,7 @@ qboolean GC_RenderNewGameWorldPassNoFrame( qboolean draw_viewmodel )
 			if( !Sys_CheckParm( "-gcnewgame" ))
 				center[2] += 48.0f;
 			VectorCopy( player->v.v_angle, rvp.viewangles );
+			GC_SpectatorEye( player, center, rvp.viewangles );
 		}
 		else
 		{
@@ -16803,12 +17266,16 @@ static qboolean GC_G376AimDumpAtLeanNpc( const float *ref_org )
 qboolean GC_RenderNewGameWorldFrames( int count )
 {
 #if XASH_GAMECUBE
+	GC_HeapCheckArmed( "world frames enter" );
+#endif
+#if XASH_GAMECUBE
 	ref_viewpass_t rvp;
 	model_t *world;
 	vec3_t center;
 	char old_drawviewmodel[16];
 	int i;
 	static char gc_render_map_log[32];
+	qboolean cine_owns_eye = false;
 
 	/* Peer BBA join (-gcconnect) has no local SV — use client world. */
 	if( !ref.initialized || ( !SV_Active() && !Sys_CheckParm( "-gcconnect" )) )
@@ -16852,6 +17319,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 			gc_cpu_dump_presents_left );
 		gc_cpu_dump_presents_left = 0;
 	}
+	GC_HeapCheckArmed( "after dump latch retire" );
 	/* The menu-to-listen-server transition frees renderer video state while it
 	 * tears down the menu client. The deferred local-map path restores the soft
 	 * framebuffer itself, but must also bring Flipper back before the first BSP
@@ -16874,6 +17342,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		Cvar_Set( "gc_quality", "0" );
 		Con_Reportf( "Xash3D GameCube: local world HUD quality set to lean\n" );
 	}
+	GC_HeapCheckArmed( "after HUD quality lean" );
 	/* Full-physics TAS reaches this bounded renderer without the normal client
 	 * view setup. Bind the already mirrored landmark mesh here, after the
 	 * renderer/world guards above, and allow the existing GX viewmodel pass to
@@ -16902,6 +17371,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	cl.models[1] = world;
 	cl.worldmodel = world;
 	cl.video_prepped = true;
+	GC_HeapCheckArmed( "after world bind" );
 
 	/* Skip R_NewMap here: on New Game it re-enters texture/surface setup and
 	 * stalls Host_Frame. Prepare already allocated low-res screens, scratch,
@@ -16954,6 +17424,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 			else if( !Sys_CheckParm( "-gcnewgame" ))
 				center[2] += 48.0f;
 			VectorCopy( player->v.v_angle, rvp.viewangles );
+			GC_SpectatorEye( player, center, rvp.viewangles );
 		}
 		else
 		{
@@ -17438,6 +17909,18 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				gc_newgame_viewcluster, leaves, look_len );
 		}
 	}
+	/* A playing cinematic shot (cl_cine.c) owns the eye on this route too,
+	 * after every probe aim above, and its PVS follows the camera. */
+	{
+		float cine_fov;
+
+		cine_owns_eye = CL_CineView( center, rvp.viewangles, &cine_fov );
+		if( cine_owns_eye )
+		{
+			rvp.fov_x = bound( 10.0f, cine_fov, 150.0f );
+			rvp.fov_y = rvp.fov_x * 0.75f;
+		}
+	}
 	/* G376: NPC dump eye is placed before G364 restream above. Do not
 	 * teleport after CapFaces bake — that looked away from the streamed
 	 * faces (grey void). Mid-frame surfbits rebuild hung Host_Frame. */
@@ -17445,7 +17928,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	/* G89: select multi-cluster PVS for camera; prove two-cluster switch once.
 	 * G199: during Flipper wall-aim, densest-cluster prove rewrites outdoor caps
 	 * back to indoor (drawn≈19). Keep outdoor refresh sticky until aim ends. */
-	if( !gc_dump_look_into_map )
+	if( !gc_dump_look_into_map || cine_owns_eye )
 	{
 		GC_UpdateNewGamePVSForOrigin( center );
 		GC_ProveNewGamePVSFollow();
@@ -17471,9 +17954,10 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	/* G149: dump/landmark path may force viewmodel on for DumpFrames evidence.
 	 * CapFaces listen gameplay also needs the first-person weapon mesh. */
 	{
-		const qboolean want_vm = gc_force_draw_viewmodel
-			|| ( Sys_CheckParm( "-gcworldrender" ) && Sys_CheckParm( "-gcplayerinput" )
-				&& cls.state == ca_active && cls.signon == SIGNONS );
+		const qboolean want_vm = !( cine_owns_eye && CL_CineHideViewModel( ))
+			&& ( gc_force_draw_viewmodel
+				|| ( Sys_CheckParm( "-gcworldrender" ) && Sys_CheckParm( "-gcplayerinput" )
+					&& cls.state == ca_active && cls.signon == SIGNONS ));
 
 		Cvar_Set( "r_drawviewmodel", want_vm ? "1" : "0" );
 		/* CapFaces listen skips V_SetupViewModel — bind a studio mesh for
@@ -17539,10 +18023,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				if( model_changed || clgame.viewent.curstate.animtime <= 0.0f )
 					clgame.viewent.curstate.animtime = (float)cl.time - 2.0f;
 				clgame.viewent.curstate.rendermode = kRenderNormal;
-				VectorCopy( rvp.vieworigin, clgame.viewent.origin );
-				VectorCopy( rvp.viewangles, clgame.viewent.angles );
-				VectorCopy( clgame.viewent.origin, clgame.viewent.curstate.origin );
-				VectorCopy( clgame.viewent.angles, clgame.viewent.curstate.angles );
+				V_GCPoseViewModelAt( rvp.vieworigin, rvp.viewangles );
 				gc_force_draw_viewmodel = true;
 				if( !gc_capfaces_vm_bound_logged
 					|| gc_capfaces_vm_team_logged != gc_capfaces_team_sel )
@@ -17575,11 +18056,13 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		const qboolean trace = frame_trace < 3;
 		const qboolean gx_world_frame = Sys_CheckParm( "-gcworldrender" )
 			&& GC_UseGxWorldDraw();
+		qboolean presented_this_frame = false;
 
 		if( trace )
 			frame_trace++;
 		GC_ProfMark( "newgame frame setup" );
 		ref.dllFuncs.R_BeginFrame( false );
+		GC_ProfMark( "render: R_BeginFrame" );
 		VectorCopy( rvp.vieworigin, refState.vieworg );
 		VectorCopy( rvp.viewangles, refState.viewangles );
 		/* Keep viewent posed with the camera each CapFaces present.
@@ -17588,10 +18071,10 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		 * (ava-play99-52..54 prism arms). */
 		if( clgame.viewent.model && clgame.viewent.model->type == mod_studio )
 		{
-			VectorCopy( rvp.vieworigin, clgame.viewent.origin );
-			VectorCopy( rvp.viewangles, clgame.viewent.angles );
-			VectorCopy( clgame.viewent.origin, clgame.viewent.curstate.origin );
-			VectorCopy( clgame.viewent.angles, clgame.viewent.curstate.angles );
+			/* Retail pose (negated pitch, bob, -1 z): the raw camera copy
+			 * tilted the gun against the view once the studio transform
+			 * negated its pitch (Tim: "gun rendering is a bit off"). */
+			V_GCPoseViewModelAt( rvp.vieworigin, rvp.viewangles );
 			if( clgame.viewent.curstate.animtime <= 0.0f )
 			{
 				clgame.viewent.curstate.sequence = 0; /* idle */
@@ -17607,7 +18090,9 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		if( ( Sys_CheckParm( "-gcnewgame" ) || Sys_CheckParm( "-gcworldrender" ))
 			&& GC_UseGxWorldDraw() )
 			CL_GameCubeLeanEmitBrushEntities();
+		GC_ProfMark( "render: lean entity emit" );
 		ref.dllFuncs.GL_RenderFrame( &rvp );
+		GC_ProfMark( "render: GL_RenderFrame after world" );
 		GC_WatchdogMark( "newgame frame after GL_RenderFrame" );
 		if( trace )
 			Con_Reportf( "Xash3D GameCube: newgame frame %d after GL_RenderFrame\n", frame_trace );
@@ -17642,6 +18127,15 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				if( trace )
 					Con_Reportf( "Xash3D GameCube: newgame frame %d HUD begin\n", frame_trace );
 				CL_DrawHUD( CL_ACTIVE );
+				/* this frame loop replaces SCR_UpdateScreen, so the chat keyboard is drawn here */
+				{
+					extern void OSK_Draw( void );
+					extern void OSK_ChatDraw( void );
+
+					OSK_ChatDraw();
+					OSK_Draw();
+				}
+				GC_ProfMark( "render: HUD" );
 				/* VGUI is skipped on GC — CapFaces listen team picker painted
 				 * to match DoD Teammenu.res (dark/tan ClassMenu palette).
 				 * Never use kRenderTransAdd here: additive FillRGBA brightens
@@ -17920,6 +18414,8 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 					}
 					else
 					{
+						if( Sys_CheckParm( "-gcnohud" ))
+							goto gc_nohud_end;  /* spectator footage: no placeholder HUD */
 						char picked[64];
 						char ammo_txt[16];
 						static int live_hud_frames;
@@ -17929,30 +18425,35 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 						if( ( live_hud_frames & 255 ) == 1 )
 							Con_Reportf( "Xash3D GameCube: CapFaces live HUD frames=%d team=%d class=%d\n",
 								live_hud_frames, gc_capfaces_team_sel, gc_capfaces_class_sel );
-						Q_snprintf( picked, sizeof( picked ), "TEAM: %s",
-							teams[gc_capfaces_team_sel] + 3 ); /* skip "N  " */
-						ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 18,
-							64, 52, 36, 200 );
-						ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 1,
-							175, 127, 1, 255 );
-						GC_CapFacesDrawText( 24, 6, picked, text_scale, 175, 127, 1, 255 );
-						/* CapFaces Flipper lean HUD — sprites Guru after densify;
-						 * paint DoD-colored health/ammo bars without SPR_Load. */
+						/* The lean route's own TEAM / HP / AMMO bars are only for a client that has no retail HUD: when the
+						 * DoD client drew its readout this frame (gc_hud_retail), a second ammo/health display would overlap it. */
+						if( Cvar_VariableValue( "gc_hud_retail" ) == 0.0f )
 						{
-							const int hud_y = scr_h - 28;
-							const int hp = 100;
-							const int hp_w = ( scr_w * 120 ) / 640;
+							Q_snprintf( picked, sizeof( picked ), "TEAM: %s",
+								teams[gc_capfaces_team_sel] + 3 ); /* skip "N  " */
+							ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 18,
+								64, 52, 36, 200 );
+							ref.dllFuncs.FillRGBA( kRenderTransTexture, 16, 4, 220, 1,
+								175, 127, 1, 255 );
+							GC_CapFacesDrawText( 24, 6, picked, text_scale, 175, 127, 1, 255 );
+							/* CapFaces Flipper lean HUD — sprites Guru after densify;
+							 * paint DoD-colored health/ammo bars without SPR_Load. */
+							{
+								const int hud_y = scr_h - 28;
+								const int hp = 100;
+								const int hp_w = ( scr_w * 120 ) / 640;
 
-							ref.dllFuncs.FillRGBA( kRenderTransTexture, 12, hud_y, hp_w + 4, 16,
-								48, 40, 28, 220 );
-							ref.dllFuncs.FillRGBA( kRenderTransTexture, 14, hud_y + 2,
-								( hp_w * hp ) / 100, 12,
-								192, 28, 0, 230 );
-							GC_CapFacesDrawText( 18, hud_y + 3, "HP 100", text_scale,
-								255, 255, 255, 255 );
-							Q_snprintf( ammo_txt, sizeof( ammo_txt ), "AMMO %d", live_ammo );
-							GC_CapFacesDrawText( scr_w - 12 - 6 * 8 * text_scale, hud_y + 3,
-								ammo_txt, text_scale, 255, 176, 0, 255 );
+								ref.dllFuncs.FillRGBA( kRenderTransTexture, 12, hud_y, hp_w + 4, 16,
+									48, 40, 28, 220 );
+								ref.dllFuncs.FillRGBA( kRenderTransTexture, 14, hud_y + 2,
+									( hp_w * hp ) / 100, 12,
+									192, 28, 0, 230 );
+								GC_CapFacesDrawText( 18, hud_y + 3, "HP 100", text_scale,
+									255, 255, 255, 255 );
+								Q_snprintf( ammo_txt, sizeof( ammo_txt ), "AMMO %d", live_ammo );
+								GC_CapFacesDrawText( scr_w - 12 - 6 * 8 * text_scale, hud_y + 3,
+									ammo_txt, text_scale, 255, 176, 0, 255 );
+							}
 						}
 						if( !gc_team_fire_logged )
 						{
@@ -18027,6 +18528,8 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 							Con_Reportf( "Xash3D GameCube: CapFaces SFX follow-up %s left=%d ammo=%d\n",
 								gc_team_fire_sfx, gc_team_fire_followups, live_ammo );
 						}
+						gc_nohud_end:
+						;
 					}
 				}
 				if( !capfaces_hud_logged && Sys_CheckParm( "-gcworldrender" ))
@@ -18041,12 +18544,31 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				cl.video_prepped = saved_prepped;
 			}
 		}
-		ref.dllFuncs.R_EndFrame();
+		{
+			const unsigned presents_before_end = gc_present_count;
+
+			/* Arm the EFB present before R_EndFrame, which presents. */
+			if( gx_world_frame )
+			{
+				if( !xfb[0] && rmode )
+					GC_AllocXFB( 0, rmode );
+				if( !xfb[1] )
+					which_fb = 0;
+				GC_MarkGxWorldEfbReady();
+			}
+			ref.dllFuncs.R_EndFrame();
+			/* R_BlitScreen on the pure-GX path now presents through
+			 * SW_UnlockBuffer. Presenting again here showed every frame
+			 * twice and waited two vsyncs per host frame, which held the
+			 * DoD listen at 30 fps with ~12 ms of real work (ceres profile:
+			 * "present: VI vsync wait" hits=128 per 64 frames, avg 10.4 ms). */
+			presented_this_frame = gc_present_count != presents_before_end;
+		}
 		GC_WatchdogMark( "newgame frame after R_EndFrame" );
-		/* Pure-GX R_BlitScreen intentionally skips the software swap, but this
-		 * direct local-play renderer owns its frame loop. Present the EFB here
-		 * so the live BSP reaches the visible XFB during menu-driven play. */
-		if( gx_world_frame )
+		/* This direct local-play renderer owns its frame loop. If R_EndFrame
+		 * did not present (soft blit skipped), present the EFB here so the
+		 * live BSP reaches the visible XFB during menu-driven play. */
+		if( gx_world_frame && !presented_this_frame )
 		{
 			/* A single-XFB build must stay on slot zero. Menu teardown can leave
 			 * the old scanout slot unavailable while Flipper itself remains live. */
@@ -18564,16 +19086,12 @@ qboolean GC_PrepareNewGameWorldPresent( void )
 	FS_ClearFindMissCache();
 	if( Sys_CheckParm( "-gcnewgame" ) && !Sys_CheckParm( "-gcfullphysics" ))
 	{
-		Con_Reportf( "Xash3D GameCube: G327 defer lean HUD VidInit/sprites until post-present\n" );
+		Con_Reportf( "Xash3D GameCube: G327 defer HUD VidInit until post-present\n" );
 	}
 	else
 	{
 		SCR_LoadCreditsFont();
-		if( clgame.dllFuncs.pfnVidInit )
-		{
-			clgame.dllFuncs.pfnVidInit();
-			Con_Reportf( "Xash3D GameCube: newgame lean HUD VidInit after world present\n" );
-		}
+		CL_GCEnsureHudVidInit( "prepare" );
 		CL_GCPreloadNewGameHudSprites();
 	}
 	Con_Reportf( "Xash3D GameCube: G327 prepare HUD ready\n" );
@@ -19060,7 +19578,7 @@ qboolean GC_PrepareNewGameWorldPresent( void )
 				ref.dllFuncs.R_AllowFog( false );
 				ref.dllFuncs.R_Set2DMode( true );
 				CL_DrawHUD( CL_ACTIVE );
-				Con_Reportf( "Xash3D GameCube: HUD lean draw\n" );
+				Con_Reportf( "Xash3D GameCube: HUD draw (V_RenderView pump)\n" );
 				ref.dllFuncs.R_AllowFog( true );
 				Platform_SetTimer( 0.0f );
 				ref.dllFuncs.R_EndFrame();

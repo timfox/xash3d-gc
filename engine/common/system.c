@@ -98,8 +98,12 @@ static void Sys_GameCubeFatalBreadcrumb( const char *message )
 		route = "sd";
 	else if( GCube_GetWritablePath( base, sizeof( base )) && !Q_strnicmp( base, "gcprobe:", 8 ))
 		route = "probe";
-	else if( GCube_GetBasePath( base, sizeof( base )))
-		route = !Q_strnicmp( base, "gcdisc:", 7 ) ? "disc" : "other";
+	/* No GCube_GetBasePath() here: it opens directories on the disc (libiso9660), and this
+	 * function runs from a fatal allocation failure, when the heap is gone. On dod_charlie
+	 * the Cvar_Get OOM in CHud::Init reached it and took a NULL-path strlen inside
+	 * _ISO9660_dirreset_r, turning a reported fatal into a hard crash. */
+	else
+		route = "disc/other";
 
 	if( !Sys_GetParmFromCmdLine( "-gcmap", gcmap ))
 		gcmap[0] = '\0';
@@ -293,12 +297,19 @@ Sys_ParseCommandLine
 
 ==================
 */
+#if XASH_GAMECUBE
+static int memo_argc = -1;	/* Sys_CheckParm memo: -1 drops it */
+#endif
+
 void Sys_ParseCommandLine( int argc, const char **argv )
 {
 	const char	*blank = "censored";
 
 	host.argc = argc;
 	host.argv = argv;
+#if XASH_GAMECUBE
+	memo_argc = -1;
+#endif
 
 	if( !host.change_game ) return;
 
@@ -327,6 +338,42 @@ where the given parameter apears, or 0 if not present
 */
 int Sys_CheckParm( const char *parm )
 {
+#if XASH_GAMECUBE
+	/* The GameCube code asks for boot flags from inside the frame (over a
+	 * thousand lookups a frame in a large map), and each one compared the
+	 * name against every argument. Remember the answers; the table is
+	 * dropped whenever the argument list changes. */
+	static struct { char name[28]; int result; } memo[64];
+	static const void *memo_argv;
+	unsigned int h = 2166136261u, len = 0;
+	int result = 0;
+
+	if( memo_argc != host.argc || memo_argv != (const void *)host.argv )
+	{
+		memset( memo, 0, sizeof( memo ));
+		memo_argc = host.argc;
+		memo_argv = (const void *)host.argv;
+	}
+	while( parm[len] )
+		h = ( h ^ (unsigned char)parm[len++] ) * 16777619u;
+	h = ( h ^ ( h >> 16 )) & 63u;
+	if( len && len < sizeof( memo[0].name ) && !strcmp( memo[h].name, parm ))
+		return memo[h].result;
+	for( int i = 1; i < host.argc; i++ )
+	{
+		if( host.argv[i] && !Q_stricmp( parm, host.argv[i] ))
+		{
+			result = i;
+			break;
+		}
+	}
+	if( len && len < sizeof( memo[0].name ))
+	{
+		memcpy( memo[h].name, parm, len + 1 );
+		memo[h].result = result;
+	}
+	return result;
+#else
 	for( int i = 1; i < host.argc; i++ )
 	{
 		if( !host.argv[i] )
@@ -336,6 +383,7 @@ int Sys_CheckParm( const char *parm )
 			return i;
 	}
 	return 0;
+#endif
 }
 
 /*
@@ -562,6 +610,11 @@ Sys_Quit
 */
 void Sys_Quit( const char *reason )
 {
+#if XASH_GAMECUBE && defined( XASH_GC_MEMWATCH_DEBUG )
+	/* Name the exit path before shutdown: a parked reset otherwise looks silent. */
+	SYS_Report( "Xash3D GameCube: Sys_Quit reason=%s status=%d frame=%u caller=%p\n",
+		reason ? reason : "<null>", host.status, host.framecount, __builtin_return_address( 0 ));
+#endif
 	Host_ShutdownWithReason( reason );
 	Host_ExitInMain();
 }

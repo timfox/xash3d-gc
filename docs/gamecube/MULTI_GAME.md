@@ -54,9 +54,9 @@ restart-to-switch-title path on GameCube yet.
 
 Do **not** claim `dodgc.dol` gameplay until all of the following are true:
 
-1. **Assets** — retail/Steam `dod/` tree is available beside `valve/` (DoD
+1. **Assets** — retail `dod/` tree is available beside `valve/` (DoD
    `liblist.gam` typically falls back to `valve`).
-2. **Game code** — Steam Day of Defeat is listed as **vgui2-blocked** in
+2. **Game code** — retail Day of Defeat is listed as **vgui2-blocked** in
    [`Documentation/not-supported-mod-list-and-reasons-why.md`](../Documentation/not-supported-mod-list-and-reasons-why.md).
    Stock Xash3D does not support that client. Need either:
    - an open reverse-engineered DoD client/server suitable for static GC link, or

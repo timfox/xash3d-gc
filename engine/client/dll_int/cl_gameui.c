@@ -403,7 +403,7 @@ static void UI_GCDrawFallbackMenu( void )
 		/* Retail composites already include their own lettering and buttons. */
 		if( !gc_menu_reported_retail_ready )
 		{
-			Con_Reportf( "Xash3D GameCube: retail menu steam background ready\n" );
+			Con_Reportf( "Xash3D GameCube: retail menu background ready\n" );
 			gc_menu_reported_retail_ready = true;
 		}
 		return;
@@ -413,7 +413,7 @@ static void UI_GCDrawFallbackMenu( void )
 
 	if( gc_menu_use_baked_retail && !gc_menu_reported_retail_ready )
 	{
-		Con_Reportf( "Xash3D GameCube: retail menu steam background ready\n" );
+		Con_Reportf( "Xash3D GameCube: retail menu background ready\n" );
 		gc_menu_reported_retail_ready = true;
 	}
 
@@ -1367,6 +1367,14 @@ static void GAME_EXPORT pfnFillRGBA( int x, int y, int width, int height, int r,
 	b = bound( 0, b, 255 );
 	a = bound( 0, a, 255 );
 
+#if XASH_GAMECUBE
+	// text queued for the 640x480 GX layer that this box covers is under it
+	{
+		extern void GC_HiTextOcclude( int x, int y, int w, int h, int alpha );
+
+		GC_HiTextOcclude( x, y, width, height, a );
+	}
+#endif
 	ref.dllFuncs.FillRGBA( kRenderTransTexture, x, y, width, height, r, g, b, a );
 }
 
@@ -1451,6 +1459,19 @@ static void GAME_EXPORT pfnDrawCharacter( int ix, int iy, int iwidth, int iheigh
 	if( !hFont )
 	{
 		cl_font_t *font = &cls.creditsFont;
+
+		/* hardware resolution text: a quad at 640x480 over the presented soft frame; the keyboard queues its own
+		 * glyphs and occludes this text under its panel (GC_HiTextOcclude) */
+		{
+			extern qboolean GC_HiTextActive( void );
+			extern qboolean GC_HiTextGlyph( int ch, float x, float y, float w, float h, int ulRGBA );
+			float cx = x, cy = y, cw = width, chh = height, u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+
+			if( GC_HiTextActive()
+				&& CL_Scissor( &gameui.ds.scissor, &cx, &cy, &cw, &chh, &u0, &v0, &u1, &v1 )
+				&& GC_HiTextGlyph( ch, x, y, width, height, ulRGBA ))
+				return;
+		}
 		wrect_t *rc;
 		int texw, texh;
 		float src_w, src_h, scale;

@@ -644,6 +644,7 @@ void SV_FreeEdicts( void );
 #if XASH_GAMECUBE
 #define GC_ENTITY_OVERFLOW_BYTES (64u * 1024u)
 void SV_GCReservePrivateOverflow( size_t after, size_t bytes );
+void SV_GCSizePacketEntities( void );
 qboolean SV_GCPrivateOverflowReserved( void );
 qboolean SV_GCPrivateOverflowPinsMapArena( void );
 #endif
@@ -760,6 +761,16 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed );
 // sv_world.c
 //
 void SV_ClearWorld( void );
+#if XASH_GAMECUBE
+/* static func_wall records (sv_world.c) */
+int SV_GCStaticWallCount( void );
+void SV_GCStaticWallsClear( void );
+qboolean SV_GCStaticWallAdd( int modelindex, const vec3_t origin, const vec3_t mins, const vec3_t maxs );
+void SV_GCStaticWallTrace( int i, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );
+void SV_GCStaticWallBounds( int i, vec3_t absmin, vec3_t absmax, int *modelindex );
+void SV_GCStaticWallInfo( int i, vec3_t origin, vec3_t mins, vec3_t maxs, int *modelindex );
+int SV_GCStaticWallsMode( void );
+#endif
 void SV_UnlinkEdict( edict_t *ent );
 void SV_ClipMoveToEntity( edict_t *ent, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );
 void SV_CustomClipMoveToEntity( edict_t *ent, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );
@@ -797,5 +808,28 @@ static inline qboolean SV_CheckGroupTrace( const edict_t *e1, const edict_t *e2 
 
 	return true;
 }
+
+#if XASH_GAMECUBE
+/* Unnamed env_model / dod_object: drawn from this list, no edict (sv_game.c). */
+#define GC_STATIC_PROPS_MAX	192
+#define GC_STATIC_PROP_MODELS	6
+typedef struct
+{
+	vec3_t	origin;
+	vec3_t	angles;
+	float	scale;
+	float	framerate;
+	short	modelindex;
+	short	sequence;
+	short	skin;
+	short	body;
+	byte	rendermode;
+	byte	renderamt;
+	byte	renderfx;
+	color24	rendercolor;
+} gc_static_prop_t;
+extern gc_static_prop_t gc_static_props[GC_STATIC_PROPS_MAX];
+extern int gc_num_static_props;
+#endif
 
 #endif//SERVER_H

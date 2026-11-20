@@ -91,6 +91,8 @@ Studio models are position independent, so the cache manager can move them.
 #define STUDIO_NF_HAS_ALPHA		(1U<<20)	// external texture has alpha-channel
 #define STUDIO_NF_HAS_DETAIL		(1U<<21)	// studiomodels has detail textures
 #define STUDIO_NF_COLORMAP		(1U<<30)	// internal system flag
+#define STUDIO_NF_GC_CMPR_STREAM	(1U<<27)	// GameCube: with STUDIO_NF_GC_CMPR, width x height CMPR texels streamed from ARAM, a half-size CMPR low mip follows them
+#define STUDIO_NF_GC_CMPR		(1U<<28)	// GameCube: index points at baked GX CMPR texels, width x height (scripts/build-gamecube-disc.py)
 #define STUDIO_NF_UV_COORDS		(1U<<31)	// using half-float coords instead of ST
 
 // motion flags
@@ -967,6 +969,10 @@ typedef struct
 	// offset to the boneweighted normal info
 	int32_t		blendnorminfoindex;
 } mstudiomodel_t;
+
+// GameCube: a body-group model whose mesh data lives in an ARAM mesh pack
+// (unused == this, unused2 == pack entry, offsets relative to that blob)
+#define GC_STUDIO_MESH_STREAMED 0x534D4347 // "GCMS" little-endian
 
 // vec3_t	boundingbox[model][bone][2];		// complex intersection info
 

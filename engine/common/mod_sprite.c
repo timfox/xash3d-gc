@@ -237,19 +237,18 @@ void Mod_LoadSpriteModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 	Q_snprintf( poolname, sizeof( poolname ), "^2%s^7", mod->name );
 #if XASH_GAMECUBE
 	/* The menu New Game route reaches client/HUD setup with a nearly full MEM1
-	 * pool table. Its generated sprites are small and live for the session;
-	 * share the host pool instead of creating one indexed pool per HUD sheet.
-	 * Fullphysics keeps its existing broad fallback for its larger sprite set. */
-	if( Sys_CheckParm( "-gcmenuplaystart" ))
+	 * pool table. HUD sheets (hud.txt and weapon_*.txt: 320/640 sets, the
+	 * crosshairs, lgtning) live for the session; share the host pool instead
+	 * of creating one indexed pool per sheet. Fullphysics keeps its existing
+	 * broad fallback for its larger sprite set. */
 	{
-		static const char *const menu_hud[] = {
-			"sprites/320hud1.spr", "sprites/crosshairs.spr", "sprites/lgtning.spr",
-			"sprites/320_train.spr", "sprites/320hud2.spr"
+		static const char *const hud_sheets[] = {
+			"sprites/320", "sprites/640", "sprites/gc_", "sprites/crosshairs.spr", "sprites/lgtning.spr"
 		};
 		int i;
-		gc_menu_hud_sprite = !Q_strnicmp( mod->name, "sprites/gc_", 11 );
-		for( i = 0; !gc_menu_hud_sprite && i < (int)ARRAYSIZE( menu_hud ); i++ )
-			gc_menu_hud_sprite = !Q_stricmp( mod->name, menu_hud[i] );
+
+		for( i = 0; !gc_menu_hud_sprite && i < (int)ARRAYSIZE( hud_sheets ); i++ )
+			gc_menu_hud_sprite = !Q_strnicmp( mod->name, hud_sheets[i], Q_strlen( hud_sheets[i] ));
 	}
 	if( Sys_CheckParm( "-gcfullphysics" )
 		|| gc_menu_hud_sprite )

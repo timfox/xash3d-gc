@@ -10,6 +10,7 @@ Copyright (C) 2026 xash3d-gc contributors
 #include "aram_core.h"
 #include <stdlib.h>
 #include <malloc.h>
+#include <reent.h>
 #include <ogc/system.h>
 #include <ogc/aram.h>
 #include <ogc/cache.h>
@@ -35,6 +36,10 @@ static qboolean gc_mapload_pressure_active;
 static byte *gc_mapload_buf;
 static size_t gc_mapload_buf_size;
 static size_t gc_mapload_tail_highwater;
+/* Highest end of any tail carve since this buffer was acquired. The
+ * highwater is lowered again during a lean map load while earlier carves
+ * (the world-texture low mips) stay live, so late users start above this. */
+static size_t gc_mapload_tail_peak;
 static qboolean gc_mapload_buf_in_use;
 static int gc_mapload_memopt_depth;
 static qboolean gc_mapload_memopt_session; /* stays on after playstart until cleared */
@@ -131,6 +136,130 @@ static void GC_MemHeapStats( size_t *used, size_t *free_in_heap, size_t *unclaim
 	*unclaimed = hi > lo ? (size_t)( hi - lo ) : 0;
 }
 
+/*
+ * Heap consistency check (newlib dlmalloc 2.6 layout). Walks every bin's
+ * bk/fd chain and the contiguous chunk list from __malloc_sbrk_base to top,
+ * and logs the first bad pointer or size. Used to bisect heap corruption:
+ * the dod_charlie menu route faults in _malloc_r (DAR 0xC = NULL bin link)
+ * on the first world DL frame.
+ */
+typedef struct gc_mchunk_s
+{
+	size_t prev_size;
+	size_t size;
+	struct gc_mchunk_s *fd;
+	struct gc_mchunk_s *bk;
+} gc_mchunk_t;
+
+extern gc_mchunk_t *__malloc_av_[];
+extern char *__malloc_sbrk_base __attribute__(( weak ));
+void __malloc_lock( struct _reent *r );
+void __malloc_unlock( struct _reent *r );
+
+#define GC_HC_NAV	128
+#define GC_HC_BIN( i )	((gc_mchunk_t *)((char *)&__malloc_av_[2 * ( i ) + 2] - 2 * sizeof( size_t )))
+
+static qboolean GC_HeapCheckPtr( uintptr_t p, uintptr_t lo, uintptr_t hi )
+{
+	return p >= lo && p < hi && ( p & 7u ) == 0;
+}
+
+qboolean GC_HeapCheck( const char *tag )
+{
+	static int failures;
+	gc_mchunk_t *top;
+	uintptr_t lo, hi, p;
+	int i, steps, chunks = 0;
+	qboolean ok = true;
+	char why[160];
+
+	if( failures >= 8 )
+		return false;
+	why[0] = '\0';
+	__malloc_lock( _REENT );
+	top = GC_HC_BIN( 0 )->fd;
+	lo = ( &__malloc_sbrk_base && __malloc_sbrk_base != (char *)-1 )
+		? ( (uintptr_t)__malloc_sbrk_base + 7u ) & ~(uintptr_t)7u : 0x80000000u;
+	hi = (uintptr_t)top + ( top ? ( top->size & ~(size_t)3 ) : 0 );
+	if( !top || (uintptr_t)top < 0x80000000u || (uintptr_t)top >= 0x81800000u )
+	{
+		Q_snprintf( why, sizeof( why ), "top=%p outside MEM1", (void *)top );
+		ok = false;
+	}
+	/* Bins 1..127: every link must be the bin header or a heap chunk. */
+	for( i = 1; ok && i < GC_HC_NAV; i++ )
+	{
+		gc_mchunk_t *b = GC_HC_BIN( i );
+		gc_mchunk_t *c = b->bk, *prev = b;
+
+		for( steps = 0; c != b; steps++ )
+		{
+			if( steps > 8192 || !GC_HeapCheckPtr( (uintptr_t)c, lo, hi ))
+			{
+				Q_snprintf( why, sizeof( why ), "bin %d bk link %p after %p (step %d, heap %p..%p)",
+					i, (void *)c, (void *)prev, steps, (void *)lo, (void *)hi );
+				ok = false;
+				break;
+			}
+			if( c->fd != prev )
+			{
+				Q_snprintf( why, sizeof( why ), "bin %d chunk %p fd=%p expected %p size=0x%lx",
+					i, (void *)c, (void *)c->fd, (void *)prev, (unsigned long)c->size );
+				ok = false;
+				break;
+			}
+			prev = c;
+			c = c->bk;
+		}
+	}
+	/* Contiguous chunk walk up to top (stops at a foreign-sbrk fencepost). */
+	for( p = lo; ok && lo != 0x80000000u && p < (uintptr_t)top; chunks++ )
+	{
+		size_t sz = ((gc_mchunk_t *)p)->size & ~(size_t)3;
+
+		if( sz == 0 || ( sz & 7u ) || p + sz > (uintptr_t)top )
+		{
+			if( sz <= 2 * sizeof( size_t ))
+				break; /* fencepost before a non-contiguous region */
+			Q_snprintf( why, sizeof( why ), "chunk %p size=0x%lx (raw 0x%lx) past top %p after %d chunks",
+				(void *)p, (unsigned long)sz, (unsigned long)((gc_mchunk_t *)p)->size, (void *)top, chunks );
+			ok = false;
+			break;
+		}
+		p += sz;
+	}
+	__malloc_unlock( _REENT );
+	if( ok )
+	{
+		/* ~10 of these a frame: the first 40 and every 5000th are enough, and keep a long run under the host log cap. */
+		static unsigned ok_logs;
+
+		if( ok_logs++ < 40 || !( ok_logs % 5000 ))
+			Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p (#%u)\n", tag, chunks, (void *)top, ok_logs );
+	}
+	else
+	{
+		failures++;
+		Con_Reportf( S_ERROR "Xash3D GameCube: heap check FAILED %s: %s\n", tag, why );
+	}
+	return ok;
+}
+
+/* Armed from gameplay active until the first world DL frame (or the first
+ * failure): bisects the heap break between those two points frame by frame. */
+static qboolean gc_heap_check_armed;
+
+void GC_HeapCheckArm( qboolean on )
+{
+	gc_heap_check_armed = on;
+}
+
+void GC_HeapCheckArmed( const char *tag )
+{
+	if( gc_heap_check_armed && !GC_HeapCheck( tag ))
+		gc_heap_check_armed = false;
+}
+
 /* Heap bytes still allocatable: free inside the arena plus unclaimed MEM1. */
 size_t GC_MemHeapFreeBytes( void )
 {
@@ -152,12 +281,41 @@ size_t GC_MemArenaFreeBytes( void )
 	return free_in_heap;
 }
 
+void GC_HeapCensusReport( const char *stage );
+
+void GC_MapLoadBufferWorldSettled( qboolean settled );
+void GC_TexRegionReport( const char *stage );
+#ifdef XASH_GC_MALLOC_TRACE
+void GC_MallocTraceFlush( void );
+#endif
+
 void GC_MemSample( const char *stage )
 {
+#ifdef XASH_GC_MALLOC_TRACE
+	GC_MallocTraceFlush();
+#endif
 	size_t total = Mem_TotalRealSize();
 	size_t delta = (total >= gc_mem_last) ? (total - gc_mem_last) : 0;
 
 	GC_MemWatch( stage );
+
+	/* Per-map budget: spawning is done, so move map-lifetime heap blocks into
+	 * the map's leftover memory (runs every map, unchanged totals or not).
+	 * From here on, arena carves must avoid the world's arrays. */
+	if( !Q_strcmp( stage, "bsp-buffer-release" ) || !Q_strcmp( stage, "entity spawn" ) || !Q_strcmp( stage, "pre-SV_Init" ))
+		GC_HeapCensusReport( stage );
+	if( !Q_strcmp( stage, "entity spawn" ))
+	{
+		extern void SV_GCParityReport( void );
+		SV_GCParityReport();
+	}
+	if( !Q_strcmp( stage, "map active" ))
+	{
+		extern void Mod_GCMoveWorldEntitiesToArena( void );
+
+		GC_MapLoadBufferWorldSettled( true );
+		Mod_GCMoveWorldEntitiesToArena();
+	}
 
 	if( total > gc_mem_hwm )
 		gc_mem_hwm = total;
@@ -175,6 +333,14 @@ void GC_MemSample( const char *stage )
 		Con_Reportf( "Xash3D GameCube: mem stage=%s total=%s delta=%s hwm=%s map=%s heap_used=%s heap_free=%s unclaimed=%s\n",
 			stage, Q_memprint( total ), Q_memprint( delta ), Q_memprint( gc_mem_hwm ), gc_mem_map,
 			Q_memprint( heap_used ), Q_memprint( heap_free ), Q_memprint( heap_unclaimed ));
+	}
+	if( !Q_strcmp( stage, "map active" ))
+	{
+		extern void GC_MemReportPools( const char *stage );
+
+		GC_MemReportPools( stage );
+		GC_HeapCensusReport( stage );
+		GC_TexRegionReport( stage );
 	}
 }
 
@@ -200,8 +366,19 @@ typedef struct gc_boot_blk_s
 	uint32_t pad[6];	/* keep the payload 32-byte aligned */
 } gc_boot_blk_t;
 
+/* Heap-pressure fallback: small allocations the libc heap refuses are served
+ * from a bump zone at the TOP of the pad, so whatever is still live at the
+ * first map load pins only the top of the pad (the map-load arena ends at the
+ * pad's end) instead of the whole of it. */
+#define GC_BOOT_SMALL_ZONE ( 256u * 1024u )
+#define GC_BOOT_SMALL_MAX ( 32u * 1024u )	/* largest block the zone serves */
+
 static byte *gc_boot_base;
 static size_t gc_boot_cap;
+static size_t gc_boot_large_cap;	/* first-fit region: cap minus the small zone */
+static byte *gc_boot_small_low, *gc_boot_small_top;
+static unsigned int gc_boot_small_live;
+static size_t gc_boot_small_live_bytes;
 static qboolean gc_boot_ready, gc_boot_closed;
 static unsigned int gc_boot_live;
 static size_t gc_boot_live_bytes, gc_boot_peak_bytes;
@@ -220,8 +397,14 @@ static qboolean GC_BootArenaInit( void )
 		gc_boot_base = NULL;
 		return false;
 	}
+	gc_boot_large_cap = gc_boot_cap;
+	if( gc_boot_cap > 4u * GC_BOOT_SMALL_ZONE )
+	{
+		gc_boot_large_cap = gc_boot_cap - GC_BOOT_SMALL_ZONE;
+		gc_boot_small_top = gc_boot_small_low = gc_boot_base + gc_boot_cap;
+	}
 	first = (gc_boot_blk_t *)gc_boot_base;
-	first->size = (uint32_t)gc_boot_cap;
+	first->size = (uint32_t)gc_boot_large_cap;
 	first->used = 0;
 	Con_Reportf( "Xash3D GameCube: boot arena ready capacity=%s\n", Q_memprint( gc_boot_cap ));
 	return true;
@@ -242,7 +425,7 @@ void *GC_BootArenaAlloc( size_t size )
 		return NULL;
 	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
 
-	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
 	{
 		gc_boot_blk_t *blk = (gc_boot_blk_t *)cursor;
 
@@ -267,6 +450,69 @@ void *GC_BootArenaAlloc( size_t size )
 	return NULL;
 }
 
+/* Last resort for a small allocation when the libc heap is exhausted. */
+void *GC_BootArenaAllocSmall( size_t size )
+{
+	size_t need;
+	gc_boot_blk_t *blk;
+
+	if( size == 0 || size > GC_BOOT_SMALL_MAX || ( gc_boot_closed && !gc_boot_small_top )
+		|| !GC_BootArenaInit() || !gc_boot_small_top )
+		return NULL;
+	need = ( sizeof( gc_boot_blk_t ) + size + GC_BOOT_ARENA_ALIGN - 1u ) & ~(size_t)( GC_BOOT_ARENA_ALIGN - 1u );
+	/* Reuse a freed block first: realloc growth and short-lived allocations
+	 * otherwise leave holes the downward bump never revisits, and the whole
+	 * zone drains on churn with almost nothing live. */
+#ifndef GC_BOOT_SMALL_NOREUSE
+	{
+		byte *cursor;
+
+		for( cursor = gc_boot_small_low; cursor < gc_boot_small_top; cursor += ((gc_boot_blk_t *)cursor)->size )
+		{
+			gc_boot_blk_t *hole = (gc_boot_blk_t *)cursor;
+
+			if( hole->used || hole->size < need )
+				continue;
+			if( hole->size - need >= 2u * GC_BOOT_ARENA_ALIGN + sizeof( gc_boot_blk_t ))
+			{
+				gc_boot_blk_t *rest = (gc_boot_blk_t *)( cursor + need );
+
+				rest->size = hole->size - (uint32_t)need;
+				rest->used = 0;
+				hole->size = (uint32_t)need;
+			}
+			hole->used = 1;
+			gc_boot_small_live++;
+			gc_boot_small_live_bytes += hole->size;
+			return (byte *)hole + sizeof( gc_boot_blk_t );
+		}
+	}
+#endif
+	/* After the map load the pad below small_low belongs to the map loader, so
+	 * only the holes inside the pinned zone above may still be handed out. */
+	if( gc_boot_closed )
+		return NULL;
+	if( (size_t)( gc_boot_small_low - ( gc_boot_base + gc_boot_large_cap )) < need )
+		return NULL;
+	gc_boot_small_low -= need;
+	blk = (gc_boot_blk_t *)gc_boot_small_low;
+	blk->size = (uint32_t)need;
+	blk->used = 1;
+	gc_boot_small_live++;
+	gc_boot_small_live_bytes += need;
+	return (byte *)blk + sizeof( gc_boot_blk_t );
+}
+
+/* Lowest address that must stay out of the map-load arena, or NULL. */
+void *GC_BootArenaPinnedLow( void )
+{
+	if( gc_boot_live )
+		return gc_boot_base;
+	if( gc_boot_small_live )
+		return gc_boot_small_low;
+	return NULL;
+}
+
 qboolean GC_BootArenaFree( void *ptr )
 {
 	gc_boot_blk_t *blk;
@@ -280,16 +526,49 @@ qboolean GC_BootArenaFree( void *ptr )
 		Con_Reportf( S_ERROR "Xash3D GameCube: boot arena double free %p\n", ptr );
 		return true;
 	}
+	if( gc_boot_small_top && (byte *)blk >= gc_boot_base + gc_boot_large_cap )
+	{
+		blk->used = 0;
+		gc_boot_small_live--;
+		gc_boot_small_live_bytes -= blk->size;
+#ifdef GC_BOOT_SMALL_POISON
+		/* Stale users of freed small-zone memory read 0xDD and a later reuse
+		 * of the block is easy to spot in dumps. */
+		memset( (byte *)blk + sizeof( gc_boot_blk_t ), 0xDD, blk->size - sizeof( gc_boot_blk_t ));
+#endif
+#ifndef GC_BOOT_SMALL_NOREUSE
+		/* Merge runs of free neighbours so holes can serve larger blocks. */
+		{
+			byte *cursor = gc_boot_small_low;
+
+			while( cursor < gc_boot_small_top )
+			{
+				gc_boot_blk_t *cur = (gc_boot_blk_t *)cursor;
+				byte *next = cursor + cur->size;
+
+				if( !cur->used && next < gc_boot_small_top && !((gc_boot_blk_t *)next)->used )
+					cur->size += ((gc_boot_blk_t *)next)->size;
+				else
+					cursor = next;
+			}
+		}
+#endif
+		/* The zone is contiguous from small_low to its top: retreat past
+		 * freed blocks so a dead zone costs nothing at the map load. */
+		while( gc_boot_small_low < gc_boot_small_top && !((gc_boot_blk_t *)gc_boot_small_low)->used )
+			gc_boot_small_low += ((gc_boot_blk_t *)gc_boot_small_low)->size;
+		return true;
+	}
 	blk->used = 0;
 	gc_boot_live--;
 	gc_boot_live_bytes -= blk->size;
 
 	/* Coalesce every run of free neighbours (few blocks; a full walk is cheap). */
-	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
+	for( cursor = gc_boot_base; cursor < gc_boot_base + gc_boot_large_cap; cursor += ((gc_boot_blk_t *)cursor)->size )
 	{
 		gc_boot_blk_t *cur = (gc_boot_blk_t *)cursor;
 
-		while( !cur->used && cursor + cur->size < gc_boot_base + gc_boot_cap )
+		while( !cur->used && cursor + cur->size < gc_boot_base + gc_boot_large_cap )
 		{
 			gc_boot_blk_t *next = (gc_boot_blk_t *)( cursor + cur->size );
 			if( next->used )
@@ -300,6 +579,176 @@ qboolean GC_BootArenaFree( void *ptr )
 	return true;
 }
 
+
+/*
+ * Heap census (diagnostic; disc config "heapcensus", set by probe builds only).
+ *
+ * The engine's tracked pools hold ~330 KiB of a ~1.2 MiB heap; the rest is
+ * plain malloc from the game DLL, filesystem, renderer and libraries with no
+ * owner on record.  With the census on, every heap block allocated from then
+ * on is recorded (pointer -> caller, size) in a table placed at 0x81800000:
+ * Dolphin backs 32 MiB for the 24 MiB MEM1 (next power of two), so the table
+ * sits outside the retail layout and the heap is untouched -- no headers, no
+ * extra heap bytes, the same OOM thresholds as a normal run.  Never enable it
+ * on hardware: that address is not RAM there.
+ * GC_HeapCensusReport prints the top call sites per "map active";
+ * scripts/gamecube-heap-census.sh resolves them.
+ */
+#define GC_CENSUS_BASE    0x81800000u
+#define GC_CENSUS_PTRS    ( 1u << 16 )	/* 64k live blocks, 12 bytes each */
+#define GC_CENSUS_CALLERS 2048u
+
+typedef struct { uint32_t ptr, caller, size; } gc_census_ent_t;
+typedef struct { uint32_t caller, live, count, peak; } gc_census_slot_t;
+
+static qboolean gc_census_on;
+static gc_census_ent_t *gc_census_ptrs;
+static gc_census_slot_t *gc_census_callers;
+static uint32_t gc_census_dropped;
+
+void GC_HeapCensusEnable( void )
+{
+	if( gc_census_on )
+		return;
+	gc_census_ptrs = (gc_census_ent_t *)GC_CENSUS_BASE;
+	gc_census_callers = (gc_census_slot_t *)( GC_CENSUS_BASE + GC_CENSUS_PTRS * sizeof( gc_census_ent_t ));
+	memset( gc_census_ptrs, 0, GC_CENSUS_PTRS * sizeof( gc_census_ent_t ));
+	memset( gc_census_callers, 0, GC_CENSUS_CALLERS * sizeof( gc_census_slot_t ));
+	gc_census_on = true;
+}
+
+static gc_census_slot_t *GC_CensusCaller( uint32_t caller )
+{
+	uint32_t i = ( caller >> 2 ) % GC_CENSUS_CALLERS, n;
+
+	for( n = 0; n < GC_CENSUS_CALLERS; n++, i = ( i + 1 ) % GC_CENSUS_CALLERS )
+	{
+		if( gc_census_callers[i].caller == caller )
+			return &gc_census_callers[i];
+		if( !gc_census_callers[i].caller )
+		{
+			gc_census_callers[i].caller = caller;
+			return &gc_census_callers[i];
+		}
+	}
+	return NULL;
+}
+
+static uint32_t GC_CensusHash( uint32_t ptr )
+{
+	return (( ptr >> 3 ) * 2654435761u ) & ( GC_CENSUS_PTRS - 1 );
+}
+
+static void GC_CensusAdd( void *p, size_t size, uint32_t caller )
+{
+	uint32_t i, n;
+	gc_census_slot_t *c;
+
+#if XASH_GC_HEAP_CENSUS_BOOT
+	/* Census builds (CFLAGS from SWEEP_HEAP_CENSUS) start at the first
+	 * allocation, so boot-time blocks are on record too. */
+	if( !gc_census_on )
+		GC_HeapCensusEnable();
+#endif
+	if( !gc_census_on || !p )
+		return;
+	for( i = GC_CensusHash( (uint32_t)(uintptr_t)p ), n = 0; n < GC_CENSUS_PTRS; n++, i = ( i + 1 ) & ( GC_CENSUS_PTRS - 1 ))
+	{
+		if( !gc_census_ptrs[i].ptr || gc_census_ptrs[i].ptr == (uint32_t)(uintptr_t)p )
+			break;
+	}
+	if( n == GC_CENSUS_PTRS )
+	{
+		gc_census_dropped++;
+		return;
+	}
+	if( gc_census_ptrs[i].ptr && ( c = GC_CensusCaller( gc_census_ptrs[i].caller )))
+	{
+		/* Same block recorded again (realloc in place, nested wrapper). */
+		c->live -= Q_min( c->live, gc_census_ptrs[i].size );
+		if( c->count )
+			c->count--;
+	}
+	gc_census_ptrs[i].ptr = (uint32_t)(uintptr_t)p;
+	gc_census_ptrs[i].caller = caller;
+	gc_census_ptrs[i].size = (uint32_t)size;
+	if(( c = GC_CensusCaller( caller )))
+	{
+		c->live += (uint32_t)size;
+		c->count++;
+		if( c->live > c->peak )
+			c->peak = c->live;
+	}
+}
+
+static void GC_CensusRemove( void *p )
+{
+	uint32_t i, j, n;
+	gc_census_slot_t *c;
+
+	if( !gc_census_on || !p )
+		return;
+	for( i = GC_CensusHash( (uint32_t)(uintptr_t)p ), n = 0; n < GC_CENSUS_PTRS; n++, i = ( i + 1 ) & ( GC_CENSUS_PTRS - 1 ))
+	{
+		if( !gc_census_ptrs[i].ptr )
+			return;	/* allocated before the census started */
+		if( gc_census_ptrs[i].ptr == (uint32_t)(uintptr_t)p )
+			break;
+	}
+	if( n == GC_CENSUS_PTRS )
+		return;
+	if(( c = GC_CensusCaller( gc_census_ptrs[i].caller )))
+	{
+		c->live -= Q_min( c->live, gc_census_ptrs[i].size );
+		if( c->count )
+			c->count--;
+	}
+	/* Backward-shift deletion keeps every probe chain unbroken. */
+	gc_census_ptrs[i].ptr = 0;
+	for( j = ( i + 1 ) & ( GC_CENSUS_PTRS - 1 ); gc_census_ptrs[j].ptr; j = ( j + 1 ) & ( GC_CENSUS_PTRS - 1 ))
+	{
+		const uint32_t home = GC_CensusHash( gc_census_ptrs[j].ptr );
+
+		if((( j - home ) & ( GC_CENSUS_PTRS - 1 )) >= (( j - i ) & ( GC_CENSUS_PTRS - 1 )))
+		{
+			gc_census_ptrs[i] = gc_census_ptrs[j];
+			gc_census_ptrs[j].ptr = 0;
+			i = j;
+		}
+	}
+}
+
+void GC_HeapCensusReport( const char *stage )
+{
+	uint32_t total = 0, i, k;
+	gc_census_slot_t top[16];
+
+	if( !gc_census_on )
+		return;
+	memset( top, 0, sizeof( top ));
+	for( i = 0; i < GC_CENSUS_CALLERS; i++ )
+	{
+		const gc_census_slot_t *c = &gc_census_callers[i];
+
+		if( !c->caller || !c->live )
+			continue;
+		total += c->live;
+		for( k = 0; k < 16; k++ )
+		{
+			if( c->live > top[k].live )
+			{
+				memmove( &top[k + 1], &top[k], sizeof( top[0] ) * ( 15 - k ));
+				top[k] = *c;
+				break;
+			}
+		}
+	}
+	Con_Reportf( "Xash3D GameCube: heap census at=%s live=%u dropped=%u\n", stage, (unsigned)total, (unsigned)gc_census_dropped );
+	for( k = 0; k < 16 && top[k].caller; k++ )
+		Con_Reportf( "Xash3D GameCube: heap census caller=0x%08x live=%u count=%u peak=%u\n",
+			(unsigned)top[k].caller, (unsigned)top[k].live, (unsigned)top[k].count, (unsigned)top[k].peak );
+}
+
 /* Linked with -Wl,--wrap=free,--wrap=realloc: any boot-arena block can be
  * released or resized through the C library entry points. */
 void __real_free( void *ptr );
@@ -307,19 +756,97 @@ void *__real_realloc( void *ptr, size_t size );
 
 void __wrap_free( void *ptr )
 {
+	GC_CensusRemove( ptr );
 	if( GC_BootArenaFree( ptr ))
 		return;
 	__real_free( ptr );
 }
 
+void *__real_malloc( size_t size );
+void *__real_calloc( size_t nmemb, size_t size );
+
+/* Every libc/library allocation: when the heap refuses a small block before
+ * the first map load, serve it from the boot pad's small zone. */
+void *__wrap_malloc( size_t size )
+{
+	void *p = __real_malloc( size );
+
+	if( !p && size )
+		p = GC_BootArenaAllocSmall( size );
+	GC_CensusAdd( p, size, (uint32_t)(uintptr_t)__builtin_return_address( 0 ));
+	return p;
+}
+
+void *__wrap_calloc( size_t nmemb, size_t size )
+{
+	void *p = __real_calloc( nmemb, size );
+
+	if( !p && nmemb && size && nmemb <= GC_BOOT_SMALL_MAX / size )
+	{
+		p = GC_BootArenaAllocSmall( nmemb * size );
+		if( p )
+			memset( p, 0, nmemb * size );
+	}
+	GC_CensusAdd( p, nmemb * size, (uint32_t)(uintptr_t)__builtin_return_address( 0 ));
+	return p;
+}
+
+void *__real_memalign( size_t align, size_t size );
+
+void *__wrap_memalign( size_t align, size_t size )
+{
+	void *p = __real_memalign( align, size );
+
+	GC_CensusAdd( p, size, (uint32_t)(uintptr_t)__builtin_return_address( 0 ));
+	return p;
+}
+
+static void *GC_ReallocImpl( void *ptr, size_t size );
+
 void *__wrap_realloc( void *ptr, size_t size )
+{
+	const uint32_t caller = (uint32_t)(uintptr_t)__builtin_return_address( 0 );
+	void *r = GC_ReallocImpl( ptr, size );
+
+	/* A failed realloc leaves the old block live. */
+	if( r || size == 0 )
+		GC_CensusRemove( ptr );
+	if( r )
+		GC_CensusAdd( r, size, caller );
+	return r;
+}
+
+static void *GC_ReallocImpl( void *ptr, size_t size )
 {
 	gc_boot_blk_t *blk;
 	size_t have;
 	void *neu;
 
 	if( !ptr || !GC_BootArenaOwns( ptr ))
-		return __real_realloc( ptr, size );
+	{
+		extern size_t malloc_usable_size( void *ptr );
+		void *r = __real_realloc( ptr, size );
+
+		/* Heap refused the grow: move the block into the boot pad's small
+		 * zone (the old block stays valid when realloc fails). */
+		if( !r && size )
+		{
+			if( !ptr )
+				r = GC_BootArenaAllocSmall( size );
+			else
+			{
+				size_t old = malloc_usable_size( ptr );
+
+				r = GC_BootArenaAllocSmall( size );
+				if( r )
+				{
+					memcpy( r, ptr, old < size ? old : size );
+					__real_free( ptr );
+				}
+			}
+		}
+		return r;
+	}
 	if( size == 0 )
 	{
 		GC_BootArenaFree( ptr );
@@ -346,7 +873,20 @@ void *__wrap_realloc( void *ptr, size_t size )
 static qboolean gc_boot_menu_scope;
 void GC_BootArenaSetMenuScope( qboolean on ) { gc_boot_menu_scope = on; }
 qboolean GC_BootArenaMenuScope( void ) { return gc_boot_menu_scope && !gc_boot_closed; }
-size_t GC_BootArenaLiveBytes( void ) { return gc_boot_live ? gc_boot_live_bytes : 0; }
+size_t GC_BootArenaLiveBytes( void ) { return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes; }
+
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* Where is the pad small zone and the sbrk break?  Compare with a corrupt block address. */
+extern void *sbrk( ptrdiff_t incr );
+void GC_BootDiagLog( const char *stage )
+{
+	struct mallinfo mi = mallinfo();
+	Con_Printf( "Xash3D GameCube: bootdiag %s pad=[%p,%p) large_end=%p small=[%p,%p) sbrk=%p arena1=[%p,%p) heap_used=%d heap_free=%d\n",
+		stage, (void *)gc_boot_base, (void *)( gc_boot_base + gc_boot_cap ),
+		(void *)( gc_boot_base + gc_boot_large_cap ), (void *)gc_boot_small_low, (void *)gc_boot_small_top,
+		sbrk( 0 ), SYS_GetArena1Lo(), SYS_GetArena1Hi(), mi.uordblks, mi.fordblks );
+}
+#endif
 
 /* First map load: no new boot allocations.  Returns the bytes still live. */
 size_t GC_BootArenaClose( void )
@@ -354,11 +894,14 @@ size_t GC_BootArenaClose( void )
 	if( !gc_boot_closed )
 	{
 		gc_boot_closed = true;
+#ifdef XASH_GC_MEMWATCH_DEBUG
+		GC_BootDiagLog( "boot arena closed" );
+#endif
 		if( gc_boot_base )
 			Con_Reportf( "Xash3D GameCube: boot arena closed live=%u bytes=%s peak=%s\n",
 				gc_boot_live, Q_memprint( gc_boot_live_bytes ), Q_memprint( gc_boot_peak_bytes ));
 	}
-	return gc_boot_live ? gc_boot_live_bytes : 0;
+	return ( gc_boot_live ? gc_boot_live_bytes : 0 ) + gc_boot_small_live_bytes;
 }
 
 /* Unconditional heap mark at fixed boot stages (MEM1 headroom telemetry). */
@@ -698,10 +1241,62 @@ done:
 	return valid;
 }
 
+/* Set at "map active", cleared when the next load borrows the arena: while
+ * set, every tail carve must lie in a gap the world-array map says is free
+ * (see GC_MapLoadBufferTailAlloc). */
+static qboolean gc_mapload_world_settled;
+
+void GC_MapLoadBufferWorldSettled( qboolean settled )
+{
+	gc_mapload_world_settled = settled;
+}
+
+qboolean GC_MapLoadBufferIsWorldSettled( void )
+{
+	return gc_mapload_world_settled;
+}
+
+#define GC_MAPLOAD_RESET_HOOKS 4
+static void (*gc_mapload_reset_hooks[GC_MAPLOAD_RESET_HOOKS])( void );
+
+/* Several owners (client temp entities, the view model skin window) may hold
+ * post-load claims at once; registering the same hook twice keeps one entry. */
+void GC_SetMapArenaResetHook( void (*hook)( void ))
+{
+	int i, free_slot = -1;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		if( gc_mapload_reset_hooks[i] == hook )
+			return;
+		if( !gc_mapload_reset_hooks[i] && free_slot < 0 )
+			free_slot = i;
+	}
+	if( free_slot >= 0 )
+		gc_mapload_reset_hooks[free_slot] = hook;
+}
+
+/* Run once and forget: each owner registers again with its next claim. */
+static void GC_RunMapArenaResetHook( void )
+{
+	int i;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		void (*hook)( void ) = gc_mapload_reset_hooks[i];
+
+		gc_mapload_reset_hooks[i] = NULL;
+		if( hook )
+			hook();
+	}
+}
+
 void *GC_BorrowMapLoadBuffer( size_t size )
 {
 	if( size == 0 )
 		return NULL;
+	GC_RunMapArenaResetHook();
+	gc_mapload_world_settled = false;
 	/* Entity private objects may still point into this map's arena. */
 	if( SV_GCPrivateOverflowPinsMapArena() )
 		return NULL;
@@ -727,8 +1322,23 @@ void *GC_BorrowMapLoadBuffer( size_t size )
 		gc_mapload_buf = (byte *)R_GCBorrowMapLoadStaticArena( alloc_size, &static_capacity );
 		if( gc_mapload_buf )
 		{
-			gc_mapload_buf_size = static_capacity;
+			extern size_t GC_TexRegionNoteArena( byte *base, size_t capacity );
+			const size_t usable = GC_TexRegionNoteArena( gc_mapload_buf, static_capacity );
+
+			if( alloc_size > usable )
+			{
+				/* The persistent texture region holds the top of the arena:
+				 * this map takes its lean load paths instead (logged). */
+				Con_Reportf( "Xash3D GameCube: budget map-load arena short need=%s usable=%s (texture region %s); lean load\n",
+					Q_memprint( alloc_size ), Q_memprint( usable ), Q_memprint( static_capacity - usable ));
+				R_GCReleaseMapLoadStaticArena( gc_mapload_buf );
+				gc_mapload_buf = NULL;
+				gc_mapload_buf_size = 0;
+				return NULL;
+			}
+			gc_mapload_buf_size = usable;
 			gc_mapload_tail_highwater = 0;
+			gc_mapload_tail_peak = 0;
 			gc_mapload_buf_in_use = true;
 			return gc_mapload_buf;
 		}
@@ -756,11 +1366,13 @@ void *GC_BorrowMapLoadBuffer( size_t size )
 		}
 		gc_mapload_buf_size = alloc_size;
 		gc_mapload_tail_highwater = 0;
+		gc_mapload_tail_peak = 0;
 		Con_Reportf( "Xash3D GameCube: map-load buffer ready %s\n", Q_memprint( alloc_size ));
 	}
 
 	/* A released staging buffer starts a fresh sub-arena carve session. */
 	gc_mapload_tail_highwater = 0;
+	gc_mapload_tail_peak = 0;
 	gc_mapload_buf_in_use = true;
 	return gc_mapload_buf;
 }
@@ -785,6 +1397,194 @@ qboolean GC_IsMapLoadBuffer( const void *ptr )
 	return ptr != NULL && ptr == gc_mapload_buf;
 }
 
+const byte *GC_MapLoadBufferBase( void )
+{
+	return gc_mapload_buf;
+}
+
+/*
+ * Persistent texture region (per-map budget, texture slots).
+ *
+ * The renderer's mip storage (HUD, sprites, skins: GX reads it in place) was
+ * ~86 KiB of heap from the client's connect on, leaving the heap empty during
+ * play and too short at every level change (entities skipped as tip-starved).
+ * Every map measured leaves >= 240 KiB at the top of the map-load arena
+ * unused, so mips live in a region growing down from the arena top instead:
+ * sized on demand by the textures actually allocated, first-fit with
+ * coalescing, shrinking when its lowest block is freed.  The arena's usable
+ * size (gc_mapload_buf_size, which every map-load user honours) is the
+ * region's low edge.  It only grows into space the world-array gap map says
+ * is free, while a map is settled; otherwise callers keep using the heap.
+ */
+typedef struct gc_texreg_blk_s
+{
+	uint32_t size;	/* whole block, header included, multiple of 32 */
+	uint32_t used;
+	uint32_t pad[6];
+} gc_texreg_blk_t;
+
+static byte  *gc_texreg_base;	/* arena base (static renderer arena) */
+static size_t gc_texreg_cap;	/* full arena capacity */
+static size_t gc_texreg_bytes;	/* region size, from the top */
+static size_t gc_texreg_live;
+
+/* Called when the static arena is borrowed: remember its geometry and
+ * return the size a map load may use. */
+size_t GC_TexRegionNoteArena( byte *base, size_t capacity )
+{
+	/* Blocks are carved down from the top in 32-byte multiples behind a 32-byte header, so their data is
+	 * 32-aligned only when the top is: an arena ending 8 past a boundary put a carried rifle's CMPR skin at
+	 * +8, GX drew it as 16-bit texels (striped red, white and green guns). */
+	const uintptr_t top = ((uintptr_t)base + capacity ) & ~(uintptr_t)31u;
+
+	gc_texreg_base = base;
+	gc_texreg_cap = top > (uintptr_t)base ? (size_t)( top - (uintptr_t)base ) : 0;
+	if( gc_texreg_bytes > gc_texreg_cap )
+		gc_texreg_bytes = 0;
+	return gc_texreg_cap - gc_texreg_bytes;
+}
+
+qboolean GC_TexRegionOwns( const void *p )
+{
+	const byte *b = (const byte *)p;
+
+	return p && gc_texreg_bytes && b >= gc_texreg_base + gc_texreg_cap - gc_texreg_bytes
+		&& b < gc_texreg_base + gc_texreg_cap;
+}
+
+void *GC_TexRegionAlloc( size_t bytes )
+{
+	extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+	const size_t need = (( bytes + 31u ) & ~(size_t)31u ) + sizeof( gc_texreg_blk_t );
+	byte *low, *top;
+	gc_texreg_blk_t *h;
+
+	if( !gc_texreg_base || !bytes || need > 1024u * 1024u )
+		return NULL;
+	top = gc_texreg_base + gc_texreg_cap;
+	low = top - gc_texreg_bytes;
+	/* First fit among freed blocks. */
+	for( h = (gc_texreg_blk_t *)low; (byte *)h < top; h = (gc_texreg_blk_t *)((byte *)h + h->size ))
+	{
+		if( h->used || h->size < need )
+			continue;
+		if( h->size - need >= sizeof( gc_texreg_blk_t ) + 32u )
+		{
+			gc_texreg_blk_t *rest = (gc_texreg_blk_t *)((byte *)h + need );
+
+			rest->size = h->size - (uint32_t)need;
+			rest->used = 0;
+			h->size = (uint32_t)need;
+		}
+		h->used = 1;
+		gc_texreg_live += h->size;
+		memset( h + 1, 0, h->size - sizeof( *h ));
+		return h + 1;
+	}
+	/* Grow down into free arena space below the region. */
+	{
+		const size_t new_low = gc_texreg_cap - gc_texreg_bytes - need;
+		size_t gap_end = 0;
+
+		if( gc_texreg_cap - gc_texreg_bytes < need || !gc_mapload_world_settled
+			|| gc_mapload_buf != gc_texreg_base
+			|| new_low < Q_max( gc_mapload_tail_highwater, gc_mapload_tail_peak )
+			|| Mod_GCArenaGap( new_low, &gap_end ) != new_low
+			|| gap_end < gc_texreg_cap - gc_texreg_bytes )
+			return NULL;
+		gc_texreg_bytes += need;
+		gc_mapload_buf_size = gc_texreg_cap - gc_texreg_bytes;
+		h = (gc_texreg_blk_t *)( gc_texreg_base + new_low );
+		h->size = (uint32_t)need;
+		h->used = 1;
+		gc_texreg_live += need;
+		memset( h + 1, 0, need - sizeof( *h ));
+		return h + 1;
+	}
+}
+
+qboolean GC_TexRegionFree( void *p )
+{
+	gc_texreg_blk_t *h, *n;
+	byte *top;
+
+	if( !GC_TexRegionOwns( p ))
+		return false;
+	top = gc_texreg_base + gc_texreg_cap;
+	h = (gc_texreg_blk_t *)p - 1;
+	h->used = 0;
+	gc_texreg_live -= Q_min( gc_texreg_live, (size_t)h->size );
+	/* Coalesce every free run, then give a free bottom back to the maps. */
+	for( h = (gc_texreg_blk_t *)( top - gc_texreg_bytes ); (byte *)h < top; h = (gc_texreg_blk_t *)((byte *)h + h->size ))
+	{
+		while( !h->used && (byte *)h + h->size < top
+			&& !( n = (gc_texreg_blk_t *)((byte *)h + h->size ))->used )
+			h->size += n->size;
+	}
+	h = (gc_texreg_blk_t *)( top - gc_texreg_bytes );
+	if( gc_texreg_bytes && !h->used )
+	{
+		gc_texreg_bytes -= h->size;
+		if( gc_mapload_buf == gc_texreg_base )
+			gc_mapload_buf_size = gc_texreg_cap - gc_texreg_bytes;
+	}
+	return true;
+}
+
+void GC_TexRegionReport( const char *stage )
+{
+	if( gc_texreg_base )
+		Con_Reportf( "Xash3D GameCube: budget texture region at=%s bytes=%s live=%s arena_usable=%s\n",
+			stage, Q_memprint( gc_texreg_bytes ), Q_memprint( gc_texreg_live ),
+			Q_memprint( gc_texreg_cap - gc_texreg_bytes ));
+}
+
+/* Offset of a free arena gap that fits `bytes` for a post-load claim (entity
+ * overflow, packet rings, client entity table), or (size_t)-1. A lean load
+ * lowers the highwater to 0 and leaves world arrays both near the bottom
+ * (in-place planes) and in a high slot near the top (leafs/nodes); the gap
+ * finder in mod_bmodel.c knows every one of them. */
+size_t GC_MapArenaFind( size_t bytes )
+{
+	extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+	size_t from = gc_mapload_tail_highwater;
+
+	if( from < gc_mapload_tail_peak )
+		from = gc_mapload_tail_peak;
+	while( gc_mapload_buf && from < gc_mapload_buf_size )
+	{
+		size_t end;
+		const size_t start = ( Mod_GCArenaGap( from, &end ) + 31u ) & ~(size_t)31u;
+
+		if( start + bytes <= end )
+			return start;
+		if( end <= from )
+			break;
+		from = end;
+	}
+	return (size_t)-1;
+}
+
+/* Bytes in the largest free gap left above the tail, for budget logs. */
+size_t GC_MapArenaLargestGap( void )
+{
+	extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+	size_t from = Q_max( gc_mapload_tail_highwater, gc_mapload_tail_peak ), best = 0;
+
+	while( gc_mapload_buf && from < gc_mapload_buf_size )
+	{
+		size_t end;
+		const size_t start = Mod_GCArenaGap( from, &end );
+
+		if( end > start && end - start > best )
+			best = end - start;
+		if( end <= from )
+			break;
+		from = end;
+	}
+	return best;
+}
+
 qboolean GC_IsMapLoadBufferAddress( const void *ptr )
 {
 	const uintptr_t address = (uintptr_t)ptr;
@@ -803,6 +1603,17 @@ size_t GC_MapLoadBufferCapacity( void )
 size_t GC_MapLoadBufferTailHighwater( void )
 {
 	return gc_mapload_tail_highwater;
+}
+
+/* Address the next tail carve would start at (before its 32-byte alignment). */
+void *GC_MapLoadBufferTailEnd( void )
+{
+	return gc_mapload_buf ? gc_mapload_buf + gc_mapload_tail_highwater : NULL;
+}
+
+size_t GC_MapLoadBufferTailPeak( void )
+{
+	return gc_mapload_tail_peak;
 }
 
 void GC_MapLoadBufferLowerTailHighwater( size_t highwater )
@@ -838,6 +1649,40 @@ void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need )
 			(unsigned long)gc_mapload_tail_highwater );
 		return NULL;
 	}
+	/* After load, a lean world keeps arrays above the highwater (leafs/nodes
+	 * high slot, planes, clipnodes), and gap-placed claims (entity text,
+	 * studio slices, packet ring) can raise the highwater into the middle of
+	 * them.  A carve made "at the highwater" then landed on the world (c1a4k:
+	 * a 768 KiB carve after the entity text move hit planes, nodes and
+	 * clipnodes).  Every post-load carve goes to the first gap at or after
+	 * the requested offset that fits, or fails cleanly. */
+	if( gc_mapload_world_settled )
+	{
+		extern size_t Mod_GCArenaGap( size_t from, size_t *gap_end );
+		size_t from = off;
+
+		for( ;; )
+		{
+			size_t gap_end = 0;
+			const size_t start = ( Mod_GCArenaGap( from, &gap_end ) + 31u ) & ~(size_t)31u;
+
+			if( start + need <= gap_end && start + need <= gc_mapload_buf_size )
+			{
+				if( start != off )
+					Con_Reportf( "Xash3D GameCube: mem arena tail=MOVED offset_bytes=%lu -> %lu need_bytes=%lu (world data in the way)\n",
+						(unsigned long)off, (unsigned long)start, (unsigned long)need );
+				off = start;
+				break;
+			}
+			if( gap_end <= from || gap_end >= gc_mapload_buf_size )
+			{
+				Con_Reportf( "Xash3D GameCube: mem arena tail=FAIL after_bytes=%lu need_bytes=%lu (no free gap after the world)\n",
+					(unsigned long)after_offset, (unsigned long)need );
+				return NULL;
+			}
+			from = gap_end;
+		}
+	}
 	if( off + need > gc_mapload_buf_size )
 	{
 		Con_Reportf( "Xash3D GameCube: mem arena tail=FAIL after_bytes=%lu need_bytes=%lu capacity_bytes=%lu\n",
@@ -847,6 +1692,8 @@ void *GC_MapLoadBufferTailAlloc( size_t after_offset, size_t need )
 
 	remaining = gc_mapload_buf_size - ( off + need );
 	gc_mapload_tail_highwater = off + need;
+	if( gc_mapload_tail_peak < off + need )
+		gc_mapload_tail_peak = off + need;
 	Con_Reportf( "Xash3D GameCube: mem arena tail=PASS after_bytes=%lu carve_bytes=%lu remaining_bytes=%lu capacity_bytes=%lu\n",
 		(unsigned long)after_offset, (unsigned long)need, (unsigned long)remaining,
 		(unsigned long)gc_mapload_buf_size );
@@ -864,6 +1711,7 @@ void GC_DiscardMapLoadBuffer( void )
 	if( gc_mapload_buf_in_use )
 		return;
 
+	GC_RunMapArenaResetHook();
 	if( gc_mapload_buf )
 	{
 		if( R_GCReleaseMapLoadStaticArena( gc_mapload_buf ))
@@ -911,6 +1759,14 @@ void GC_ClearMapLoadMemoryOpt( void )
 	gc_job_count = 0;
 	GC_AramMapReset();
 	GC_PrefetchResetForMenu();
+}
+
+/* A local reconnect (same-map changelevel on the listen route) goes through
+ * CL_Disconnect, which clears the session flag; the reload must keep the lean
+ * map route it had. */
+void GC_SetMapLoadMemoryOptSession( qboolean on )
+{
+	gc_mapload_memopt_session = on;
 }
 
 qboolean GC_MapLoadMemoryOpt( void )
@@ -1090,10 +1946,19 @@ unsigned int GC_AramAllocTagged( unsigned int size, qboolean stream, const char 
 			stream ? "stream" : "reserve", tag ? tag : "?", Q_memprint( size ), base,
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )));
 	else
-		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s\n",
+	{
+		int i;
+
+		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s segs=%d/%d\n",
 			tag ? tag : "?", stream ? "stream" : "reserve", Q_memprint( size ),
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )),
-			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )));
+			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )), (int)gc_aram_heap.count, GC_ARAM_MAX_SEGS );
+		/* Say what fragments it: the whole segment table, once per refusal. */
+		for( i = 0; i < gc_aram_heap.count; i++ )
+			Con_Reportf( "Xash3D GameCube: ARAM map 0x%08x %s %s%s\n", gc_aram_heap.segs[i].offset,
+				Q_memprint( gc_aram_heap.segs[i].size ), gc_aram_heap.segs[i].used ? gc_aram_heap.segs[i].tag : "FREE",
+				gc_aram_heap.segs[i].used ? ( gc_aram_heap.segs[i].cls == GC_ARAM_STREAM ? " (stream)" : " (session)" ) : "" );
+	}
 	return base;
 }
 
@@ -1175,6 +2040,37 @@ void GC_AramVideoRelease( void )
 	gc_aram_video_base = 0;
 	gc_aram_video_capacity = 0;
 	GC_AramFree( base );
+}
+
+/* World DL packs get their own growable stream block.  They used to share
+ * the map window with the BSP hot lumps: on the retail disc the hot lumps
+ * claimed it first (1 MiB), the 1.4 MiB c0a0 pack fell back to the disc
+ * path and the first frame stalled on a GX fence. */
+static u32 gc_aram_worlddl_base, gc_aram_worlddl_capacity;
+
+unsigned int GC_AramWorldDLReserve( unsigned int size )
+{
+	u32 aligned = ( size + 31u ) & ~31u;
+
+	if( !aligned ) return 0;
+	if( gc_aram_worlddl_base && aligned <= gc_aram_worlddl_capacity )
+		return gc_aram_worlddl_base;
+	if( gc_aram_worlddl_base )
+	{
+		GC_AramFree( gc_aram_worlddl_base );
+		gc_aram_worlddl_base = 0;
+		gc_aram_worlddl_capacity = 0;
+	}
+	/* Round up so the tram chain's slightly larger packs reuse the block.
+	 * Lost Coast is one map: keep the 32-byte DMA align only, so a 2.3 MB
+	 * pack does not pay another ~200–700 KiB of empty ARAM (stream=3700 Kb
+	 * on an older 3.5 MB bake; today's file is 2.36 MB). */
+#if !( defined(XASH_GC_LOSTCOAST) && XASH_GC_LOSTCOAST )
+	aligned = ( aligned + 256u * 1024u - 1u ) & ~( 256u * 1024u - 1u );
+#endif
+	gc_aram_worlddl_base = GC_AramAllocTagged( aligned, true, "worlddl" );
+	if( gc_aram_worlddl_base ) gc_aram_worlddl_capacity = aligned;
+	return gc_aram_worlddl_base;
 }
 
 unsigned int GC_AramMapReserve( unsigned int size )
@@ -1409,6 +2305,25 @@ void GC_PrefetchResetForMenu( void )
 	gc_prefetch_used = 0;
 	gc_prefetch_manifest_ready = false;
 	gc_prefetch_initialized = false;
+}
+
+/* The menu-idle first-map prefetch window is dead weight once the map is loaded (1 MiB of ARAM
+ * in a DoD match). Drop its entries first so no reader can see freed ARAM, then free the block;
+ * the next menu idle reserves a fresh one (GC_PrefetchResetForMenu clears the init flag). */
+void GC_PrefetchReleaseForMatch( void )
+{
+	unsigned int base = gc_prefetch_aram;
+
+	if( !base )
+		return;
+	memset( gc_prefetch, 0, sizeof( gc_prefetch ));
+	gc_prefetch_count = 0;
+	gc_prefetch_next = 0;
+	gc_prefetch_used = 0;
+	gc_prefetch_capacity = 0;
+	gc_prefetch_manifest_ready = true;
+	gc_prefetch_aram = 0;
+	GC_AramFree( base );
 }
 
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )

@@ -214,6 +214,16 @@ qboolean R_OpaqueEntity( cl_entity_t *ent )
 	if( sw_noalphabrushes.value && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
 		return true;
 
+#if XASH_GAMECUBE
+	/* On the Flipper a see-through brush (rendermode 4: lattices, netting,
+	 * fences) is alpha-tested, never blended, so it draws with the solid
+	 * brush entities. The translucent pass never reached it on the capture
+	 * route: dod_charlie's radio tower (func_wall *178, {tension6 lattice)
+	 * was missing and the control-point flag on it hung in the sky. */
+	if( GC_UseGxWorldDraw() && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
+		return true;
+#endif
+
 	return false;
 }
 
@@ -396,7 +406,7 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 
 	if( type == ET_BEAM )
 	{
-		if( tr.draw_list->num_beam_entities >= MAX_VISIBLE_PACKET )
+		if( tr.draw_list->num_beam_entities >= GX_MAX_BEAM_ENTITIES )
 		{
 			gEngfuncs.Con_Printf( S_ERROR "Too many beams %d!\n", tr.draw_list->num_beam_entities );
 			return false;
@@ -411,7 +421,7 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 	{
 		if( clent->model->type == mod_brush )
 		{
-			if( tr.draw_list->num_edge_entities >= MAX_VISIBLE_PACKET )
+			if( tr.draw_list->num_edge_entities >= GX_MAX_EDGE_ENTITIES )
 				return false;
 
 			tr.draw_list->edge_entities[tr.draw_list->num_edge_entities] = clent;
@@ -444,10 +454,28 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 R_GetFarClip
 ===============
 */
+qboolean R_GXCaptureMode( void );
+
 static float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
-		return gp_movevars->zmax * 1.73f;
+	{
+		float zfar = gp_movevars->zmax * 1.73f;
+
+		/* -gccapture: a film camera out at sea must still see the far end
+		 * of the beach, whatever sv_zmax the map was built with. */
+		if( R_GXCaptureMode())
+		{
+			vec3_t span;
+			float diag;
+
+			VectorSubtract( WORLDMODEL->maxs, WORLDMODEL->mins, span );
+			diag = VectorLength( span ) + 512.0f;
+			if( zfar < diag )
+				zfar = diag;
+		}
+		return zfar;
+	}
 	return 2048.0f;
 }
 
@@ -1005,6 +1033,30 @@ static void R_DrawEntitiesOnList( void )
 				lean_studios++;
 			}
 #endif
+			/* List each distinct studio entity drawn (first 16): the white
+			 * crowbar beside the bot body had no owner on any emit path. */
+			{
+				static const void *seen_ent[16];
+				static const void *seen_mod[16];
+				int k;
+
+				for( k = 0; k < 16; k++ )
+				{
+					if( seen_ent[k] == RI.currententity && seen_mod[k] == RI.currentmodel )
+						break;
+					if( !seen_ent[k] )
+					{
+						seen_ent[k] = RI.currententity;
+						seen_mod[k] = RI.currentmodel;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: draw studio %s ent=%p index=%d player=%d org=(%.0f %.0f %.0f) body=%d weaponmodel=%d\n",
+							RI.currentmodel->name, (void *)RI.currententity, RI.currententity->index,
+							RI.currententity->player ? 1 : 0,
+							RI.currententity->origin[0], RI.currententity->origin[1], RI.currententity->origin[2],
+							RI.currententity->curstate.body, RI.currententity->curstate.weaponmodel );
+						break;
+					}
+				}
+			}
 			R_SetUpWorldTransform();
 			R_DrawStudioModel( RI.currententity );
 			break;
@@ -1153,7 +1205,27 @@ static void R_DrawEntitiesOnList( void )
 					if( GC_IsLowMemoryMode() && GC_UseGxWorldDraw() && !R_GXWorldDLActive())
 						break;
 					if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
+					{
+						/* -gccapture: name each see-through brush culled here once
+						 * (the solid pass logs its own). */
+						if( R_GXCaptureMode())
+						{
+							static const model_t *tculled[32];
+							static int ntculled;
+							int ci;
+
+							for( ci = 0; ci < ntculled && tculled[ci] != RI.currentmodel; ci++ )
+								;
+							if( ci == ntculled && ntculled < 32 )
+							{
+								tculled[ntculled++] = RI.currentmodel;
+								gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled trans rm=%d amt=%d\n",
+									RI.currentmodel->name, RI.currententity->curstate.rendermode,
+									RI.currententity->curstate.renderamt );
+							}
+						}
 						break;
+					}
 					R_DrawBrushModel( RI.currententity );
 					break;
 				}
@@ -1268,6 +1340,12 @@ static void R_DrawEntitiesOnList( void )
 	}
 
 	R_GC_ENTITY_TRACE( "Xash3D GameCube: DrawEntities trans EFX done\n" );
+#if XASH_GAMECUBE
+	{
+		extern void GC_ProfMark( const char *name );
+		GC_ProfMark( "render: entities solid+trans+EFX" );
+	}
+#endif
 	GL_SetRenderMode( kRenderNormal );
 	R_SetUpWorldTransform();
 	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
@@ -1281,13 +1359,18 @@ static void R_DrawEntitiesOnList( void )
 
 			/* Landmark crowbar is bound on viewent; do not require world NPC
 			 * studios (lean_studios) or tip-safe maps never reach G155/G164. */
-			if( tr.viewent && tr.viewent->model
+			if( Q_stricmp( XASH_GAMEDIR, "lostcoast" )
+				&& tr.viewent && tr.viewent->model
 				&& tr.viewent->model->type == mod_studio
 				&& tr.viewent->model->cache.data
 				&& !( r_drawviewmodel && r_drawviewmodel->value == 0
 					&& ( R_GXEfbDumpHoldLeft() > 0 || R_GXDumpSkipViewmodelActive())))
 			{
 				R_DrawViewModel();
+				{
+					extern void GC_ProfMark( const char *name );
+					GC_ProfMark( "render: viewmodel" );
+				}
 				if( !lean_vm_draw_logged )
 				{
 					lean_vm_draw_logged = true;
@@ -1307,6 +1390,10 @@ static void R_DrawEntitiesOnList( void )
 						&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" ))))
 			{
 				R_AllowFog( false );
+				{
+					extern void R_GXDecalRingDraw( void );
+					R_GXDecalRingDraw();
+				}
 				gEngfuncs.CL_DrawEFX( tr.frametime, true );
 				R_AllowFog( true );
 				if( !lean_efx_draw_logged )
@@ -1322,6 +1409,12 @@ static void R_DrawEntitiesOnList( void )
 		R_DrawViewModel();
 	}
 	R_GC_ENTITY_TRACE( "Xash3D GameCube: DrawEntities viewmodel done\n" );
+#if XASH_GAMECUBE
+	{
+		extern void GC_ProfMark( const char *name );
+		GC_ProfMark( "render: viewmodel+lean EFX" );
+	}
+#endif
 #if XASH_GAMECUBE
 	if( lean_ents && tr.framecount <= 4 )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: lean DrawEntities f=%d brushes=%d studios=%d solid=%u vm=%d\n",
@@ -1888,6 +1981,7 @@ static void R_EdgeDrawingGcmapProbe( void )
 		VectorCopy( RI.rvp.vieworigin, tr.modelorg );
 		if( tr.framecount <= 1 )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: R_EdgeDrawing GX CapFaces begin\n" );
+		GC_HeapCheckArmed( "edge drawing begin" );
 		/* Pre-live low-res bring-up skips CapFaces (MEM1). Post-lab changelevel
 		 * dests draw once GX world is live (GX-023); tram G36 sample stays off. */
 		if( GC_UseLowResWorldProbe() && !GC_AllowFlipperCapFaces() )
@@ -1983,8 +2077,41 @@ static void R_EdgeDrawingGcmapProbe( void )
 					continue;
 				if( be->model->nummodelsurfaces <= 0 )
 					continue;
+				/* -gccapture: each brush model on the solid brush list, once. */
+				if( R_GXCaptureMode())
+				{
+					static const model_t *listed[96];
+					static int nlisted;
+					int li;
+
+					for( li = 0; li < nlisted && listed[li] != be->model; li++ )
+						;
+					if( li == nlisted && nlisted < 96 )
+					{
+						listed[nlisted++] = be->model;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush list %s rm=%d of %d\n",
+							be->model->name, be->curstate.rendermode, bn );
+					}
+				}
 				if( !R_GXBrushEntityVisible( be ))
 				{
+					/* -gccapture: name each brush model culled here once. */
+					if( R_GXCaptureMode())
+					{
+						static const model_t *culled[64];
+						static int nculled;
+						int ci;
+
+						for( ci = 0; ci < nculled && culled[ci] != be->model; ci++ )
+							;
+						if( ci == nculled && nculled < 64 )
+						{
+							culled[nculled++] = be->model;
+							gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled %s rm=%d org=%.0f %.0f %.0f\n",
+								be->model->name, r_gx_last_cull_was_pvs ? "pvs" : "frustum",
+								be->curstate.rendermode, be->origin[0], be->origin[1], be->origin[2] );
+						}
+					}
 					if( r_gx_last_cull_was_pvs )
 						cull_pvs++;
 					else
@@ -2288,6 +2415,9 @@ static qboolean R_GCMarkLiveBspPVS( void )
 R_MarkLeaves
 ===============
 */
+#if XASH_GAMECUBE
+qboolean R_GXCaptureMode( void );
+#endif
 static void R_MarkLeaves( void )
 {
 #if XASH_GAMECUBE
@@ -2300,9 +2430,11 @@ static void R_MarkLeaves( void )
 
 	/* Low-res without visdata: mark every leaf. New Game with prepare-time
 	 * FatPVS cache applies that mark below (not full-vis). */
-	if( GC_UseLowResWorldProbe() && !( WORLDMODEL && WORLDMODEL->visdata )
+	/* -gccapture marks every leaf too: a film capture draws all the map in view. */
+	if( GC_UseLowResWorldProbe() && ( R_GXCaptureMode()
+		|| ( !( WORLDMODEL && WORLDMODEL->visdata )
 		&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" )
-		&& !gEngfuncs.Sys_CheckParm( "-gcmenuplaystart" ))
+		&& !gEngfuncs.Sys_CheckParm( "-gcmenuplaystart" ))))
 	{
 		int i;
 
@@ -2324,7 +2456,8 @@ static void R_MarkLeaves( void )
 				WORLDMODEL->surfaces[i].visframe = tr.framecount;
 		}
 		if( tr.framecount <= 1 )
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: full-vis leaf mark active (low-res no visdata)\n" );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: full-vis leaf mark active (%s)\n",
+				R_GXCaptureMode() ? "capture mode" : "low-res no visdata" );
 		return;
 	}
 
@@ -2477,11 +2610,17 @@ void GAME_EXPORT R_RenderScene( void )
 	}
 #endif
 
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene before flush" );
+#endif
 	if( tr.map_unload )
 	{
 		D_FlushCaches();
 		tr.map_unload = false;
 	}
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene after flush" );
+#endif
 
 
 	R_SetupFrustum();
@@ -2545,8 +2684,12 @@ void GAME_EXPORT R_RenderScene( void )
 //	R_SetupGL( true );
 	// R_Clear( ~0 );
 
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene before markleaves" );
+#endif
 	R_MarkLeaves();
 #if XASH_GAMECUBE
+	GC_HeapCheckArmed( "render scene after markleaves" );
 	GC_WatchdogMark( "R_RenderScene setup+markleaves" );
 	if( tr.framecount <= 1
 		&& ( gEngfuncs.Sys_CheckParm( "-gcnewgame" )
@@ -2654,6 +2797,7 @@ void GAME_EXPORT R_BeginFrame( qboolean clearScene )
 {
 #if XASH_GAMECUBE
 	R_GXSkinBeginFrame();
+	R_GXHudHiBeginFrame();
 #endif
 	R_Set2DMode( true );
 
@@ -3042,9 +3186,9 @@ qboolean GAME_EXPORT R_Init( void )
 	tr.palette = (color24 *)ENGINE_GET_PARM( PARM_GET_PALETTE_PTR );
 	tr.viewent = (cl_entity_t *)ENGINE_GET_PARM( PARM_GET_VIEWENT_PTR );
 	tr.texgammatable = (byte *)ENGINE_GET_PARM( PARM_GET_TEXGAMMATABLE_PTR );
-	tr.lightgammatable = (uint *)ENGINE_GET_PARM( PARM_GET_LIGHTGAMMATABLE_PTR );
-	tr.screengammatable = (uint *)ENGINE_GET_PARM( PARM_GET_SCREENGAMMATABLE_PTR );
-	tr.lineargammatable = (uint *)ENGINE_GET_PARM( PARM_GET_LINEARGAMMATABLE_PTR );
+	tr.lightgammatable = (uint16_t *)ENGINE_GET_PARM( PARM_GET_LIGHTGAMMATABLE_PTR );
+	tr.screengammatable = (uint16_t *)ENGINE_GET_PARM( PARM_GET_SCREENGAMMATABLE_PTR );
+	tr.lineargammatable = (uint16_t *)ENGINE_GET_PARM( PARM_GET_LINEARGAMMATABLE_PTR );
 		tr.elights = (dlight_t *)ENGINE_GET_PARM( PARM_GET_ELIGHTS_PTR );
 
 	if( !R_InitBlit( glblit ))

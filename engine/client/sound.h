@@ -28,6 +28,17 @@ extern poolhandle_t sndpool;
 #define SOUND_48k       48000 // 48khz sample rate (GameCube AI hardware)
 
 #if XASH_GAMECUBE
+/* wavdata_t whose PCM lives in the ARAM sound store: buffer[] holds only the
+ * 32-bit ARAM address and the mixer DMAs each span it reads (s_load.c). */
+#define GC_SOUND_ARAM_BACKED BIT( 3 )
+static inline uint32_t S_GCWavAram( const wavdata_t *wav )
+{
+	uint32_t aram;
+
+	memcpy( &aram, wav->buffer, sizeof( aram ));
+	return aram;
+}
+const byte *S_GCWavSpan( const wavdata_t *wav, int first_frame, int *num_frames );
 #define SOUND_DMA_SPEED SOUND_48k
 #else
 #define SOUND_DMA_SPEED SOUND_44k // hardware playback rate

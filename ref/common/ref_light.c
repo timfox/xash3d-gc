@@ -14,6 +14,30 @@ GNU General Public License for more details.
 */
 
 #include "ref_common.h"
+#if XASH_GAMECUBE
+color24 *Mod_GCLightPointSamples( const msurface_t *surf );
+qboolean Mod_GCAramLightmapActive( void );
+qboolean Mod_GCLightPointsActive( const model_t *world );
+/* Light faces baked next to the world DL (r_gx_worlddl.c): the light point
+ * data of every face for routes without a live msurface table. */
+typedef struct
+{
+	float        vecs[2][4];
+	int          mins[2];
+	int          extents[2];
+	unsigned int word;	// flags << 24 | lightofs (0xFFFFFF: none)
+	byte         styles[4];
+} gc_lightface_t;
+#define GC_LF_SKY   1
+#define GC_LF_TILED 2
+#define GC_LF_NOLIGHT 0xFFFFFFu
+int R_GXLightFacesCount( void );
+qboolean R_GXLightFacesRead( int first, int num, void *out );
+qboolean R_GXLightSamplesRead( unsigned int ofs, void *out, unsigned int len );
+/* Last sky trace of R_EntityDynamicLight: 0 no surface, 1 not sky, 2 sky. */
+int r_gc_light_path = -1;
+float r_gc_light_frac;
+#endif
 #include "xash3d_mathlib.h"
 #include "enginefeatures.h"
 #include "pm_local.h"
@@ -35,7 +59,14 @@ void CL_RunLightStyles( lightstyle_t *ls )
 	if( !world )
 		return;
 
-	if( r_fullbright->value || !world->lightdata )
+	qboolean have_light = world->lightdata != NULL;
+#if XASH_GAMECUBE
+	/* On the world DL route the lightmap lives in the baked light faces; the
+	 * light styles still scale it (65536 saturated every light point). */
+	have_light = have_light || R_GXLightFacesCount() > 0;
+#endif
+
+	if( r_fullbright->value || !have_light )
 	{
 		for( int i = 0; i < MAX_LIGHTSTYLES; i++ )
 			g_lightstylevalue[i] = 256 * 256;
@@ -169,7 +200,11 @@ R_PushDlights
 */
 int R_PushDlights( model_t *model, int framecount )
 {
-	if( !model )
+	/* The GameCube retail route draws the world from its World DL pack and
+	 * has no live surface table: marking walked NULL + firstsurface and the
+	 * game died on the first dynamic light (alien slave zap, c1a2a). Models
+	 * still take dynamic lights; lit walls need World DL support. */
+	if( !model || !model->surfaces )
 		return framecount;
 
 	for( int i = 0; i < MAX_DLIGHTS; i++ )
@@ -187,6 +222,8 @@ int R_PushDlights( model_t *model, int framecount )
 
 void R_PushDlightsForBmodel( model_t *model, int framecount, const matrix4x4 object_matrix )
 {
+	if( !model || !model->surfaces )
+		return;
 	for( int i = 0; i < MAX_DLIGHTS; i++ )
 	{
 		dlight_t *l = &gp_dlights[i];
@@ -213,6 +250,114 @@ void R_PushDlightsForBmodel( model_t *model, int framecount, const matrix4x4 obj
 static vec3_t	g_trace_lightspot;
 static vec3_t	g_trace_lightvec;
 static float	g_trace_fraction;
+
+#if XASH_GAMECUBE
+/*
+=================
+R_GCLightFacesAt
+
+R_RecursiveLightPoint's per-node face test, reading the baked light faces
+(no msurface table on the world DL route). want_any: return the first face
+the point lies on whatever it is (sky test, as EV_TraceSurface); otherwise
+skip tiled faces and sum the face's styles into cv. Returns the face's flags
++ 1 on a hit, 0 on none.
+=================
+*/
+static int R_GCLightFacesAt( int first, int num, const vec3_t mid, float midf, colorVec *cv, qboolean want_any )
+{
+	static gc_lightface_t lf[16] __attribute__(( aligned( 32 )));
+
+	while( num > 0 )
+	{
+		const int n = Q_min( num, 16 );
+
+		if( !R_GXLightFacesRead( first, n, lf ))
+			return 0;
+		for( int i = 0; i < n; i++ )
+		{
+			const gc_lightface_t *f = &lf[i];
+			const int flags = (int)( f->word >> 24 );
+			const unsigned int lightofs = f->word & GC_LF_NOLIGHT;
+
+			if( !want_any && FBitSet( flags, GC_LF_TILED ))
+				continue;
+
+			float s = DotProduct( mid, f->vecs[0] ) + f->vecs[0][3];
+			float t = DotProduct( mid, f->vecs[1] ) + f->vecs[1][3];
+
+			if( s < f->mins[0] || t < f->mins[1] )
+				continue;
+
+			float ds = s - f->mins[0];
+			float dt = t - f->mins[1];
+
+			if( ds > f->extents[0] || dt > f->extents[1] )
+				continue;
+
+			if( want_any )
+				return flags + 1;
+
+			cv->r = cv->g = cv->b = cv->a = 0;
+			g_trace_fraction = midf;
+			if( lightofs == GC_LF_NOLIGHT )
+				return flags + 1;
+
+			const int smax = ( f->extents[0] / 16 ) + 1;
+			const int tmax = ( f->extents[1] / 16 ) + 1;
+			const unsigned int size = (unsigned int)( smax * tmax ) * 3u;
+			unsigned int ofs = lightofs + (unsigned int)( Q_rint( dt / 16.0f ) * smax + Q_rint( ds / 16.0f )) * 3u;
+
+			for( int map = 0; map < MAXLIGHTMAPS && f->styles[map] != 255; map++, ofs += size )
+			{
+				const uint scale = g_lightstylevalue[f->styles[map]];
+				byte rgb[3];
+
+				if( !R_GXLightSamplesRead( ofs, rgb, 3 ))
+					break;
+				cv->r += rgb[0] * scale;
+				cv->g += rgb[1] * scale;
+				cv->b += rgb[2] * scale;
+			}
+			return flags + 1;
+		}
+		first += n;
+		num -= n;
+	}
+	return 0;
+}
+
+/* First face along start..end: its light-face flags + 1, or 0. */
+static int R_GCTraceLightFace( model_t *model, mnode_t *node, const vec3_t start, const vec3_t end )
+{
+start:
+	if( !node || node->contents < 0 )
+		return 0;
+
+	float front = PlaneDiff( start, node->plane );
+	float back = PlaneDiff( end, node->plane );
+	int side = front < 0;
+
+	if(( back < 0 ) == side )
+	{
+		node = node_child( node, side, model );
+		goto start;
+	}
+
+	float frac = front / ( front - back );
+	vec3_t mid;
+	VectorLerp( start, frac, end, mid );
+
+	int hit = R_GCTraceLightFace( model, node_child( node, side, model ), start, mid );
+	if( hit )
+		return hit;
+
+	hit = R_GCLightFacesAt( node_firstsurface( node, model ), node_numsurfaces( node, model ), mid, 0.0f, NULL, true );
+	if( hit )
+		return hit;
+
+	return R_GCTraceLightFace( model, node_child( node, !side, model ), mid, end );
+}
+#endif
 
 /*
 =================
@@ -263,6 +408,16 @@ start:
 
 	VectorCopy( mid, g_trace_lightspot );
 
+	if( !model->surfaces ) // GameCube World DL route: no live surface table
+	{
+#if XASH_GAMECUBE
+		if( R_GXLightFacesCount() > 0
+			&& R_GCLightFacesAt( firstsurface, numsurfaces, mid, midf, cv, false ))
+			return true;
+#endif
+		numsurfaces = 0;
+	}
+
 	for( int i = 0; i < numsurfaces; i++ )
 	{
 		const msurface_t *surf = &model->surfaces[firstsurface + i];
@@ -285,7 +440,13 @@ start:
 
 		cv->r = cv->g = cv->b = cv->a = 0;
 
-		if( !surf->samples )
+		const color24 *samples = surf->samples;
+#if XASH_GAMECUBE
+		/* The world lightmap lives in ARAM: fetch this face's samples. */
+		if( !samples )
+			samples = Mod_GCLightPointSamples( surf );
+#endif
+		if( !samples )
 			return true;
 
 		int sample_size = gEngfuncs.Mod_SampleSizeForFace( surf );
@@ -297,7 +458,7 @@ start:
 
 		g_trace_fraction = midf;
 
-		const color24 *lm = surf->samples + Q_rint( dt ) * smax + Q_rint( ds );
+		const color24 *lm = samples + Q_rint( dt ) * smax + Q_rint( ds );
 		const color24 *dm = NULL;
 		matrix3x4 tbn = { 0 };
 
@@ -379,7 +540,12 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 	if( lvec )
 		VectorClear( lvec );
 
-	if( !gp_cl->models[1] || !gp_cl->models[1]->lightdata )
+	if( !gp_cl->models[1] || ( !gp_cl->models[1]->lightdata
+#if XASH_GAMECUBE
+		&& !Mod_GCAramLightmapActive() && !Mod_GCLightPointsActive( gp_cl->models[1] )
+		&& !( !gp_cl->models[1]->surfaces && R_GXLightFacesCount() > 0 )
+#endif
+		))
 		return (colorVec){ 255, 255, 255, 0 };
 
 	float last_fraction = 1.0f;
@@ -545,8 +711,23 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 		else
 			psurf = gEngfuncs.EV_TraceSurface( 0, vecSrc, vecEnd );
 
-		if(( ent->model->type == mod_studio && FBitSet( ent->model->flags, STUDIO_FORCE_SKYLIGHT ))
-			|| ( psurf && FBitSet( psurf->flags, SURF_DRAWSKY )))
+		qboolean sky = psurf && FBitSet( psurf->flags, SURF_DRAWSKY );
+#if XASH_GAMECUBE
+		/* No live surfaces on the world DL route: find the face the sky
+		 * trace stops on from the baked light faces. */
+		if( !psurf && gp_cl->models[1] && !gp_cl->models[1]->surfaces && R_GXLightFacesCount() > 0 )
+		{
+			model_t *w = gp_cl->models[1];
+			const int hit = R_GCTraceLightFace( w, &w->nodes[w->hulls[0].firstclipnode], vecSrc, vecEnd );
+
+			sky = hit && FBitSet( hit - 1, GC_LF_SKY );
+			r_gc_light_path = hit ? ( sky ? 2 : 1 ) + 2 : 0;
+		}
+		else
+			r_gc_light_path = psurf ? ( sky ? 2 : 1 ) : 0;
+		r_gc_light_frac = trace.fraction;
+#endif
+		if(( ent->model->type == mod_studio && FBitSet( ent->model->flags, STUDIO_FORCE_SKYLIGHT )) || sky )
 		{
 			VectorCopy( mv->skyvec, lightDir );
 
@@ -603,6 +784,26 @@ void R_EntityDynamicLight( cl_entity_t *ent, alight_t *plight, qboolean draw_wor
 			VectorCopy( lightvec, lightDir );
 		}
 	}
+
+#if XASH_GAMECUBE
+	/* No lightmap sample under the entity (the baked light faces miss some
+	 * floors, e.g. parts of dod_charlie): bodies went pure black (amb=1
+	 * shade=0). Fall back to a dim light from the sky colour and direction,
+	 * about the level of a normally lit floor sample. */
+	if(( light.r + light.g + light.b ) == 0
+		&& ( mv->skycolor[0] + mv->skycolor[1] + mv->skycolor[2] ) != 0 )
+	{
+		const float peak = Q_max( Q_max( mv->skycolor[0], mv->skycolor[1] ), mv->skycolor[2] );
+		const float k = peak > 0.0f ? 48.0f / peak : 0.0f;
+
+		light.r = (unsigned)bound( 0.0f, mv->skycolor[0] * k, 255.0f );
+		light.g = (unsigned)bound( 0.0f, mv->skycolor[1] * k, 255.0f );
+		light.b = (unsigned)bound( 0.0f, mv->skycolor[2] * k, 255.0f );
+		if( !VectorIsNull( mv->skyvec ))
+			VectorCopy( mv->skyvec, lightDir );
+		r_gc_light_path = 5;	/* fallback */
+	}
+#endif
 
 	if( ent->curstate.renderfx == kRenderFxLightMultiplier && ent->curstate.iuser4 != 10 )
 	{

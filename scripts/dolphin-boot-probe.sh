@@ -22,7 +22,8 @@ if [[ -f scripts/gamecube-env.sh ]]; then
 fi
 source scripts/dolphin-probe-lock.sh || exit $?
 source scripts/dolphin-probe-common.sh || exit $?
-LOG_DIR=".ai/logs/dolphin-probe-$(date +%Y%m%d-%H%M%S)"
+# GC_PROBE_TAG keeps concurrent sessions in one checkout from sharing a log/ISO dir.
+LOG_DIR=".ai/logs/dolphin-probe-$(date +%Y%m%d-%H%M%S)${GC_PROBE_TAG:+-$GC_PROBE_TAG}"
 ISO_PATH="$ROOT/$LOG_DIR/xash3d-gc.iso"
 PREBUILT_ISO="${1:-${DOLPHIN_PREBUILT_ISO:-}}"
 if [[ -n "$PREBUILT_ISO" && "$PREBUILT_ISO" != /* ]]; then
@@ -88,7 +89,7 @@ DOLPHIN_TAS="${DOLPHIN_TAS:-}"
 probe_set_default_landmarks
 GUEST_MARKER="Xash3D GameCube: bootstrap"
 READY_MARKER="Xash3D GameCube: engine subsystems ready"
-RETAIL_MENU_MARKER="Xash3D GameCube: retail menu steam background ready"
+RETAIL_MENU_MARKER="Xash3D GameCube: retail menu background ready"
 RETAIL_MENU_INTERACTIVE_MARKER="Xash3D GameCube: retail menu button text ready"
 RETAIL_MENU_BG_FALLBACK_MARKER="Xash3D GameCube: mainui vidinit background ready"
 RETAIL_MENU_READY_FALLBACK_MARKER="Xash3D GameCube: mainui vidinit menu ready"
@@ -106,7 +107,9 @@ if [[ -n "$GC_PHASE_TEST" ]]; then
 	G82_FAULT_MARKER="G82: Intentional phase fault at ${GC_PHASE_TEST}"
 fi
 DOLPHIN_MMU="${DOLPHIN_MMU:-True}"
-DOLPHIN_AUDIO_VOLUME=100; [[ "${DOLPHIN_MUTE_AUDIO:-0}" =~ ^(1|true|TRUE|True|yes|YES|Yes|on|ON|On)$ ]] && DOLPHIN_AUDIO_VOLUME=0
+# Muted by default (host volume only; guest DSP/ARAM and DumpAudio unchanged).
+# DOLPHIN_MUTE_AUDIO=0 to listen.
+DOLPHIN_AUDIO_VOLUME=0; [[ "${DOLPHIN_MUTE_AUDIO:-1}" =~ ^(0|false|FALSE|False|no|NO|No|off|OFF|Off)$ ]] && DOLPHIN_AUDIO_VOLUME=100
 mkdir -p "$USER_DIR/Config"; DUMP_FRAMES=0
 # Retail screenshot capture is useful for visual evidence but changes Dolphin
 # host throughput substantially.  Keep the historical retail default while
@@ -129,6 +132,7 @@ else
 fi
 cat > "$USER_DIR/Config/Dolphin.ini" <<EOF
 [Core]
+$( [[ "${XASH_GC_PROBE_HEAPCENSUS:-0}" == "1" ]] && printf 'RAMOverrideEnable = True\nMEM1Size = 67108864' )
 CPUCore = ${DOLPHIN_CPU_CORE}
 CPUThread = ${DOLPHIN_CPU_THREAD}
 DSPHLE = True
@@ -521,8 +525,8 @@ if (( DOLPHIN_NEWGAME )); then
 		G170_DONE_MARKER="Xash3D GameCube: G170 soft studio chroma tint="
 		G171_DONE_MARKER="Xash3D GameCube: G171 outdoor refresh"
 		G172_DONE_MARKER="Xash3D GameCube: G172 HUD sheets loaded"
-		G173_DONE_MARKER="Xash3D GameCube: G173 HUD hud1 lean"
-		G174_DONE_MARKER="Xash3D GameCube: G174 HUD crosshairs lean"
+		G173_DONE_MARKER="Xash3D GameCube: G173 HUD 640 sheets"
+		G174_DONE_MARKER="Xash3D GameCube: G174 HUD crosshairs"
 		G175_DONE_MARKER="Xash3D GameCube: G175 outdoor refresh"
 		G176_DONE_MARKER="Xash3D GameCube: G176 raised face cap"
 		G177_DONE_MARKER="Xash3D GameCube: G177 soft dump HUD composite"
@@ -572,7 +576,6 @@ if [[ "${DOLPHIN_EXECUTABLE:-}" == flatpak:* ]]; then
 	append_guest_args DOLPHIN_CMD
 	DOLPHIN_IS_FLATPAK=1
 elif [[ -n "${DOLPHIN_EXECUTABLE:-}" ]]; then
-	# Sibling DoD tooling pkill -f dolphin-emu; rewrite sticky env to the alias.
 	if [[ "$(basename "$DOLPHIN_EXECUTABLE")" == "dolphin-emu" \
 		&& -x "$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin" ]]; then
 		DOLPHIN_EXECUTABLE="$ROOT/3rdparty/dolphin/build/Binaries/xash-gc-dolphin"

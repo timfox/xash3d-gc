@@ -1237,6 +1237,12 @@ static void R_FreeGameCubeSurfaceCache( void )
 		free( sc_base );
 	else
 		Mem_Free( sc_base );
+	/* R_InitCaches re-creates the cache right after this; a stale sc_base
+	 * made R_TryInitGameCubeSurfaceCacheSized "reuse" the freed block, and the
+	 * next D_FlushCaches (first frame after R_NewMap) wrote next/owner/size
+	 * into it, corrupting a free 64 KiB heap chunk's bin links. */
+	sc_base = sc_rover = NULL;
+	gc_sc_heap = false;
 }
 
 qboolean R_TryInitGcmapSurfaceCache( void )
@@ -1261,6 +1267,13 @@ qboolean R_TryInitGcmapSurfaceCache( void )
 		if( size > 65536 )
 			size = 65536;
 	}
+
+	/* The 128 KiB static store costs no heap: take it first.  Heap was tried
+	 * first, so c2a4e got a 32 KiB heap cache with 18 KiB left and died in
+	 * net_encode's _Mem_Realloc.  Heap only while another owner holds the
+	 * store (changelevel save/restore, AI .nod read). */
+	if( R_TryInitLowResSurfaceCache() )
+		return true;
 
 	/* G140: New Game must not take a 32/64 KiB crumb here — that starved
 	 * materials.txt / HUD_Init. Prefer defer until landmark/static 128 KiB. */
@@ -1308,6 +1321,10 @@ static qboolean R_TryInitGameCubeSurfaceCacheSized( int size, qboolean allow_low
 	if( size > GC_SURFACE_CACHE_MAX )
 		size = GC_SURFACE_CACHE_MAX;
 
+	/* Static store first, as in R_TryInitGcmapSurfaceCache. */
+	if( allow_lowres_static && R_TryInitLowResSurfaceCache() )
+		return true;
+
 	for( try_size = size; try_size >= 32768; try_size >>= 1 )
 	{
 		int alloc_size = ( try_size + 8191 ) & ~8191;
@@ -1341,12 +1358,31 @@ static qboolean R_TryInitGameCubeSurfaceCacheSized( int size, qboolean allow_low
 /* The GX live-BSP route draws through Flipper and never needs the soft
  * surface cache during a changelevel save: hand its static store to the
  * transition save (sv_save.c). The next map load re-creates the cache. */
-byte *R_GCBorrowSurfaceCacheStore( size_t *size )
+/* One borrower at a time.  Three engine paths borrow this store during a
+ * changelevel (entity text, the transition save/restore, AI .nod reads);
+ * unowned, a revisit's restore sat here while worldspawn read c1a4b.nod into
+ * the same bytes and LoadGameState walked a clobbered entity table (DSI). */
+static const char *gc_surfstore_owner;
+
+byte *R_GCClaimSurfaceCacheStore( size_t *size, const char *owner )
 {
+	if( gc_surfstore_owner )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: surface-cache store busy (%s holds it, %s refused)\n",
+			gc_surfstore_owner, owner );
+		return NULL;
+	}
 	R_GcmapTrimSurfaceCache();
+	gc_surfstore_owner = owner;
 	if( size )
 		*size = GC_SURFACE_CACHE_LOWRES;
 	return gc_lowres_surfcache_store;
+}
+
+void R_GCReleaseSurfaceCacheStore( const char *owner )
+{
+	if( gc_surfstore_owner && !Q_strcmp( gc_surfstore_owner, owner ))
+		gc_surfstore_owner = NULL;
 }
 
 void R_GcmapTrimSurfaceCache( void )
@@ -1371,6 +1407,8 @@ qboolean R_TryInitLowResSurfaceCache( void )
 {
 	if( sc_base )
 		return true;
+	if( gc_surfstore_owner )
+		return false; // borrowed (changelevel save/restore); next map load retries
 
 	sc_base = (surfcache_t *)gc_lowres_surfcache_store;
 	sc_size = GC_SURFACE_CACHE_LOWRES;
@@ -1397,6 +1435,12 @@ void D_FlushCaches( void )
 {
 	if( !sc_base )
 		return;
+#if XASH_GAMECUBE
+	static int flush_logs;
+	if( flush_logs++ < 8 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: D_FlushCaches sc_base=%p size=%d heap=%d static=%d map_unload=%d\n",
+		(void *)sc_base, sc_size, gc_sc_heap ? 1 : 0, gc_sc_static ? 1 : 0, tr.map_unload ? 1 : 0 );
+#endif
 
 	// if newmap, surfaces already freed
 	if( !tr.map_unload )

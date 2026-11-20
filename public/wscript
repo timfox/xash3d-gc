@@ -140,7 +140,31 @@ def configure(conf):
 	# kill temporary uselib
 	del conf.env.DEFINES_export
 
+def _mainui_stamp(bld):
+	# the mainui checkout that is built, and the commit the engine commit records for it: a menu
+	# that does not match what the engine pins is stale (or newer) UI, so the build says so
+	import subprocess
+	root = bld.srcnode.abspath()
+	def git(*args):
+		try:
+			return subprocess.check_output(['git', '-C', root] + list(args), stderr=subprocess.DEVNULL).decode().strip()
+		except Exception:
+			return ''
+	built = git('-C', '3rdparty/mainui', 'rev-parse', '--short=10', 'HEAD')
+	if built and git('-C', '3rdparty/mainui', 'status', '--porcelain', '--untracked-files=no'):
+		built += '+'
+	pinned = ''
+	for line in git('ls-tree', 'HEAD', '3rdparty/mainui').splitlines():
+		parts = line.split()
+		if len(parts) >= 3:
+			pinned = parts[2][:10]
+	return built or 'unknown', pinned or 'unknown'
+
 def build(bld):
+	mainui_built, mainui_pinned = _mainui_stamp(bld)
+	if mainui_built.rstrip('+') != mainui_pinned:
+		Logs.warn('mainui checkout %s does not match the commit this engine commit pins (%s): the menu is not the pinned UI' % (mainui_built, mainui_pinned))
+
 	bld(name = 'sdk_includes',
 		export_includes = '. ../common ../pm_shared ../engine',
 		export_defines = bld.env.EXPORT_DEFINES_LIST,
@@ -150,7 +174,7 @@ def build(bld):
 	bld.stlib(source = 'build_vcs.c',
 		target = 'build_vcs',
 		features = 'format',
-		defines = ['XASH_BUILD_COMMIT=\"%s\"' % bld.env.GIT_VERSION, 'XASH_BUILD_BRANCH=\"%s\"' % bld.env.GIT_BRANCH, 'XASH_BUILD_COMMIT_DATE=\"%s\"' % bld.env.GIT_COMMIT_DATE])
+		defines = ['XASH_BUILD_MAINUI=\"%s\"' % mainui_built, 'XASH_BUILD_MAINUI_PIN=\"%s\"' % mainui_pinned, 'XASH_BUILD_COMMIT=\"%s\"' % bld.env.GIT_VERSION, 'XASH_BUILD_BRANCH=\"%s\"' % bld.env.GIT_BRANCH, 'XASH_BUILD_COMMIT_DATE=\"%s\"' % bld.env.GIT_COMMIT_DATE])
 
 	bld.stlib(source = bld.path.ant_glob('*.c', excl='build_vcs.c'),
 		target = 'public',

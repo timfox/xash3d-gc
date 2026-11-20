@@ -748,6 +748,9 @@ static qboolean Host_FilterTime( double time )
 	else
 		host.frametime = bound( MIN_FRAMETIME, host.frametime, MAX_FRAMETIME );
 
+	// a playing cinematic shot locks game time to its film frame rate
+	CL_CineFrameTime( &host.frametime );
+
 	return true;
 }
 
@@ -781,6 +784,9 @@ void Host_Frame( double time )
 
 	double t1 = Platform_DoubleTime();
 
+#if XASH_GAMECUBE
+	GC_HeapCheckArmed( "host frame enter" );
+#endif
 	GC_WatchdogMark( "host frame" );
 #if XASH_GAMECUBE
 	GC_ProfFrame();
@@ -1466,6 +1472,12 @@ static void Host_InitCommon( int argc, char **argv, const char *progname, qboole
 	Cmd_Init();
 	Cvar_Init();
 #if XASH_GAMECUBE
+	{
+		extern void GCube_ApplyCfgCvars( void );
+		GCube_ApplyCfgCvars();
+	}
+#endif
+#if XASH_GAMECUBE
 	GC_MemWatch( "init Cmd_Init" );
 #endif
 
@@ -1557,6 +1569,9 @@ static void Host_InitCommon( int argc, char **argv, const char *progname, qboole
 	FS_LoadGameInfo();
 	Host_CheckGameLibraries();
 	Cvar_PostFSInit();
+#if XASH_GAMECUBE
+	GC_PrintBuildInfo();
+#endif
 
 	// NOTE: only once resource without which engine can't continue work
 	#if XASH_GAMECUBE
@@ -1676,6 +1691,12 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 		Mod_GCEnsureStaticReserves();
 		Mod_GCReleaseUnusedWorldReserves();
 		GC_MemSample( "pre-SV_Init boot reserve release" );
+#ifdef XASH_GC_MEMWATCH_DEBUG
+		{
+			extern void GC_BootDiagLog( const char *stage );
+			GC_BootDiagLog( "pre-SV_Init" );
+		}
+#endif
 	}
 #endif
 	NET_Init();
@@ -1874,23 +1895,12 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
 						!Q_stricmp( gcmap, "c4a3" )
 						|| !Q_strnicmp( gcmap, "c5a", 3 );
 
-					/* G336: denser AM cold New Game stalls mid full HUD_Init after
-					 * StatusIcon (probe 20260810-035405/040141) before MOTD hook.
-					 * Force lean HUD for those maps before G326 ensure; c1a0d,
-					 * tram hops, and early Interloper (c4a1a–d) keep quality=1. */
-					if( !Q_stricmp( gcmap, "c1a0a" )
-						|| !Q_stricmp( gcmap, "c1a0b" )
-						|| !Q_stricmp( gcmap, "c1a0c" )
-						|| !Q_strnicmp( gcmap, "c1a1", 4 )
-						|| !Q_strnicmp( gcmap, "c1a2", 4 )
-						|| !Q_strnicmp( gcmap, "c1a3", 4 )
-						|| !Q_strnicmp( gcmap, "c1a4", 4 )
-						|| !Q_strnicmp( gcmap, "c2a", 3 )
-						|| !Q_strnicmp( gcmap, "c3a", 3 )
-						|| g336_xen_lean )
+					/* Renderer quality only (the client HUD is the full
+					 * retail one at any gc_quality). */
+					if( g336_xen_lean )
 					{
 						Cvar_Set( "gc_quality", "0" );
-						Con_Reportf( "Xash3D GameCube: G336 lean HUD for denser map %s\n",
+						Con_Reportf( "Xash3D GameCube: G336 low-memory cold load for Xen map %s\n",
 							gcmap );
 					}
 					if( xen_boss_skip_premap )

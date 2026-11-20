@@ -97,6 +97,7 @@ typedef struct imglib_s
 	int			force_flags;	// override cmd_flags
 	qboolean			custom_palette;	// custom palette was installed
 	qboolean			mdl_decode;		// current image is an embedded studio texture
+	qboolean			hud_sprite;		// current image is a client (HUD) sprite frame
 } imglib_t;
 
 // imagelib definitions
@@ -131,6 +132,8 @@ extern imglib_t image;
 
 #if XASH_GAMECUBE
 void *Image_GCAllocMdlDecode( size_t bytes );
+void *Image_GCLendMdlDecode( void (*evict)( void ), size_t *bytes );
+void Image_GCReturnMdlDecode( void );
 qboolean Image_GCIsMdlDecode( const void *ptr );
 void Image_GCReleaseMdlDecode( void );
 void *Image_GCAllocTransient( size_t bytes );

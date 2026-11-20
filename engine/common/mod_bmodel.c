@@ -81,6 +81,10 @@ static mleaf_t *gc_leafs_prealloc;
  * video and the main menu, which never use them. */
 static byte *gc_static_nodes;
 static void *gc_clipnodes_malloc_block;
+/* The raw clipnodes lump when Mod_GCReloadStdBspLump read it from disc into
+ * a plain malloc block (not scratch or spill): Mod_LoadClipnodes moves it into
+ * gc_static_clipnodes and frees it instead of keeping 254 KB of heap (caen). */
+static void *gc_clipnodes_reload_heap;
 static qboolean gc_clipnodes_pool_block;
 #if XASH_GAMECUBE
 /* Compact hull 1–3 clipnodes: campaign peak is c5a1 / rocket_frenzy ~32.3k
@@ -118,8 +122,15 @@ static qboolean gc_entities_static_block;
 /* Tip-safe HL1 changelevel: dense dest entity lumps miss fragmented tip
  * (c3a2a≈75 KiB, c4a3≈98 KiB). DoD listen CapFaces needs that tip back
  * (tip-donner OOM when BSS was linked) — valve builds omit LIBBBA, so
- * gate the BSS on that. Call site already requires BYTES > 0. */
-#if !defined(XASH_GAMECUBE_HAVE_LIBBBA) || !XASH_GAMECUBE_HAVE_LIBBBA
+ * gate the BSS on that. Call site already requires BYTES > 0.
+ * The LIBBBA define does not reach this file in the DoD build (the link
+ * map still showed the 112 KiB block), so the DoD build is excluded by its
+ * own define too: it never passes -gcchangelevel.
+ * Lost Coast is one map and never changes level either; its heap is down
+ * to a few KB in play, so it leaves the block out as well. */
+#if ( !defined(XASH_GAMECUBE_HAVE_LIBBBA) || !XASH_GAMECUBE_HAVE_LIBBBA ) \
+	&& !( defined(XASH_DODGC_NETWORK) && XASH_DODGC_NETWORK ) \
+	&& !( defined(XASH_GC_LOSTCOAST) && XASH_GC_LOSTCOAST )
 #define GC_CHANGELEVEL_ENTITIES_FALLBACK_BYTES ( 112u * 1024u )
 static char gc_changelevel_entities_fallback_bss[GC_CHANGELEVEL_ENTITIES_FALLBACK_BYTES];
 static char *gc_changelevel_entities_fallback = gc_changelevel_entities_fallback_bss;
@@ -188,10 +199,13 @@ qboolean Mod_GCEnsureStaticReserves( void )
 	/* Never consolation-seize leafs when nodes deferred (-gcmap boot tip). */
 	gc_leafs_highslot_carve = false;
 #if XASH_DODGC_NETWORK
+	/* Only once a map is being loaded (sv.name set): the boot and menu never
+	 * use the leafs block, and holding its ~292 KiB there ate the entire
+	 * headroom the BSS savings bought (engine_subsystems_ready free=1480). */
 	/* FULL avalanche mleafs (286 KiB) cannot share the ~390 KiB under-surface
 	 * hole with nodes (413 KiB). Hold static leafs for the listen FULL path
 	 * so PreallocWorldNodes can leave scratch to mnodes (ava-fullbsp21/22). */
-	if( !gc_static_leafs
+	if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 48u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
@@ -236,6 +250,7 @@ qboolean Mod_GCEnsureStaticReserves( void )
  * BSP load let the 384 KiB get fragmented/consumed before CL_LoadProgs
  * (probe 091844: free only rose to 9 KiB and InitInput still hung).
  */
+static model_t *worldmodel; /* defined with the world state below */
 void Mod_GCReleaseUnusedWorldReserves( void )
 {
 	if( gc_static_nodes && !gc_nodes_static_block )
@@ -253,9 +268,24 @@ void Mod_GCReleaseUnusedWorldReserves( void )
 			Q_memprint( sizeof( dmodel_t ) * GC_STATIC_SUBMODEL_CAPACITY ));
 	}
 #if XASH_DODGC_NETWORK
+	/* A world that is already loaded with its leafs somewhere else never
+	 * touches the reserve again (dod_charlie: 347 KiB table in the BSP
+	 * scratch, yet 292 KiB was seized here at client ready and sat idle for
+	 * the whole map). Give it back, or do not take it; the next map load
+	 * retakes it through EnsureStaticReserves. */
+	if( worldmodel && worldmodel->leafs && worldmodel->numleafs > 0 && !gc_leafs_static_block )
+	{
+		if( gc_static_leafs )
+		{
+			free( gc_static_leafs );
+			gc_static_leafs = NULL;
+			Con_Reportf( "Xash3D GameCube: released unused leafs reserve %s\n",
+				Q_memprint( GC_STATIC_LEAFS_BYTES ));
+		}
+	}
 	/* After nodes reserve returns to the tip, seize leafs for FULL avalanche
 	 * (scratch hole fits mnodes only — ava-fullbsp21). */
-	if( !gc_static_leafs
+	else if( !gc_static_leafs && sv.name[0]
 		&& GC_MemHeapFreeBytes() >= GC_STATIC_LEAFS_BYTES + 32u * 1024u )
 	{
 		Mod_GCTakeReserve( (void **)&gc_static_leafs, GC_STATIC_LEAFS_BYTES, "leafs" );
@@ -361,6 +391,23 @@ static qboolean gc_world_msurface_retained;
  * below. Freeing any other brush model (a stale previous level after a
  * changelevel) must not tear the current world down. */
 static const model_t *gc_world_blocks_owner;
+/* World lighting/PVS sizes for the arena gap finder and canary (end of file). */
+static size_t gc_world_lightdata_bytes, gc_world_visdata_bytes;
+/* Every leaf the world BSP loaded.  Mod_SetupSubmodels lowers numleafs to the
+ * world's visleafs, but the leafs of the brush entities stay live behind them
+ * in the same array (avalanche: 231 func_wall). */
+static size_t gc_world_total_leafs;
+static const mleaf_t *gc_world_total_leafs_of;
+
+/* Entries in a world leaf array, brush entity leafs included. */
+static size_t Mod_GCLeafArrayCount( const model_t *mod )
+{
+	const size_t count = mod->numleafs >= 0 ? (size_t)mod->numleafs + 1 : 0;
+
+	if( mod->leafs && mod->leafs == gc_world_total_leafs_of && gc_world_total_leafs > count )
+		return gc_world_total_leafs;
+	return count;
+}
 static byte *gc_bsp_scratch_base;
 static size_t gc_bsp_scratch_size;
 static size_t gc_bsp_scratch_carve_high;
@@ -560,6 +607,17 @@ qboolean Mod_GCIsRetainedBspScratch( const void *buf )
 static byte *gc_menu_lm_atlas;
 static int gc_menu_ls_count; /* animated faces kept in the scratch, see below */
 
+/* Bumped every time the world-array spill is rewound for a new map load. The
+ * spill levels alone cannot tell a reload from steady state: the new map
+ * refills the spill past the old mark before anyone checks it, so renderer
+ * packs that keep pointers into the spill compare this instead. */
+static unsigned gc_world_array_spill_generation;
+
+unsigned Mod_GCWorldArraySpillGeneration( void )
+{
+	return gc_world_array_spill_generation;
+}
+
 void Mod_GCClearRetainedBspScratch( void )
 {
 	gc_menu_lm_atlas = NULL; /* lives in the scratch */
@@ -582,8 +640,16 @@ void Mod_GCClearRetainedBspScratch( void )
 		extern void SV_GCDropSpillStringArena( void );
 		extern qboolean SV_GCEnsureStringArena( void );
 		SV_GCDropSpillStringArena();
+#if !XASH_DEDICATED
+		{
+			extern void CL_GCDropSpillTempEnts( void );
+			CL_GCDropSpillTempEnts();
+		}
+#endif
 		gc_world_array_spill_pin = 0;
 		gc_world_array_spill_used = 0;
+		gc_world_array_spill_generation++;
+		Mod_GCAnimPackSpillReset();
 		SV_GCEnsureStringArena();
 	}
 	/* Bounce carve stays for the session — CapFaces may still hold the ptr. */
@@ -743,8 +809,22 @@ static void Mod_GCFreeBspPin( void **ptr )
 		return;
 	}
 
+	/* A lump that lives anywhere in the map-load arena is arena memory, even
+	 * when it sits past the scratch range (tail carves, the reserved surface
+	 * slot). Handing an interior pointer to free() corrupts the heap. */
+	if( GC_IsMapLoadBufferAddress( *ptr ))
+	{
+		Con_Reportf( "Xash3D GameCube: bsp pin %p is map arena outside scratch, dropped without free\n", *ptr );
+		*ptr = NULL;
+		return;
+	}
+
+	GC_WatchdogStage( "bsp pin heap free" );
+	Con_Reportf( "Xash3D GameCube: bsp pin heap free %p\n", *ptr );
 	free( *ptr );
+	GC_HeapCheck( "after bsp pin free" );
 	*ptr = NULL;
+	GC_WatchdogStage( "bsp pin freed" );
 }
 #endif
 #include "swaplib.h"
@@ -987,6 +1067,43 @@ void *Mod_GCWorldArraySpillTryGrow( const void *ptr, size_t old_bytes, size_t ne
 		what ? what : "?", Q_memprint( old_bytes ), Q_memprint( new_bytes ),
 		Q_memprint( gc_world_array_spill_used ));
 	return (void *)p;
+}
+
+/* Bytes of the map-load arena the live BSP scratch (surface table, carves
+ * reserved above it) still occupies. Nothing else may be carved below it. */
+size_t Mod_GCBspScratchFloor( void )
+{
+	if( !gc_bsp_scratch_base || !GC_IsMapLoadBuffer( gc_bsp_scratch_base ))
+		return 0;
+	return gc_bsp_scratch_size + gc_bsp_scratch_carve_high;
+}
+
+/* True while [ptr, ptr+bytes) is still inside the allocated spill (not
+ * rewound by a map change). */
+qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( !p || p < gc_world_array_spill || p >= gc_world_array_spill + GC_WORLD_ARRAY_SPILL_BYTES )
+		return false;
+	return (size_t)( p - gc_world_array_spill ) + bytes <= gc_world_array_spill_used;
+}
+
+size_t Mod_GCWorldArraySpillFree( void )
+{
+	size_t cap = Mod_GCWorldArraySpillCap();
+
+	return cap > gc_world_array_spill_used ? cap - gc_world_array_spill_used : 0;
+}
+
+/* Free spill once the CapFaces CMPR bounce has borrowed its high 32 KiB.
+ * Mod_GCWorldArraySpillFree reports the full cap until that borrow, so a
+ * reserve sized from it came up 32 KiB short later (ceres: us-inf core
+ * 238.45 Kb against 236.19 Kb free after a 242 KiB reserve). */
+size_t Mod_GCWorldArraySpillFreeLasting( void )
+{
+	return GC_WORLD_ARRAY_SPILL_USABLE > gc_world_array_spill_used
+		? GC_WORLD_ARRAY_SPILL_USABLE - gc_world_array_spill_used : 0;
 }
 
 size_t Mod_GCWorldArraySpillUsed( void )
@@ -3674,7 +3791,7 @@ static void Mod_MakeHull0( model_t *mod, const dbspmodel_t *bmod )
 			{
 				const byte *p = (const byte *)mod->leafs;
 				busy[busy_count].start = p - gc_bsp_scratch_base;
-				busy[busy_count].end = busy[busy_count].start + mod->numleafs * sizeof( *mod->leafs );
+				busy[busy_count].end = busy[busy_count].start + Mod_GCLeafArrayCount( mod ) * sizeof( *mod->leafs );
 				busy_count++;
 			}
 
@@ -4037,6 +4154,13 @@ static void Mod_SetupSubmodels( model_t *mod, dbspmodel_t *bmod )
 	const qboolean qbsp2 = FBitSet( mod->flags, MODEL_QBSP2 ) ? true : false;
 	const char *name = mod->name;
 	model_t *world = mod; // submodels might want to share hulls
+#if XASH_GAMECUBE
+	if( bmod->isworld )
+	{
+		gc_world_total_leafs = mod->numleafs > 0 ? (size_t)mod->numleafs : 0;
+		gc_world_total_leafs_of = mod->leafs;
+	}
+#endif
 
 	mod->numframes = 2;	// regular and alternate animation
 
@@ -4387,6 +4511,16 @@ static void Mod_LoadEntities( model_t *mod, const dbspmodel_t *bmod )
 		 * leafs memalign(202)/seize(208) deferred → LoadLeafs tip-OOM while
 		 * nodes alone took BSP scratch. Prefer malloc(need) so leaf tip-park
 		 * still sees a contiguous hole. Reuse an already-held static block. */
+		/* A lump larger than the reserve never uses it (dod_charlie: 180 KiB
+		 * lump malloc'd beside an idle 128 KiB reserve, heap low 21 KiB).
+		 * Give the reserve back before the exact-size take below. */
+		if( gc_static_entities && need > GC_STATIC_ENTITIES_BYTES )
+		{
+			free( gc_static_entities );
+			gc_static_entities = NULL;
+			Con_Reportf( "Xash3D GameCube: world entities %s exceed the reserve, released %s\n",
+				Q_memprint( need ), Q_memprint( GC_STATIC_ENTITIES_BYTES ));
+		}
 		if( gc_static_entities && need <= GC_STATIC_ENTITIES_BYTES )
 		{
 			mod->entities = gc_static_entities;
@@ -5365,6 +5499,12 @@ static struct
 	byte          low_shift[GC_WT_MAX_TEXTURES]; /* first resident mip */
 } gc_wt;
 
+/* Entries in the loaded world texture pack. */
+int GC_WorldTexCount( void )
+{
+	return (int)gc_wt.count;
+}
+
 /* Transient table/hot-mip pool: prefer unused map-load arena tail to avoid a
  * large contiguous MEM1 allocation. Boot/map load leaves little headroom; the
  * full texture chains live in ARAM and this pool only holds active low mips.
@@ -5510,6 +5650,9 @@ typedef struct
 
 static gc_wt_stored_t gc_wt_store[GC_WT_ARAM_ENTRIES];
 static uint32_t gc_wt_store_base, gc_wt_store_head, gc_wt_store_next;
+/* Ring size. Lost Coast (-gccapfacessmoke) has one map and no changelevel,
+ * so its ring is sized to that map's pack instead of holding 6 MB of ARAM. */
+static uint32_t gc_wt_store_bytes = GC_WT_ARAM_BYTES;
 static byte gc_wt_stage[16 * 1024] __attribute__((aligned(32)));
 
 /* When the remaining tail can accommodate both world trees, share it between
@@ -5585,9 +5728,9 @@ static const gc_wt_stored_t *Mod_GCWorldStorePut( const gc_wt_entry_t *e, byte *
 	gc_wt_stored_t *s;
 	int i;
 
-	if( size > GC_WT_ARAM_BYTES )
+	if( size > gc_wt_store_bytes )
 		return NULL;
-	if( gc_wt_store_head + size > GC_WT_ARAM_BYTES )
+	if( gc_wt_store_head + size > gc_wt_store_bytes )
 		gc_wt_store_head = 0;
 	for( i = 0; i < GC_WT_ARAM_ENTRIES; i++ )
 	{
@@ -5612,8 +5755,8 @@ static const gc_wt_stored_t *Mod_GCWorldStorePutFile( const gc_wt_entry_t *e, fi
 	gc_wt_stored_t *s;
 	uint32_t done = 0;
 	int i;
-	if( size > GC_WT_ARAM_BYTES ) return NULL;
-	if( gc_wt_store_head + size > GC_WT_ARAM_BYTES ) gc_wt_store_head = 0;
+	if( size > gc_wt_store_bytes ) return NULL;
+	if( gc_wt_store_head + size > gc_wt_store_bytes ) gc_wt_store_head = 0;
 	for( i = 0; i < GC_WT_ARAM_ENTRIES; i++ )
 	{
 		s = &gc_wt_store[i];
@@ -5687,12 +5830,76 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 	Mod_GCWorldPackInitStub();
 	start = Sys_DoubleTime( );
 	size = FS_FileLength( f );
+#if XASH_DODGC_NETWORK
+	/* DoD: every measured map pack is 1.4-3.2 MiB, so a fixed 6 MiB ring held 2.8-4.6 MiB of ARAM the
+	 * match never touched, and the two 3.55 MiB player animation packs did not fit beside it. The ring
+	 * is this map's pack plus margin for the per-tag duplicates (full 6 MiB when that does not fit).
+	 * It is recomputed at every pack open: a later, larger pack must not wrap a smaller ring (the
+	 * wrap would overwrite textures of the same pack that gc_wt.aram[] still points at), so the ring is
+	 * released and reserved again at the larger size. The previous world's textures are already gone
+	 * here (the pack state was reset above) and the store entries are cleared with it. */
+	if( size > 0 && !Sys_CheckParm( "-gccapfacessmoke" ))
+	{
+		const uint32_t margin = Q_max( 512u * 1024u, (uint32_t)size / 8u );
+		const uint64_t want64 = (( (uint64_t)size + margin + 32767u ) & ~(uint64_t)32767u );
+		const uint32_t want = want64 < GC_WT_ARAM_BYTES ? (uint32_t)want64 : GC_WT_ARAM_BYTES;
+
+		if( gc_wt_store_base && gc_wt_store_bytes < want )
+		{
+			if( GC_AramFree( gc_wt_store_base ))
+			{
+				Con_Reportf( "Xash3D GameCube: world texture store ring %s too small for pack %s, reserving %s\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( want ));
+				gc_wt_store_base = 0;
+				gc_wt_store_head = gc_wt_store_next = 0;
+				memset( gc_wt_store, 0, sizeof( gc_wt_store ));
+			}
+			else
+				Con_Reportf( S_WARN "Xash3D GameCube: world texture store ring %s too small for pack %s and could not be released\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ));
+		}
+		if( !gc_wt_store_base )
+		{
+			gc_wt_store_bytes = want;
+			Con_Reportf( "Xash3D GameCube: world texture store ring %s for pack %s (full ring %s)\n",
+				Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( GC_WT_ARAM_BYTES ));
+		}
+	}
+#endif
 	if( !gc_wt_store_base )
-		gc_wt_store_base = GC_AramReserveTagged( GC_WT_ARAM_BYTES, "wtstore" );
+	{
+		/* Size the ring to this pack when the map never changelevels into a
+		 * larger one. Lost Coast is one map; CapFaces smoke is the same.
+		 * DoD keeps the 6 MB ring so a tram hop can keep shared textures
+		 * without re-reading them. The retail title → New Game path does
+		 * not pass -gccapfacessmoke, so Lost Coast builds must gate on the
+		 * compile define / map stem or the pack would still take 6 MB
+		 * (menu probe 2026-11-18: ARAM reserve 6 Mb while wt is 1.4 MB). */
+		qboolean size_to_pack = false;
+
+		if( size > 0 && (uint32_t)size < GC_WT_ARAM_BYTES )
+		{
+#if defined(XASH_GC_LOSTCOAST) && XASH_GC_LOSTCOAST
+			size_to_pack = true;
+#else
+			if( Sys_CheckParm( "-gccapfacessmoke" ) || !Q_stricmp( stem, "d2_lostcoast" ))
+				size_to_pack = true;
+#endif
+		}
+		if( size_to_pack )
+			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
+		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		/* A reserve that fails at the right-sized ring retries at the full ring before giving up. */
+		if( !gc_wt_store_base && gc_wt_store_bytes < GC_WT_ARAM_BYTES )
+		{
+			gc_wt_store_bytes = GC_WT_ARAM_BYTES;
+			gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		}
+	}
 	if( !gc_wt_store_base )
 	{
 		Con_Reportf( S_ERROR "Xash3D GameCube: world texture pack %s needs %u bytes of ARAM\n",
-			path, (unsigned)GC_WT_ARAM_BYTES );
+			path, (unsigned)gc_wt_store_bytes );
 		FS_Close( f );
 		return;
 	}
@@ -5886,6 +6093,20 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 		{
 			hits++;
 			hit_bytes += bytes;
+			/* A texture already in the ARAM store (a reload of the same map)
+			 * used to end the pack ("stop ... reason=resident-budget") once
+			 * the staging window was full; the first load flips to stub +
+			 * ARAM streaming there. Do the same for a hit. */
+			if( !aram_only && !stream_only && bytes - skip > room )
+			{
+				if( !logged_aram_continue )
+				{
+					logged_aram_continue = true;
+					Con_Reportf( "Xash3D GameCube: texture pack continue ARAM-stream map=%s from=%u reason=store-hit bytes=%u room=%u\n",
+						stem, (unsigned)i, (unsigned)bytes, (unsigned)room );
+				}
+				stream_only = true;
+			}
 		}
 		else
 		{
@@ -7644,7 +7865,7 @@ static void Mod_LoadNodes( model_t *mod, dbspmodel_t *bmod )
 				{
 					const byte *p = (const byte *)mod->leafs;
 					busy[busy_count].start = p - gc_bsp_scratch_base;
-					busy[busy_count].end = busy[busy_count].start + mod->numleafs * sizeof( *mod->leafs );
+					busy[busy_count].end = busy[busy_count].start + Mod_GCLeafArrayCount( mod ) * sizeof( *mod->leafs );
 					busy_count++;
 				}
 
@@ -8326,6 +8547,7 @@ void Mod_GameCubeFreeMallocSurfaces( model_t *mod )
 		gc_clipnodes_pool_block = false;
 		gc_clipnodes_static_block = false;
 		gc_clipnodes_scratch_block = false;
+		gc_clipnodes_reload_heap = NULL;
 		gc_submodels_malloc_block = NULL;
 		gc_entities_malloc_block = NULL;
 		gc_planes_arena_tail = false;
@@ -8485,6 +8707,98 @@ free_submodels:
 		Q_memprint( GC_MemHeapFreeBytes() ) );
 }
 
+/*
+ * Per-map budget: move the world's entity text (32-104 KiB) off the heap
+ * once the map is ready.  During the load the arena still holds live lumps
+ * (which is why the load itself never uses the tail for it), but by MAP_READY
+ * spawning is done and the leftover gaps are known.  The text keeps living as
+ * long as the map; FreeMallocSurfaces drops the pointer without free().
+ */
+void Mod_GCWorldCanaryCheck( const char *when );
+
+/* Bytes the world's entity text will need in the map arena at MAP_READY
+ * (Mod_GCMoveWorldEntitiesToArena), or 0 when it is not a movable heap block.
+ * The DoD packet ring is sized with this left over, or the ring takes the gap
+ * and the text stays on the heap (180 KB on dod_charlie). */
+size_t Mod_GCWorldEntityTextHeapBytes( void )
+{
+	model_t *mod = worldmodel;
+
+	if( !mod || mod->type != mod_brush || !mod->entities )
+		return 0;
+#if XASH_DODGC_NETWORK
+	if( gc_entities_static_block && gc_static_entities && mod->entities == gc_static_entities )
+		return Q_strlen( mod->entities ) + 1;
+#endif
+	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
+		return 0;
+	return Q_strlen( mod->entities ) + 1;
+}
+
+void Mod_GCMoveWorldEntitiesToArena( void )
+{
+	model_t *mod = worldmodel;
+	size_t need, at;
+	char *dst;
+
+	if( !mod || mod->type != mod_brush || !mod->entities )
+		return;
+#if XASH_DODGC_NETWORK
+	/* The 128 KB entity reserve is a permanent heap block a DoD listen map holds
+	 * its small lump in (avalanche). Once the text sits in the arena the reserve
+	 * goes back to the heap; the next map load takes it again if it is needed. */
+	if( gc_entities_static_block && gc_static_entities && mod->entities == gc_static_entities )
+	{
+		size_t n = Q_strlen( mod->entities ) + 1, pos = GC_MapArenaFind( n );
+		char *to;
+
+		if( pos != (size_t)-1 && ( to = (char *)GC_MapLoadBufferTailAlloc( pos, n )) != NULL )
+		{
+			memcpy( to, mod->entities, n );
+			mod->entities = to;
+			free( gc_static_entities );
+			gc_static_entities = NULL;
+			gc_entities_static_block = false;
+			gc_entities_arena_tail = true;
+			Con_Reportf( "Xash3D GameCube: budget moved entity text to map leftover (%s), entity reserve returned, heap free %s\n",
+				Q_memprint( n ), Q_memprint( GC_MemHeapFreeBytes()));
+			Mod_GCWorldCanaryCheck( "after entity text move" );
+			return;
+		}
+	}
+#endif
+	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
+	{
+		static const model_t *said;
+
+		if( said != mod )
+		{
+			said = mod;
+			Con_Reportf( "Xash3D GameCube: budget entity text not on heap (%s%s%s)\n",
+				gc_entities_static_block ? "static reserve" : "",
+				gc_entities_arena_tail ? "arena" : "",
+				!gc_entities_static_block && !gc_entities_arena_tail ? "other" : "" );
+		}
+		return;
+	}
+	need = Q_strlen( mod->entities ) + 1;
+	at = GC_MapArenaFind( need );
+	if( at == (size_t)-1 || !( dst = (char *)GC_MapLoadBufferTailAlloc( at, need )))
+	{
+		Con_Reportf( "Xash3D GameCube: budget keeps entity text on heap (%s, largest gap %s)\n",
+			Q_memprint( need ), Q_memprint( GC_MapArenaLargestGap()));
+		return;
+	}
+	memcpy( dst, mod->entities, need );
+	mod->entities = dst;
+	free( gc_entities_malloc_block );
+	gc_entities_malloc_block = NULL;
+	gc_entities_arena_tail = true;
+	Con_Reportf( "Xash3D GameCube: budget moved entity text to map leftover (%s), heap free %s\n",
+		Q_memprint( need ), Q_memprint( GC_MemHeapFreeBytes()));
+	Mod_GCWorldCanaryCheck( "after entity text move" );
+}
+
 static void Mod_GCRestoreDeferredMarkfaces( dbspmodel_t *bmod )
 {
 	if( !gc_bsp_deferred.markfaces )
@@ -8612,7 +8926,7 @@ static size_t Mod_GCCollectWorldScratchBusy( model_t *mod, dbspmodel_t *bmod, gc
 	{
 		const byte *p = (const byte *)mod->leafs;
 		busy[busy_count].start = p - gc_bsp_scratch_base;
-		busy[busy_count].end = busy[busy_count].start + (size_t)mod->numleafs * sizeof( *mod->leafs );
+		busy[busy_count].end = busy[busy_count].start + Mod_GCLeafArrayCount( mod ) * sizeof( *mod->leafs );
 		busy_count++;
 	}
 
@@ -8697,19 +9011,13 @@ static size_t Mod_GCCollectWorldScratchBusy( model_t *mod, dbspmodel_t *bmod, gc
 	return busy_count;
 }
 
-static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lumpnum )
+/* Open (or keep) the single DVD handle used for every lump reload. Called
+ * early from Mod_LoadBrushModel for the world, while the heap still has room
+ * for the file_t and search-path lookups; by the time leafs/nodes reload the
+ * heap is ~0 and a late FS_Open misses ("find missed", 2.66 KB free). */
+static qboolean Mod_GCOpenBspReloadFile( model_t *mod, const char *what )
 {
-	const mlumpinfo_t *info = Mod_GCFindStdLumpInfo( lumpnum );
-	file_t *f;
-	dlump_t lump;
-	byte *lumpbuf;
-	size_t real_entrysize;
-	size_t numelems;
-	qboolean scratch_backed = false;
 	char bsppath[MAX_QPATH];
-
-	if( !info )
-		return false;
 
 	if( Q_stristr( mod->name, ".bsp" ))
 		Q_strncpy( bsppath, mod->name, sizeof( bsppath ));
@@ -8718,7 +9026,9 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 	/* Keep one DVD handle across faces/markfaces/leafs/nodes — repeated
 	 * FS_Open under post-carve MEM1 fails on real hardware and Dolphin. */
-	if( !gc_bsp_reload_file || Q_stricmp( gc_bsp_reload_path, bsppath ))
+	if( gc_bsp_reload_file && !Q_stricmp( gc_bsp_reload_path, bsppath ))
+		return true;
+
 	{
 		int retry;
 
@@ -8734,7 +9044,7 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 		if( !gc_bsp_reload_file )
 		{
-			Con_Reportf( S_ERROR "Xash3D GameCube: failed to reopen %s for lump %i\n", bsppath, lumpnum );
+			Con_Reportf( S_ERROR "Xash3D GameCube: failed to reopen %s for %s\n", bsppath, what );
 			return false;
 		}
 
@@ -8742,14 +9052,34 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 		if( FS_Read( gc_bsp_reload_file, &gc_bsp_reload_header, sizeof( gc_bsp_reload_header ))
 			!= sizeof( gc_bsp_reload_header ))
 		{
-			Con_Reportf( S_ERROR "Xash3D GameCube: header read failed for lump %s\n", info->loadname );
+			Con_Reportf( S_ERROR "Xash3D GameCube: header read failed for %s\n", what );
 			FS_Close( gc_bsp_reload_file );
 			gc_bsp_reload_file = NULL;
+			gc_bsp_reload_path[0] = '\0';
 			return false;
 		}
 		le_struct_swap( dheader_swap, &gc_bsp_reload_header );
 		gc_bsp_reload_header_ok = true;
 	}
+
+	return true;
+}
+
+static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lumpnum )
+{
+	const mlumpinfo_t *info = Mod_GCFindStdLumpInfo( lumpnum );
+	file_t *f;
+	dlump_t lump;
+	byte *lumpbuf;
+	size_t real_entrysize;
+	size_t numelems;
+	qboolean scratch_backed = false;
+
+	if( !info )
+		return false;
+
+	if( !Mod_GCOpenBspReloadFile( mod, info->loadname ))
+		return false;
 
 	f = gc_bsp_reload_file;
 
@@ -8918,6 +9248,8 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 	*(byte **)((byte *)bmod + info->dataofs) = lumpbuf;
 	*(size_t *)((byte *)bmod + info->countofs) = numelems;
+	if( lumpnum == LUMP_CLIPNODES )
+		gc_clipnodes_reload_heap = scratch_backed ? NULL : lumpbuf;
 	Con_Reportf( "Xash3D GameCube: reloaded BSP lump %s (%s)%s from disc\n",
 		info->loadname, Q_memprint( lump.filelen ), scratch_backed ? " [scratch]" : "" );
 	return true;
@@ -8932,6 +9264,140 @@ static void Mod_GCCloseBspReloadFile( void )
 	}
 	gc_bsp_reload_path[0] = '\0';
 	gc_bsp_reload_header_ok = false;
+}
+
+/* Light points on routes that never load LUMP_LIGHTING (the world drawn from
+ * a prebaked world DL). GoldSrc lights a studio model from the lightmap
+ * under it (R_LightPoint); without the lump every player fell back to flat
+ * white 255. Keep the lump and a per-face lightofs table in ARAM, and DMA
+ * one face's samples at a time when a light point lands on it. */
+static unsigned int gc_lp_aram, gc_lp_aram_cap, gc_lp_bytes;
+static unsigned int gc_lp_ofs_aram, gc_lp_ofs_cap;
+static int gc_lp_numfaces;
+static model_t *gc_lp_model;
+
+static unsigned int Mod_GCLightPointBlock( unsigned int *base, unsigned int *cap, unsigned int need, const char *tag )
+{
+	need = ( need + 31u ) & ~31u;
+	if( *base && *cap >= need )
+		return *base;
+	if( *base )
+		GC_AramFree( *base );
+	*base = GC_AramAllocTagged( need, true, tag );
+	*cap = *base ? need : 0;
+	return *base;
+}
+
+static void Mod_GCBindLightPoints( model_t *mod, dbspmodel_t *bmod )
+{
+	dlump_t faces, lighting;
+	size_t done;
+	int i;
+
+	gc_lp_model = NULL;
+	gc_lp_numfaces = 0;
+	gc_lp_bytes = 0;
+	if( !mod || !bmod || !bmod->isworld || mod->lightdata || gc_lm_aram_base
+		|| !mod->surfaces || mod->numsurfaces <= 0 || bmod->version != HLBSP_VERSION
+		|| bmod->lightmap_samples != 3 || Sys_CheckParm( "-gcnolightpoints" ))
+		return;
+	if( !Mod_GCOpenBspReloadFile( mod, "light points" ) || !gc_bsp_reload_header_ok )
+		return;
+	faces = gc_bsp_reload_header.lumps[LUMP_FACES];
+	lighting = gc_bsp_reload_header.lumps[LUMP_LIGHTING];
+	if( faces.filelen / (int)sizeof( dface_t ) != mod->numsurfaces || lighting.filelen <= 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: light points skipped faces=%d/%d lighting=%d\n",
+			faces.filelen / (int)sizeof( dface_t ), mod->numsurfaces, lighting.filelen );
+		return;
+	}
+	if( !Mod_GCLightPointBlock( &gc_lp_aram, &gc_lp_aram_cap, (unsigned int)lighting.filelen, "lightpoint" )
+		|| !Mod_GCLightPointBlock( &gc_lp_ofs_aram, &gc_lp_ofs_cap, (unsigned int)mod->numsurfaces * 4u, "lightpoint ofs" ))
+	{
+		Con_Reportf( S_WARN "Xash3D GameCube: light points: no ARAM for %s\n", Q_memprint( lighting.filelen ));
+		return;
+	}
+
+	FS_Seek( gc_bsp_reload_file, lighting.fileofs, SEEK_SET );
+	for( done = 0; done < (size_t)lighting.filelen; )
+	{
+		const size_t chunk = Q_min((size_t)lighting.filelen - done, (size_t)GC_LM_HYDRATE_MAX );
+
+		if( FS_Read( gc_bsp_reload_file, gc_lm_hydrate_buf, chunk ) != (fs_offset_t)chunk )
+			return;
+		GC_AramCopy( gc_lp_aram + (unsigned int)done, gc_lm_hydrate_buf, (unsigned int)chunk, true );
+		done += chunk;
+	}
+
+	/* Faces in batches; each face's lightofs packs down to the front of the
+	 * same buffer (int i lands at 4i, below face i's own bytes at 20i). */
+	FS_Seek( gc_bsp_reload_file, faces.fileofs, SEEK_SET );
+	for( i = 0; i < mod->numsurfaces; )
+	{
+		const int batch = Q_min( mod->numsurfaces - i, (int)( GC_LM_HYDRATE_MAX / sizeof( dface_t )) & ~7 );
+		int *ofs = (int *)gc_lm_hydrate_buf;
+		int k;
+
+		if( FS_Read( gc_bsp_reload_file, gc_lm_hydrate_buf, batch * sizeof( dface_t )) != (fs_offset_t)( batch * sizeof( dface_t )))
+			return;
+		for( k = 0; k < batch; k++ )
+		{
+			int v;
+
+			memcpy( &v, gc_lm_hydrate_buf + k * sizeof( dface_t ) + offsetof( dface_t, lightofs ), sizeof( v ));
+			ofs[k] = LittleLong( v );
+		}
+		GC_AramCopy( gc_lp_ofs_aram + (unsigned int)i * 4u, ofs, (unsigned int)batch * 4u, true );
+		i += batch;
+	}
+
+	gc_lp_bytes = (unsigned int)lighting.filelen;
+	gc_lp_numfaces = mod->numsurfaces;
+	gc_lp_model = mod;
+	Con_Reportf( "Xash3D GameCube: light points bound lighting=%s faces=%d (ARAM)\n",
+		Q_memprint( lighting.filelen ), gc_lp_numfaces );
+}
+
+qboolean Mod_GCLightPointsActive( const model_t *world )
+{
+	return ( world && gc_lp_model == world && gc_lp_bytes && world->surfaces ) ? true : false;
+}
+
+/* One face's lightmap samples for a light point, or NULL. */
+color24 *Mod_GCLightPointSamples( const msurface_t *surf )
+{
+	int idx, lightofs, sample_size, smax, tmax, styles = 0, map;
+	unsigned int bytes;
+
+	if( !surf )
+		return NULL;
+	if( surf->samples )
+		return surf->samples;
+	if( gc_lm_aram_base )
+		return Mod_GCHydrateSurfaceLightmap( surf );
+	if( !gc_lp_model || !gc_lp_model->surfaces || !surf->info )
+		return NULL;
+	idx = (int)( surf - gc_lp_model->surfaces );
+	if( idx < 0 || idx >= gc_lp_numfaces )
+		return NULL;
+	GC_AramCopy( gc_lp_ofs_aram + (unsigned int)idx * 4u, &lightofs, sizeof( lightofs ), false );
+	if( lightofs < 0 )
+		return NULL;
+
+	sample_size = Mod_SampleSizeForFace( surf );
+	if( sample_size < 1 )
+		sample_size = 16;
+	smax = ( surf->info->lightextents[0] / sample_size ) + 1;
+	tmax = ( surf->info->lightextents[1] / sample_size ) + 1;
+	for( map = 0; map < MAXLIGHTMAPS && surf->styles[map] != 255; map++ )
+		styles++;
+	if( styles < 1 )
+		styles = 1;
+	bytes = (unsigned int)( smax * tmax * styles ) * sizeof( color24 );
+	if( smax < 1 || tmax < 1 || bytes > GC_LM_HYDRATE_MAX || (unsigned int)lightofs + bytes > gc_lp_bytes )
+		return NULL;
+	GC_AramCopy( gc_lp_aram + (unsigned int)lightofs, gc_lm_hydrate_buf, bytes, false );
+	return (color24 *)gc_lm_hydrate_buf;
 }
 
 static void Mod_GCEnsureBspLump( model_t *mod, dbspmodel_t *bmod, int lumpnum )
@@ -9032,6 +9498,11 @@ static qboolean Mod_GCWorldDLPackPresent( const model_t *mod )
 	if( cached_yes )
 		Con_Reportf( "Xash3D GameCube: world DL pack hit %s\n", path );
 	return cached_yes > 0;
+}
+
+qboolean Mod_GCWorldTraceReady( const model_t *world )
+{
+	return Mod_GCWorldDLPackPresent( world );
 }
 #endif
 
@@ -9151,7 +9622,9 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		size_t texinfo_bytes = mod->numtexinfo * sizeof( mtexinfo_t );
 		qboolean texinfo_heap_owned = false;
 
+		GC_WatchdogStage( "texinfo pin malloc" );
 		pinned = malloc( texinfo_bytes );
+		GC_WatchdogStage( "texinfo pin copy" );
 		if( pinned )
 		{
 			memcpy( pinned, mod->texinfo, texinfo_bytes );
@@ -9181,6 +9654,53 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		}
 	}
 
+	/* The faces lump may still live inside the staging buffer being released (dod_flash: 9801 faces,
+	 * clamped slot, so they stay a BSP alias instead of a copy). Clearing the pointer would leave the
+	 * surface load with no faces ("missing BSP faces ... before surface load"), and the tail-copy
+	 * restore below only exists when a copy was made. Move them out first; when no room can be found,
+	 * keep the staging buffer for the surface load instead of releasing it. */
+	{
+		const qboolean q2 = bmod->version == QBSP2_VERSION;
+		const void *faces = q2 ? (const void *)bmod->surfaces32 : (const void *)bmod->surfaces;
+
+		/* CapFaces lean / WorldDL never build the live surfaces, so nothing reads these faces afterwards. */
+		if( faces && !gc_capfaces_lean_surfaces && Mod_GCPointerInBuffer( faces, mod_base, bufferlen ))
+		{
+			const size_t bytes = bmod->numsurfaces * ( q2 ? sizeof( *bmod->surfaces32 ) : sizeof( *bmod->surfaces ));
+			void *copy = Mod_GCWorldArraySpillAlloc( bytes, "faces" );
+			qboolean from_spill = copy != NULL;
+
+			if( !copy )
+				copy = Mod_GCPreSurfaceTailAlloc( GC_MapLoadBufferTailHighwater(), bytes );
+			if( !copy )
+				copy = Mem_TryMalloc( mod->mempool, bytes );
+			if( !copy )
+			{
+				gc_retain_bsp_source_buffer = true;
+				gc_force_bsp_image_release = false;
+				gc_bsp_scratch_base = mod_base;
+				gc_bsp_scratch_size = GC_IsMapLoadBuffer( mod_base ) && GC_MapLoadBufferCapacity() > bufferlen
+					? GC_MapLoadBufferCapacity() : bufferlen;
+				Con_Reportf( S_WARN "Xash3D GameCube: faces (%s) still live in BSP staging and no copy fits; retaining staging for surfaces\n",
+					Q_memprint( bytes ));
+				return;
+			}
+			memcpy( copy, faces, bytes );
+			if( q2 )
+				bmod->surfaces32 = copy;
+			else
+			{
+				bmod->surfaces = copy;
+				if( from_spill )
+				{
+					gc_faces_tail_copy = copy;
+					gc_faces_source_alias = false;
+				}
+			}
+			Con_Reportf( "Xash3D GameCube: faces %s moved out of BSP staging before release\n", Q_memprint( bytes ));
+		}
+	}
+
 	if( bmod->version == QBSP2_VERSION )
 	{
 		if( Mod_GCPointerInBuffer( bmod->surfaces32, mod_base, bufferlen ))
@@ -9194,7 +9714,9 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 	gc_retain_bsp_source_buffer = false;
 	Con_Reportf( "Xash3D GameCube: releasing gcmap BSP staging %s before surfaces\n",
 		Q_memprint( bufferlen ));
+	GC_WatchdogStage( "bsp source buffer release" );
 	Mod_GCReleaseBspSourceBuffer( mod, bmod, mod_base, bufferlen );
+	GC_WatchdogStage( "bsp source buffer released" );
 	if( !gc_faces_source_alias && !bmod->surfaces && gc_faces_tail_copy )
 		bmod->surfaces = gc_faces_tail_copy;
 	/* Staging lumps are cleared, but the map-load arena stays allocated
@@ -10196,6 +10718,14 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				gc_clipnodes_malloc_block = owned;
 				for( h = 1; h < 4; h++ )
 					mod->hulls[h].clipnodes16 = owned;
+				/* The raw lump read from disc is no longer referenced: it stayed on the heap for the whole match. */
+				if( gc_clipnodes_reload_heap && bmod->clipnodes == gc_clipnodes_reload_heap && (void *)owned != gc_clipnodes_reload_heap )
+				{
+					free( gc_clipnodes_reload_heap );
+					bmod->clipnodes = NULL;
+					Con_Reportf( "Xash3D GameCube: freed raw clipnodes lump %s\n", Q_memprint( clip_sz ));
+				}
+				gc_clipnodes_reload_heap = NULL;
 				Con_Reportf( "Xash3D GameCube: owned compact clipnodes %s\n",
 					Q_memprint( clip_sz ));
 				return;
@@ -10210,6 +10740,34 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: compact clipnodes aliased from BSP scratch %s\n",
 					Q_memprint( clip_sz ));
 			}
+			else if( gc_clipnodes_reload_heap && bmod->clipnodes == gc_clipnodes_reload_heap
+				&& bmod->numclipnodes <= GC_STATIC_CLIPNODE_CAPACITY )
+			{
+				/* dod_caen: a 254 KB disc reload kept on the heap all match while the 256 KB BSS table sat idle.
+				 * Same normalized copy as the pinned path, then the heap block goes back. */
+				for( int i = 0; i < bmod->numclipnodes; i++ )
+				{
+					int c0 = (unsigned short)bmod->clipnodes[i].children[0];
+					int c1 = (unsigned short)bmod->clipnodes[i].children[1];
+
+					if( c0 >= bmod->numclipnodes )
+						c0 -= 65536;
+					if( c1 >= bmod->numclipnodes )
+						c1 -= 65536;
+					gc_static_clipnodes[i].planenum = bmod->clipnodes[i].planenum;
+					gc_static_clipnodes[i].children[0] = (short)c0;
+					gc_static_clipnodes[i].children[1] = (short)c1;
+				}
+				free( gc_clipnodes_reload_heap );
+				gc_clipnodes_reload_heap = NULL;
+				bmod->clipnodes = NULL;
+				mod->clipnodes16 = gc_static_clipnodes;
+				gc_clipnodes_malloc_block = gc_static_clipnodes;
+				gc_clipnodes_static_block = true;
+				gc_clipnodes_pool_block = false;
+				Con_Reportf( "Xash3D GameCube: compact clipnodes moved from heap lump to static table %s\n",
+					Q_memprint( clip_sz ));
+			}
 			else
 			{
 				gc_clipnodes_malloc_block = bmod->clipnodes;
@@ -10217,6 +10775,7 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: compact clipnodes aliased from heap lump %s\n",
 					Q_memprint( clip_sz ));
 			}
+			gc_clipnodes_reload_heap = NULL;
 			return;
 		}
 
@@ -10344,7 +10903,10 @@ static void Mod_LoadVisibility( model_t *mod, dbspmodel_t *bmod )
 	/* Optional: renderer can fall back to full-vis leaf marking. */
 #if XASH_GAMECUBE
 	if( GC_MapLoadMemoryOpt() && bmod->isworld )
+	{
 		mod->visdata = Mod_GCWorldArrayTryAlloc( mod, bmod, bmod->visdatasize, "visdata" );
+		gc_world_visdata_bytes = bmod->visdatasize;
+	}
 	else
 #endif
 		mod->visdata = Mem_TryMalloc( mod->mempool, bmod->visdatasize );
@@ -10513,7 +11075,7 @@ static size_t Mod_GCCollectAllWorldScratchBusy( model_t *mod, dbspmodel_t *bmod,
 		Mod_GCBusyAdd( busy, &n, cap, bmod->nodes, bmod->numnodes * sizeof( dnode_t ));
 	}
 	Mod_GCBusyAdd( busy, &n, cap, mod->planes, mod->numplanes * sizeof( mplane_t ));
-	Mod_GCBusyAdd( busy, &n, cap, mod->leafs, ( mod->numleafs + 1 ) * sizeof( mleaf_t ));
+	Mod_GCBusyAdd( busy, &n, cap, mod->leafs, Mod_GCLeafArrayCount( mod ) * sizeof( mleaf_t ));
 	Mod_GCBusyAdd( busy, &n, cap, mod->vertexes, mod->numvertexes * sizeof( mvertex_t ));
 	Mod_GCBusyAdd( busy, &n, cap, mod->edges16, mod->numedges * ( bsp2 ? sizeof( medge32_t ) : sizeof( medge16_t )));
 	Mod_GCBusyAdd( busy, &n, cap, mod->nodes, mod->numnodes * sizeof( mnode_t ));
@@ -11106,6 +11668,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 			}
 
 			mod->lightdata = (color24 *)bmod->lightdata;
+			if( bmod->isworld ) gc_world_lightdata_bytes = bmod->lightdatasize;
 			SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 			for( i = 0; i < mod->numsurfaces; i++ )
 			{
@@ -11150,6 +11713,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		{
 			bmod->lightdatasize = bmod->rgblightdatasize;
 			mod->lightdata = Mem_Malloc( mod->mempool, bmod->rgblightdatasize );
+			if( bmod->isworld ) gc_world_lightdata_bytes = bmod->rgblightdatasize;
 			memcpy( mod->lightdata, bmod->rgblightdata, bmod->rgblightdatasize );
 			SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 		}
@@ -11160,6 +11724,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		else
 		{
 			mod->lightdata = (color24 *)Mem_Malloc( mod->mempool, bmod->lightdatasize * sizeof( color24 ));
+			if( bmod->isworld ) gc_world_lightdata_bytes = bmod->lightdatasize * sizeof( color24 );
 
 			// expand the white lighting data
 			for( int i = 0; i < bmod->lightdatasize; i++ )
@@ -11168,6 +11733,7 @@ static void Mod_LoadLighting( model_t *mod, dbspmodel_t *bmod )
 		break;
 	case 3:	// load colored lighting
 		mod->lightdata = Mem_Malloc( mod->mempool, bmod->lightdatasize );
+		if( bmod->isworld ) gc_world_lightdata_bytes = bmod->lightdatasize;
 		memcpy( mod->lightdata, bmod->lightdata, bmod->lightdatasize );
 		SetBits( mod->flags, MODEL_COLORED_LIGHTING );
 		break;
@@ -11850,8 +12416,20 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 	else
 		Con_Reportf( "Xash3D GameCube: CapFaces lean — skip face ensure (%zu faces)\n",
 			bmod->numsurfaces );
+	/* Stage names for the watchdog: a stall here used to report only the
+	 * last breadcrumb from the server ("map buffer prepared"). */
+	GC_WatchdogStage( "pre-surface lump free" );
+	Con_Reportf( "Xash3D GameCube: pre-surface lump free begin scratch=%p+%lu carve=%lu arena=%p+%lu\n",
+		gc_bsp_scratch_base, (unsigned long)gc_bsp_scratch_size, (unsigned long)gc_bsp_scratch_carve_high,
+		GC_MapLoadBufferBase(), (unsigned long)GC_MapLoadBufferCapacity() );
 	Mod_GCFreeGcmapPreSurfaceLumps( bmod );
+	GC_WatchdogStage( "pre-surface staging release" );
+	Con_Reportf( "Xash3D GameCube: pre-surface staging release begin base=%p len=%lu\n",
+		mod_base, (unsigned long)bufferlen );
 	Mod_GCReleaseGcmapPreSurfaceStaging( mod, bmod, mod_base, bufferlen );
+	GC_WatchdogStage( "pre-surface staging released" );
+	Con_Reportf( "Xash3D GameCube: pre-surface staging release done\n" );
+	GC_HeapCheck( "after pre-surface staging release" );
 	if( !gc_capfaces_lean_surfaces )
 		Mod_GCRefreshClampedSurfaceSlot( mod, bmod );
 	else
@@ -11861,7 +12439,9 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 		GC_MapLoadBufferLowerTailHighwater( 0 );
 		Con_Reportf( "Xash3D GameCube: CapFaces lean — cleared surface high-slot for leafs/nodes\n" );
 	}
+	GC_WatchdogStage( "pre-surfaces sample" );
 	GC_MemSample( "pre-surfaces" );
+	GC_WatchdogStage( "surfaces load" );
 	if( !gc_capfaces_lean_surfaces
 		&& bmod->numsurfaces
 		&& ( bmod->version == QBSP2_VERSION ? !bmod->surfaces32 : !bmod->surfaces ))
@@ -12074,6 +12654,8 @@ static qboolean Mod_LoadBmodelLumps( model_t *mod, byte *mod_base, size_t buffer
 #endif
 	Mod_LoadLighting( mod, bmod );
 #if XASH_GAMECUBE
+	if( isworld )
+		Mod_GCBindLightPoints( mod, bmod );
 	Mod_GCCloseBspReloadFile();
 	Con_Reportf( "Xash3D GameCube: bmodel lighting ready\n" );
 	/* G277: capture after Mod_LoadLighting binds samples to every world and
@@ -12313,6 +12895,15 @@ void Mod_LoadBrushModel( model_t *mod, void *buffer, size_t buffersize, qboolean
 	mod->mempool = Mem_AllocPool( poolname );
 	mod->type = mod_brush;
 
+#if XASH_GAMECUBE
+	/* Open the lump-reload DVD handle now, while the heap can still serve the
+	 * file_t and path lookup. The leafs/nodes reload runs after the BSP buffer
+	 * release with ~0 heap free, where FS_Open misses. Best effort: a failure
+	 * here only falls back to the late open. Closed in Mod_LoadBmodelLumps. */
+	if( world.loading )
+		Mod_GCOpenBspReloadFile( mod, "world load" );
+#endif
+
 	// loading all the lumps into heap
 	if( !Mod_LoadBmodelLumps( mod, buffer, buffersize, world.loading ))
 		return; // there were errors
@@ -12546,3 +13137,200 @@ int GAME_EXPORT Mod_SaveLump( const char *filename, const int lump, void *lumpda
 	FS_Close( f );
 	return LUMP_SAVE_OK;
 }
+
+#if XASH_GAMECUBE
+/* Live world arrays inside the map arena. The lean World DL load leaves
+ * planes in the BSP image near the bottom and parks leafs/nodes in a high
+ * slot near the top, so the free space for post-load claims is a gap in the
+ * middle, not "everything above the tail". Collect every world array that
+ * points into the arena (lighting and PVS sizes come from the load). */
+typedef struct { size_t lo, hi; } gc_arena_range_t;
+
+
+static void Mod_GCLiveRange( gc_arena_range_t *r, int *n, int max, const byte *arena, size_t cap, const void *ptr, size_t bytes )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( !p || !bytes || p < arena || p >= arena + cap || *n >= max )
+		return;
+	r[*n].lo = (size_t)( p - arena );
+	r[*n].hi = Q_min( r[*n].lo + bytes, cap );
+	( *n )++;
+}
+
+static int Mod_GCWorldArenaRanges( gc_arena_range_t *r, int max, const byte *arena, size_t cap )
+{
+	const model_t *mod = worldmodel;
+	int n = 0, h;
+
+	if( !mod || mod->type != mod_brush )
+		return 0;
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->planes, mod->numplanes * sizeof( mplane_t ));
+	/* numleafs is only the world's visleafs after submodel setup; brush
+	 * entity leafs follow in the same array and a claim placed on them
+	 * zeroed their contents (avalanche: traces through func_wall then read a
+	 * NULL plane in R_RecursiveLightPoint / PM_RecursiveSurfCheck). */
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->leafs,
+		Mod_GCLeafArrayCount( mod ) * sizeof( mleaf_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->nodes, mod->numnodes * sizeof( mnode_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->vertexes, mod->numvertexes * sizeof( mvertex_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->edges16, mod->numedges * sizeof( medge32_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->texinfo, mod->numtexinfo * sizeof( mtexinfo_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->surfaces, mod->numsurfaces * ( sizeof( msurface_t ) + sizeof( mextrasurf_t )));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->surfedges, mod->numsurfedges * sizeof( int ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->clipnodes16, mod->numclipnodes * sizeof( mclipnode32_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->marksurfaces, mod->nummarksurfaces * sizeof( *mod->marksurfaces ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->textures, mod->numtextures * sizeof( *mod->textures ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->submodels, mod->numsubmodels * sizeof( dmodel_t ));
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->lightdata, gc_world_lightdata_bytes );
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->visdata, gc_world_visdata_bytes );
+	Mod_GCLiveRange( r, &n, max, arena, cap, mod->entities, mod->entities ? Q_strlen( mod->entities ) + 1 : 0 );
+	for( h = 0; h < MAX_MAP_HULLS; h++ )
+	{
+		Mod_GCLiveRange( r, &n, max, arena, cap, mod->hulls[h].planes, mod->numplanes * sizeof( mplane_t ));
+		Mod_GCLiveRange( r, &n, max, arena, cap, mod->hulls[h].clipnodes16,
+			( mod->hulls[h].lastclipnode + 1 ) * sizeof( mclipnode32_t ));
+	}
+	return n;
+}
+
+/* Free gap at or above `from` that no live world array touches:
+ * returns its start and writes its end. */
+size_t Mod_GCArenaGap( size_t from, size_t *gap_end )
+{
+	gc_arena_range_t r[48];
+	const byte *arena = GC_MapLoadBufferBase();
+	const size_t cap = GC_MapLoadBufferCapacity();
+	const int n = arena && cap ? Mod_GCWorldArenaRanges( r, ARRAYSIZE( r ), arena, cap ) : 0;
+	size_t start = from, end = cap;
+	qboolean moved = true;
+	int i;
+
+	while( moved )
+	{
+		moved = false;
+		for( i = 0; i < n; i++ )
+		{
+			if( r[i].lo <= start && r[i].hi > start )
+			{
+				start = r[i].hi;
+				moved = true;
+			}
+		}
+	}
+	for( i = 0; i < n; i++ )
+	{
+		if( r[i].lo >= start && r[i].lo < end )
+			end = r[i].lo;
+	}
+	if( gap_end )
+		*gap_end = start < end ? end : start;
+	return start;
+}
+
+/* Canary: CRC the arena-resident world data that never changes after load
+ * (planes, lighting, PVS, node links). Taken at the first check after load,
+ * compared on later ones; any change means a claim landed on world data. */
+static uint32_t gc_world_canary_crc;
+static const model_t *gc_world_canary_mod;
+
+/* Per-component CRCs, so a change names what was overwritten. */
+enum { GC_CANARY_PLANES, GC_CANARY_LIGHT, GC_CANARY_VIS, GC_CANARY_NODES, GC_CANARY_CLIP, GC_CANARY_LEAFS, GC_CANARY_COUNT };
+static const char *gc_canary_names[GC_CANARY_COUNT] = { "planes", "lighting", "pvs", "nodes", "clipnodes", "leafs" };
+static uint32_t gc_world_canary_parts[GC_CANARY_COUNT];
+
+static uint32_t Mod_GCWorldCanary( const model_t *mod, uint32_t *parts )
+{
+	uint32_t crc, all;
+	int i;
+
+	for( i = 0; i < GC_CANARY_COUNT; i++ )
+		parts[i] = 0;
+	if( mod->planes )
+	{
+		CRC32_Init( &crc );
+		CRC32_ProcessBuffer( &crc, mod->planes, mod->numplanes * sizeof( mplane_t ));
+		parts[GC_CANARY_PLANES] = CRC32_Final( crc );
+	}
+	if( mod->lightdata && gc_world_lightdata_bytes )
+	{
+		CRC32_Init( &crc );
+		CRC32_ProcessBuffer( &crc, mod->lightdata, gc_world_lightdata_bytes );
+		parts[GC_CANARY_LIGHT] = CRC32_Final( crc );
+	}
+	if( mod->visdata && gc_world_visdata_bytes )
+	{
+		CRC32_Init( &crc );
+		CRC32_ProcessBuffer( &crc, mod->visdata, gc_world_visdata_bytes );
+		parts[GC_CANARY_VIS] = CRC32_Final( crc );
+	}
+	CRC32_Init( &crc );
+	for( i = 0; mod->nodes && i < mod->numnodes; i++ )
+	{
+		CRC32_ProcessBuffer( &crc, &mod->nodes[i].plane, sizeof( mod->nodes[i].plane ));
+		CRC32_ProcessBuffer( &crc, &mod->nodes[i].contents, sizeof( mod->nodes[i].contents ));
+	}
+	parts[GC_CANARY_NODES] = CRC32_Final( crc );
+	/* Collision hulls: a claim over them shows up as garbage in
+	 * PM_HullPointContents, not as a bad picture. */
+	if( mod->clipnodes16 && mod->numclipnodes > 0 )
+	{
+		CRC32_Init( &crc );
+		CRC32_ProcessBuffer( &crc, mod->clipnodes16, mod->numclipnodes
+			* ( world.version == QBSP2_VERSION ? sizeof( mclipnode32_t ) : sizeof( mclipnode16_t )));
+		parts[GC_CANARY_CLIP] = CRC32_Final( crc );
+	}
+	/* Leaf contents, brush entity leafs included (they sit behind the
+	 * world's visleafs and were the ones a claim landed on). */
+	if( mod->leafs )
+	{
+		const size_t count = Mod_GCLeafArrayCount( mod );
+		size_t l;
+
+		CRC32_Init( &crc );
+		for( l = 0; l < count; l++ )
+			CRC32_ProcessBuffer( &crc, &mod->leafs[l].contents, sizeof( mod->leafs[l].contents ));
+		parts[GC_CANARY_LEAFS] = CRC32_Final( crc );
+	}
+	CRC32_Init( &all );
+	CRC32_ProcessBuffer( &all, parts, sizeof( parts[0] ) * GC_CANARY_COUNT );
+	return CRC32_Final( all );
+}
+
+void Mod_GCWorldCanaryCheck( const char *when )
+{
+	const model_t *mod = worldmodel;
+	uint32_t parts[GC_CANARY_COUNT];
+	uint32_t crc;
+	char what[96];
+	int i;
+
+	if( !mod || mod->type != mod_brush )
+		return;
+	/* Between maps the old world is being replaced (its spill and arena are
+	 * reset for the next load): only compare a settled world. */
+	if( Q_strncmp( when, "after load", 10 ) && !GC_MapLoadBufferIsWorldSettled( ))
+		return;
+	crc = Mod_GCWorldCanary( mod, parts );
+	/* The world model reuses slot 0 across maps: (re)arm at every load. */
+	if( gc_world_canary_mod != mod || !Q_strncmp( when, "after load", 10 ))
+	{
+		gc_world_canary_mod = mod;
+		gc_world_canary_crc = crc;
+		memcpy( gc_world_canary_parts, parts, sizeof( parts ));
+		Con_Reportf( "Xash3D GameCube: world canary armed %s crc=%08x (%s)\n", mod->name, crc, when );
+		return;
+	}
+	if( crc != gc_world_canary_crc )
+	{
+		what[0] = 0;
+		for( i = 0; i < GC_CANARY_COUNT; i++ )
+			if( parts[i] != gc_world_canary_parts[i] )
+				Q_strncat( what, va( "%s%s", what[0] ? "," : "", gc_canary_names[i] ), sizeof( what ));
+		Con_Reportf( S_ERROR "Xash3D GameCube: WORLD CANARY CHANGED %s crc %08x -> %08x parts=%s (%s): arena claim overwrote world data\n",
+			mod->name, gc_world_canary_crc, crc, what, when );
+		gc_world_canary_crc = crc;
+		memcpy( gc_world_canary_parts, parts, sizeof( parts ));
+	}
+}
+#endif

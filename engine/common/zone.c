@@ -55,7 +55,14 @@ static qboolean Mem_GCMenuIdleSoftFail( void )
  * room for both indexes after ZIP_NAME_MAX shrink without starving HUDs. */
 #define GC_FS_ARENA_SIZE (192u * 1024u)
 #else
-#define GC_FS_ARENA_SIZE (512u * 1024u)
+/* No FileSystem Pool arena on the HL1 build.  The old 512 KiB grab only
+ * succeeded when the heap happened to have that much unclaimed at FS init:
+ * every working retail route ran with it failing (284-456 KiB unclaimed),
+ * and once unrelated BSS savings let it succeed (640 KiB unclaimed) it pinned
+ * ~420 KiB idle and starved boot -- every chapter hung in HUD InitInput with
+ * "can't alloc ... no free memory".  FS blocks use the heap and the boot
+ * arena fallback, as on every route that worked. */
+#define GC_FS_ARENA_SIZE 0u
 #endif
 #define GC_FS_ARENA_MIN (2u * 1024u)
 #endif
@@ -144,7 +151,15 @@ static size_t poolcount = 0;
  * but no contiguous block for realloc(). Keep a bounded table reserve so
  * creating late sprite/model pools does not become a false OOM. Handles are
  * indices, so relocating the table is safe after copying live entries. */
+/* DoD never has more than 32 pools live (18 at map active on dod_charlie);
+ * the reserve was never touched there, and at 1024 entries of 112 bytes it
+ * kept 112 KiB of MEM1 out of the heap. 160 entries leave five times the
+ * measured peak. */
+#if defined(XASH_DODGC_NETWORK) && XASH_DODGC_NETWORK
+#define GC_POOLCHAIN_RESERVE 160
+#else
 #define GC_POOLCHAIN_RESERVE 1024
+#endif
 static mempool_t gc_poolchain_reserve[GC_POOLCHAIN_RESERVE];
 static qboolean gc_poolchain_static;
 #endif
@@ -164,6 +179,72 @@ static void GC_MemWatchCall( const char *what, const char *filename, int filelin
 #endif
 
 #if XASH_GAMECUBE
+/* One line per "map active": every pool of 2 KiB or more, so growth across
+ * repeated changelevels shows which pool keeps what. */
+void GC_MemReportPools( const char *stage )
+{
+	char line[1024];
+	size_t i, len = 0;
+
+	size_t live = 0, small = 0;
+
+	line[0] = 0;
+	for( i = 0; i < poolcount; i++ )
+	{
+		const mempool_t *pool = &poolchain[i];
+
+		if( !pool->filename )
+			continue;
+		live++;
+		if( pool->realsize < 2048 )
+		{
+			small += pool->realsize;
+			continue;
+		}
+		if( len + 48 < sizeof( line ))
+			len += Q_snprintf( line + len, sizeof( line ) - len, " %s=%u",
+				pool->name, (unsigned)pool->realsize );
+	}
+	Con_Reportf( "Xash3D GameCube: mem pools at=%s live=%u slots=%u small=%u%s\n", stage,
+		(unsigned)live, (unsigned)poolcount, (unsigned)small, line );
+	/* Names that appear more than once: a pool created per map and never freed. */
+	for( i = 0; i < poolcount; i++ )
+	{
+		size_t j, dup = 0;
+
+		if( !poolchain[i].filename )
+			continue;
+		for( j = 0; j < i; j++ )
+			if( poolchain[j].filename && !Q_strcmp( poolchain[j].name, poolchain[i].name ))
+				break;
+		if( j < i )
+			continue; // reported with its first instance
+		for( j = i + 1; j < poolcount; j++ )
+			if( poolchain[j].filename && !Q_strcmp( poolchain[j].name, poolchain[i].name ))
+				dup++;
+		if( dup )
+			Con_Reportf( "Xash3D GameCube: mem pool repeated name=%s count=%u size=%u at %s:%i\n",
+				poolchain[i].name, (unsigned)( dup + 1 ), (unsigned)poolchain[i].realsize,
+				poolchain[i].filename, poolchain[i].fileline );
+	}
+}
+
+/* Snapshot pool sizes (begin) and report the pools that grew (end). */
+static size_t gc_pool_snap[256];
+void GC_MemPoolDelta( const char *what, qboolean begin )
+{
+	size_t i;
+
+	for( i = 0; i < poolcount && i < ARRAYSIZE( gc_pool_snap ); i++ )
+	{
+		if( begin )
+			gc_pool_snap[i] = poolchain[i].realsize;
+		else if( poolchain[i].realsize != gc_pool_snap[i] )
+			Con_Reportf( "Xash3D GameCube: pool delta at=%s pool=%s %d bytes\n", what,
+				poolchain[i].name, (int)poolchain[i].realsize - (int)gc_pool_snap[i] );
+	}
+}
+
 void GC_MemReportPoolPressure( const char *subsystem, size_t requested )
 {
 	static char last_subsystem[64];
@@ -424,6 +505,11 @@ void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const ch
 		size_t blocksize = sizeof( memheader_small_t ) + size + sizeof( byte );
 		memheader_small_t *mem = Q_malloc( blocksize );
 
+#if XASH_GAMECUBE
+		/* Heap exhausted at boot: the idle map-load pad takes it. */
+		if( mem == NULL )
+			mem = (memheader_small_t *)GC_BootArenaAllocSmall( blocksize );
+#endif
 		if( mem == NULL )
 			return NULL;
 
@@ -463,6 +549,8 @@ void *_Mem_TryAlloc( poolhandle_t poolptr, size_t size, qboolean clear, const ch
 			|| !Q_stricmp( pool->name, "FileSystem Pool" )
 			|| ( GC_BootArenaMenuScope() && !Q_stricmp( pool->name, "ref_gx zone" ))))
 			mem = (memheader_t *)GC_BootArenaAlloc( blocksize );
+		if( !mem )
+			mem = (memheader_t *)GC_BootArenaAllocSmall( blocksize );
 #endif
 
 		if( mem == NULL )
@@ -1004,12 +1092,18 @@ static poolhandle_t Mem_InitPool( mempool_t *pool, const char *name, unsigned in
 	pool->realsize = sizeof( mempool_t );
 	Q_strncpy( pool->name, name, sizeof( pool->name ));
 #if XASH_GAMECUBE
-	if( !Q_stricmp( name, "FileSystem Pool" ))
+	if( GC_FS_ARENA_SIZE > 0 && !Q_stricmp( name, "FileSystem Pool" ))
 	{
-		pool->gc_arena = Q_malloc( GC_FS_ARENA_SIZE );
+		/* A BBA-linked host (-net) needs ~360 KiB for lwIP/net threads before the game DLL runs; the
+		 * arena peaks near 100-104 KiB on the multiplayer maps, so 128 KiB is enough there. */
+		size_t arena = GC_FS_ARENA_SIZE;
+#if XASH_DODGC_NETWORK
+		if( Sys_CheckParm( "-net" )) arena = 128u * 1024u;
+#endif
+		pool->gc_arena = Q_malloc( arena );
 		if( pool->gc_arena )
 		{
-			pool->gc_arena_size = GC_FS_ARENA_SIZE;
+			pool->gc_arena_size = arena;
 			Con_Reportf( "Xash3D GameCube: filesystem arena ready size=%s\n",
 				Q_memprint( pool->gc_arena_size ));
 		}
@@ -1091,6 +1185,29 @@ void _Mem_EmptyPool( poolhandle_t poolptr, const char *filename, int fileline )
 	}
 #endif
 }
+
+#if XASH_GAMECUBE
+/* List what a pool still holds (first 12 big blocks, small count), with a
+ * header check, before it is freed. */
+void Mem_GCDescribePool( poolhandle_t poolptr, const char *why )
+{
+	mempool_t *pool = poolptr ? Mem_FindPool( poolptr ) : NULL;
+	const memheader_t *h;
+	const memheader_small_t *hs;
+	int n = 0, small = 0;
+
+	if( !pool )
+		return;
+	for( hs = pool->chain_small; hs && small < 100000; hs = hs->next )
+		small++;
+	Con_Reportf( "Xash3D GameCube: pool %s why=%s size=%u small=%d\n",
+		pool->name, why, (unsigned)pool->realsize, small );
+	for( h = pool->chain; h && n < 12; h = h->next, n++ )
+		Con_Reportf( "Xash3D GameCube:   block %p size=%u at %s:%u sentinel=%s\n",
+			(const void *)h, (unsigned)h->size, h->filename ? h->filename : "?",
+			(unsigned)h->fileline, h->sentinel1 == MEMHEADER_SENTINEL_BIG ? "ok" : "BAD" );
+}
+#endif
 
 void _Mem_FreePool( poolhandle_t *poolptr, const char *filename, int fileline )
 {
@@ -1273,10 +1390,54 @@ qboolean GC_MemCheckChains( const char *tag )
 /* Silent watch for heap corruption: checks every chain at each call until
  * the first break, then reports the last tag that was still clean so the
  * corrupting step is bracketed between two milestones. */
+#ifdef XASH_GC_MEMWATCH_DEBUG
+/* -gcwatchaddr 0xADDR: log the 48 bytes at ADDR whenever they change between
+ * GC_MemWatch calls, so the step that clobbers a known block is bracketed. */
+static void GC_MemWatchAddr( const char *tag )
+{
+	static unsigned char prev[48];
+	static uintptr_t addr;
+	static int state;	/* 0 unset, 1 armed, 2 off */
+	char arg[32];
+	unsigned char *p;
+
+	if( state == 2 )
+		return;
+	if( state == 0 )
+	{
+		if( !Sys_GetParmFromCmdLine( "-gcwatchaddr", arg ) || !arg[0] )
+		{
+			state = 2;
+			return;
+		}
+		addr = (uintptr_t)strtoul( arg, NULL, 0 );
+		state = 1;
+		memcpy( prev, (void *)addr, sizeof( prev ));
+		Con_Printf( "Xash3D GameCube: gcwatchaddr armed %p\n", (void *)addr );
+		return;
+	}
+	p = (unsigned char *)addr;
+	if( memcmp( prev, p, sizeof( prev )))
+	{
+		char hex[48 * 2 + 1];
+		int i;
+
+		for( i = 0; i < (int)sizeof( prev ); i++ )
+			Q_snprintf( hex + i * 2, 3, "%02x", p[i] );
+		Con_Printf( "Xash3D GameCube: gcwatchaddr %p changed at=%s now=%s\n", (void *)addr, tag, hex );
+		memcpy( prev, p, sizeof( prev ));
+	}
+}
+#endif
+
 void GC_MemWatch( const char *tag )
 {
 	static qboolean broken, busy;
 	static char last_ok[96] = "start";
+
+#ifdef XASH_GC_MEMWATCH_DEBUG
+	GC_MemWatchAddr( tag );
+#endif
 
 	if( !gc_mem_watch_enabled || broken || busy )
 		return;

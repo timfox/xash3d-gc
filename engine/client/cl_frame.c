@@ -748,13 +748,42 @@ static void CL_DeltaEntity( sizebuf_t *msg, frame_t *frame, int newnum, entity_s
 
 	if(( newnum < 0 ) || ( newnum >= clgame.maxEntities ))
 	{
+#if XASH_GAMECUBE
+		/* Direct-map New Game keeps the 2-slot bootstrap entity table and
+		 * draws entities from server edicts; every snapshot lands here. */
+		if( clgame.maxEntities > 2 )
+#endif
 		Con_DPrintf( S_ERROR "%s: invalid newnum: %d\n", __func__, newnum );
+#if XASH_GAMECUBE
+		/* No cl_entity_t for it, but its state still belongs in this frame:
+		 * the server deltas the next frame against it. Leaving it out made
+		 * the client parse the next delta of that entity as a new entity and
+		 * misread the stream ("CL_ParsePacketEntities: overflow") once the
+		 * history ring was large enough for real delta compression. */
+		if( has_update )
+		{
+			entity_state_t base = { 0 };
+			/* Read with a valid index; OOB numbers reject without reading. */
+			alive = MSG_ReadDeltaEntity( msg, old ? old : &base, state, 1, delta_type, cl.mtime[0] );
+		}
+		else if( old )
+			*state = *old;
+		else
+			alive = false;
+		if( alive )
+		{
+			state->number = newnum;
+			cls.next_client_entities++;
+			frame->num_entities++;
+		}
+#else
 		if( has_update )
 		{
 			entity_state_t discarded = { 0 };
 			/* Consume bits with a valid index — OOB numbers reject without reading. */
 			MSG_ReadDeltaEntity( msg, old ? old : &discarded, &discarded, 1, delta_type, cl.mtime[0] );
 		}
+#endif
 		return;
 	}
 
@@ -898,7 +927,11 @@ int CL_ParsePacketEntities( sizebuf_t *msg, qboolean delta, connprotocol_t proto
 		oldnum = CL_UpdateOldEntNum( ++oldindex, oldframe, &oldent );
 	}
 
-	if( newframe->num_entities != count && newframe->num_entities != 0 )
+	if( newframe->num_entities != count && newframe->num_entities != 0
+#if XASH_GAMECUBE
+		&& clgame.maxEntities > 2
+#endif
+		)
 		Con_Reportf( S_WARN "%s%s: (%i should be %i)\n", __func__, delta ? "Delta" : "", newframe->num_entities, count );
 
 	if( !newframe->valid )
@@ -1396,6 +1429,136 @@ process frame interpolation etc
 ===============
 */
 #if XASH_GAMECUBE
+#if XASH_GAMECUBE
+/*
+=============
+Remote client static props
+
+The server sends its static props (unnamed env_model / dod_object, no edict)
+in the signon as svc_spawnstatic. The listen host already draws them from
+gc_static_props, so it drops these messages. A remote client fills its own
+gc_static_props from them and links the nearest ones each frame.
+=============
+*/
+#define GC_REMOTE_STATIC_DRAW	16
+
+static qboolean CL_GCStaticPropOnServer( const entity_state_t *state )
+{
+	int i;
+
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+
+		if( sp->modelindex == state->modelindex && VectorCompareEpsilon( sp->origin, state->origin, 0.5f ))
+			return true;
+	}
+	return false;
+}
+
+qboolean CL_GCStaticPropFromSignon( const entity_state_t *state )
+{
+	gc_static_prop_t *sp;
+
+	if( SV_Active( ))
+		return CL_GCStaticPropOnServer( state );
+	if( gc_num_static_props >= GC_STATIC_PROPS_MAX )
+		return true; /* over the cap: drop it rather than spend a cl_entity_t */
+	sp = &gc_static_props[gc_num_static_props++];
+	memset( sp, 0, sizeof( *sp ));
+	VectorCopy( state->origin, sp->origin );
+	VectorCopy( state->angles, sp->angles );
+	sp->scale = state->scale;
+	sp->framerate = state->framerate;
+	sp->modelindex = (short)state->modelindex;
+	sp->sequence = (short)state->sequence;
+	sp->skin = state->skin;
+	sp->body = (short)state->body;
+	sp->rendermode = (byte)state->rendermode;
+	sp->renderamt = (byte)state->renderamt;
+	sp->renderfx = (byte)state->renderfx;
+	sp->rendercolor = state->rendercolor;
+	return true;
+}
+
+void CL_GCClearRemoteStaticProps( void )
+{
+	if( !SV_Active( ))
+		gc_num_static_props = 0;
+}
+
+void CL_GCLinkRemoteStaticProps( void )
+{
+	static cl_entity_t ents[GC_REMOTE_STATIC_DRAW];
+	static int logged_count = -1;
+	int picks[GC_REMOTE_STATIC_DRAW];
+	float dists[GC_REMOTE_STATIC_DRAW];
+	int n = 0, i, j, linked = 0;
+
+	if( SV_Active() || gc_num_static_props <= 0 )
+		return;
+	for( i = 0; i < gc_num_static_props; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[i];
+		vec3_t delta;
+		float d;
+
+		VectorSubtract( sp->origin, refState.vieworg, delta );
+		d = DotProduct( delta, delta );
+		if( d > 12000.0f * 12000.0f )
+			continue;
+		if( n < GC_REMOTE_STATIC_DRAW )
+			n++;
+		else if( d >= dists[n - 1] )
+			continue;
+		for( j = n - 1; j > 0 && dists[j - 1] > d; j-- )
+		{
+			dists[j] = dists[j - 1];
+			picks[j] = picks[j - 1];
+		}
+		dists[j] = d;
+		picks[j] = i;
+	}
+	for( i = 0; i < n; i++ )
+	{
+		const gc_static_prop_t *sp = &gc_static_props[picks[i]];
+		cl_entity_t *ent = &ents[linked];
+		model_t *mod = CL_ModelHandle( sp->modelindex );
+
+		if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+			continue;
+		memset( ent, 0, sizeof( *ent ));
+		ent->model = mod;
+		VectorCopy( sp->origin, ent->origin );
+		VectorCopy( sp->angles, ent->angles );
+		VectorCopy( sp->origin, ent->curstate.origin );
+		VectorCopy( sp->angles, ent->curstate.angles );
+		ent->curstate.modelindex = sp->modelindex;
+		ent->curstate.sequence = sp->sequence;
+		ent->curstate.body = sp->body;
+		ent->curstate.skin = sp->skin;
+		ent->curstate.scale = sp->scale > 0.0f ? sp->scale : 1.0f;
+		ent->curstate.framerate = sp->framerate != 0.0f ? sp->framerate : 1.0f;
+		ent->curstate.rendermode = sp->rendermode;
+		ent->curstate.renderamt = sp->renderamt;
+		ent->curstate.renderfx = sp->renderfx;
+		ent->curstate.rendercolor = sp->rendercolor;
+		ent->curstate.entityType = ENTITY_NORMAL;
+		ent->prevstate = ent->curstate;
+		VectorCopy( ent->origin, ent->latched.prevorigin );
+		VectorCopy( ent->angles, ent->latched.prevangles );
+		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+			linked++;
+	}
+	if( logged_count != gc_num_static_props )
+	{
+		logged_count = gc_num_static_props;
+		Con_Reportf( "Xash3D GameCube: remote static props %d, linked %d nearest\n",
+			gc_num_static_props, linked );
+	}
+}
+#endif
+
 /*
 ===============
 CL_GameCubeLeanEmitBrushEntities
@@ -1405,25 +1568,544 @@ fills the draw list (G315 solid=0). Pull nearby server brush edicts plus at
 most one already-resident world studio (not v_*) into the Flipper list.
 ===============
 */
+/* DoD animation token for a carried weapon, from its p_ model name
+ * (models/p_stg44.mdl -> "stg44"); the body's sequences are stand_<token>_aim. */
+static const char *CL_GCLeanDodAimToken( const char *wpath )
+{
+	static const struct { const char *model; const char *token; } map[] = {
+		{ "p_stg44", "stg44" }, { "p_mp40", "mp40" }, { "p_k98", "bolt" }, { "p_garand", "rifle" },
+		{ "p_tommy", "tommy" }, { "p_thompson", "tommy" }, { "p_spring", "bolt" }, { "p_amerk", "knife" },
+		{ "p_colt", "pistol" }, { "p_luger", "pistol" }, { "p_bar", "mg" }, { "p_mg42", "mg" },
+		{ "p_30cal", "30cal" }, { "p_bren", "bren" }, { "p_bazooka", "bazooka" }, { "p_pschreck", "pschreck" },
+		{ "p_spade", "spade" }, { "p_grenade", "gren" }, { "p_stick", "stick" },
+		/* BAR, British and para guns, on the body's nearest aim pose. */
+		{ "p_barbu", "mg" }, { "p_enfield", "bolt" }, { "p_enfields", "bolt" }, { "p_sten", "mp40" },
+		{ "p_piat", "bazooka" }, { "p_webley", "pistol" }, { "p_fairbairn", "knife" }, { "p_paraknife", "knife" },
+		{ "p_mills", "gren" }, { "p_m1carb", "rifle" }, { "p_grease", "tommy" }, { "p_fg42", "stg44" },
+		/* Bipod deployed / up variants (p_*bd, p_*bu) not covered by a prefix above. */
+		{ "p_scopedfg42", "stg44" }, { "p_mg34", "mg" },
+	};
+	const char *name;
+	int i;
+
+	if( !wpath || !wpath[0] )
+		return NULL;
+	name = Q_strrchr( wpath, '/' );
+	name = name ? name + 1 : wpath;
+	for( i = 0; i < (int)( sizeof( map ) / sizeof( map[0] )); i++ )
+	{
+		if( !Q_strnicmp( name, map[i].model, Q_strlen( map[i].model )))
+			return map[i].token;
+	}
+	return NULL;
+}
+
+extern void GC_ProfMark( const char *name );
+void R_GXStudioInvalidateBindings( void );
+
+/* First sequence of a studio header whose label contains `want`, or -1. */
+static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want );
+
+/* Every drawn player looks up up to six labels a frame, and a miss walks all
+ * of a DoD body's sequences four times with case-blind compares. Remember the
+ * answers per header; the header's size fields guard against a reused address. */
+#define CL_GC_SEQ_CACHE 64
+typedef struct
+{
+	const studiohdr_t *hdr;
+	int numseq;
+	int seqindex;
+	int seq;
+	char want[40];
+} cl_gc_seq_cache_t;
+
+static int CL_GCLeanFindSeq( const studiohdr_t *hdr, const char *want )
+{
+	static cl_gc_seq_cache_t cache[CL_GC_SEQ_CACHE];
+	static int next;
+	cl_gc_seq_cache_t *c;
+	int i;
+
+	if( !hdr || !want || Q_strlen( want ) >= (int)sizeof( cache[0].want ))
+		return CL_GCLeanFindSeqScan( hdr, want );
+	for( i = 0; i < CL_GC_SEQ_CACHE; i++ )
+	{
+		c = &cache[i];
+		if( c->hdr == hdr && c->numseq == hdr->numseq && c->seqindex == hdr->seqindex
+			&& !Q_strcmp( c->want, want ))
+			return c->seq;
+	}
+	c = &cache[next];
+	next = ( next + 1 ) % CL_GC_SEQ_CACHE;
+	c->hdr = hdr;
+	c->numseq = hdr->numseq;
+	c->seqindex = hdr->seqindex;
+	Q_strncpy( c->want, want, sizeof( c->want ));
+	c->seq = CL_GCLeanFindSeqScan( hdr, want );
+	return c->seq;
+}
+
+static int CL_GCLeanFindSeqScan( const studiohdr_t *hdr, const char *want )
+{
+	const mstudioseqdesc_t *sd;
+	int i;
+
+	if( !hdr || hdr->numseq <= 0 || hdr->seqindex <= 0 )
+		return -1;
+	sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	/* Exact label first, then a label starting with it, then any animated
+	 * (numframes > 1) label containing it: DoD's first "idle" match is
+	 * look_idle, a single-frame aim pose. */
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( !Q_stricmp( sd[i].label, want ))
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( !Q_strnicmp( sd[i].label, want, Q_strlen( want )) && sd[i].numframes > 1 )
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( Q_stristr( sd[i].label, want ) && sd[i].numframes > 1 )
+			return i;
+	}
+	for( i = 0; i < hdr->numseq; i++ )
+	{
+		if( Q_stristr( sd[i].label, want ))
+			return i;
+	}
+	return -1;
+}
+
+/* Keep the nearest `cap` candidates: id is an edict number, or -(prop + 1)
+ * for a static prop. */
+/*
+ * The model index of a third-person weapon (p_*.mdl) for curstate.weaponmodel, or 0
+ * while it is not resident. Not resident yet: load it (lean mesh + skin companion,
+ * then from the ARAM asset cache on later maps). A failed load waits before it tries
+ * again, and gives up after a few. Players and scripted film actors both carry one.
+ */
+static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
+{
+	extern qboolean Mod_GCPromoteStudioPath( const char *path );
+	static double next_try[64];	/* by model index & 63: BSS is MEM1 */
+	static byte fails[64];
+	static int fails_spawn = -1;
+	static int noload = -1;
+	int widx = ( wpath && wpath[0] ) ? SV_ModelIndex( wpath ) : 0;
+	model_t *wm = ( widx > 0 && widx < MAX_MODELS ) ? SV_ModelHandle( widx ) : NULL;
+
+	if( widx <= 0 || widx >= MAX_MODELS )
+		return 0;
+	if( !( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data ))
+	{
+		const int wk = widx & 63;
+
+		if( fails_spawn != svs.spawncount )
+		{
+			memset( next_try, 0, sizeof( next_try ));
+			memset( fails, 0, sizeof( fails ));
+			fails_spawn = svs.spawncount;
+		}
+		if( noload < 0 )
+			noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
+		/* A scripted cast of 24 asked for every class's gun at once: a 198 KB
+		 * read failed in the file pool and every later shot's cast file with it
+		 * (ceres short-charlie-a). Film actors load at most two guns per map
+		 * (256 KB or less each); past that an actor carries a gun only if a player's
+		 * already brought it in. */
+		if( film && !noload )
+		{
+			static int film_spawn = -1, film_loads;
+			static int film_logs;
+			const fs_offset_t size = FS_FileSize( wpath, false );
+
+			if( film_spawn != svs.spawncount )
+			{
+				film_spawn = svs.spawncount;
+				film_loads = 0;
+			}
+			if( film_loads >= 2 || size <= 0 || size > 262144 )
+			{
+				if( film_logs < 8 && fails[wk] < 3 )
+				{
+					film_logs++;
+					Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) not loaded: %d of 2 loads used\n",
+						wpath, (long)size, film_loads );
+				}
+				fails[wk] = 3;
+				return 0;
+			}
+			if( fails[wk] < 3 && host.realtime >= next_try[wk] )
+				film_loads++;
+		}
+		if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
+		{
+			if( Mod_GCPromoteStudioPath( wpath ))
+			{
+				wm = Mod_FindName( wpath, false );
+				if( wm )
+					sv.models[widx] = wm;
+			}
+			else
+			{
+				fails[wk]++;
+				next_try[wk] = host.realtime + 5.0;
+			}
+		}
+	}
+	if( wm && wm->type == mod_studio && wm->needload == NL_PRESENT && wm->cache.data )
+	{
+		cl.models[widx] = wm;
+		return widx;
+	}
+	return 0;
+}
+
+static void CL_GCLeanPick( int *picks, float *dists, int *n, int cap, int id, float dist )
+{
+	int slot, worst = 0;
+
+	if( *n < cap )
+	{
+		picks[*n] = id;
+		dists[*n] = dist;
+		( *n )++;
+		return;
+	}
+	for( slot = 1; slot < *n; slot++ )
+		if( dists[slot] > dists[worst] )
+			worst = slot;
+	if( *n > 0 && dist < dists[worst] )
+	{
+		picks[worst] = id;
+		dists[worst] = dist;
+	}
+}
+
+/* World DL visibility memo keys for static props (edicts use their number). */
+#define GC_STATIC_PROP_KEY0	4096
+
+/* Death pose for a dead player or a body-queue corpse. The server's player
+ * model is a hull stub, so the game cannot always look the sequence up: keep
+ * the game's sequence when it is a valid one-shot of this body, else use the
+ * body's first one-shot death label. */
+static int CL_GCLeanDeathSeq( const studiohdr_t *hdr, int seq )
+{
+	static const char *const labels[] = { "death", "die", "dead" };
+	const mstudioseqdesc_t *sd;
+	int i, k;
+
+	if( !hdr || hdr->numseq <= 0 || hdr->seqindex <= 0 )
+		return seq;
+	sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex );
+	if( seq > 0 && seq < hdr->numseq && !FBitSet( sd[seq].flags, STUDIO_LOOPING ))
+		return seq;
+	for( k = 0; k < (int)( sizeof( labels ) / sizeof( labels[0] )); k++ )
+	{
+		for( i = 0; i < hdr->numseq; i++ )
+		{
+			if( Q_stristr( sd[i].label, labels[k] ) && !FBitSet( sd[i].flags, STUDIO_LOOPING ))
+				return i;
+		}
+	}
+	return ( seq >= 0 && seq < hdr->numseq ) ? seq : 0;
+}
+
+/* Team body of player slot e (1-based) from its "model" userinfo, if resident
+ * (loads it once per slot otherwise). */
+static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
+{
+	const char *body;
+	char path[MAX_QPATH];
+	model_t *mod;
+
+	if( e < 1 || e > svs.maxclients || !svs.clients )
+		return NULL;
+	body = Info_ValueForKey( svs.clients[e - 1].userinfo, "model" );
+	if( !body[0] || Q_snprintf( path, sizeof( path ), "models/player/%s/%s.mdl", body, body ) <= 0 )
+		return NULL;
+	mod = Mod_FindName( path, false );
+	if(( !mod || mod->needload != NL_PRESENT ) && tried && !*tried )
+	{
+		*tried = true;
+		mod = Mod_ForName( path, false, false );
+		Con_Reportf( "Xash3D GameCube: lean emit player %d fallback body %s %s\n",
+			e, path, mod && mod->cache.data ? "loaded" : "load failed" );
+	}
+	if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+		return NULL;
+	return mod;
+}
+
+/* A studio prop the game puts in a film (dod-gc's film actors: the soldiers of a
+ * cine_play shot, props wearing the team player models) carries this in
+ * pev->iuser4. The lean emitter's model allowlist leaves out player bodies, so
+ * these are admitted by the tag, ahead of the map's props. Keep the value in step
+ * with DODGC_FILM_ACTOR_TAG in dod-gc's src/dod_film.h. */
+#define GC_FILM_ACTOR_TAG	0x46494C4D	/* 'FILM' */
+/* Studio slots in capture mode: dod-gc's 64-actor cast, the players and props. */
+#define GC_LEAN_STUDIO_MAX	72
+/* Brush entities (func_wall, doors, breakables) in capture mode, was 6. */
+#define GC_LEAN_BRUSH_MAX	64
+
+/* The lean emitter rebuilds each studio entity from its edict every frame, so
+ * the client-side latch that crossfades a sequence change (0.2 s in
+ * R_StudioSetupBones) never survives. Keep it here, per edict. */
+typedef struct
+{
+	int	index;
+	int	seq, prevseq;
+	float	frame, prevframe;	/* edict frames, 0..255 */
+	float	changetime;
+} gc_seqlatch_t;
+
+static gc_seqlatch_t gc_seqlatch[40];
+
+static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
+{
+	const studiohdr_t *hdr = mod ? (const studiohdr_t *)mod->cache.data : NULL;
+	gc_seqlatch_t *l = NULL, *spare = &gc_seqlatch[0];
+	int i;
+
+	if( !hdr || ent->index <= 0 )
+		return;
+	for( i = 0; i < (int)ARRAYSIZE( gc_seqlatch ); i++ )
+	{
+		if( gc_seqlatch[i].index == ent->index )
+		{
+			l = &gc_seqlatch[i];
+			break;
+		}
+		if( !gc_seqlatch[i].index || gc_seqlatch[i].changetime < spare->changetime )
+			spare = &gc_seqlatch[i];
+	}
+	if( !l )
+	{
+		l = spare;
+		l->index = ent->index;
+		l->seq = l->prevseq = ent->curstate.sequence;
+		l->changetime = 0.0f;
+	}
+	else if( l->seq != ent->curstate.sequence )
+	{
+		l->prevseq = l->seq;
+		l->prevframe = l->frame;
+		l->seq = ent->curstate.sequence;
+		l->changetime = (float)cl.time;
+	}
+	l->frame = ed->v.frame;
+	if( l->changetime > 0.0f && (float)cl.time - l->changetime < 0.2f
+		&& l->prevseq >= 0 && l->prevseq < hdr->numseq )
+	{
+		const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)hdr + hdr->seqindex ) + l->prevseq;
+
+		ent->latched.prevsequence = l->prevseq;
+		ent->latched.sequencetime = l->changetime;
+		ent->latched.prevframe = l->prevframe * ( sd->numframes - 1 ) / 256.0f;
+	}
+}
+
+/* The same for movement. A walking monster (MOVETYPE_STEP) moves and turns
+ * when it thinks, ten times a second, and the renderer carries it from the
+ * step before to this one (R_StudioLerpMovement) between its animtimes. The
+ * lean emitter latched "before" to "now" every frame, so nothing was carried:
+ * the Lost Coast fisherman walked and turned in ten jumps a second. Few
+ * things walk at once on this route, and static data is heap here: four. */
+typedef struct
+{
+	int	index;
+	float	animtime, prevanimtime;
+	vec3_t	origin, prevorigin;
+	vec3_t	angles, prevangles;
+} gc_movelatch_t;
+
+static gc_movelatch_t gc_movelatch[4];
+
+static void GC_LeanMoveLatch( cl_entity_t *ent )
+{
+	gc_movelatch_t *l = NULL, *spare = &gc_movelatch[0];
+	int i;
+
+	if( ent->index <= 0 || ent->curstate.movetype != MOVETYPE_STEP || ent->curstate.animtime <= 0.0f )
+		return;
+	for( i = 0; i < (int)ARRAYSIZE( gc_movelatch ); i++ )
+	{
+		if( gc_movelatch[i].index == ent->index )
+		{
+			l = &gc_movelatch[i];
+			break;
+		}
+		if( !gc_movelatch[i].index || gc_movelatch[i].animtime < spare->animtime )
+			spare = &gc_movelatch[i];
+	}
+	if( !l || ent->curstate.animtime < l->animtime || ent->curstate.animtime > l->animtime + 1.0f )
+	{
+		/* new here, a new level, or back after a pause: nothing to carry */
+		l = l ? l : spare;
+		l->index = ent->index;
+		l->animtime = l->prevanimtime = ent->curstate.animtime;
+		VectorCopy( ent->origin, l->origin );
+		VectorCopy( ent->origin, l->prevorigin );
+		VectorCopy( ent->angles, l->angles );
+		VectorCopy( ent->angles, l->prevangles );
+	}
+	else if( ent->curstate.animtime != l->animtime )
+	{
+		l->prevanimtime = l->animtime;
+		VectorCopy( l->origin, l->prevorigin );
+		VectorCopy( l->angles, l->prevangles );
+		l->animtime = ent->curstate.animtime;
+		VectorCopy( ent->origin, l->origin );
+		VectorCopy( ent->angles, l->angles );
+	}
+	ent->latched.prevanimtime = l->prevanimtime;
+	VectorCopy( l->prevorigin, ent->latched.prevorigin );
+	VectorCopy( l->prevangles, ent->latched.prevangles );
+}
+
+/*
+=============
+CL_GCLeanPlayerEffects
+
+The New Game routes run a lean client frame without CL_EmitEntities, where
+retail turns the local player's effects into dynamic lights
+(CL_LinkPlayers -> CL_AddEntityEffects: the flashlight beam, bright light).
+Do that step here from the listen server's player edict.
+=============
+*/
+void CL_GCLeanPlayerEffects( void )
+{
+	edict_t *player;
+	cl_entity_t *lp;
+
+	if( !SV_Active() || cls.state != ca_active || svs.maxclients < 1 )
+		return;
+	player = SV_EdictNum( 1 );
+	if( !player || !SV_IsValidEdict( player )
+		|| !FBitSet( player->v.effects, EF_DIMLIGHT | EF_BRIGHTLIGHT ))
+		return;
+	lp = CL_GetLocalPlayer();
+	if( !lp )
+		return;
+	VectorCopy( player->v.origin, lp->origin );
+	VectorCopy( player->v.angles, lp->angles );
+	lp->curstate.effects = player->v.effects;
+	lp->player = true;
+	lp->index = cl.playernum + 1;
+	if( VectorIsNull( cl.viewheight ))
+		VectorSet( cl.viewheight, 0.0f, 0.0f, player->v.view_ofs[2] );
+	CL_AddEntityEffects( lp );
+}
+
+#define GC_LEAN_WALL_POOL 40	/* static wall draw slots per frame: PVS + frustum visible, reported when exceeded */
+
+/* The wall draw pool (40 cl_entity_t, ~66 KB) is taken from the heap the first time a map has static wall records, not
+ * kept as static image: a build or map without gc_static_walls (Lost Coast, HL1) never pays for it. Kept for the session;
+ * NULL (walls not drawn, reported once) when the heap cannot give it. */
+static cl_entity_t *CL_GCLeanWallPool( void )
+{
+	static cl_entity_t *pool;
+	static qboolean failed;
+
+	if( !pool && !failed )
+	{
+		pool = (cl_entity_t *)calloc( GC_LEAN_WALL_POOL, sizeof( cl_entity_t ));
+		failed = !pool;
+		Con_Reportf( "Xash3D GameCube: static wall draw pool %s %s\n", Q_memprint( GC_LEAN_WALL_POOL * sizeof( cl_entity_t )),
+			pool ? "from the heap" : "REFUSED, static walls not drawn" );
+	}
+	return pool;
+}
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
-	static cl_entity_t lean_brush_ents[6];
+	static cl_entity_t lean_brush_static[6];
+	cl_entity_t *lean_brush_ents = lean_brush_static;
 	/* WorldDL listen: emit every nearby map prop (avalanche has ~dozen
 	 * env_model instances across 5 unique MDLs). Was 4 — only sandbags. */
-	static cl_entity_t lean_studio_ents[24];
+	static cl_entity_t lean_studio_static[40];	/* 24 film actors plus map props */
+	/* -gccapture: a 64-actor cast plus props, from the spill or heap per map. */
+	static cl_entity_t *lean_studio_big;
+	cl_entity_t *lean_studio_ents = lean_studio_static;
+	int studio_budget = (int)( sizeof( lean_studio_static ) / sizeof( lean_studio_static[0] ));
+	static qboolean lean_player_seen;
 	edict_t *player;
 	vec3_t view_org;
 	int e, added = 0, studios = 0;
-	int scan_brush = 0, scan_far = 0, scan_nomod = 0, scan_nosurf = 0;
+	int scan_brush = 0, scan_far = 0, scan_nomod = 0, scan_nosurf = 0, brush_beyond_budget = 0;
 	int scan_studio = 0, scan_studio_skip = 0;
-	const int budget = (int)( sizeof( lean_brush_ents ) / sizeof( lean_brush_ents[0] ));
-	const int studio_budget = (int)( sizeof( lean_studio_ents ) / sizeof( lean_studio_ents[0] ));
-	const float max_dist = 8000.0f;
+	int budget = (int)( sizeof( lean_brush_static ) / sizeof( lean_brush_static[0] ));
+	qboolean capture_brush_pick = false;
+	int brush_picks[GC_LEAN_BRUSH_MAX];
+	int n_brush_picks = 0;
+	const float max_dist = CL_GCCaptureMode() ? 32000.0f : 8000.0f;
 	/* G371: denser AM NPC near dump/landmark eye. Xen bake eye→Nihilanth is
 	 * ~450u; keep headroom for companions. WorldDL props: whole-map radius. */
-	const float studio_max_dist = ( Sys_CheckParm( "-gcfullphysics" )
+	const float studio_max_dist = CL_GCCaptureMode() ? 32000.0f : ( Sys_CheckParm( "-gcfullphysics" )
 		|| Sys_CheckParm( "-gcworldrender" )) ? 12000.0f : 1600.0f;
+
+/* Spill left for the world DL (its tables, ~55 KiB on dod_charlie, and the
+ * smallest chunk cache) when capture mode takes big blocks before it loads. */
+#ifndef GC_CAPTURE_WORLD_SPILL_KEEP
+#define GC_CAPTURE_WORLD_SPILL_KEEP	( 224u * 1024u )
+#endif
+	if( CL_GCCaptureMode( ))
+	{
+		extern size_t GC_MemHeapFreeBytes( void );
+		extern size_t Mod_GCWorldArraySpillFreeLasting( void );
+		extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+		extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
+		const size_t big_bytes = sizeof( cl_entity_t ) * ( GC_LEAN_STUDIO_MAX + GC_LEAN_BRUSH_MAX );
+		static qboolean big_in_spill;
+		static int big_tried_spawn = -1;
+
+		/* A spill block dies with its map (the spill rewinds). */
+		if( lean_studio_big && big_in_spill && !Mod_GCWorldArraySpillHolds( lean_studio_big, big_bytes ))
+		{
+			lean_studio_big = NULL;
+			big_in_spill = false;
+		}
+		/* Once per map, in game: the world-array spill first (MEM1 is down to
+		 * a few KiB by then), the heap only with a margin, since Mem_Calloc
+		 * does not come back on failure. ~1.6 KiB per slot. */
+		if( !lean_studio_big && big_tried_spawn != svs.spawncount && cls.state == ca_active )
+		{
+			const char *where = "spill";
+
+			big_tried_spawn = svs.spawncount;
+			/* The world DL loads its tables and chunk cache from the spill on
+			 * the first frame drawn, after this. Taking the slots first left it
+			 * "no spill for tables" and capture runs drew no world at all (sky,
+			 * actors and smoke only). Leave it room, else use the heap. */
+			if( Mod_GCWorldArraySpillFreeLasting() >= big_bytes + GC_CAPTURE_WORLD_SPILL_KEEP )
+				lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
+			if( lean_studio_big )
+			{
+				memset( lean_studio_big, 0, big_bytes );
+				big_in_spill = true;
+			}
+			else if( GC_MemHeapFreeBytes() > big_bytes + 192 * 1024 )
+			{
+				lean_studio_big = Mem_Calloc( host.mempool, big_bytes );
+				where = "heap";
+			}
+			Con_Reportf( "Xash3D GameCube: capture mode studio slots %d, brush slots %d %s in %s (%s)\n",
+				GC_LEAN_STUDIO_MAX, GC_LEAN_BRUSH_MAX, lean_studio_big ? "allocated" : "not allocated",
+				lean_studio_big ? where : "spill or heap", Q_memprint( big_bytes ));
+		}
+		if( lean_studio_big )
+		{
+			lean_studio_ents = lean_studio_big;
+			studio_budget = GC_LEAN_STUDIO_MAX;
+			lean_brush_ents = lean_studio_big + GC_LEAN_STUDIO_MAX;
+			budget = GC_LEAN_BRUSH_MAX;
+			capture_brush_pick = true;
+		}
+	}
 
 	/* CapFaces listen (-gcworldrender) also lacks a filled Flipper entity
 	 * list (solid=0) — env_model / mapmodels need the same lean emit path. */
@@ -1443,21 +2125,123 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	/* Prefer dump/bake eye so Xen boss picks use the CapFaces camera, not
 	 * info_player_start (c4a3 EmitBrush view=(436,-376) while dump eye was
 	 * (240,-396)). */
+	/* A cinematic camera (cine_play) looks from far across the map: what is
+	 * near it is what the shot sees, not what is near the player. */
 	if( !VectorIsNull( refState.vieworg )
-		&& ( Sys_CheckParm( "-gcdumpframes" ) || Sys_CheckParm( "-gcdump" )))
+		&& ( Sys_CheckParm( "-gcdumpframes" ) || Sys_CheckParm( "-gcdump" ) || CL_CineActive( )))
 		VectorCopy( refState.vieworg, view_org );
 	else if( player && SV_IsValidEdict( player ) && !VectorIsNull( player->v.origin ))
 		VectorCopy( player->v.origin, view_org );
 	else
 		VectorCopy( refState.vieworg, view_org );
 
-	for( e = svs.maxclients + 1; e < svgame.numEntities && added < budget; e++ )
+	/* -gccapture: the brush slots go to the brush entities that look
+	 * biggest from the camera, not the lowest edict numbers. dod_charlie has well over 16 drawn brush
+	 * entities, and the first-come pick left out the radio tent's column
+	 * (func_wall *178), so the control-point flag on it hung in the air. */
+	if( capture_brush_pick )
 	{
-		edict_t *ed = SV_EdictNum( e );
+		float brush_dists[GC_LEAN_BRUSH_MAX];
+		vec3_t fwd;
+
+		/* Rank by how big the box looks from the camera (distance over
+		 * size), and leave out what is behind it: nearest-first gave every
+		 * slot to the beach obstacles in front of a shot looking up at the
+		 * bluff, and the radio tent's column still missed out. */
+		/* Every map prop, not the first 64 in edict order: dod_charlie has
+		 * more than that before its control points. Static: 3 KB. */
+		static vec3_t feet[256];
+		int n_feet = 0;
+
+		AngleVectors( refState.viewangles, fwd, NULL, NULL );
+		n_brush_picks = 0;
+		/* A brush that a studio prop stands on (the control-point flag on
+		 * its column) always gets a slot: without it the prop floats. */
+		for( e = svs.maxclients + 1; e < svgame.numEntities && n_feet < (int)ARRAYSIZE( feet ); e++ )
+		{
+			edict_t *ed = SV_EdictNum( e );
+			model_t *mod;
+
+			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex || FBitSet( ed->v.effects, EF_NODRAW ))
+				continue;
+			if( ed->v.iuser4 == GC_FILM_ACTOR_TAG )
+				continue;
+			mod = SV_ModelHandle( ed->v.modelindex );
+			if( !mod || mod->type != mod_studio )
+				continue;
+			VectorSet( feet[n_feet], ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] - 8.0f );
+			n_feet++;
+		}
+		for( e = svs.maxclients + 1; e < svgame.numEntities; e++ )
+		{
+			edict_t *ed = SV_EdictNum( e );
+			model_t *mod;
+			vec3_t center, delta;
+
+			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex || FBitSet( ed->v.effects, EF_NODRAW ))
+				continue;
+			mod = SV_ModelHandle( ed->v.modelindex );
+			if( !mod || mod->type != mod_brush )
+				continue;
+			if( mod->nummodelsurfaces <= 0 && !( mod->name[0] == '*' ))
+				continue;
+			VectorAverage( ed->v.absmin, ed->v.absmax, center );
+			VectorSubtract( center, view_org, delta );
+			{
+				vec3_t half;
+				float radius;
+
+				VectorSubtract( ed->v.absmax, center, half );
+				radius = VectorLength( half );
+				float score = VectorLength( delta ) / ( radius + 16.0f );
+				int f;
+
+				/* The prop's origin need not touch the brush: the control-point
+				 * flag's origin sits about 26 units above its pole's foot, and
+				 * the pole is sunk into the top of the column (dod_charlie cp3
+				 * on func_wall *178). So: over the box's footprint (8 units of
+				 * slack), and between its bottom and 64 units over its top. */
+				for( f = 0; f < n_feet; f++ )
+				{
+					if( feet[f][0] >= ed->v.absmin[0] - 8.0f && feet[f][0] <= ed->v.absmax[0] + 8.0f
+						&& feet[f][1] >= ed->v.absmin[1] - 8.0f && feet[f][1] <= ed->v.absmax[1] + 8.0f
+						&& feet[f][2] >= ed->v.absmin[2] && feet[f][2] <= ed->v.absmax[2] + 64.0f )
+					{
+						static const model_t *told[32];
+						static int ntold;
+						int ti;
+
+						score = 0.0f;
+						for( ti = 0; ti < ntold && told[ti] != mod; ti++ )
+							;
+						if( ti == ntold && ntold < (int)ARRAYSIZE( told ))
+						{
+							told[ntold++] = mod;
+							Con_Reportf( "Xash3D GameCube: capture prop support %s rm=%d amt=%.0f top=%.0f prop feet=%.0f %.0f %.0f\n",
+								mod->name, ed->v.rendermode, ed->v.renderamt, ed->v.absmax[2],
+								feet[f][0], feet[f][1], feet[f][2] );
+						}
+						break;
+					}
+				}
+				if( score > 0.0f && DotProduct( delta, fwd ) < -radius )
+					continue;	/* behind the camera */
+				CL_GCLeanPick( brush_picks, brush_dists, &n_brush_picks, budget, e, score );
+			}
+		}
+	}
+
+	for( int bi = svs.maxclients + 1; ( capture_brush_pick ? bi - ( svs.maxclients + 1 ) < n_brush_picks
+		: bi < svgame.numEntities ) && added < budget; bi++ )
+	{
+		edict_t *ed;
 		model_t *mod;
 		cl_entity_t *ent;
 		vec3_t delta, center;
 		float dist;
+
+		e = capture_brush_pick ? brush_picks[bi - ( svs.maxclients + 1 )] : bi;
+		ed = SV_EdictNum( e );
 
 		if( !SV_IsValidEdict( ed ))
 			continue;
@@ -1473,6 +2257,11 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			continue;
 		}
 		scan_brush++;
+		if( added >= budget )
+		{
+			brush_beyond_budget++;
+			continue;
+		}
 		/* Inline *submodels may report surfaces via firstmodelsurface. */
 		if( mod->nummodelsurfaces <= 0 && !( mod->name[0] == '*' ))
 		{
@@ -1522,9 +2311,130 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		VectorCopy( ent->origin, ent->latched.prevorigin );
 		VectorCopy( ent->angles, ent->latched.prevangles );
 
-		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
-			added++;
+		{
+			const qboolean took = ref.dllFuncs.R_AddEntity( ent, ET_NORMAL );
+
+			/* -gccapture: each brush model handed to the renderer, once
+			 * (settles whether a support brush reaches the draw list). */
+			if( capture_brush_pick )
+			{
+				static const model_t *handed[96];
+				static int nhanded;
+				int hi;
+
+				for( hi = 0; hi < nhanded && handed[hi] != mod; hi++ )
+					;
+				if( hi == nhanded && nhanded < (int)ARRAYSIZE( handed ))
+				{
+					handed[nhanded++] = mod;
+					Con_Reportf( "Xash3D GameCube: capture emit brush %s e=%d took=%d rm=%d amt=%d dist=%.0f slot=%d of %d\n",
+						mod->name, e, took ? 1 : 0, ent->curstate.rendermode, ent->curstate.renderamt, dist,
+						added, budget );
+				}
+			}
+			if( took )
+			{
+				added++;
+				if( FBitSet( ent->curstate.effects, EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_LIGHT ))
+					CL_AddEntityEffects( ent );
+			}
+		}
 	}
+
+	/* Static func_wall records (gc_static_walls 1): no edict, so the scan above never sees them. Draw the nearest
+	 * visible ones from the record list, the way the static props are drawn. */
+	if( SV_GCStaticWallCount() > 0 && SV_GCStaticWallsMode() == 1 && CL_GCLeanWallPool() )
+	{
+		cl_entity_t *lean_wall_ents = CL_GCLeanWallPool();
+		extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+		int wpick[GC_LEAN_WALL_POOL], wn = 0, wi, wj, drawn = 0, wvisible = 0;
+		float wdist[GC_LEAN_WALL_POOL];
+		static int wmax_visible;
+
+		for( wi = 0; wi < SV_GCStaticWallCount(); wi++ )
+		{
+			vec3_t wo, wmin, wmax, wabsmin, wabsmax, wc, wd;
+			int wmi;
+			float d;
+
+			SV_GCStaticWallInfo( wi, wo, wmin, wmax, &wmi );
+			SV_GCStaticWallBounds( wi, wabsmin, wabsmax, &wmi );
+			VectorAverage( wabsmin, wabsmax, wc );
+			VectorSubtract( wc, view_org, wd );
+			d = VectorLength( wd );
+			if( d > max_dist )
+				continue;
+			if( !R_GXWorldDLEntityVisible( 6144 + wi, wabsmin, wabsmax ))
+				continue;
+			wvisible++;
+			if( wn < GC_LEAN_WALL_POOL )
+				wn++;
+			else if( d >= wdist[wn - 1] )
+				continue;
+			for( wj = wn - 1; wj > 0 && wdist[wj - 1] > d; wj-- )
+			{
+				wdist[wj] = wdist[wj - 1];
+				wpick[wj] = wpick[wj - 1];
+			}
+			wdist[wj] = d;
+			wpick[wj] = wi;
+		}
+		for( wi = 0; wi < wn; wi++ )
+		{
+			vec3_t wo, wmin, wmax;
+			int wmi;
+			cl_entity_t *went = &lean_wall_ents[drawn];
+			model_t *wmod;
+
+			SV_GCStaticWallInfo( wpick[wi], wo, wmin, wmax, &wmi );
+			wmod = SV_ModelHandle( wmi );
+			if( !wmod || wmod->type != mod_brush )
+				continue;
+			if( wmi > 0 && wmi < MAX_MODELS )
+				cl.models[wmi] = wmod;
+			memset( went, 0, sizeof( *went ));
+			went->index = 0;
+			went->model = wmod;
+			VectorCopy( wo, went->origin );
+			VectorCopy( wo, went->curstate.origin );
+			VectorCopy( wmin, went->curstate.mins );
+			VectorCopy( wmax, went->curstate.maxs );
+			went->curstate.modelindex = wmi;
+			went->curstate.solid = SOLID_BSP;
+			went->curstate.movetype = MOVETYPE_PUSH;
+			went->curstate.rendermode = kRenderNormal;
+			went->curstate.entityType = ENTITY_NORMAL;
+			went->prevstate = went->curstate;
+			VectorCopy( went->origin, went->latched.prevorigin );
+			if( ref.dllFuncs.R_AddEntity( went, ET_NORMAL ))
+				drawn++;
+		}
+		{
+			static int wall_logs;
+
+			if( wvisible > wmax_visible )
+			{
+				wmax_visible = wvisible;
+				Con_Reportf( "Xash3D GameCube: static walls: new max visible %d (pool %d, drawn %d, records %d)%s\n", wvisible,
+					GC_LEAN_WALL_POOL, drawn, SV_GCStaticWallCount(), wvisible > GC_LEAN_WALL_POOL ? " TRUNCATED" : "" );
+			}
+			if( wall_logs++ < 3 || !( wall_logs % 600 ))
+				Con_Reportf( "Xash3D GameCube: static walls drawn %d of %d records (%d visible, view %.0f %.0f %.0f)\n",
+					drawn, SV_GCStaticWallCount(), wvisible, view_org[0], view_org[1], view_org[2] );
+		}
+	}
+
+	{
+		static int beyond_max, beyond_logs;
+
+		if( brush_beyond_budget > beyond_max && beyond_logs++ < 12 )
+		{
+			beyond_max = brush_beyond_budget;
+			Con_Reportf( "Xash3D GameCube: lean brush scan: %d brush edicts in range NOT drawn (budget %d, drew %d, scanned %d)\n",
+				brush_beyond_budget, budget, added, scan_brush );
+		}
+	}
+	GC_ProfMark( "render: lean emit brush scan" );
 
 	/* Already-resident world studios (w_* weapons + allowlisted NPCs +
 	 * CapFaces mapmodels). No Mod_ForName — G371 promotes after present≥24.
@@ -1535,8 +2445,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		&& studio_budget > 0 )
 	{
 		int studio_slots = 0;
-		int picks[24];
-		float pick_dists[24];
+		int bodies[4];
+		int n_bodies = 0;
+		int picks[GC_LEAN_STUDIO_MAX];
+		float pick_dists[GC_LEAN_STUDIO_MAX];
+		/* Leave room for the other players and bots (emitted after). */
+		const int pick_cap = Q_max( 1, studio_budget - Q_max( 0, svs.maxclients - 1 ));
 		int n_picks = 0;
 		int slot;
 
@@ -1547,15 +2461,164 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			vec3_t delta;
 			float dist;
 			qboolean allow;
-			int slot;
+			qboolean is_film;
 
 			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex )
 				continue;
 			if( FBitSet( ed->v.effects, EF_NODRAW ))
 				continue;
+			/* Body-queue corpse (CopyToBodyQue: renderfx kRenderFxDeadPlayer,
+			 * renderamt = the dead player's slot). Drawn after the players. */
+			if( ed->v.renderfx == kRenderFxDeadPlayer )
+			{
+				if( n_bodies < (int)( sizeof( bodies ) / sizeof( bodies[0] )))
+					bodies[n_bodies++] = e;
+				continue;
+			}
+			{
+				extern qboolean SV_GCEdictIsPackNamed( const edict_t *ent );
+
+				/* Named map props are drawn from the prop pack: no studio load. */
+				if( SV_GCEdictIsPackNamed( ed ))
+					continue;
+			}
 			mod = SV_ModelHandle( ed->v.modelindex );
+			/* Before the type test: an unloaded handle is not mod_studio yet. */
+			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A map model precached by the game at spawn (DoD control
+				 * point flags) stays a registered, never-loaded handle on this
+				 * route: nothing promotes it the way the static props are.
+				 * Point the handle at a resident copy, or load it (lean mesh,
+				 * ARAM cache later), retrying a failed load every few seconds. */
+				extern qboolean Mod_GCPromoteStudioPath( const char *path );
+				static double next_try[32];
+				static byte fails[32];
+				static int fails_spawn = -1;
+				const int mk = ed->v.modelindex & 31;
+				model_t *found;
+
+				if( fails_spawn != svs.spawncount )
+				{
+					memset( next_try, 0, sizeof( next_try ));
+					memset( fails, 0, sizeof( fails ));
+					fails_spawn = svs.spawncount;
+				}
+				found = Mod_FindName( mod->name, false );
+				if(( !found || found->needload != NL_PRESENT || !found->cache.data )
+					&& fails[mk] < 3 && host.realtime >= next_try[mk] )
+				{
+					if( Mod_GCPromoteStudioPath( mod->name ))
+						found = Mod_FindName( mod->name, false );
+					else
+					{
+						fails[mk]++;
+						next_try[mk] = host.realtime + 5.0;
+					}
+					Con_Reportf( "Xash3D GameCube: lean promote map model %s (index %d) %s\n", mod->name,
+						ed->v.modelindex, found && found->needload == NL_PRESENT && found->cache.data ? "resident" : "not loaded" );
+				}
+				if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+				{
+					if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
+						sv.models[ed->v.modelindex] = found;
+					mod = found;
+				}
+			}
+			if( mod && mod->type == mod_studio && mod->needload == NL_PRESENT && mod->cache.data
+				&& Q_stristr( mod->name, "mapmodels/" ))
+			{
+				/* A promoted map model has its lean mesh only; attach its *t
+				 * skin atlas too, or it draws flat grey (ceres 3282517bd).
+				 * Bound skins return at once; stop checking after that. */
+				extern qboolean Mod_GCAttachStudioSkins( model_t *m );
+				static byte skin_state[32];	/* 0..2 fails, 0xff bound */
+				static double skin_next[32];
+				static int skin_spawn = -1;
+				const int sk = ed->v.modelindex & 31;
+
+				if( skin_spawn != svs.spawncount )
+				{
+					memset( skin_state, 0, sizeof( skin_state ));
+					memset( skin_next, 0, sizeof( skin_next ));
+					skin_spawn = svs.spawncount;
+				}
+				if( skin_state[sk] < 3 && host.realtime >= skin_next[sk] )
+				{
+					if( Mod_GCAttachStudioSkins( mod ))
+					{
+						skin_state[sk] = 0xff;
+						R_GXStudioInvalidateBindings();
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' bound\n", mod->name );
+					}
+					else
+					{
+						skin_state[sk]++;
+						skin_next[sk] = host.realtime + 5.0;
+						Con_Reportf( "Xash3D GameCube: lean map model skins '%s' failed (%d)\n", mod->name, skin_state[sk] );
+					}
+				}
+			}
+			is_film = ( ed->v.iuser4 == GC_FILM_ACTOR_TAG );
+			if( is_film && ( !mod || mod->needload != NL_PRESENT || !mod->cache.data )
+				&& ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS && sv.model_precache[ed->v.modelindex][0] )
+			{
+				/* The team body is precached by the game while the map loads,
+				 * which on this route registers the name without loading it
+				 * (the bots' bodies go through CL_GCLeanPlayerBody the same way).
+				 * Load it once per model index and map. */
+				static byte film_tried[MAX_MODELS / 8];
+				static int film_spawn = -1;
+				const int mi = ed->v.modelindex;
+
+				if( film_spawn != svs.spawncount )
+				{
+					memset( film_tried, 0, sizeof( film_tried ));
+					film_spawn = svs.spawncount;
+				}
+				if( !CHECKVISBIT( film_tried, mi ))
+				{
+					model_t *found;
+
+					SETVISBIT( film_tried, mi );
+					found = Mod_ForName( sv.model_precache[mi], false, false );
+					Con_Reportf( "Xash3D GameCube: lean film actor body %s %s\n", sv.model_precache[mi],
+						found && found->cache.data ? "loaded" : "load failed" );
+					if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+					{
+						sv.models[mi] = found;
+						mod = found;
+					}
+				}
+				else
+				{
+					model_t *found = Mod_FindName( sv.model_precache[mi], false );
+
+					if( found && found->type == mod_studio && found->needload == NL_PRESENT && found->cache.data )
+						mod = found;
+				}
+			}
 			if( !mod || mod->type != mod_studio )
 				continue;
+			/* A weapon a player carries keeps its w_ model at the player's
+			 * origin; it drew as a white rifle lying at the bot's feet
+			 * (ceres 18e0d6f). Carried items belong to the player model. */
+			if(( ed->v.owner && SV_IsValidEdict( ed->v.owner )
+					&& NUM_FOR_EDICT( ed->v.owner ) >= 1 && NUM_FOR_EDICT( ed->v.owner ) <= svs.maxclients )
+				|| ed->v.movetype == MOVETYPE_FOLLOW
+				|| ( ed->v.aiment && SV_IsValidEdict( ed->v.aiment )))
+			{
+				static int carried_logs;
+
+				if( carried_logs < 4 )
+				{
+					carried_logs++;
+					Con_Reportf( "Xash3D GameCube: lean skip carried %s (entity %d, owner %d)\n",
+						mod->name, e, NUM_FOR_EDICT( ed->v.owner ));
+				}
+				continue;
+			}
 			scan_studio++;
 			if( mod->needload != NL_PRESENT || !mod->name[0] || !mod->cache.data )
 			{
@@ -1563,30 +2626,54 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				continue;
 			}
 			/* Weapons + lean NPCs + Xen bosses + CapFaces mapmodels.
-			 * Skip v_* / player. */
-			allow = false;
-			if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
+			 * Skip v_* / player. The answer only depends on the model name,
+			 * and it took up to twenty case-insensitive substring searches
+			 * per studio entity per frame: remember it per model. */
+			if( is_film )
 				allow = true;
-			else if( Q_stristr( mod->name, "mapmodels/" )
-				|| Q_stristr( mod->name, "hk_satchel" )
-				|| Q_stristr( mod->name, "sandbags" )
-				|| Q_stristr( mod->name, "by_rubble" )
-				|| Q_stristr( mod->name, "horse_statue" )
-				|| Q_stristr( mod->name, "by_canopy" )
-				|| Q_stristr( mod->name, "arc_xer_tree" )
-				|| Q_stristr( mod->name, "furniture" )
-				|| Q_stristr( mod->name, "bulb" ))
-				allow = true;
-			else if( Q_stristr( mod->name, "scientist" )
-				|| Q_stristr( mod->name, "barney" )
-				|| Q_stristr( mod->name, "headcrab" )
-				|| Q_stristr( mod->name, "zombie" )
-				|| Q_stristr( mod->name, "roach" )
-				|| Q_stristr( mod->name, "nihilanth" )
-				|| Q_stristr( mod->name, "controller" )
-				|| Q_stristr( mod->name, "islave" ))
-				allow = true;
-			if( !allow || Q_stristr( mod->name, "player.mdl" ))
+			else
+			{
+				static struct { const model_t *mod; char name[40]; signed char ok; } memo[8];
+				const unsigned mi = ( (unsigned)(size_t)mod >> 4 ) & 7u;
+
+				if( memo[mi].mod == mod && memo[mi].ok >= 0 && !Q_strcmp( memo[mi].name, mod->name ))
+					allow = memo[mi].ok != 0;
+				else
+				{
+				allow = false;
+				if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
+					allow = true;
+				else if( Q_stristr( mod->name, "mapmodels/" )
+					|| Q_stristr( mod->name, "hk_satchel" )
+					|| Q_stristr( mod->name, "sandbags" )
+					|| Q_stristr( mod->name, "by_rubble" )
+					|| Q_stristr( mod->name, "horse_statue" )
+					|| Q_stristr( mod->name, "by_canopy" )
+					|| Q_stristr( mod->name, "arc_xer_tree" )
+					|| Q_stristr( mod->name, "furniture" )
+					|| Q_stristr( mod->name, "bulb" ))
+					allow = true;
+				else if( Q_stristr( mod->name, "scientist" )
+					|| Q_stristr( mod->name, "barney" )
+					|| Q_stristr( mod->name, "headcrab" )
+					|| Q_stristr( mod->name, "zombie" )
+					|| Q_stristr( mod->name, "roach" )
+					|| Q_stristr( mod->name, "nihilanth" )
+					|| Q_stristr( mod->name, "controller" )
+					|| Q_stristr( mod->name, "islave" )
+					|| Q_stristr( mod->name, "models/lc/" ))	/* Lost Coast cast */
+					allow = true;
+					if( Q_stristr( mod->name, "player.mdl" ))
+						allow = false;
+					if( Q_strlen( mod->name ) < sizeof( memo[mi].name ))
+					{
+						memo[mi].mod = mod;
+						Q_strncpy( memo[mi].name, mod->name, sizeof( memo[mi].name ));
+						memo[mi].ok = allow ? 1 : 0;
+					}
+				}
+			}
+			if( !allow )
 			{
 				scan_studio_skip++;
 				continue;
@@ -1598,34 +2685,108 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				scan_studio_skip++;
 				continue;
 			}
-			/* Insert into nearest-N picks. */
-			if( n_picks < studio_budget )
+			/* World DL maps carry their PVS: leave out what the eye cannot
+			 * see instead of animating and skinning the whole map's cast. */
 			{
-				picks[n_picks] = e;
-				pick_dists[n_picks] = dist;
-				n_picks++;
-			}
-			else
-			{
-				int worst = 0;
-				for( slot = 1; slot < n_picks; slot++ )
+				extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+				vec3_t bmin, bmax;
+
+				VectorCopy( ed->v.absmin, bmin );
+				VectorCopy( ed->v.absmax, bmax );
+				if( bmax[0] - bmin[0] < 1.0f || bmax[2] - bmin[2] < 1.0f )
 				{
-					if( pick_dists[slot] > pick_dists[worst] )
-						worst = slot;
+					VectorSet( bmin, ed->v.origin[0] - 48.0f, ed->v.origin[1] - 48.0f, ed->v.origin[2] );
+					VectorSet( bmax, ed->v.origin[0] + 48.0f, ed->v.origin[1] + 48.0f, ed->v.origin[2] + 80.0f );
 				}
-				if( dist < pick_dists[worst] )
+				if( !R_GXWorldDLEntityVisible( e, bmin, bmax ))
 				{
-					picks[worst] = e;
-					pick_dists[worst] = dist;
+					scan_studio_skip++;
+					continue;
 				}
 			}
+			{
+				static int pick_logs;
+
+				if( pick_logs < 12 )
+				{
+					pick_logs++;
+					Con_Reportf( "Xash3D GameCube: lean studio candidate %d %s class=%s owner=%d aiment=%d movetype=%d org=(%.0f %.0f %.0f)\n",
+						e, mod->name, SV_GetString( ed->v.classname ),
+						ed->v.owner ? NUM_FOR_EDICT( ed->v.owner ) : 0,
+						ed->v.aiment ? NUM_FOR_EDICT( ed->v.aiment ) : 0,
+						ed->v.movetype, ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] );
+				}
+			}
+			/* Insert into nearest-N picks. A film actor is what the shot is
+			 * about: it goes ahead of every map prop. */
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, is_film ? dist * 0.001f : dist );
+		}
+		/* Static props (unnamed env_model / dod_object, no edict). */
+		for( e = 0; e < gc_num_static_props; e++ )
+		{
+			const gc_static_prop_t *sp = &gc_static_props[e];
+			extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+			model_t *mod = SV_ModelHandle( sp->modelindex );
+			vec3_t delta, bmin, bmax;
+			float dist;
+
+			if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+				continue;
+			VectorSubtract( sp->origin, view_org, delta );
+			dist = VectorLength( delta );
+			if( dist > studio_max_dist )
+				continue;
+			VectorSet( bmin, sp->origin[0] - 48.0f, sp->origin[1] - 48.0f, sp->origin[2] );
+			VectorSet( bmax, sp->origin[0] + 48.0f, sp->origin[1] + 48.0f, sp->origin[2] + 80.0f );
+			if( !R_GXWorldDLEntityVisible( GC_STATIC_PROP_KEY0 + e, bmin, bmax ))
+				continue;
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, -( e + 1 ), dist );
 		}
 		for( slot = 0; slot < n_picks && studio_slots < studio_budget; slot++ )
 		{
-			edict_t *ed = SV_EdictNum( picks[slot] );
-			model_t *mod = SV_ModelHandle( ed->v.modelindex );
+			edict_t *ed;
+			model_t *mod;
 			cl_entity_t *ent = &lean_studio_ents[studio_slots];
 
+			if( picks[slot] < 0 )
+			{
+				const gc_static_prop_t *sp = &gc_static_props[-picks[slot] - 1];
+
+				mod = SV_ModelHandle( sp->modelindex );
+				if( !mod )
+					continue;
+				if( sp->modelindex > 0 && sp->modelindex < MAX_MODELS )
+					cl.models[sp->modelindex] = mod;
+				memset( ent, 0, sizeof( *ent ));
+				ent->index = 0;
+				ent->model = mod;
+				VectorCopy( sp->origin, ent->origin );
+				VectorCopy( sp->angles, ent->angles );
+				VectorCopy( sp->origin, ent->curstate.origin );
+				VectorCopy( sp->angles, ent->curstate.angles );
+				ent->curstate.modelindex = sp->modelindex;
+				ent->curstate.sequence = sp->sequence;
+				ent->curstate.body = sp->body;
+				ent->curstate.skin = sp->skin;
+				ent->curstate.scale = sp->scale > 0.0f ? sp->scale : 1.0f;
+				ent->curstate.framerate = sp->framerate != 0.0f ? sp->framerate : 1.0f;
+				ent->curstate.rendermode = sp->rendermode;
+				ent->curstate.renderamt = sp->renderamt;
+				ent->curstate.renderfx = sp->renderfx;
+				ent->curstate.rendercolor = sp->rendercolor;
+				ent->curstate.entityType = ENTITY_NORMAL;
+				ent->prevstate = ent->curstate;
+				VectorCopy( ent->origin, ent->latched.prevorigin );
+				VectorCopy( ent->angles, ent->latched.prevangles );
+				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					studios++;
+					studio_slots++;
+				}
+				continue;
+			}
+			ed = SV_EdictNum( picks[slot] );
+			mod = SV_ModelHandle( ed->v.modelindex );
 			if( !mod )
 				continue;
 			if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS )
@@ -1644,10 +2805,35 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->curstate.movetype = (int)ed->v.movetype;
 			ent->curstate.sequence = ed->v.sequence;
 			ent->curstate.frame = ed->v.frame;
+			/* Bone controllers travel with every studio entity in GoldSrc. Left
+			 * at the memset 0 they sit at the controller's start angle: the
+			 * Lost Coast fisherman's four look joints held him bent over. */
+			ent->curstate.controller[0] = ed->v.controller[0];
+			ent->curstate.controller[1] = ed->v.controller[1];
+			ent->curstate.controller[2] = ed->v.controller[2];
+			ent->curstate.controller[3] = ed->v.controller[3];
+			/* And the blends: a player model's aim grid (torso yaw, pitch). Left at 0
+			 * the grid's corner had every scripted film actor looking up. */
+			ent->curstate.blending[0] = ed->v.blending[0];
+			ent->curstate.blending[1] = ed->v.blending[1];
 			ent->curstate.body = ed->v.body;
 			ent->curstate.skin = ed->v.skin;
 			ent->curstate.scale = ed->v.scale > 0.0f ? ed->v.scale : 1.0f;
 			ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
+			/* A scripted film actor carries its class's p_ weapon like a player; the
+			 * renderer merges it onto the hand bones (R_StudioDrawModel). */
+			if( ed->v.iuser4 == GC_FILM_ACTOR_TAG && ed->v.weaponmodel )
+			{
+				static int film_wlogs;
+
+				ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( SV_GetString( ed->v.weaponmodel ), true );
+				if( film_wlogs < 4 )
+				{
+					film_wlogs++;
+					Con_Reportf( "Xash3D GameCube: film actor %d weapon %s index %d\n", picks[slot],
+						SV_GetString( ed->v.weaponmodel ), ent->curstate.weaponmodel );
+				}
+			}
 			/* G377: edict animtime is 0 under lean StrikeThink. Snapping to
 			 * cl.time every emit made EstimateFrame dfdt=0 (frozen pose). */
 			ent->curstate.animtime = ed->v.animtime > 0.0f ? ed->v.animtime : 0.0f;
@@ -1713,13 +2899,492 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			VectorCopy( ent->origin, ent->latched.prevorigin );
 			VectorCopy( ent->angles, ent->latched.prevangles );
 			ent->latched.prevanimtime = ent->curstate.animtime;
+			memcpy( ent->latched.prevcontroller, ent->curstate.controller, sizeof( ent->latched.prevcontroller ));
+			GC_LeanSeqLatch( ent, ed, mod );
+			GC_LeanMoveLatch( ent );
 			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			{
 				studios++;
 				studio_slots++;
 			}
 		}
-		if( studios == 0 )
+		GC_ProfMark( "render: lean emit studio scan" );
+		/* Other players and bots. The scan above starts after the client slots
+		 * and skips player.mdl, so on this route nobody else was ever drawn.
+		 * Emit them as players (ent->player) so the renderer swaps in the team
+		 * body from their "model" userinfo (models/player/<model>/<model>.mdl). */
+		{
+			static int player_logs;
+			static int player_reject_logs;
+			static int player_last_reject[MAX_CLIENTS + 1];
+			static qboolean player_body_tried[MAX_CLIENTS + 1];
+			static qboolean player_scan_logged;
+			static convar_t *gc_facebot;
+			int near_e = 0;
+			float near_d = 0.0f;
+			vec3_t near_org = { 0.0f, 0.0f, 0.0f };
+
+			/* gc_facebot 1 (console or listenserver.cfg): turn the local view
+			 * toward the nearest drawn player each frame, so a fixed test
+			 * run can capture a bot without steering. */
+			if( !gc_facebot )
+				gc_facebot = Cvar_FindVar( "gc_facebot" );
+
+			if( !player_scan_logged )
+			{
+				player_scan_logged = true;
+				Con_Reportf( "Xash3D GameCube: lean emit player scan maxclients=%d local=%d slots=%d/%d\n",
+					svs.maxclients, cl.playernum + 1, studio_slots, studio_budget );
+			}
+
+			for( e = 1; e <= svs.maxclients && e <= MAX_CLIENTS && studio_slots < studio_budget; e++ )
+			{
+				edict_t *ed = SV_EdictNum( e );
+				model_t *mod = NULL;
+				cl_entity_t *ent;
+				vec3_t delta;
+				int reject = 0;
+				qboolean dead;
+
+				if( e == cl.playernum + 1 )
+					continue;
+				/* Spectator in-eye (OBS_IN_EYE 4): the view sits inside the
+				 * followed player, so drawing its body puts the head and
+				 * shoulders in front of the camera. iuser2 is the target. */
+				if( SV_IsValidEdict( SV_EdictNum( cl.playernum + 1 )))
+				{
+					edict_t *self = SV_EdictNum( cl.playernum + 1 );
+
+					if( self->v.iuser1 == 4 && self->v.iuser2 == e )
+						continue;
+				}
+				if( !SV_IsValidEdict( ed ))
+					reject = 1;
+				else if( FBitSet( ed->v.effects, EF_NODRAW ))
+					reject = 2;
+				else if( ed->v.iuser1 != 0 )
+					reject = 3;
+				else
+				{
+					if( ed->v.modelindex )
+						mod = SV_ModelHandle( ed->v.modelindex );
+					if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+					{
+						/* The lean player.mdl may be a spill stub (no cache.data)
+						 * or the bot may have no modelindex on this route. Any
+						 * resident studio will do as the entity's model: the
+						 * renderer swaps in the team body from the "model"
+						 * userinfo anyway. Load that body once per slot. */
+						mod = CL_GCLeanPlayerBody( e, &player_body_tried[e] );
+						if( !mod || mod->type != mod_studio || mod->needload != NL_PRESENT || !mod->cache.data )
+							reject = ed->v.modelindex ? 5 : 6;
+					}
+				}
+				if( !reject )
+				{
+					VectorSubtract( ed->v.origin, view_org, delta );
+					if( VectorLength( delta ) > studio_max_dist )
+						reject = 7;
+				}
+				if( reject )
+				{
+					/* Log each slot's reason when it changes, so one run shows
+					 * why a bot is not drawn: 1 invalid/free, 2 nodraw,
+					 * 3 spectator, 5 model not resident, 6 no
+					 * modelindex and no body, 7 out of range. */
+					if( reject != 1 && player_last_reject[e] != reject && player_reject_logs < 32 )
+					{
+						model_t *sm = ( SV_IsValidEdict( ed ) && ed->v.modelindex ) ? SV_ModelHandle( ed->v.modelindex ) : NULL;
+
+						player_reject_logs++;
+						Con_Reportf( "Xash3D GameCube: lean emit player %d reject=%d modelindex=%d model=%s type=%d needload=%d cache=%s\n",
+							e, reject, SV_IsValidEdict( ed ) ? ed->v.modelindex : -1,
+							sm ? sm->name : "-", sm ? (int)sm->type : -1, sm ? (int)sm->needload : -1,
+							sm && sm->cache.data ? "yes" : "no" );
+					}
+					player_last_reject[e] = reject;
+					continue;
+				}
+				player_last_reject[e] = 0;
+				dead = ed->v.deadflag != DEAD_NO;
+				if( ed->v.modelindex > 0 && ed->v.modelindex < MAX_MODELS && SV_ModelHandle( ed->v.modelindex ) == mod )
+					cl.models[ed->v.modelindex] = mod;
+				ent = &lean_studio_ents[studio_slots];
+				memset( ent, 0, sizeof( *ent ));
+				ent->index = e;
+				ent->player = true;
+				ent->model = mod;
+				VectorCopy( ed->v.origin, ent->origin );
+				VectorCopy( ed->v.angles, ent->angles );
+				VectorCopy( ent->origin, ent->curstate.origin );
+				VectorCopy( ent->angles, ent->curstate.angles );
+				VectorCopy( ed->v.mins, ent->curstate.mins );
+				VectorCopy( ed->v.maxs, ent->curstate.maxs );
+				ent->curstate.number = e;
+				ent->curstate.modelindex = ed->v.modelindex;
+				ent->curstate.solid = (int)ed->v.solid;
+				ent->curstate.movetype = (int)ed->v.movetype;
+				ent->curstate.sequence = ed->v.sequence;
+				ent->curstate.gaitsequence = ed->v.gaitsequence;
+				ent->curstate.frame = ed->v.frame;
+				ent->curstate.body = ed->v.body;
+				ent->curstate.skin = ed->v.skin;
+				ent->curstate.scale = 1.0f;
+				ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
+				/* The server's player model is a hull-only stub, so the game
+				 * code cannot look up sequences and leaves sequence 0 with
+				 * animtime 0 (ceres acf6eef: the bot held one pose). Pick the
+				 * body's own sequences by label from its speed, and keep a
+				 * fixed animtime so the frame advances with cl.time (stamping
+				 * cl.time every emit froze it at frame 0). */
+				/* DoD's server stamps animtime = time every think, but with the
+				 * hull stub its frame never advances, so animtime == time and
+				 * the pose stuck at frame 0 (ceres 2ee8fa7). Use a per-slot
+				 * base time, reset when the chosen sequence changes. */
+				{
+					static float anim_base[MAX_CLIENTS + 1];
+					static int anim_seq[MAX_CLIENTS + 1];
+
+					/* Dying restarts the clock even when the game's sequence
+					 * number did not change, so the death plays from frame 0. */
+					const int key = ent->curstate.sequence + 1 + ( dead ? 0x10000 : 0 );
+
+					if( anim_base[e] <= 0.0f || anim_base[e] > (float)cl.time || anim_seq[e] != key )
+					{
+						anim_base[e] = (float)cl.time > 0.0f ? (float)cl.time : 0.001f;
+						anim_seq[e] = key;
+					}
+					ent->curstate.animtime = anim_base[e];
+					ent->curstate.frame = 0.0f;
+				}
+				{
+					static int seq_logs;
+					const studiohdr_t *bh = (const studiohdr_t *)mod->cache.data;
+					float speed = sqrtf( ed->v.velocity[0] * ed->v.velocity[0] + ed->v.velocity[1] * ed->v.velocity[1] );
+					int idle = CL_GCLeanFindSeq( bh, "idle" );
+					int gait;
+
+					if( speed > 150.0f )
+						gait = CL_GCLeanFindSeq( bh, "run" );
+					else if( speed > 10.0f )
+						gait = CL_GCLeanFindSeq( bh, "walk" );
+					else
+						gait = idle;
+					/* DoD bodies have no "idle"/"run" HL labels: sequence 0 is look_idle (arm held
+					 * out). Use the DoD ones: stand_/crouch_<weapon>_aim for the carried weapon,
+					 * dod_idle1, and dod_walk / dod_jog / dod_sprint for the legs. */
+					{
+						const char *tok = ed->v.weaponmodel ? CL_GCLeanDodAimToken( SV_GetString( ed->v.weaponmodel )) : NULL;
+						char label[48];
+						int aim = -1, dgait = -1;
+
+						/* iuser3 bit 0 is prone, bit 1 deployed (dod-gc
+						 * docs/DOD_ENGINE_REQUESTS.md). */
+						const qboolean prone = ( ed->v.iuser3 & 1 ) != 0;
+
+						if( tok )
+						{
+							Q_snprintf( label, sizeof( label ), "%s_%s_aim",
+								prone ? "prone" : FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
+							aim = CL_GCLeanFindSeq( bh, label );
+						}
+						if( aim < 0 && prone )
+							aim = CL_GCLeanFindSeq( bh, "prone_idle" );
+						if( aim < 0 )
+							aim = CL_GCLeanFindSeq( bh, "dod_idle1" );
+						/* Crouched legs: dod_crawl when moving, dod_crouch_idle
+						 * when still (standing legs under a crouched torso
+						 * before). */
+						if( prone )
+							dgait = speed > 10.0f ? CL_GCLeanFindSeq( bh, "prone_forward" ) : aim;
+						else if( FBitSet( ed->v.flags, FL_DUCKING ))
+							dgait = CL_GCLeanFindSeq( bh, speed > 10.0f ? "dod_crawl" : "dod_crouch_idle" );
+						else if( speed > 200.0f )
+							dgait = CL_GCLeanFindSeq( bh, "dod_sprint" );
+						else if( speed > 120.0f )
+							dgait = CL_GCLeanFindSeq( bh, "dod_jog" );
+						else if( speed > 10.0f )
+							dgait = CL_GCLeanFindSeq( bh, "dod_walk" );
+						else
+						{
+							/* Standing still: idle legs. The HL "idle" lookup
+							 * finds look_idle, sequence 0, which the renderer
+							 * reads as "no gait": the body then ignored the aim
+							 * pitch whenever a bot stood still to shoot. */
+							dgait = CL_GCLeanFindSeq( bh, "dod_idle1" );
+							if( dgait <= 0 )
+								dgait = CL_GCLeanFindSeq( bh, "standing_idle" );
+						}
+						if( aim >= 0 )
+							idle = aim;
+						if( dgait >= 0 )
+							gait = dgait;
+					}
+					if( dead )
+					{
+						/* One-shot death on the whole body: no legs overlay, and
+						 * the renderer clamps a non-looping sequence on its last
+						 * frame, so the corpse holds the final pose. */
+						static int death_logs;
+
+						ent->curstate.sequence = CL_GCLeanDeathSeq( bh, ed->v.sequence );
+						ent->curstate.gaitsequence = 0;
+						if( death_logs < 8 )
+						{
+							const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex );
+
+							death_logs++;
+							Con_Reportf( "Xash3D GameCube: lean player %d dead (deadflag %d) game seq %d -> %d '%s'\n",
+								e, (int)ed->v.deadflag, ed->v.sequence, ent->curstate.sequence,
+								( ent->curstate.sequence >= 0 && ent->curstate.sequence < bh->numseq ) ? sd[ent->curstate.sequence].label : "?" );
+						}
+					}
+					else
+					{
+						if( ed->v.sequence == 0 && idle >= 0 )
+							ent->curstate.sequence = idle;
+						if( ed->v.gaitsequence == 0 && gait >= 0 )
+							ent->curstate.gaitsequence = gait;
+					}
+					if( seq_logs < 6 )
+					{
+						const mstudioseqdesc_t *sd = bh ? (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex ) : NULL;
+
+						seq_logs++;
+						int sq = ent->curstate.sequence, gq = ent->curstate.gaitsequence;
+						qboolean sok = sd && sq >= 0 && sq < bh->numseq;
+						qboolean gok = sd && gq >= 0 && gq < bh->numseq;
+
+						Con_Reportf( "Xash3D GameCube: lean player %d seq %d '%s' (%d frames %.0f fps) gait %d '%s' (%d frames) speed %.0f numseq %d\n",
+							e, sq, sok ? sd[sq].label : "?", sok ? sd[sq].numframes : -1, sok ? sd[sq].fps : 0.0f,
+							gq, gok ? sd[gq].label : "?", gok ? sd[gq].numframes : -1,
+							speed, bh ? bh->numseq : -1 );
+					}
+				}
+				/* Keep the aim pitch (angles.x = -v_angle.x / 3): with a gait
+				 * sequence the renderer turns it into the aim blend and
+				 * leaves the root yaw-only (R_StudioPlayerBlend), as stock
+				 * GoldSrc does. Decide on the gait this emit chose above:
+				 * DoD's server leaves v.gaitsequence 0, so testing the edict
+				 * zeroed the pitch of every bot (held at the baked mid
+				 * blend, looking slightly up). Without a gait the pitch
+				 * would tilt the whole body, so it stays 0 then. */
+				if( dead || !ent->curstate.gaitsequence )
+					ent->angles[0] = 0.0f;
+				ent->curstate.angles[0] = ent->angles[0];
+				{
+					/* Aim check: what pitch each player hands the renderer. */
+					static double next_aim_log[MAX_CLIENTS + 1];
+
+					if( e <= MAX_CLIENTS && host.realtime >= next_aim_log[e] )
+					{
+						next_aim_log[e] = host.realtime + 2.0;
+						Con_Reportf( "Xash3D GameCube: lean aim player %d v_angle.x %.1f angles.x %.1f gait %d seq %d -> pitch %.1f%s\n",
+							e, ed->v.v_angle[0], ed->v.angles[0], ent->curstate.gaitsequence, ent->curstate.sequence,
+							ent->angles[0], dead ? " (dead)" : "" );
+					}
+				}
+				/* v.weaponmodel is a string_t (the p_ model path); the renderer
+				 * wants a model index (ceres fpa: weaponmodel=28156). Attach it
+				 * only when that model is resident. */
+				ent->curstate.weaponmodel = 0;
+				if( ed->v.weaponmodel && !dead )
+				{
+					const char *wpath = SV_GetString( ed->v.weaponmodel );
+					static int wlogs;
+
+					ent->curstate.weaponmodel = CL_GCLeanWeaponIndex( wpath, false );
+					if( wlogs < 4 )
+					{
+						wlogs++;
+						Con_Reportf( "Xash3D GameCube: lean player %d weapon %s index %d %s\n",
+							e, wpath ? wpath : "?", ent->curstate.weaponmodel, ent->curstate.weaponmodel ? "attached" : "not resident" );
+					}
+				}
+				ent->curstate.rendermode = ed->v.rendermode;
+				ent->curstate.renderamt = (int)ed->v.renderamt;
+				ent->curstate.effects = ed->v.effects;
+				ent->curstate.entityType = ENTITY_NORMAL;
+				ent->curstate.blending[0] = 127;
+				ent->curstate.blending[1] = 127;
+				ent->prevstate = ent->curstate;
+				VectorCopy( ent->origin, ent->latched.prevorigin );
+				VectorCopy( ent->angles, ent->latched.prevangles );
+				ent->latched.prevanimtime = ent->curstate.animtime;
+				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					float d = VectorLength( delta );
+
+					studios++;
+					studio_slots++;
+					lean_player_seen = true;
+					/* gc_facebot 10+N: face player N instead of the nearest
+					 * (a test aid: e.g. 12 = move to and aim at player 2). */
+					const int facebot_pick = gc_facebot && gc_facebot->value >= 10.0f
+						? (int)gc_facebot->value - 10 : 0;
+
+					if( facebot_pick ? e == facebot_pick : ( !near_e || d < near_d ))
+					{
+						near_e = e;
+						near_d = d;
+						VectorCopy( ed->v.origin, near_org );
+					}
+					if( player_logs < 8 )
+					{
+						player_logs++;
+						Con_Reportf( "Xash3D GameCube: lean emit player %d model=%s userinfo=%s seq=%d dist=%.0f org=(%.0f %.0f %.0f) yaw=%.0f\n",
+							e, mod->name, cl.players[e - 1].model, ed->v.sequence, d,
+							ed->v.origin[0], ed->v.origin[1], ed->v.origin[2],
+							RAD2DEG( atan2f( delta[1], delta[0] )));
+					}
+				}
+			}
+			if( near_e && (( gc_facebot && gc_facebot->value != 0.0f ) || Sys_CheckParm( "-gcfacebot" )))
+			{
+				static int facebot_logs;
+				static qboolean facebot_moved;
+				vec3_t dir, ang;
+
+				/* gc_facebot 2: also move the local player, once, to a free
+				 * spot next to the bot (a hull trace out from the bot in 8
+				 * directions, longest clear one), so walls between the spawn
+				 * and the bot cannot hide it. */
+				if( gc_facebot && gc_facebot->value >= 2.0f && !facebot_moved
+					&& player && SV_IsValidEdict( player ))
+				{
+					float best = 0.0f;
+					vec3_t best_pos;
+					int k;
+
+					for( k = 0; k < 8; k++ )
+					{
+						float a = (float)k * ( M_PI_F / 4.0f );
+						vec3_t end;
+						trace_t tr;
+						float clear;
+
+						end[0] = near_org[0] + cosf( a ) * 240.0f;
+						end[1] = near_org[1] + sinf( a ) * 240.0f;
+						end[2] = near_org[2];
+						tr = SV_MoveNoEnts( near_org, player->v.mins, player->v.maxs, end, MOVE_NOMONSTERS, player );
+						if( tr.allsolid || tr.startsolid )
+							continue;
+						clear = tr.fraction * 240.0f;
+						if( clear > best )
+						{
+							best = clear;
+							VectorLerp( near_org, Q_min( clear - 16.0f, 200.0f ) / 240.0f, end, best_pos );
+						}
+					}
+					facebot_moved = true;
+					if( best >= 96.0f )
+					{
+						VectorCopy( best_pos, player->v.origin );
+						VectorClear( player->v.velocity );
+						SV_LinkEdict( player, false );
+						VectorCopy( best_pos, view_org );
+					}
+					Con_Reportf( "Xash3D GameCube: gc_facebot move %s to (%.0f %.0f %.0f), clear %.0f from player %d\n",
+						best >= 96.0f ? "done" : "skipped", best >= 96.0f ? best_pos[0] : 0.0f,
+						best >= 96.0f ? best_pos[1] : 0.0f, best >= 96.0f ? best_pos[2] : 0.0f, best, near_e );
+				}
+				VectorSubtract( near_org, view_org, dir );
+				VectorAngles( dir, ang );
+				if( ang[0] > 180.0f )
+					ang[0] -= 360.0f;
+				cl.viewangles[PITCH] = -ang[PITCH];
+				cl.viewangles[YAW] = ang[YAW];
+				cl.viewangles[ROLL] = 0.0f;
+				/* Some lean camera paths read the local edict's v_angle. */
+				if( player && SV_IsValidEdict( player ))
+					VectorCopy( cl.viewangles, player->v.v_angle );
+				if( facebot_logs < 4 )
+				{
+					facebot_logs++;
+					Con_Reportf( "Xash3D GameCube: gc_facebot aim at player %d dist=%.0f angles=(%.0f %.0f)\n",
+						near_e, near_d, cl.viewangles[PITCH], cl.viewangles[YAW] );
+				}
+			}
+		}
+		/* Body-queue corpses, drawn as their player (body from that slot's
+		 * userinfo) holding the last frame of the death sequence. */
+		for( slot = 0; slot < n_bodies && studio_slots < studio_budget; slot++ )
+		{
+			static qboolean body_tried[MAX_CLIENTS + 1];
+			static int body_logs;
+			edict_t *ed = SV_EdictNum( bodies[slot] );
+			const int owner = (int)ed->v.renderamt;
+			model_t *mod;
+			cl_entity_t *ent;
+			vec3_t delta, bmin, bmax;
+			extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+
+			if( owner < 1 || owner > svs.maxclients || owner > MAX_CLIENTS )
+				continue;
+			VectorSubtract( ed->v.origin, view_org, delta );
+			if( VectorLength( delta ) > studio_max_dist )
+				continue;
+			VectorSet( bmin, ed->v.origin[0] - 48.0f, ed->v.origin[1] - 48.0f, ed->v.origin[2] - 36.0f );
+			VectorSet( bmax, ed->v.origin[0] + 48.0f, ed->v.origin[1] + 48.0f, ed->v.origin[2] + 36.0f );
+			if( !R_GXWorldDLEntityVisible( bodies[slot], bmin, bmax ))
+				continue;
+			mod = CL_GCLeanPlayerBody( owner, &body_tried[owner] );
+			if( !mod )
+				continue;
+			ent = &lean_studio_ents[studio_slots];
+			memset( ent, 0, sizeof( *ent ));
+			ent->index = bodies[slot];
+			ent->player = true;
+			ent->model = mod;
+			VectorCopy( ed->v.origin, ent->origin );
+			VectorCopy( ed->v.angles, ent->angles );
+			ent->angles[0] = 0.0f;
+			VectorCopy( ent->origin, ent->curstate.origin );
+			VectorCopy( ent->angles, ent->curstate.angles );
+			ent->curstate.number = owner;	/* renderer picks the body by slot */
+			ent->curstate.modelindex = ed->v.modelindex;
+			ent->curstate.movetype = MOVETYPE_NONE;
+			ent->curstate.sequence = CL_GCLeanDeathSeq( (const studiohdr_t *)mod->cache.data, ed->v.sequence );
+			ent->curstate.gaitsequence = 0;
+			ent->curstate.frame = 255.0f;
+			ent->curstate.framerate = 0.0f;
+			ent->curstate.animtime = (float)cl.time;
+			ent->curstate.body = ed->v.body;
+			ent->curstate.skin = ed->v.skin;
+			ent->curstate.scale = 1.0f;
+			ent->curstate.rendermode = kRenderNormal;
+			ent->curstate.renderamt = 255;
+			ent->curstate.entityType = ENTITY_NORMAL;
+			ent->curstate.blending[0] = 127;
+			ent->curstate.blending[1] = 127;
+			ent->prevstate = ent->curstate;
+			VectorCopy( ent->origin, ent->latched.prevorigin );
+			VectorCopy( ent->angles, ent->latched.prevangles );
+			ent->latched.prevanimtime = ent->curstate.animtime;
+			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+			{
+				studios++;
+				studio_slots++;
+				if( body_logs < 8 )
+				{
+					body_logs++;
+					Con_Reportf( "Xash3D GameCube: lean corpse %d of player %d %s seq %d at (%.0f %.0f %.0f)\n",
+						bodies[slot], owner, mod->name, ent->curstate.sequence,
+						ed->v.origin[0], ed->v.origin[1], ed->v.origin[2] );
+				}
+			}
+		}
+		GC_ProfMark( "render: lean emit players" );
+		/* Once a player body has been drawn the stub is not needed, and it
+		 * showed as a white plank on the floor near the bot (ceres fld). */
+#if XASH_GC_LOSTCOAST
+		/* Not on Lost Coast: with no character in view (the monastery stairs,
+		 * the church) the stub sat 48 units in front of the eye, a crowbar
+		 * that looked ten times too large. */
+		if( 0 )
+#else
+		if( studios == 0 && !lean_player_seen )
+#endif
 		{
 			/* Prefer tiny lean w_crowbar stub — v_crowbar hung Flipper
 			 * (probe 20260807-171034: studios=1 then silence). */
@@ -1743,16 +3408,106 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				ent->prevstate = ent->curstate;
 				VectorCopy( ent->origin, ent->latched.prevorigin );
 				if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
+				{
+					static int stub_logs;
+
 					studios++;
+					if( stub_logs < 4 )
+					{
+						stub_logs++;
+						Con_Reportf( "Xash3D GameCube: lean stub w_crowbar at (%.0f %.0f %.0f)\n",
+							ent->origin[0], ent->origin[1], ent->origin[2] );
+					}
+				}
+			}
+		}
+
+		/* This route never runs V_RenderView/V_SetupViewModel, so the held
+		 * weapon was never bound (ceres lt3: vm=0, no "viewmodel index"
+		 * line). Bind the server's viewmodel here, loading it on demand. */
+		{
+			int vmi = cl.local.viewmodel ? cl.local.viewmodel
+				: cl.frames[cl.parsecountmod].clientdata.viewmodel;
+			model_t *held = vmi > 0 ? CL_ModelHandle( vmi ) : NULL;
+			static int held_logged = -1, held_logs;
+			char vpath[MAX_QPATH];
+
+			vpath[0] = '\0';
+			if( held && held->name[0] )
+				Q_strncpy( vpath, held->name, sizeof( vpath ));
+			/* Listen server: a late precache (game Deploy after connect) may
+			 * not have reached cl.models yet (ceres: index=294 model=(null)).
+			 * The name is in our own server's precache table. */
+			else if( vmi > 0 && vmi < MAX_MODELS && sv.model_precache[vmi][0] )
+				Q_strncpy( vpath, sv.model_precache[vmi], sizeof( vpath ));
+
+			/* A cinematic shot that hides the weapon (cine_viewmodel 0) never
+			 * draws it, so it does not load it either: the 30-120 KB studio
+			 * and its skins stay free for the scripted actors and effects. */
+			if( vpath[0] && Q_stristr( vpath, ".mdl" ) && !CL_CineHideViewModel()
+				&& ( !held || held->type != mod_studio || !held->cache.data ))
+			{
+				/* A failed load is retried once a second, not every frame:
+				 * each attempt clears the FS miss cache and probes the disc
+				 * (ceres b302741eb ran the budget-skip loop until exit). */
+				static int held_retry_vmi = -1;
+				static double held_retry_time;
+
+				if( vmi != held_retry_vmi || cl.time < held_retry_time
+					|| cl.time - held_retry_time >= 1.0 )
+				{
+					held_retry_vmi = vmi;
+					held_retry_time = cl.time;
+					if( Mod_GCEnsureLandmarkViewModel( vpath ))
+						held = Mod_FindName( vpath, false );
+				}
+			}
+			/* No held weapon (spectator, dead, holstered): drop the last
+			 * one, or the old gun stayed bound and drawn for good. */
+			if( vmi <= 0 && clgame.viewent.model )
+			{
+				clgame.viewent.model = NULL;
+				clgame.viewent.curstate.modelindex = 0;
+			}
+			if( held && held->type == mod_studio && held->cache.data
+				&& clgame.viewent.model != held )
+			{
+				/* A gun the server precache already made resident skipped
+				 * the ensure call above, so it never got its *t skins (flat
+				 * pink v_enfield) or became the protected held slot. */
+				Mod_GCEnsureLandmarkViewModel( vpath );
+				clgame.viewent.model = held;
+				clgame.viewent.curstate.modelindex = vmi;
+				clgame.viewent.curstate.animtime = (float)cl.time;
+				clgame.viewent.curstate.framerate = 1.0f;
+				clgame.viewent.curstate.rendermode = kRenderNormal;
+				VectorCopy( view_org, clgame.viewent.origin );
+				VectorCopy( clgame.viewent.origin, clgame.viewent.curstate.origin );
+			}
+			if( vmi != held_logged && held_logs < 8 )
+			{
+				held_logs++;
+				held_logged = vmi;
+				Con_Reportf( "Xash3D GameCube: lean held viewmodel index=%d name=%s model=%s bound=%d\n",
+					vmi, vpath[0] ? vpath : "(none)", held ? held->name : "(null)",
+					held && clgame.viewent.model == held ? 1 : 0 );
 			}
 		}
 
 		/* Landmark viewmodel for Flipper G155 gun pass (G105 crowbar).
 		 * Bind even when no world NPC studios made the lean list — tip-safe
 		 * c0a0 often has studios=0 while crowbar is already G105-ready. */
+#if XASH_GC_LOSTCOAST
+		/* Lost Coast has no view models baked yet. The HL1 crowbar this
+		 * fallback binds is not on its disc as a usable model: it was bound
+		 * again every frame and drew as a white mesh ten times too large in
+		 * the world (the monastery stairs, the church). */
+		if( 0 )
+#else
 		if( !clgame.viewent.model
 			|| clgame.viewent.model->type != mod_studio
 			|| !clgame.viewent.model->cache.data )
+#endif
 		{
 			const char *vpath = Mod_GCLandmarkViewModelPath();
 			model_t *vm = NULL;
@@ -1774,6 +3529,14 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			}
 		}
 
+#if XASH_GC_LOSTCOAST
+		/* However it got bound (the fallback above, or the weapon the HL1
+		 * player code holds), Lost Coast draws no view model: none is baked
+		 * for it, and the HL1 crowbar showed as a huge white mesh. */
+		clgame.viewent.model = NULL;
+		clgame.viewent.curstate.modelindex = 0;
+#endif
+
 		/* Early G291 seed (present 0/2) dies before studio admit (present≥16).
 		 * Reseed tip-safe particles once so lean EFX can emit. */
 		if( studios > 0 )
@@ -1787,6 +3550,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			}
 		}
 	}
+
+	/* R_ClearScene above dropped the temp entities CL_EmitEntities linked. */
+	CL_GCRelinkTempEnts();
 
 	if( log_n < 4 || ( studios > 0 && log_n < 8 ))
 	{
@@ -1869,6 +3635,7 @@ void CL_EmitEntities( void )
 	CL_LinkPacketEntities ( &cl.frames[cl.parsecountmod] );
 #if XASH_GAMECUBE
 	CL_GCDumpStudioEntities( &cl.frames[cl.parsecountmod] );
+	CL_GCLinkRemoteStaticProps();
 #endif
 
 	// link custom user temp entities
@@ -1954,3 +3721,13 @@ qboolean CL_GetMovieSpatialization( rawchan_t *ch )
 
 	return true;
 }
+
+#if XASH_GAMECUBE
+/* The name the (listen) server precached at this model index, or NULL: cl_game.c has no view of server_t. */
+const char *CL_GCServerModelName( int modelindex )
+{
+	if( modelindex <= 0 || modelindex >= MAX_MODELS || !SV_Active() || !sv.model_precache[modelindex][0] )
+		return NULL;
+	return sv.model_precache[modelindex];
+}
+#endif

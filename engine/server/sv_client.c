@@ -189,7 +189,7 @@ client_ready:
 #endif
 		if( !cl->netchan.message.pData )
 		{
-			Netchan_Setup( NS_SERVER, &cl->netchan, loopback, 0, cl,
+			Netchan_Setup( NS_SERVER, &cl->netchan, loopback, Cvar_VariableInteger( "net_qport" ), cl,
 				SV_GetFragmentSize, 0 );
 			Con_Reportf( "Xash3D GameCube: direct-map loopback netchan initialized\n" );
 		}
@@ -197,6 +197,7 @@ client_ready:
 		{
 			cl->netchan.client = cl;
 			cl->netchan.pfnBlockSize = SV_GetFragmentSize;
+			cl->netchan.qport = Cvar_VariableInteger( "net_qport" );
 			Con_Reportf( "Xash3D GameCube: direct-map loopback netchan preserved seq=%u\n",
 				cl->netchan.outgoing_sequence );
 		}
@@ -207,6 +208,17 @@ client_ready:
 		cl->state = cs_spawned;
 		cl->connecttime = host.realtime;
 		SetBits( cl->flags, FCL_RESEND_USERINFO|FCL_RESEND_MOVEVARS );
+		{
+			/* The direct-map route skips SV_SendServerdata, so the client never
+			 * learns the server's user message numbers. Queue them reliably so
+			 * the first HUD/train message after input starts flowing parses. */
+			int i, n = 0;
+
+			for( i = 1; i < MAX_USER_MESSAGES && svgame.msg[i].name[0]; i++, n++ )
+				SV_SendUserReg( &cl->netchan.message, &svgame.msg[i] );
+			Con_Reportf( "Xash3D GameCube: direct-map queued %d user message regs overflow=%d\n",
+				n, MSG_CheckOverflow( &cl->netchan.message ) ? 1 : 0 );
+		}
 		Con_Reportf( "Xash3D GameCube: direct-map client ready cs_spawned frames=%p\n",
 			cl->frames );
 	}
@@ -1396,6 +1408,8 @@ static void SV_Info( netadr_t from, int protocolVersion )
 		Info_SetValueForKeyf( s, "maxcl", sizeof( s ), "%i", svs.maxclients );
 		Info_SetValueForKey( s, "gamedir", GI->gamefolder, sizeof( s ));
 		Info_SetValueForKey( s, "password", SV_HavePassword() ? "1" : "0", sizeof( s ));
+		// lets Find servers list only DoD GC servers (same marker as the connect handshake)
+		Info_SetValueForKey( s, DODGC_NET_KEY, DODGC_NET_VERSION, sizeof( s ));
 
 		// write host last so we can try to cut off too long hostnames
 		// TODO: value size limit for infostrings
@@ -4361,3 +4375,40 @@ void Test_RunQueryRateLimit( void )
 }
 
 #endif // XASH_ENGINE_TESTS
+
+#if XASH_GAMECUBE
+/*
+==================
+SV_GCForceClientHudUpdate
+
+The GameCube local map routes spawn the server before the client DLL is up,
+so the game's first Health/Battery/WeaponList/CurWeapon/HideWeapon messages
+reach a client with no hooks and are dropped; the game only resends on a
+change. Ask it to resend all of them, as the game's own "fullupdate" client
+command does (CBasePlayer::ForceClientDllUpdate), plus the view entity,
+without the engine's demo-recording extras (ambient sounds, decals,
+static ents).
+==================
+*/
+qboolean SV_GCForceClientHudUpdate( void )
+{
+	sv_client_t *cl = svs.clients;
+
+	if( sv.state != ss_active || !cl || cl->state != cs_spawned || !cl->edict || !svgame.dllFuncs.pfnClientCommand )
+	{
+		static int logs;
+
+		if( logs++ < 3 )
+			Con_Reportf( "Xash3D GameCube: HUD state resend waits (sv=%d cl=%d)\n",
+				sv.state, cl ? cl->state : -1 );
+		return false;
+	}
+	Cmd_TokenizeString( "fullupdate" );
+	svgame.dllFuncs.pfnClientCommand( cl->edict );
+	/* The view entity went out with the same early messages: without it
+	 * the client draws no crosshair (CL_DrawCrosshair checks it). */
+	SV_UpdateClientView( cl );
+	Con_Reportf( "Xash3D GameCube: HUD state resent to the client (game fullupdate, view)\n" );
+	return true;
+}
+#endif
