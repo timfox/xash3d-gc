@@ -4621,7 +4621,11 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		r_gc_studio_skins_in_arena = GC_MenuRunsServer()
 			|| gEngfuncs.Sys_CheckParm( "-gcnewgame" )
 			|| gEngfuncs.Sys_CheckParm( "-gcworldrender" )
-			|| ( Q_stristr( mdlname, "v_" ) != NULL );
+			|| ( Q_stristr( mdlname, "v_" ) != NULL )
+			/* A carried gun's skin too: decoded into the reclaimable pool it came back striped red,
+			 * white and green (the source bytes and its own texnum checked out), like the latticed
+			 * Garand viewmodel of ava-play99-28. Two 64x64 skins. */
+			|| ( Q_stristr( mdlname, "models/p_" ) != NULL );
 		ptexture->index = GL_LoadTexture( texname, (byte *)ptexture, size, flags );
 		r_gc_studio_skins_in_arena = false;
 		/* Viewmodel skins larger than the 128x128 decode: keep the source
