@@ -157,7 +157,7 @@ void SV_GCSizePacketEntities( void )
 	{
 		/* Per frame cap C: the retail 256 visible-entity limit. The real play route (menu start, the game's own AddToFullPack) put 111 entities
 		 * in one frame on dod_caen, 89 on charlie and 62 on avalanche (release pass, 4 bots); the lean boot-override route carries only seats + 4
-		 * brushes (17), which is not what ships. Each ring (server, local client) holds E entries, i.e. E / peak frames, 2 x 128 = 256 when the
+		 * brushes (17), which is not what ships. Each ring (server, local client) holds E entries, i.e. E / peak frames, up to 256 when the
 		 * arena allows: the largest arena gap after leaving room for the entity text to move off the heap and for the body models
 		 * (GC_DOD_ARENA_KEEP); when that leaves less than E_MIN, the text reservation and then the keep-out are given up before
 		 * the ring is, because the static 128 tables overflow at 111+ entities (149 "Ignored" lines on caen). */
@@ -167,7 +167,11 @@ void SV_GCSizePacketEntities( void )
 		const size_t text = ( Mod_GCWorldEntityTextHeapBytes() + 1023u ) / 1024u * 1024u;
 		const size_t scratch = es * (size_t)visible;
 		const size_t reserve[4] = { GC_DOD_ARENA_KEEP + text, GC_DOD_ARENA_KEEP, GC_DOD_ARENA_KEEP / 2, 0 };
-		const int E_MIN = 128, E_MAX = 2 * visible;
+		/* E_MAX: one visible cap per ring, i.e. two frames at caen's 111 peak, ~3 at charlie's 89. A listen server's
+		 * client acks the previous frame, so deltas need only the last two; a missed delta base is a full update, not
+		 * a lost entity. The old 2 x visible took 472 + 472 entries (408 KB) on charlie and left the world texture
+		 * slots no arena room (release pass, master 1ef2491d66: 0 CMPR slots adopted on charlie, caen, avalanche). */
+		const int E_MIN = 128, E_MAX = visible;
 		int level;
 
 		for( level = 0; level < 4; level++ )
