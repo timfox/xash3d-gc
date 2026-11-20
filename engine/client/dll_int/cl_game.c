@@ -5187,6 +5187,20 @@ static model_t *CL_GCStudioModelByIndex( int modelindex )
 	model_t *m = CL_ModelHandle( modelindex );
 	int i;
 
+	/* The client's own table has no entry for a model the server precached late (the last index of the weapon set): look it up by the
+	 * server's name, which finds the resident model without a disc read and fills the slot. */
+	if( !m && modelindex > 0 && modelindex < MAX_MODELS && SV_Active() && sv.model_precache[modelindex][0]
+		&& Q_stristr( sv.model_precache[modelindex], ".mdl" ))
+	{
+		m = Mod_ForName( sv.model_precache[modelindex], false, false );
+		if( m )
+		{
+			cl.models[modelindex] = m;
+			Con_Reportf( "Xash3D GameCube: client model slot %d filled from the server table: %s (%s)\n", modelindex, m->name,
+				m->cache.data ? "resident" : "not loaded" );
+		}
+		return m;
+	}
 	if( !m || m->cache.data || !m->name[0] || !Q_stristr( m->name, ".mdl" ))
 		return m;
 	for( i = 0; i < ntried; i++ )

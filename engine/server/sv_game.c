@@ -1970,9 +1970,10 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 	{
 		// allocate a new one
 #if XASH_GAMECUBE && XASH_DODGC_NETWORK
-		/* The last few edicts belong to what the game cannot do without (a rocket or grenade made through GetClassPtr, which has no
-		 * name here and cannot take a NULL): a spawn by name (weapon box, gib, sparks, an item) stops short of them. */
-		if( !ent && svgame.numEntities > svs.maxclients && SV_GCNamedSpawnBlocked())
+		/* The last few edicts belong to what the game cannot do without: a spawning player's loadout (crowbar, sidearm, primary, grenades),
+		 * objectives, and rockets and grenades made through GetClassPtr (no name here, cannot take a NULL). Only the cosmetic or droppable
+		 * classes (weapon boxes, gibs, sparks, effects: SV_GCNonEssentialClass) stop short of them. */
+		if( !ent && svgame.numEntities > svs.maxclients && SV_GCNonEssentialClass( pszClassName ) && SV_GCNamedSpawnBlocked())
 		{
 			static int gc_reserve_logs;
 
