@@ -2053,6 +2053,38 @@ static void R_StudioSetupSkin( studiohdr_t *ptexturehdr, int index )
 		ptexture = gEngfuncs.CL_GetRemapInfoForEntity( RI.currententity )->ptexture;
 	if( !ptexture )
 		ptexture = (mstudiotexture_t *)((byte *)ptexturehdr + ptexturehdr->textureindex );        // fallback
+#if XASH_GAMECUBE
+	{
+		/* One line per carried gun (p_*): which texture its skin binds. */
+		static char gun_seen[8][24];
+		int g;
+
+		for( g = 0; Q_stristr( ptexturehdr->name, "p_" ) && g < 8; g++ )
+		{
+			const char *base = ptexturehdr->name, *c;
+
+			for( c = ptexturehdr->name; *c; c++ )   /* MDL names carry the modeller's path, \\ or / */
+				if( *c == '\\' || *c == '/' )
+					base = c + 1;
+			if( Q_strnicmp( base, "p_", 2 ))
+				break;
+			if( !Q_strncmp( gun_seen[g], base, sizeof( gun_seen[g] ) - 1 ))
+				break;
+			if( !gun_seen[g][0] )
+			{
+				const int ti = ptexture[index].index;
+				image_t *img = ( ti > 0 && (unsigned)ti < (unsigned)MAX_TEXTURES ) ? R_GetTexture( (unsigned)ti ) : NULL;
+
+				Q_strncpy( gun_seen[g], base, sizeof( gun_seen[g] ));
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gun skin %s skin[%d] %s %dx%d flags=%x remap=%d -> tex=%d img=%s %dx%d\n",
+					base, index, ptexture[index].name, ptexture[index].width, ptexture[index].height,
+					ptexture[index].flags, (int)m_fDoRemap, ti,
+					( img && img->name[0] ) ? img->name : "?", img ? img->width : 0, img ? img->height : 0 );
+				break;
+			}
+		}
+	}
+#endif
 
 	if( r_lightmap->value && !r_fullbright->value )
 	{
@@ -4564,6 +4596,28 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		/* Viewmodel skins must live in the persistent overflow BSS — temppool
 		 * reclaim left hands.mdl soft pixels as 0x0000 and the Garand latticed
 		 * (ava-play99-28). WorldDL listen is not -gcnewgame, so pin v_* always. */
+		/* A carried gun's (p_*) skin: what it is made from, and whether the
+		 * name was already a texture (GL_LoadTexture then keeps the old one). */
+		if( Q_stristr( mdlname, "models/p_" ))
+		{
+			static int gun_tex_logs;
+
+			if( gun_tex_logs++ < 8 )
+			{
+				const byte *px = (const byte *)phdr + ptexture->index;
+				/* The header size can be the UV domain (255x256), not the baked 64x64: read the palette
+				 * after the pixels only when that stays inside a 64x64 skin, else show zeros. */
+				static const byte nopal[768];
+				const byte *pal = ptexture->width * ptexture->height <= 64 * 64
+					? px + ptexture->width * ptexture->height : nopal;
+
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gun skin load %s %dx%d src+%d existed=%d "
+					"px=%02x%02x%02x%02x%02x%02x%02x%02x pal0=%02x%02x%02x pal1=%02x%02x%02x pal255=%02x%02x%02x\n",
+					texname, ptexture->width, ptexture->height, ptexture->index, GL_FindTexture( texname ),
+					px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7],
+					pal[0], pal[1], pal[2], pal[3], pal[4], pal[5], pal[765], pal[766], pal[767] );
+			}
+		}
 		r_gc_studio_skins_in_arena = GC_MenuRunsServer()
 			|| gEngfuncs.Sys_CheckParm( "-gcnewgame" )
 			|| gEngfuncs.Sys_CheckParm( "-gcworldrender" )
