@@ -936,6 +936,58 @@ const char *SV_GCSoundPrecacheName( int index )
 }
 #endif
 
+#if XASH_GAMECUBE
+/*
+=======================
+SV_GCQueueLocalTempEnt
+
+GameCube listen route: temp entities bound for the local client did not reach
+its parser (fx diag TE=0 through a whole scripted shot while the game sent dozens
+of bursts and tracers). Same process, same thread: hand them to the client
+directly through a small queue it drains every frame (CL_GCDrainLocalTempEnts).
+=======================
+*/
+static byte	gc_local_tent_data[4096];	/* drained every client frame; MEM1 is tight */
+static sizebuf_t	gc_local_tent_buf;
+static qboolean	gc_local_tent_init;
+unsigned	gc_local_tent_queued, gc_local_tent_dropped;
+
+static qboolean SV_GCQueueLocalTempEnt( sizebuf_t *multicast )
+{
+	const int bits = MSG_GetNumBitsWritten( multicast );
+
+	if( !gc_local_tent_init )
+	{
+		MSG_Init( &gc_local_tent_buf, "GCLocalTempEnts", gc_local_tent_data, sizeof( gc_local_tent_data ));
+		gc_local_tent_init = true;
+	}
+	if( MSG_GetNumBitsLeft( &gc_local_tent_buf ) <= bits + 8 )
+	{
+		gc_local_tent_dropped++;
+		return true;	/* full this frame: drop it rather than send it the way that loses it */
+	}
+	MSG_WriteBits( &gc_local_tent_buf, MSG_GetData( multicast ), bits );
+	gc_local_tent_queued++;
+	return true;
+}
+
+/* The client side: copy out what was queued since the last call and empty the queue. */
+int SV_GCTakeLocalTempEnts( byte *out, int size )
+{
+	int bytes;
+
+	if( !gc_local_tent_init || !MSG_GetNumBitsWritten( &gc_local_tent_buf ))
+		return 0;
+	bytes = MSG_GetNumBytesWritten( &gc_local_tent_buf );
+	if( bytes > size )
+		bytes = 0;
+	else
+		memcpy( out, MSG_GetData( &gc_local_tent_buf ), bytes );
+	MSG_Clear( &gc_local_tent_buf );
+	return bytes;
+}
+#endif
+
 static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboolean usermessage, qboolean filter )
 {
 	byte		*mask = NULL;
@@ -1003,6 +1055,24 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		return 0;
 	}
 
+#if XASH_GAMECUBE
+	/* Scripted shots: why a temp entity does or does not reach a client. */
+	{
+		static int te_logs;
+
+		if( te_logs < 24 && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity )
+		{
+			sv_client_t *c = svs.clients;
+
+			te_logs++;
+			Con_Reportf( "Xash3D GameCube: temp entity multicast dest=%d clients=%d c0 state=%d local=%d fake=%d edict=%d\n",
+				dest, numclients, c ? c->state : -1,
+				c ? NET_IsLocalAddress( c->netchan.remote_address ) : -1,
+				c ? FBitSet( c->flags, FCL_FAKECLIENT ) != 0 : -1, c && c->edict ? 1 : 0 );
+		}
+	}
+#endif
 	// send the data to all relevent clients (or once only)
 	for( j = 0, cl = current; j < numclients; j++, cl++ )
 	{
@@ -1029,6 +1099,16 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		if( !SV_CheckClientVisiblity( cl, mask ))
 			continue;
 
+#if XASH_GAMECUBE
+		if( !specproxy && !reliable && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity
+			&& NET_IsLocalAddress( cl->netchan.remote_address )
+			&& SV_GCQueueLocalTempEnt( &sv.multicast ))
+		{
+			numsends++;
+			continue;
+		}
+#endif
 		if( specproxy ) MSG_WriteBits( &sv.spec_datagram, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
 		else if( reliable ) MSG_WriteBits( &cl->netchan.message, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
 		else MSG_WriteBits( &cl->datagram, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));

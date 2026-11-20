@@ -1768,11 +1768,16 @@ static qboolean Mod_GCMapNeedsStudio( const char *path )
 		}
 		return false;
 	}
-	/* Lost Coast: a viewmodel no map entity names (the grenades the HL1 game
-	 * code precaches with every weapon) waits until it is held, like the ones
-	 * above. Preloading v_grenade took 133 KB of the studio arena at spawn,
-	 * room the prop chain cache needs in the harbor. */
-	if( Sys_CheckParm( "-gccapfacessmoke" ) && !Q_strnicmp( path, "models/v_", 9 ))
+	/* A viewmodel no map entity names waits until it is held, like the ones
+	 * above. Lost Coast: preloading v_grenade took 133 KB of the studio arena
+	 * at spawn, room the prop chain cache needs in the harbor. DoD: the game
+	 * precaches its whole gun table (18 viewmodels, 30-120 KB each plus a
+	 * 30-86 KB *t skin scratch), and on dod_avalanche that ran the heap from
+	 * 96 KB to 2.4 KB during entity spawn, so the grenade world models, later
+	 * entities and listenserver.cfg failed to load (ceres 59f4f145). Only the
+	 * held gun is ever drawn, and it loads on demand (V_SetupViewModel and the
+	 * lean listen route in cl_frame.c). */
+	if( !Q_strnicmp( path, "models/v_", 9 ))
 		return false;
 	return true;	/* unknown model: keep the old behaviour */
 }

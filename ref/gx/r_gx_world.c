@@ -354,6 +354,19 @@ static qboolean r_gx_tex_band_logged;
 #define GC_GX_G36_DENSER_LIVE_BUDGET 32
 #endif
 
+/* -gccapture (engine CL_GCCaptureMode): an offline film capture. Frame rate
+ * matters less than what the shot shows, so every map face in view draws: no
+ * eye-PVS skips, no small or far face culls, and twice the face budgets. The
+ * primary frustum stays (faces off screen are not seen anyway). */
+qboolean R_GXCaptureMode( void )
+{
+	static int capture = -1;
+
+	if( capture < 0 )
+		capture = gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 1 : 0;
+	return capture != 0;
+}
+
 static int R_GXFrameFaceBudget( void )
 {
 	/* Cap only during the armed G36 window; denser AM gets a tighter band. */
@@ -369,6 +382,8 @@ static int R_GXFrameFaceBudget( void )
 		}
 		return GC_GX_G36_SAMPLE_FACE_BUDGET;
 	}
+	if( R_GXCaptureMode( ))
+		return GC_GX_FRAME_FACE_BUDGET * 2;
 	return GC_GX_FRAME_FACE_BUDGET;
 }
 
@@ -380,6 +395,8 @@ static int R_GXLiveFaceBudget( void )
 			return GC_GX_G36_DENSER_LIVE_BUDGET;
 		return GC_GX_G36_SAMPLE_LIVE_BUDGET;
 	}
+	if( R_GXCaptureMode( ))
+		return GC_GX_LIVE_FACE_BUDGET * 2;
 	return GC_GX_LIVE_FACE_BUDGET;
 }
 #ifndef GC_GX_FILL_FACE_BUDGET
@@ -2834,6 +2851,12 @@ static byte *R_GXCmprBounce( void )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce alloc failed\n" );
 	}
 	return r_gx_cmpr_bounce;
+}
+
+/* How many texture slots the cache has now. */
+int R_GXCmprSlotCount( void )
+{
+	return r_gx_cmpr_nslots;
 }
 
 /* Cumulative slot hits and misses, for the flythrough profile line. */
@@ -5634,6 +5657,7 @@ static int R_GXDrawWorldLiveSurfaces( model_t *world, qboolean opaque_too )
 	int skip_frustum = 0;
 	int nsort = 0;
 	const qboolean newgame = gEngfuncs.Sys_CheckParm( "-gcnewgame" );
+	const qboolean capture = R_GXCaptureMode();
 	qboolean surfaces_live;
 	qboolean surfaces_pinned;
 	static qboolean live_logged;
@@ -5723,13 +5747,13 @@ static int R_GXDrawWorldLiveSurfaces( model_t *world, qboolean opaque_too )
 			/* Prefer closer / larger walls under the emit budget. */
 			{
 				int area = (int)surf->extents[0] * (int)surf->extents[1];
-				if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+				if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 				{
 					skip_area++;
 					continue;
 				}
 				/* G283: match cap path — far-small cull dropped tunnel walls. */
-				if( !newgame
+				if( !newgame && !capture
 					&& area > 0 && area < GC_GX_FAR_MIN_AREA
 					&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 				{
@@ -6176,6 +6200,15 @@ static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
 /* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
 static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+#define GC_PROP_HINGES	4
+
+static struct
+{
+	float	pivot[3];
+	int	inst;	/* + 1, 0 = free */
+	float	speed, drag, stop, start;	/* the swing: degrees a second at start, lost at drag a second, until stop degrees */
+} gc_prop_hinge[GC_PROP_HINGES];
+static int gc_prop_nhinge;
 /* Pack v7: per-face prop lighting. Every vertex carries an index into 256
  * octahedral directions (the table lostcoast-gc tools/bake_lostcoast_props.py
  * also builds), and every instance three display-space colours taken from
@@ -6350,6 +6383,8 @@ static void R_GXPropMapCheck( void )
 	gc_prop_nmat = 0;
 	gc_prop_ninst = 0;
 	gc_prop_nmodels = 0;
+	gc_prop_nhinge = 0;
+	memset( gc_prop_hinge, 0, sizeof( gc_prop_hinge ));
 	gc_prop_cache = NULL;
 	gc_prop_cache_size = gc_prop_cache_head = 0;
 	gc_prop_cache_tried = false;
@@ -7167,8 +7202,33 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 			( mv[1][0] * gc_prop_sun[0] + mv[1][1] * gc_prop_sun[1] + mv[1][2] * gc_prop_sun[2] ) * 1.0e6f,
 			( mv[2][0] * gc_prop_sun[0] + mv[2][1] * gc_prop_sun[1] + mv[2][2] * gc_prop_sun[2] ) * 1.0e6f );
 		GX_LoadLightObj( &lo, GX_LIGHT1 );
-		if( gc_prop_lit_mode != 1 )
+		if( lt[9] == 3 )
 		{
+			/* Record 3: the ambient cube's vertical gradient. The sky term
+			 * is signed, base + up x N.z, so a face that looks down goes
+			 * darker than one that looks sideways, as the cube's bottom
+			 * face says (a hull's underside: 0.04 against 0.22 for its
+			 * sides). A channel has one diffuse function, so the sun,
+			 * which must clamp, has the second colour channel, and a
+			 * second stage adds the two. */
+			if( gc_prop_lit_mode != 2 )
+			{
+				const GXColor black = { 0, 0, 0, 255 };
+
+				GX_SetNumChans( 2 );
+				GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+					GX_LIGHT0, GX_DF_SIGNED, GX_AF_NONE );
+				GX_SetChanCtrl( GX_COLOR1A1, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
+					GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE );
+				GX_SetChanMatColor( GX_COLOR0A0, white );
+				GX_SetChanMatColor( GX_COLOR1A1, white );
+				GX_SetChanAmbColor( GX_COLOR1A1, black );
+				gc_prop_lit_mode = 2;
+			}
+		}
+		else if( gc_prop_lit_mode != 1 )
+		{
+			GX_SetNumChans( 1 );
 			GX_SetChanCtrl( GX_COLOR0A0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG,
 				GX_LIGHT0 | GX_LIGHT1, GX_DF_CLAMP, GX_AF_NONE );
 			GX_SetChanMatColor( GX_COLOR0A0, white );
@@ -7181,6 +7241,7 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	{
 		if( gc_prop_lit_mode != 0 )
 		{
+			GX_SetNumChans( 1 );
 			GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG,
 				GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
 			gc_prop_lit_mode = 0;
@@ -7188,12 +7249,27 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		GX_SetChanMatColor( GX_COLOR0A0, col );
 	}
 	{
-		const int x2 = ( gc_prop_vsize == 11 && gc_prop_cur_light && gc_prop_cur_light[9] == 2 ) ? 1 : 0;
+		/* 0: x1. 1: x2 (record 2). 2: two channels, x2 (record 3). */
+		const int rec = ( gc_prop_vsize == 11 && gc_prop_cur_light ) ? gc_prop_cur_light[9] : 0;
+		const int x2 = rec == 3 ? 2 : rec == 2 ? 1 : 0;
 
 		if( gc_prop_tev_x2 != x2 )
 		{
 			GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
-			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, x2 ? GX_CS_SCALE_2 : GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, x2 == 1 ? GX_CS_SCALE_2 : GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			if( x2 == 2 )
+			{
+				/* ( texture x channel 0 + texture x channel 1 ) x 2 */
+				GX_SetNumTevStages( 2 );
+				GX_SetTevDirect( GX_TEVSTAGE1 );
+				GX_SetTevOrder( GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR1A1 );
+				GX_SetTevColorIn( GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_CPREV );
+				GX_SetTevColorOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+				GX_SetTevAlphaIn( GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+				GX_SetTevAlphaOp( GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+			}
+			else
+				GX_SetNumTevStages( 1 );
 			gc_prop_tev_x2 = x2;
 		}
 	}
@@ -7352,12 +7428,89 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	return drawn;
 }
 
+/* A placed prop turned about a vertical hinge the map names (phys_hinge:
+ * the two leaves of the harbor gate, which the fisherman unlocks). The
+ * props are static here, so the game code hands over the push (speed at
+ * the start, what the hinge takes off it each second, the angle at which
+ * it meets something, when) and the leaf
+ * is turned at draw time. Its box is grown to the circle it sweeps so
+ * culling stays right at any angle. */
+void GC_PropHinge( const float *pivot, float speed, float drag, float stop, float start )
+{
+	int i, h = -1;
+	gc_prop_inst_t *in;
+
+	if( gc_prop_state != 1 )
+		return;
+	for( i = 0; i < GC_PROP_HINGES; i++ )
+	{
+		if( gc_prop_hinge[i].inst && gc_prop_hinge[i].pivot[0] == pivot[0] && gc_prop_hinge[i].pivot[1] == pivot[1] )
+		{
+			h = i;
+			break;
+		}
+	}
+	if( h < 0 )
+	{
+		/* The leaf on this hinge: the smallest prop whose box reaches the
+		 * hinge line and is not on another hinge already. */
+		int best = -1;
+		float bestvol = 0.0f;
+
+		for( h = 0; h < GC_PROP_HINGES && gc_prop_hinge[h].inst; h++ );
+		if( h == GC_PROP_HINGES )
+			return;
+		for( i = 0; i < gc_prop_ninst; i++ )
+		{
+			float vol;
+			int k;
+
+			in = &gc_prop_inst[i];
+			if( pivot[0] < in->mins[0] - 4 || pivot[0] > in->maxs[0] + 4
+				|| pivot[1] < in->mins[1] - 4 || pivot[1] > in->maxs[1] + 4
+				|| pivot[2] < in->mins[2] - 16 || pivot[2] > in->maxs[2] + 16 )
+				continue;
+			for( k = 0; k < GC_PROP_HINGES; k++ )
+				if( gc_prop_hinge[k].inst == i + 1 )
+					break;
+			if( k < GC_PROP_HINGES )
+				continue;
+			vol = (float)( in->maxs[0] - in->mins[0] + 1 ) * (float)( in->maxs[1] - in->mins[1] + 1 )
+				* (float)( in->maxs[2] - in->mins[2] + 1 );
+			if( best < 0 || vol < bestvol )
+			{
+				best = i;
+				bestvol = vol;
+			}
+		}
+		if( best < 0 )
+			return;
+		in = &gc_prop_inst[best];
+		gc_prop_hinge[h].inst = best + 1;
+		gc_prop_nhinge++;
+		VectorCopy( pivot, gc_prop_hinge[h].pivot );
+		{
+			/* the far corner of the box from the hinge: the swept circle */
+			float fx = Q_max( pivot[0] - in->mins[0], in->maxs[0] - pivot[0] );
+			float fy = Q_max( pivot[1] - in->mins[1], in->maxs[1] - pivot[1] );
+			float r = sqrtf( fx * fx + fy * fy ) + 1.0f;
+
+			in->mins[0] = (s16)( pivot[0] - r ); in->maxs[0] = (s16)( pivot[0] + r );
+			in->mins[1] = (s16)( pivot[1] - r ); in->maxs[1] = (s16)( pivot[1] + r );
+		}
+	}
+	gc_prop_hinge[h].speed = speed;
+	gc_prop_hinge[h].drag = drag;
+	gc_prop_hinge[h].stop = stop;
+	gc_prop_hinge[h].start = start;
+}
+
 static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 {
 	float mid[3], org[3];
 	const float k = 6.2831853f / 65536.0f;
 	const float *eye = RI.rvp.vieworigin;
-	float dx, dy, dz, r2, d2, cover2;
+	float dx, dy, dz, r2, d2, cover2, hinge_turn = 0.0f;
 
 	/* Named map props (high byte of the model word: ordinal + 1) are drawn
 	 * while their edict is drawable, so the good/destroyed pairs that
@@ -7399,6 +7552,37 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	org[0] = (float)in->org[0];
 	org[1] = (float)in->org[1];
 	org[2] = (float)in->org[2];
+	if( gc_prop_nhinge )
+	{
+		int h;
+
+		for( h = 0; h < GC_PROP_HINGES; h++ )
+		{
+			if( gc_prop_hinge[h].inst == ( in - gc_prop_inst ) + 1 )
+			{
+				/* Pushed once and slowed by the hinge: the speed dies
+				 * away at drag a second, the angle is its integral. */
+				const float t = ( gp_cl ? (float)gp_cl->time : 0.0f ) - gc_prop_hinge[h].start;
+				const float kd = gc_prop_hinge[h].drag;
+				const float *pv = gc_prop_hinge[h].pivot;
+				float deg = 0.0f, c, s2, hx, hy;
+
+				if( t > 0.0f )
+					deg = kd > 0.001f ? gc_prop_hinge[h].speed * ( 1.0f - expf( -kd * t )) / kd : gc_prop_hinge[h].speed * t;
+				/* (what it meets stops it dead: an iron gate on a wall) */
+				if( gc_prop_hinge[h].stop > 0.0f )
+					deg = bound( -gc_prop_hinge[h].stop, deg, gc_prop_hinge[h].stop );
+				hinge_turn = deg * ( 3.14159265f / 180.0f );
+				c = cosf( hinge_turn );
+				s2 = sinf( hinge_turn );
+				hx = org[0] - pv[0];
+				hy = org[1] - pv[1];
+				org[0] = pv[0] + hx * c - hy * s2;
+				org[1] = pv[1] + hx * s2 + hy * c;
+				break;
+			}
+		}
+	}
 	{
 		int drawn;
 
@@ -7454,7 +7638,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		}
 		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == ( in->model & 0xffu );
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
-			(float)in->ang[1] * k, (float)in->ang[2] * k,
+			(float)in->ang[1] * k + hinge_turn, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
 			 * (already resident) reads the same there, and the full
 			 * chains it asked for no longer compete for the cache. */
@@ -8060,6 +8244,10 @@ static void R_GXSmokeLoad( void );
  * ending on a polygon edge. 16 KB from the map arena. */
 static byte *gc_wdepth_tex;
 static GXTexObj gc_wdepth_obj;
+/* A second I4 map on the same grid (file header word 5 = 1): 15 where the
+ * sun reaches the water, 0 in shadow. The sun's glint is multiplied by it. */
+static GXTexObj gc_wsunmap_obj;
+static qboolean gc_wsunmap_ready;
 static int gc_wdepth_state;	/* 0 untried, 1 ready, -1 absent */
 static float gc_wdepth_x0, gc_wdepth_y0, gc_wdepth_w, gc_wdepth_h;
 
@@ -8089,11 +8277,20 @@ static qboolean R_GXWaterDepthReady( void )
 		memcpy( &cell, &hdr[4], 4 );
 		if( w >= 8 && h >= 8 && !( w & 7u ) && !( h & 7u ) && bytes <= 64u * 1024u && cell > 0.0f )
 		{
+			const u32 maps = hdr[5] == 1u ? 2u : 1u;
+
 			gc_wdepth_tex = (byte *)GC_MapLoadBufferTailAlloc(
-				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes );
-			if( gc_wdepth_tex && gEngfuncs.fsapi->Read( f, gc_wdepth_tex, bytes ) == (fs_offset_t)bytes )
+				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), bytes * maps );
+			if( gc_wdepth_tex && gEngfuncs.fsapi->Read( f, gc_wdepth_tex, bytes * maps ) == (fs_offset_t)( bytes * maps ))
 			{
-				DCFlushRange( gc_wdepth_tex, bytes );
+				DCFlushRange( gc_wdepth_tex, bytes * maps );
+				if( maps == 2u )
+				{
+					GX_InitTexObj( &gc_wsunmap_obj, gc_wdepth_tex + bytes, (u16)w, (u16)h, GX_TF_I4,
+						GX_CLAMP, GX_CLAMP, GX_FALSE );
+					GX_InitTexObjFilterMode( &gc_wsunmap_obj, GX_LINEAR, GX_LINEAR );
+					gc_wsunmap_ready = true;
+				}
 				GX_InitTexObj( &gc_wdepth_obj, gc_wdepth_tex, (u16)w, (u16)h, GX_TF_I4,
 					GX_CLAMP, GX_CLAMP, GX_FALSE );
 				GX_InitTexObjFilterMode( &gc_wdepth_obj, GX_LINEAR, GX_LINEAR );
@@ -8523,6 +8720,57 @@ static void R_GXDrawPackedWater( void )
 					memset( im, 0, sizeof( im ));
 					im[0][0] = im[1][1] = 0.75f * (float)gc_wsun_side / ( 3.0f * 8.0f * 127.5f ) * 8.0f;
 					GX_SetIndTexMatrix( GX_ITM_0, im, -3 );
+					/* The glint only where the sun reaches the water: a
+					 * fourth stage multiplies by the baked sun map, looked
+					 * up by the vertex's world position. */
+					if( gc_wsunmap_ready )
+					{
+						Mtx wm;
+
+						memset( wm, 0, sizeof( wm ));
+						wm[0][0] = 1.0f / gc_wdepth_w; wm[0][3] = -gc_wdepth_x0 / gc_wdepth_w;
+						wm[1][1] = 1.0f / gc_wdepth_h; wm[1][3] = -gc_wdepth_y0 / gc_wdepth_h;
+						wm[2][3] = 1.0f;
+						GX_LoadTexMtxImm( wm, GX_TEXMTX8, GX_MTX2x4 );
+						GX_LoadTexObj( &gc_wsunmap_obj, GX_TEXMAP4 );
+						GX_SetNumTexGens( 6 );
+						GX_SetTexCoordGen( GX_TEXCOORD5, GX_TG_MTX2x4, GX_TG_POS, GX_TEXMTX8 );
+						GX_SetNumTevStages( 4 );
+						GX_SetTevDirect( GX_TEVSTAGE3 );
+						GX_SetTevOrder( GX_TEVSTAGE3, GX_TEXCOORD5, GX_TEXMAP4, GX_COLORNULL );
+						GX_SetTevColorIn( GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO );
+						GX_SetTevColorOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+						GX_SetTevAlphaIn( GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+						GX_SetTevAlphaOp( GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					}
+				}
+				/* The sun texture is the sky alone: it knows nothing of what
+				 * stands between the water and the sky, so the glint showed on
+				 * water that mirrors a cliff in its own shadow. The mirror
+				 * pass already holds what each point really reflects; weight
+				 * the glint by it, ( mirror - 0.5 ) * 4 clamped: sky near the
+				 * sun keeps it, a dark cliff or building takes it away. */
+				{
+					const int ms = water_tex ? 3 : 1;
+					const int mc = water_tex ? GX_TEXCOORD5 : GX_TEXCOORD1;
+
+					GX_LoadTexMtxImm( tm, GX_TEXMTX8, GX_MTX3x4 );
+					GX_LoadTexObj( &gc_mirror_obj, GX_TEXMAP6 );
+					GX_SetNumTexGens( water_tex ? 6 : 2 );
+					GX_SetTexCoordGen( mc, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX8 );
+					GX_SetNumTevStages( ms + 2 );
+					GX_SetTevDirect( GX_TEVSTAGE0 + ms );
+					GX_SetTevOrder( GX_TEVSTAGE0 + ms, mc, GX_TEXMAP6, GX_COLORNULL );
+					GX_SetTevColorIn( GX_TEVSTAGE0 + ms, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+					GX_SetTevColorOp( GX_TEVSTAGE0 + ms, GX_TEV_ADD, GX_TB_SUBHALF, GX_CS_SCALE_4, GX_TRUE, GX_TEVREG0 );
+					GX_SetTevAlphaIn( GX_TEVSTAGE0 + ms, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+					GX_SetTevAlphaOp( GX_TEVSTAGE0 + ms, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					GX_SetTevDirect( GX_TEVSTAGE0 + ms + 1 );
+					GX_SetTevOrder( GX_TEVSTAGE0 + ms + 1, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+					GX_SetTevColorIn( GX_TEVSTAGE0 + ms + 1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_C0, GX_CC_ZERO );
+					GX_SetTevColorOp( GX_TEVSTAGE0 + ms + 1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+					GX_SetTevAlphaIn( GX_TEVSTAGE0 + ms + 1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV );
+					GX_SetTevAlphaOp( GX_TEVSTAGE0 + ms + 1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
 				}
 			}
 		}
@@ -8727,6 +8975,8 @@ static void R_GXDrawPackedWater( void )
 		GX_SetTevDirect( GX_TEVSTAGE0 );
 		GX_SetTevDirect( GX_TEVSTAGE1 );
 		GX_SetTevDirect( GX_TEVSTAGE2 );
+		GX_SetTevDirect( GX_TEVSTAGE3 );
+		GX_SetTevDirect( GX_TEVSTAGE4 );
 		GX_SetVtxDesc( GX_VA_TEX0, GX_NONE );
 	}
 	/* The reflection is the mirror pass above. The earlier stand-ins (a
@@ -9479,6 +9729,11 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
 	R_GXTrace( "hot service" );
 	R_GXHotService();
+	{
+		extern void R_GXBloomGlowPrepass( void );
+
+		R_GXBloomGlowPrepass();
+	}
 	R_GXTrace( "mirror" );
 	R_GXWaterMirrorPass();
 	R_GXTrace( "3d state" );
@@ -9491,16 +9746,25 @@ static int R_GXDrawWorldDLFrame( void )
 	drawn = R_GXWorldDLDraw();
 	ST_MARK( 1 );
 	R_GXTrace( "worlddl done" );
-	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
-	 * prop VAT change hangs Dolphin's GP after the first frame. */
+	/* The map's fog on the props too. It was held to the world after a GP
+	 * hang in an early Dolphin run; without it the refinery towers and the
+	 * village across the harbor stood crisp and white in front of hazed
+	 * cliffs, where retail's are blue-grey with distance. */
 	/* Opaque first, then the transparent sheet. The baked opaque water
 	 * that used to bury hulls is gone from the world DL, so props sort by
 	 * plain depth: world, props, then water blended over whatever is
 	 * submerged. Underwater veil last so it covers props too. */
-	R_GXTrace( "horizon" );
-	R_GXPropDrawHorizon( RI.rvp.vieworigin );
-	R_GXTrace( "props" );
-	R_GXPropDraw( RI.rvp.vieworigin );
+	{
+		extern void R_GXFogBegin( void );
+		extern void R_GXFogEnd( void );
+
+		R_GXFogBegin();
+		R_GXTrace( "horizon" );
+		R_GXPropDrawHorizon( RI.rvp.vieworigin );
+		R_GXTrace( "props" );
+		R_GXPropDraw( RI.rvp.vieworigin );
+		R_GXFogEnd();
+	}
 	R_GXTrace( "fisherman" );
 	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
 	R_GXTrace( "canister" );
@@ -9650,6 +9914,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 	 * the probe/route helpers from each bounded face loop below. */
 	const int frame_budget = R_GXFrameFaceBudget();
 	const int live_budget = R_GXLiveFaceBudget();
+	const qboolean capture = R_GXCaptureMode();
 
 	/* Reserve HUD TEXMAP0 slabs before world uploads fill MEM1. */
 	R_GXReserveHudPool();
@@ -10230,7 +10495,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				if( want_live_overlap && GC_CapFaceIsLive( slot ))
 					continue;
 				/* Lean / pack: drop faces outside eye PVS (cluster of centroid). */
-				if( !GC_CapFaceInPVS( slot ))
+				if( !capture && !GC_CapFaceInPVS( slot ))
 				{
 					pvs_skips++;
 					continue;
@@ -10273,7 +10538,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				}
 				}
 				area = (int)surf->extents[0] * (int)surf->extents[1];
-				if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+				if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 				{
 					r_gx_face_skips++;
 					r_gx_face_skip_area++;
@@ -10284,7 +10549,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				/* G281: skip far-small cull on New Game — tunnel walls along
 				 * the look path were dropped while dump eye was distant.
 				 * Solo -gcworldrender CapFaces use the same dump eye. */
-				if( !newgame_probe && !gEngfuncs.Sys_CheckParm( "-gcworldrender" )
+				if( !newgame_probe && !capture && !gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 					&& area > 0 && area < GC_GX_FAR_MIN_AREA
 					&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 				{
@@ -10734,7 +10999,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 			msurface_t *surf = &draw[slot];
 			vec3_t bmins, bmaxs;
 
-			if( !GC_CapFaceInPVS( slot ))
+			if( !capture && !GC_CapFaceInPVS( slot ))
 			{
 				pvs_skips++;
 				continue;
@@ -10768,13 +11033,13 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				}
 			}
 			area = (int)surf->extents[0] * (int)surf->extents[1];
-			if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+			if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 			{
 				r_gx_face_skips++;
 				r_gx_face_skip_area++;
 				continue;
 			}
-			if( area > 0 && area < GC_GX_FAR_MIN_AREA
+			if( !capture && area > 0 && area < GC_GX_FAR_MIN_AREA
 				&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 			{
 				r_gx_face_skips++;
@@ -12108,8 +12373,9 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 
 	psurf = &geom->surfaces[mod->firstmodelsurface];
 	{
-	int skip_plane = 0, skip_sky = 0, skip_edges = 0, emit_zero = 0, skip_frustum = 0;
+	int skip_plane = 0, skip_sky = 0, skip_edges = 0, emit_zero = 0, skip_frustum = 0, skip_alpha = 0;
 	const qboolean unrotated = !e->angles[0] && !e->angles[1] && !e->angles[2];
+	const qboolean see_through = e->curstate.rendermode == kRenderTransAlpha;
 
 	int nsort = 0;
 	/* The sort table is the real bound. 256 cut large DoD props (bunkers,
@@ -12157,6 +12423,22 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 				continue;
 			}
 		}
+		/* A see-through brush (rendermode 4, camouflage netting) whose
+		 * masked '{' texture has no alpha here drew as a solid grey sheet
+		 * hanging in the air (dod_charlie *114 over the trenches). Leave
+		 * such a face out rather than draw it solid. */
+		if( see_through && psurf->texinfo && psurf->texinfo->texture
+			&& psurf->texinfo->texture->name[0] == '{' )
+		{
+			const texture_t *mt = psurf->texinfo->texture;
+			const image_t *img = mt->gl_texturenum > 0 ? R_GetTexture( (unsigned)mt->gl_texturenum ) : NULL;
+
+			if( !img || !img->gc_packed_alpha )
+			{
+				skip_alpha++;
+				continue;
+			}
+		}
 		/* No CPU backface — cabin walls face inward; angles break modelorg. */
 		if( !R_GXFaceSortPush( &nsort, psurf, i ))
 			break;
@@ -12169,6 +12451,17 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 		if( got <= 0 )
 			emit_zero++;
 		drawn += got;
+	}
+	if( skip_alpha )
+	{
+		static int alpha_logs;
+
+		if( alpha_logs < 6 )
+		{
+			alpha_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: brush %s rendermode 4: %d masked face(s) without alpha left out\n",
+				mod->name, skip_alpha );
+		}
 	}
 	{
 		static int tram_logs;

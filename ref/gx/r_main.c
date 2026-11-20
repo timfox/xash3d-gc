@@ -1342,6 +1342,10 @@ static void R_DrawEntitiesOnList( void )
 						&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" ))))
 			{
 				R_AllowFog( false );
+				{
+					extern void R_GXDecalRingDraw( void );
+					R_GXDecalRingDraw();
+				}
 				gEngfuncs.CL_DrawEFX( tr.frametime, true );
 				R_AllowFog( true );
 				if( !lean_efx_draw_logged )
@@ -2330,6 +2334,9 @@ static qboolean R_GCMarkLiveBspPVS( void )
 R_MarkLeaves
 ===============
 */
+#if XASH_GAMECUBE
+qboolean R_GXCaptureMode( void );
+#endif
 static void R_MarkLeaves( void )
 {
 #if XASH_GAMECUBE
@@ -2342,9 +2349,11 @@ static void R_MarkLeaves( void )
 
 	/* Low-res without visdata: mark every leaf. New Game with prepare-time
 	 * FatPVS cache applies that mark below (not full-vis). */
-	if( GC_UseLowResWorldProbe() && !( WORLDMODEL && WORLDMODEL->visdata )
+	/* -gccapture marks every leaf too: a film capture draws all the map in view. */
+	if( GC_UseLowResWorldProbe() && ( R_GXCaptureMode()
+		|| ( !( WORLDMODEL && WORLDMODEL->visdata )
 		&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" )
-		&& !gEngfuncs.Sys_CheckParm( "-gcmenuplaystart" ))
+		&& !gEngfuncs.Sys_CheckParm( "-gcmenuplaystart" ))))
 	{
 		int i;
 
@@ -2366,7 +2375,8 @@ static void R_MarkLeaves( void )
 				WORLDMODEL->surfaces[i].visframe = tr.framecount;
 		}
 		if( tr.framecount <= 1 )
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: full-vis leaf mark active (low-res no visdata)\n" );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: full-vis leaf mark active (%s)\n",
+				R_GXCaptureMode() ? "capture mode" : "low-res no visdata" );
 		return;
 	}
 

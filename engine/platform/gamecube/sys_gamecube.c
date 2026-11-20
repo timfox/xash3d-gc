@@ -1105,9 +1105,11 @@ static qboolean gc_landmark3_configured;
 static qboolean gc_leanpvs_configured;
 static qboolean gc_fullphysics_configured;
 static qboolean gc_worldrender_configured;
+static qboolean gc_nohud_configured;	/* gamecube.cfg 'nohud': the engine's lean HUD is not drawn (spectator footage) */
 static qboolean gc_capfaces_smoke_configured;
 static qboolean gc_tas_configured;
 static qboolean gc_dumpframes_configured;
+static qboolean gc_capture_configured;	/* gccapture: -gccapture, offline film capture */
 static qboolean gc_swissquit_configured;
 static int gc_swissquit_frames = -1; /* -1 idle, >=0 countdown, -2 done */
 static u64 gc_swissquit_last_poll_ticks; /* coalesce vid+input polls same frame */
@@ -1194,9 +1196,11 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_leanpvs_configured = false;
 	gc_fullphysics_configured = false;
 	gc_worldrender_configured = false;
+	gc_nohud_configured = false;
 	gc_capfaces_smoke_configured = false;
 	gc_tas_configured = false;
 	gc_dumpframes_configured = false;
+	gc_capture_configured = false;
 	gc_swissquit_configured = false;
 	gc_memreport_configured = false;
 	gc_net_configured = false;
@@ -1492,6 +1496,17 @@ static void GCube_LoadDiscBootOverrides( void )
 			}
 		}
 
+		if( !Q_strnicmp( cursor, "nohud", 5 ))
+		{
+			char ch = cursor[5];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_nohud_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override nohud\n" );
+				continue;
+			}
+		}
+
 		if( !Q_strnicmp( cursor, "gcworldrender", 13 ))
 		{
 			char ch = cursor[13];
@@ -1639,6 +1654,18 @@ static void GCube_LoadDiscBootOverrides( void )
 				SYS_Report( "Xash3D GameCube: disc boot override tas %s\n", gc_tas_name );
 			}
 			continue;
+		}
+
+		/* Film capture: draw everything, frame rate second (CL_GCCaptureMode). */
+		if( !Q_strnicmp( cursor, "gccapture", 9 ))
+		{
+			char ch = cursor[9];
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_capture_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override gccapture\n" );
+				continue;
+			}
 		}
 
 		/* G347: soft DumpFrames latch for Dolphin PNG evidence. */
@@ -2091,6 +2118,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 
 	if( gc_worldrender_configured && !Sys_CheckParm( "-gcworldrender" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcworldrender";
+	if( gc_nohud_configured && !Sys_CheckParm( "-gcnohud" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcnohud";
 	if( gc_capfaces_smoke_configured && !Sys_CheckParm( "-gccapfacessmoke" ) && n + 1 < cap )
 		gc_argv[n++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured && !Sys_CheckParm( "-gcmap" ) && n + 2 < cap )
@@ -2110,6 +2139,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 	}
 	if( gc_dumpframes_configured && !Sys_CheckParm( "-gcdumpframes" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcdumpframes";
+	if( gc_capture_configured && !Sys_CheckParm( "-gccapture" ) && n + 1 < cap )
+		gc_argv[n++] = "-gccapture";
 	/* LCG-7: GetArgv often misses gamecube.cfg before DVD/chdir is ready.
 	 * CapFaces reinject covers smoke; retail title menu needs the same for
 	 * menuauto + startmap so New Game still reaches d2_lostcoast. */
@@ -2208,6 +2239,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 		gc_argv[fake_argc++] = "-gcmenuauto";
 	if( gc_worldrender_configured )
 		gc_argv[fake_argc++] = "-gcworldrender";
+	if( gc_nohud_configured )
+		gc_argv[fake_argc++] = "-gcnohud";
 	if( gc_capfaces_smoke_configured )
 		gc_argv[fake_argc++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured )
@@ -2308,6 +2341,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	}
 	if( gc_dumpframes_configured )
 		gc_argv[fake_argc++] = "-gcdumpframes";
+	if( gc_capture_configured )
+		gc_argv[fake_argc++] = "-gccapture";
 	if( gc_swissquit_configured )
 		gc_argv[fake_argc++] = "-gcswissquit";
 	if( gc_retail_newgame_configured && !gc_menu_newgame_configured )

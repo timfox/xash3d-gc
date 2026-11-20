@@ -84,6 +84,21 @@ the DumpFrames capture reel so you stay in control.
 | VELVET | Soft wrap nap + rim sheen IndTex |
 | CARBON | Dual-scale weave × metal IndTex glints |
 | PEARL | Soft body + animated nacre Fresnel coat |
+| CONCRETE | Cool aggregate tint × scrolled pebble + rough IndTex |
+| WOOD PLANK | Warm oak tint × anisotropic grain scroll + soft sheen |
+| BRICK | Fired clay tint × AO×2 mortar + IndTex bumps |
+| CERAMIC TILE | Cool glaze × tile grid detail + sharp dielectric coat |
+| OLED VOID | Near-black OLED × dual dark KONST IndTex |
+| ANODIZED MG | Dyed Mg metal × dual cool-green KONST IndTex |
+| FROST POLY | Frosted polycarb × dual cool KONST IndTex |
+| HOLO VINYL | Peel holo vinyl × dual chroma KONST IndTex |
+| ASPHALT | Dark road body + sparse wet IndTex glints |
+| RUBBER | Soft wrap tire rubber, muted Fresnel |
+| PLASTIC ABS | Cool-tinted injection plastic + soft dielectric coat |
+| LEATHER | Warm hide grain + soft sheen IndTex |
+| NEON RIM | Solid albedo×AO body + thin KONST Fresnel accent (not force-field) |
+| THIN FILM OIL | Dark body + low-sat rainbow on Fresnel only (not IRIDESCENT bloom) |
+| BRUSHED TITANIUM | Cool Ti tint + directional IndTex brush streaks (not ANISO FLAKE) |
 | STAINED GLASS | Cobalt-tinted panes × AO + sharp Fresnel IndTex coat |
 | LED MATRIX | Pixel-grid panel × metal-gated KONST emissive (no force-field shell) |
 | OIL SLICK | Dark wet body + rainbow Fresnel film (≠ IRIDESCENT / thin-film oil) |
