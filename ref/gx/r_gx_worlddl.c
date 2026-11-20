@@ -1593,6 +1593,75 @@ static void R_GXWorldDLLoad( const char *mapbase )
  * point walk in ref_light.c reads one node's faces and a few samples. */
 #define GC_LF_REC 56u
 static u32 gc_lf_aram, gc_lf_cap, gc_lf_faces, gc_lf_rec_ofs, gc_lf_lit_ofs, gc_lf_lit_bytes;
+/* Version 2 (DODGC_WD_LZ4=1): the record array and the lighting lump are random-access LZ4 regions of GC_LF_BLOCK-byte
+ * blocks (scripts/bake_worlddl_goldsrc.py pack_blocks_lz4). A block is staged, decoded into one of GC_LF_CACHE
+ * block buffers (1 for the records, 2 for the lighting: a sample is read once per light style, far apart) and read
+ * from there. 4 KiB of MEM1 for about 1.3 MiB of ARAM a map. */
+#define GC_LF_BLOCK	1024u
+#define GC_LF_CACHE	3
+static u32 gc_lf_ver;
+static byte gc_lf_blk[GC_LF_CACHE][GC_LF_BLOCK] __attribute__(( aligned( 32 )));
+static s32 gc_lf_blk_id[GC_LF_CACHE];	/* ( region << 24 ) | block, -1 empty */
+static byte gc_lf_stage[GC_LF_BLOCK] __attribute__(( aligned( 32 )));
+static int gc_lf_lit_rr;
+
+/* Block `blk` of the region at ARAM offset region_ofs holding raw_total bytes -> a cached buffer, or NULL. */
+static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 blk )
+{
+	u32 w[2] __attribute__(( aligned( 32 )));
+	u32 raw_len, rawsz, ofs, pad, stored;
+	s32 id = (s32)(( region << 24 ) | blk );
+	int i, slot;
+
+	if( blk * GC_LF_BLOCK >= raw_total )
+		return NULL;
+	for( i = 0; i < GC_LF_CACHE; i++ )
+		if( gc_lf_blk_id[i] == id )
+			return gc_lf_blk[i];
+	slot = region == 0 ? 0 : 1 + ( gc_lf_lit_rr++ & 1 );
+	raw_len = Q_min( GC_LF_BLOCK, raw_total - blk * GC_LF_BLOCK );
+	rawsz = ( raw_len + 31u ) & ~31u;
+	GC_AramCopy( gc_lf_aram + region_ofs + 4u + 4u * blk, w, 8, false );
+	ofs = w[0] & ~31u;
+	pad = w[0] & 31u;
+	stored = ( w[1] & ~31u ) - ofs;
+	gc_lf_blk_id[slot] = -1;
+	if( !stored || stored > rawsz || pad >= stored )
+		return NULL;
+	if( stored == rawsz && !pad )
+		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_lf_blk[slot], raw_len, false );
+	else
+	{
+		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_lf_stage, stored, false );
+		if( !Mod_GCLZ4Decode( gc_lf_stage, gc_lf_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
+			return NULL;
+	}
+	gc_lf_blk_id[slot] = id;
+	return gc_lf_blk[slot];
+}
+
+/* len bytes at raw offset ofs of the record (region 0) or lighting (region 1) stream. */
+static qboolean R_GXLfRead2( u32 region, u32 ofs, void *out, u32 len )
+{
+	const u32 region_ofs = region ? gc_lf_lit_ofs : gc_lf_rec_ofs;
+	const u32 raw_total = region ? gc_lf_lit_bytes : gc_lf_faces * GC_LF_REC;
+	byte *dst = (byte *)out;
+
+	while( len )
+	{
+		const u32 blk = ofs / GC_LF_BLOCK, off = ofs % GC_LF_BLOCK;
+		const u32 n = Q_min( len, GC_LF_BLOCK - off );
+		const byte *b = R_GXLfBlock( region, region_ofs, raw_total, blk );
+
+		if( !b )
+			return false;
+		memcpy( dst, b + off, n );
+		dst += n;
+		ofs += n;
+		len -= n;
+	}
+	return true;
+}
 
 static void R_GXLightFacesLoad( const char *mapbase )
 {
@@ -1611,14 +1680,15 @@ static void R_GXLightFacesLoad( const char *mapbase )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces missing %s\n", path );
 		return;
 	}
-	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32 || memcmp( hdr, "GClf", 4 ) || hdr[1] != 1u
-		|| hdr[3] != 32u || hdr[4] < 32u + hdr[2] * GC_LF_REC )
+	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32 || memcmp( hdr, "GClf", 4 )
+		|| ( hdr[1] != 1u && !( hdr[1] == 2u && hdr[7] == GC_LF_BLOCK && hdr[6] >= hdr[4] ))
+		|| hdr[3] != 32u || hdr[4] < 32u + ( hdr[1] == 1u ? hdr[2] * GC_LF_REC : 0u ))
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: light faces bad header %s\n", path );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
-	size = ( hdr[4] + hdr[5] + 31u ) & ~31u;
+	size = ( ( hdr[1] == 2u ? hdr[6] : hdr[4] + hdr[5] ) + 31u ) & ~31u;
 	if( !gc_lf_aram || gc_lf_cap < size )
 	{
 		if( gc_lf_aram )
@@ -1649,11 +1719,14 @@ static void R_GXLightFacesLoad( const char *mapbase )
 			break;
 	}
 	gEngfuncs.fsapi->Close( f );
-	if( done < hdr[4] + hdr[5] )
+	if( done < ( hdr[1] == 2u ? hdr[6] : hdr[4] + hdr[5] ))
 	{
 		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light faces short read %u/%u\n", done, hdr[4] + hdr[5] );
 		return;
 	}
+	gc_lf_ver = hdr[1];
+	for( done = 0; done < GC_LF_CACHE; done++ )
+		gc_lf_blk_id[done] = -1;
 	gc_lf_rec_ofs = hdr[3];
 	gc_lf_lit_ofs = hdr[4];
 	gc_lf_lit_bytes = hdr[5];
@@ -1671,6 +1744,8 @@ qboolean R_GXLightFacesRead( int first, int num, void *out )
 {
 	if( !gc_lf_faces || first < 0 || num <= 0 || (u32)( first + num ) > gc_lf_faces )
 		return false;
+	if( gc_lf_ver == 2u )
+		return R_GXLfRead2( 0, (u32)first * GC_LF_REC, out, (u32)num * GC_LF_REC );
 	GC_AramCopy( gc_lf_aram + gc_lf_rec_ofs + (u32)first * GC_LF_REC, out, (u32)num * GC_LF_REC, false );
 	return true;
 }
@@ -1679,6 +1754,8 @@ qboolean R_GXLightSamplesRead( u32 ofs, void *out, u32 len )
 {
 	if( !gc_lf_faces || ofs >= gc_lf_lit_bytes || len > gc_lf_lit_bytes - ofs )
 		return false;
+	if( gc_lf_ver == 2u )
+		return R_GXLfRead2( 1, ofs, out, len );
 	GC_AramCopy( gc_lf_aram + gc_lf_lit_ofs + ofs, out, len, false );
 	return true;
 }
