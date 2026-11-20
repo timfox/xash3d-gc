@@ -1148,8 +1148,13 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				 * 43 KB with L0): in a 24 KB slot they lose L0 and the beach
 				 * and trench ground goes soft. -gccmprbig N adds N (default none:
 				 * on charlie fewer 24 KB slots cost more misses than they save). */
-				const size_t small = 24u * 1024u;
-				const size_t big = 44u * 1024u;
+				/* A 128x128 chain is 10944 bytes and every DoD world texture
+				 * but a few 256x128 ones draws at that size or smaller (the
+				 * 256x256 ones drop their top mip in a 24 KB slot too), so
+				 * slots of that size hold twice as many textures in the
+				 * same gap. Past sixteen, a few take a whole 256x128 chain. */
+				const size_t small = 10944u;
+				size_t big = 44u * 1024u;
 				const size_t keep_gap = 160u * 1024u;	/* later claims (overflow, entity tables) */
 				const size_t gap = GC_MapArenaLargestGap();
 				const size_t avail = gap > keep_gap ? gap - keep_gap : 0;
@@ -1163,8 +1168,17 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				while( bn > 0 && avail < (size_t)bn * big + 8u * small )
 					bn--;
 				gn = (int)(( avail - (size_t)bn * big ) / small );
-				if( gn > 32 )
-					gn = 32;
+				if( gn > 48 )
+					gn = 48;
+				if( !bn )
+				{
+					big = 21984u;
+					while( gn > 16 && bn < 6 )
+					{
+						gn -= 2;
+						bn++;
+					}
+				}
 				for( ; gn >= 8 && !gt; gn-- )
 				{
 					const size_t bytes = (size_t)gn * small + (size_t)bn * big;
@@ -1431,7 +1445,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	 * chunk bytes one cluster's PVS can show, keep that plus a quarter, and
 	 * turn the rest of the cache into texture slots. */
 	if( !gc_wd_cache_in_arena && !cmpr_adopted && gc_wd_aram && gc_wd_pvs
-		&& R_GXCmprSlotCount() <= 8 && gc_wd_hdr.n_clusters > 0
+		&& R_GXCmprSlotCount() < 8 && gc_wd_hdr.n_clusters > 0
 		&& gc_wd_hdr.n_clusters * 4u <= gc_wd_cache_size
 		&& !gEngfuncs.Sys_CheckParm( "-gcnocacheslots" ))
 	{
