@@ -38,6 +38,11 @@ WD_FLAG_LM_LZ4 = 0x0010
 WD_FLAG_PVS_LZ4 = 0x0020
 PVS_BLOCK = 4096
 LM_PAGES_MAX = 1024
+# CMPR pages are a quarter of the size, and a cell there owns whole 4x4 blocks, so a page holds at most 63
+# one-luxel faces: with one page a leaf the crowded leaves had faces left with no cell at all (flat grey).
+# dod_caen alone has more than 2000 lit leaves.  4096 CMPR pages are the bytes of the 1024 RGB565 pages before
+# (2 MB of the ARAM stream at most), and the runtime's page hint (GC_WD_LM_HINT) is exact to 4096.
+LM_PAGES_MAX_CMPR = 4096
 # A crowded leaf takes up to this many pages; a batch names its page in the low bits of its pad word.
 LM_CHUNK_PAGES = 4
 WD_FLAG_LM_MULTI = 0x0040
@@ -262,6 +267,21 @@ def lm_pages_needed(dims, align: int = 1) -> int:
 		if lm_shelf_pages(sizes, n, align):
 			return n
 	return LM_CHUNK_PAGES
+
+
+def lm_grant_pages(needs, budget: int) -> dict:
+	"""Pages per chunk from a map-wide budget.  needs is [(chunk, pages wanted)] in order of priority.
+	Every chunk gets its first page before any gets a second, every second before any third: a crowded
+	leaf late in the order is not left with faces that have no cell while a large one takes four pages."""
+	grant: dict = {}
+	for level in range(1, LM_CHUNK_PAGES + 1):
+		for cl, need in needs:
+			if budget < 1:
+				return grant
+			if need >= level and grant.get(cl, 0) == level - 1:
+				grant[cl] = level
+				budget -= 1
+	return grant
 
 
 def lm_pack_pages(dims, npages: int, align: int = 1):
@@ -801,21 +821,11 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False, lm_cmpr: bool | None 
 		hi = [max(v[0][a] for rec in chunk.pending for v in rec[1]) for a in range(3)]
 		spans.append((max(hi[a] - lo[a] for a in range(3)), cl))
 	spans.sort(reverse=True)
-	lm_budget = LM_PAGES_MAX
-	lm_grant: dict[int, int] = {}
+	needs = []
 	for _span, cl in spans:
-		if lm_budget < 1:
-			break
-		lm_grant[cl] = 1
-		lm_budget -= 1
-	for _span, cl in spans:
-		if cl not in lm_grant or lm_budget < 1:
-			continue
 		dims = [(chunks[cl].pending[i][2], chunks[cl].pending[i][3]) for i in lit_of[cl]]
-		extra = min(lm_pages_needed(dims, lm_align) - 1, lm_budget)
-		if extra > 0:
-			lm_grant[cl] += extra
-			lm_budget -= extra
+		needs.append((cl, max(1, lm_pages_needed(dims, lm_align))))
+	lm_grant = lm_grant_pages(needs, LM_PAGES_MAX_CMPR if lm_cmpr else LM_PAGES_MAX)
 	for cl, chunk in chunks.items():
 		lit = lit_of[cl]
 		npages = lm_grant.get(cl, 0)
