@@ -115,5 +115,31 @@ class StaticBrushTest(unittest.TestCase):
 		self.assertEqual(self.bake.SB_MODEL_MAX, 1024)
 
 
+def load_pair_check():
+	"""world_dl_pair_ok from the disc builder, without importing the whole script."""
+	import ast
+
+	src = (ROOT / "scripts/build-gamecube-disc.py").read_text()
+	fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "world_dl_pair_ok")
+	scope = {"Path": Path}
+	exec(compile(ast.Module(body=[fn], type_ignores=[]), "build-gamecube-disc.py", "exec"), scope)
+	return scope["world_dl_pair_ok"]
+
+
+class StalePrebakeTest(unittest.TestCase):
+	def test_disc_builder_takes_only_a_pack_its_list_was_written_with(self):
+		ok = load_pair_check()
+		bake = load_bake()
+		with tempfile.TemporaryDirectory() as tmp:
+			wd = Path(tmp) / "wd_dod_test.gcd"
+			wd.write_bytes(b"x" * 1000)
+			self.assertFalse(ok(wd))  # no list at all: an old prebake
+			sb = Path(tmp) / "wd_dod_test_sb.gcd"
+			bake.write_static_brushes(sb, [(3, True)], 1000)
+			self.assertTrue(ok(wd))
+			bake.write_static_brushes(sb, [(3, True)], 2000)
+			self.assertFalse(ok(wd))  # list from another bake
+
+
 if __name__ == "__main__":
 	unittest.main()
