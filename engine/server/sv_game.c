@@ -6442,6 +6442,17 @@ static int gc_parity_tier_count[GC_PARITY_TIERS];	/* the census's per-tier total
  * temp ents). DoD builds have five client slots; four bots and a player
  * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
 #define GC_PARITY_RUNTIME_RESERVE 32
+/* Per player: a DoD loadout is three or four weapon entities plus grenades in
+ * flight; the fixed 32 was sized for five slots and ran out at 12 bots (kalt,
+ * 8 bots, reached 445 of 460 edicts). Eight more cover weapon boxes
+ * (DOD_MAX_BOXES 6) and temp ents. */
+#define GC_PARITY_RUNTIME_PER_CLIENT 4
+static int SV_GCParityRuntimeReserve( void )
+{
+	const int scaled = GC_PARITY_RUNTIME_PER_CLIENT * svs.maxclients + 8;
+
+	return scaled > GC_PARITY_RUNTIME_RESERVE ? scaled : GC_PARITY_RUNTIME_RESERVE;
+}
 
 /* The edicts a map's own entities may fill. A capture build's bigger table
  * (XASH_GC_MAX_EDICTS) is for the scripted cast: with the map allowed into
@@ -6489,7 +6500,7 @@ static qboolean SV_GCEntityPressure( unsigned floor_kb )
 	 * when the entities spawned: whether ALL its parity entities, walls included, were dropped depended on noise.) */
 	const qboolean heap = GC_MemHeapFreeBytes() < floor_kb * 1024u;
 	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
-	const qboolean ents = svgame.numEntities >= SV_GCMapEdictCap() - GC_PARITY_RUNTIME_RESERVE;
+	const qboolean ents = svgame.numEntities >= SV_GCMapEdictCap() - SV_GCParityRuntimeReserve();
 
 	if( heap )
 		gc_parity_why[0]++;
@@ -7220,7 +7231,7 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 			SV_GCCensusAdd( census_must, &n_must, classname );
 	}
 	must = total - parity - optional - nofunc - statics - baked;
-	gc_parity_budget = SV_GCMapEdictCap() - GC_PARITY_RUNTIME_RESERVE - ( svs.maxclients + 1 ) - must;
+	gc_parity_budget = SV_GCMapEdictCap() - SV_GCParityRuntimeReserve() - ( svs.maxclients + 1 ) - must;
 	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
 		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
 	/* Walls first, then map logic, then lights. */
@@ -7231,8 +7242,8 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 		gc_parity_tier_budget[t] = Q_min( tier_count[t], left );
 		left -= gc_parity_tier_budget[t];
 	}
-	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d static-props=%d (edicts %d)\n",
-		mapname, total, must, parity, gc_parity_budget, optional, nofunc, statics, GI->max_edicts );
+	Con_Reportf( "Xash3D GameCube: %s entities=%d always=%d parity=%d budget=%d optional=%d no-spawn=%d static-props=%d (edicts %d, run-time reserve %d)\n",
+		mapname, total, must, parity, gc_parity_budget, optional, nofunc, statics, GI->max_edicts, SV_GCParityRuntimeReserve( ));
 	Con_Reportf( "Xash3D GameCube: %s parity tiers walls %d/%d logic %d/%d lights %d/%d, baked illusionary %d\n",
 		mapname, gc_parity_tier_budget[0], tier_count[0], gc_parity_tier_budget[1], tier_count[1],
 		gc_parity_tier_budget[2], tier_count[2], baked );

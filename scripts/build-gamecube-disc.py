@@ -2171,6 +2171,22 @@ def build_loading_spans(source: Path, output: Path) -> list[tuple[str, Path]]:
 	return [("media/gc_loading.spn", out)]
 
 
+def world_dl_pair_ok(wd: Path) -> bool:
+	"""True when wd_<map>_sb.gcd sits next to this world DL and was written with
+	it: the runtime (model.c GC_StaticBrushes) ignores the static brush list
+	when its recorded pack size differs, and the server then sends every brush
+	entity as a packet entity (a stale 1.3 MB prebaked dod_avalanche pack
+	against a 2.88 MB fresh bake left objects missing)."""
+	sb = wd.with_name(wd.stem + "_sb.gcd")
+	try:
+		head = sb.read_bytes()[:12]
+	except OSError:
+		return False
+	if len(head) < 12 or head[:4] != b"GCsb" or int.from_bytes(head[4:6], "big") != 1:
+		return False
+	return int.from_bytes(head[8:12], "big") == wd.stat().st_size
+
+
 def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	"""media/wd_<map>.gcd for a GoldSrc map: the whole BSP as GX display lists
 	per PVS cluster (scripts/bake_worlddl_goldsrc.py, runtime
@@ -4200,18 +4216,25 @@ def stage_smoke_data(
 		name = f"wd_{stem}.gcd"
 		dest = media_out / name
 		src = None
+		stale = None
 		repo_root = Path(__file__).resolve().parents[3]  # .../dod-gc
 		for cand in (
 			source / "media" / name,
 			repo_root / "content" / "dod" / "media" / name,
 		):
 			if cand.is_file():
-				src = cand
-				break
+				if world_dl_pair_ok(cand):
+					src = cand
+					break
+				print(f"  world DL: ignoring {cand} (no matching static brush list; stale prebake)")
+				stale = stale or cand
 		if src is None:
 			bsp = source / "maps" / f"{stem}.bsp"
 			if bsp.is_file():
 				src = bake_world_dl(bsp, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache")
+		if src is None and stale is not None:
+			print(f"  world DL: WARNING: no fresh bake for {stem}; staging stale {stale} (brush entities go out as packet entities)")
+			src = stale
 		if src is None:
 			print(f"  world DL: no {name} (CapFaces/live BSP fallback)")
 			continue
