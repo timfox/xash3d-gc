@@ -261,6 +261,15 @@ static u32 gc_wd_lm_stream;	/* file offset of page 0 */
 static s32 gc_wd_lm_slot_page[GC_WD_LM_SLOTS_MAX];
 static s32 gc_wd_lm_slot_frame[GC_WD_LM_SLOTS_MAX];
 static int gc_wd_lm_miss, gc_wd_lm_miss_total;
+#if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
+/* When a slot was last asked for within its frame: chunks are walked nearest
+ * first, so the highest number of last frame is the farthest page. */
+static u16 gc_wd_lm_slot_seq[GC_WD_LM_SLOTS_MAX];
+#define GC_WD_LM_STEALS_FRAME 24	/* 12 KiB of ARAM reads a frame at most */
+#define GC_WD_LM_TOUCH( i ) ( gc_wd_lm_slot_seq[i] = seq < 0xffffu ? seq++ : seq )
+#else
+#define GC_WD_LM_TOUCH( i ) ((void)0)
+#endif
 static int gc_wd_lm_binds;
 static int gc_wd_chunk_lm;	/* current chunk uses TEXMAP2 lightmap */
 static GXTexObj gc_wd_lm_obj;
@@ -422,11 +431,24 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	static int full_frame = -1;	/* frame in which every slot was already in use */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
+#if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
+	static int seq_frame = -1, steals;
+	static u16 seq;
+	int far_slot = -1;
+
+	if( seq_frame != gc_wd_frame )
+	{
+		seq_frame = gc_wd_frame;
+		seq = 0;
+		steals = 0;
+	}
+#endif
 
 	i = hint[page & 2047u];
 	if( i < gc_wd_lm_nslots && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
+		GC_WD_LM_TOUCH( i );
 		return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
 	}
 	/* A wide view asks for more pages than there are slots (500 chunks in
@@ -441,6 +463,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		if( gc_wd_lm_slot_page[i] == (s32)page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
+			GC_WD_LM_TOUCH( i );
 			hint[page & 2047u] = (u8)i;
 			return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
 		}
@@ -454,7 +477,25 @@ static byte *R_GXWorldDLLmPage( u32 page )
 			oldest = gc_wd_lm_slot_frame[i];
 			victim = i;
 		}
+#if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
+		else if( gc_wd_lm_slot_frame[i] == gc_wd_frame - 1
+			&& ( far_slot < 0 || gc_wd_lm_slot_seq[i] > gc_wd_lm_slot_seq[far_slot] ))
+			far_slot = i;
+#endif
 	}
+#if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
+	/* One world pass a frame here. When the slots run out the ask is from a
+	 * chunk nearer than every page of last frame that has not been asked for
+	 * yet, so it takes the farthest of those. Without this a far leaf kept its
+	 * slot for as long as it stayed in view and the nearer leaf that came into
+	 * view was drawn vertex lit: leaves changed shading as the camera moved,
+	 * and a leaf at the edge of the view lost and won its slot in turn. */
+	if( victim < 0 && far_slot >= 0 && steals < GC_WD_LM_STEALS_FRAME )
+	{
+		victim = far_slot;
+		steals++;
+	}
+#endif
 	if( victim < 0 )
 	{
 		full_frame = gc_wd_frame;
@@ -466,6 +507,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		GX_InvalidateTexAll();
 	gc_wd_lm_slot_page[victim] = (s32)page;
 	gc_wd_lm_slot_frame[victim] = gc_wd_frame;
+	GC_WD_LM_TOUCH( victim );
 	gc_wd_lm_miss++;
 	gc_wd_lm_miss_total++;
 	hint[page & 2047u] = (u8)victim;
