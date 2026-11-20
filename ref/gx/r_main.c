@@ -2077,6 +2077,22 @@ static void R_EdgeDrawingGcmapProbe( void )
 					continue;
 				if( be->model->nummodelsurfaces <= 0 )
 					continue;
+				/* -gccapture: each brush model on the solid brush list, once. */
+				if( R_GXCaptureMode())
+				{
+					static const model_t *listed[96];
+					static int nlisted;
+					int li;
+
+					for( li = 0; li < nlisted && listed[li] != be->model; li++ )
+						;
+					if( li == nlisted && nlisted < 96 )
+					{
+						listed[nlisted++] = be->model;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush list %s rm=%d of %d\n",
+							be->model->name, be->curstate.rendermode, bn );
+					}
+				}
 				if( !R_GXBrushEntityVisible( be ))
 				{
 					/* -gccapture: name each brush model culled here once. */

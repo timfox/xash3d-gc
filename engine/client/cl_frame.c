@@ -2311,11 +2311,33 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		VectorCopy( ent->origin, ent->latched.prevorigin );
 		VectorCopy( ent->angles, ent->latched.prevangles );
 
-		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 		{
-			added++;
-			if( FBitSet( ent->curstate.effects, EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_LIGHT ))
-				CL_AddEntityEffects( ent );
+			const qboolean took = ref.dllFuncs.R_AddEntity( ent, ET_NORMAL );
+
+			/* -gccapture: each brush model handed to the renderer, once
+			 * (settles whether a support brush reaches the draw list). */
+			if( capture_brush_pick )
+			{
+				static const model_t *handed[96];
+				static int nhanded;
+				int hi;
+
+				for( hi = 0; hi < nhanded && handed[hi] != mod; hi++ )
+					;
+				if( hi == nhanded && nhanded < (int)ARRAYSIZE( handed ))
+				{
+					handed[nhanded++] = mod;
+					Con_Reportf( "Xash3D GameCube: capture emit brush %s e=%d took=%d rm=%d amt=%d dist=%.0f slot=%d of %d\n",
+						mod->name, e, took ? 1 : 0, ent->curstate.rendermode, ent->curstate.renderamt, dist,
+						added, budget );
+				}
+			}
+			if( took )
+			{
+				added++;
+				if( FBitSet( ent->curstate.effects, EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_LIGHT ))
+					CL_AddEntityEffects( ent );
+			}
 		}
 	}
 

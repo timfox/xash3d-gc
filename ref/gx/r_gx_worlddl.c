@@ -158,6 +158,16 @@ extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t siz
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
+extern qboolean R_GXTexnumMasked( unsigned texnum );
+/* The last world texture bound has a cut-out mask: its batches alpha-test. */
+static qboolean gc_wd_masked;
+static qboolean R_GXWorldDLBind( unsigned texnum )
+{
+	const qboolean ok = R_GXWorldDLBindTex( texnum );
+
+	gc_wd_masked = ok && R_GXTexnumMasked( texnum );
+	return ok;
+}
 extern unsigned r_gx_hot_weight;
 extern unsigned r_gx_cmpr_near_miss_total;
 extern qboolean R_GXTexnumIsLargeChain( unsigned texnum );
@@ -577,7 +587,32 @@ static void R_GXWorldDLSetupLit( int lightmap )
 
 /* id 0 restores the lit diffuse stage. Authored $detail adds mod2x (unlit
  * chunks only). $bumpmap without $envmap adds emboss on lit colour. */
+static void R_GXTevMatAppendStages( int id, int a, int b );
+
+/* GoldSrc '{' textures carry their mask in the CMPR alpha bit, but the lit
+ * setup turned the alpha test off for every batch, so lattices and netting
+ * drew their holes black (dod_charlie's flag tower *178, the trench netting
+ * *114). A plain material (no Source $alphatest record) cuts out when its
+ * texture is masked. */
 static void R_GXTevMatAppend( int id, int a, int b )
+{
+	R_GXTevMatAppendStages( id, a, b );
+	if( id < 1 || id > (int)gc_tev_nmat )
+	{
+		if( gc_wd_masked )
+		{
+			GX_SetAlphaCompare( GX_GEQUAL, 128, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_FALSE );
+		}
+		else
+		{
+			GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+			GX_SetZCompLoc( GX_TRUE );
+		}
+	}
+}
+
+static void R_GXTevMatAppendStages( int id, int a, int b )
 {
 	u8 flags, didx, aref;
 	u16 scale_fp;
@@ -775,6 +810,9 @@ static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
 static byte *gc_wd_cache_heap;	/* the cache when it had to come from the heap */
 static byte *gc_wd_tables_heap;	/* the tables when the spill had no room */
+static byte *gc_wd_force_heap;	/* -gccapture: the overflow bounce when the cache has no tail to spare */
+static u32 gc_wd_force_heap_size;
+qboolean R_GXCaptureMode( void );
 static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots this map */
 /* More distinct world textures than full-size slots: distant chunks then
  * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
@@ -846,6 +884,15 @@ static void R_GXWorldDLUnload( void )
 		free( gc_wd_tables_heap );
 		gc_wd_tables_heap = NULL;
 	}
+	if( gc_wd_force_heap )
+	{
+		GX_DrawDone();
+		free( gc_wd_force_heap );
+		gc_wd_force_heap = NULL;
+		gc_wd_force_heap_size = 0;
+	}
+	gc_wd_force = NULL;
+	gc_wd_force_size = 0;
 	gc_wd_slots = NULL;
 	gc_wd_texnum = NULL;
 	gc_wd_pvs = NULL;
@@ -1627,6 +1674,35 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			gc_wd_cache_size -= tail;
 			gc_wd_force = gc_wd_cache + gc_wd_cache_size;
 			gc_wd_force_size = tail;
+		}
+		/* -gccapture: a 96 KiB cache holds the near ground of a wide shot
+		 * and nothing else. dod_charlie from the beach had ~1600 of 1830
+		 * chunks in view "waiting" every frame, never drawn: the bluff top,
+		 * its flag tower and the far bunkers were missing. Frame rate does
+		 * not matter there, so a bounce from the heap lets every chunk in
+		 * view draw, one at a time, straight from ARAM. */
+		if( !gc_wd_force && R_GXCaptureMode())
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+
+			if( gc_wd_force_heap && gc_wd_force_heap_size < tail )
+			{
+				GX_DrawDone();
+				free( gc_wd_force_heap );
+				gc_wd_force_heap = NULL;
+			}
+			if( !gc_wd_force_heap && GC_MemHeapFreeBytes() >= tail + 128u * 1024u )
+			{
+				gc_wd_force_heap = (byte *)memalign( 32, tail );
+				gc_wd_force_heap_size = gc_wd_force_heap ? tail : 0;
+			}
+			if( gc_wd_force_heap )
+			{
+				gc_wd_force = gc_wd_force_heap;
+				gc_wd_force_size = tail;
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture world DL overflow bounce %u KiB %s\n",
+				tail / 1024u, gc_wd_force_heap ? "from the heap" : "not allocated (heap low): far chunks will not draw" );
 		}
 	}
 	GC_HeapCheck( "world DL before mat pack" );
@@ -2853,7 +2929,7 @@ static void R_GXWorldDLEmitChunk( byte *chunk, int *cur_mat )
 				gc_wd_texnum[b->mat] = (s16)GC_WorldTexnumByHash( m->tex_hash );
 			if( gc_wd_texnum[b->mat] <= 0 )
 				continue;
-			if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+			if( !R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 				continue;
 			*cur_mat = (int)b->mat;
 		}
@@ -3162,7 +3238,7 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 	R_GXCmprSetFar( far_pool ? true : false );
 	r_gx_hot_weight = ( far_pool || r_gx_mirror || !R_GXTexnumIsLargeChain( (unsigned)gc_wd_texnum2[mat] )) ? 0u
 		: R_GXWorldDLNearBatches( idx, k0, (int)(( gc_wd_keys[idx[k0]] >> 16 ) & 0xffffu ));
-	if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum2[mat] ))
+	if( !R_GXWorldDLBind( (unsigned)gc_wd_texnum2[mat] ))
 		return;
 	GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
@@ -3318,7 +3394,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 				 * batches of its group (the hot window's priority). */
 				if( !far_pool && !r_gx_mirror && R_GXTexnumIsLargeChain( (unsigned)texnum ))
 					r_gx_hot_weight = R_GXWorldDLNearBatches( idx, k, key );
-				WD_PF( 4, ok = R_GXWorldDLBindTex( (unsigned)texnum ));
+				WD_PF( 4, ok = R_GXWorldDLBind( (unsigned)texnum ));
 				if( ok )
 				{
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
@@ -3533,7 +3609,7 @@ static void R_GXWorldDLDynDraw( void )
 					continue;
 				if( (int)b->mat != cur_mat )
 				{
-					if( !R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+					if( !R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 						continue;
 					cur_mat = (int)b->mat;
 				}
@@ -3988,7 +4064,7 @@ int R_GXWorldDLDraw( void )
 					{
 						qboolean bound;
 
-						WD_PF( 4, bound = R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ));
+						WD_PF( 4, bound = R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ));
 						if( !bound )
 						{
 							bind_fail++;
@@ -4012,7 +4088,7 @@ int R_GXWorldDLDraw( void )
 						gc_wd_texnum2[b->mat] = (s16)( t2 > 0 ? t2 : -1 );
 					}
 					if( gc_wd_texnum2[b->mat] > 0
-						&& R_GXWorldDLBindTex( (unsigned)gc_wd_texnum2[b->mat] ))
+						&& R_GXWorldDLBind( (unsigned)gc_wd_texnum2[b->mat] ))
 					{
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 						/* Coverage = vertex alpha, carried through the later stages. */
@@ -4028,7 +4104,7 @@ int R_GXWorldDLDraw( void )
 						blend_draws++;
 					}
 					/* Back to layer 1 for the spec pass and the next batch. */
-					if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+					if( R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 				}
 				/* $envmap: reflective batches carry their normal. Main view
@@ -4053,7 +4129,7 @@ int R_GXWorldDLDraw( void )
 							GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
 						R_GXWorldDLEnvOff();
 						R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
-						if( R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ))
+						if( R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ))
 							cur_mat = (int)b->mat;
 					}
 				}
