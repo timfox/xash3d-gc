@@ -1476,7 +1476,12 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		if( open_rows == gc_wd_hdr.n_clusters )
 			need = total;
 		floor_bytes = Q_max( 96u * 1024u, gc_wd_hdr.max_chunk * 2u );
-		keep = need + need / 4u + (( gc_wd_hdr.max_chunk + 31u ) & ~31u );
+		/* The PVS bound is before the frustum test, and more than half of a
+		 * DoD map's clusters have no row at all, so it is far above what a
+		 * frame draws (avalanche: 204 KB bound, 39 KB drawn). charlie and
+		 * caen run on a 96 KB cache; twice that is kept at most. */
+		keep = need + (( gc_wd_hdr.max_chunk + 31u ) & ~31u );
+		keep = Q_min( keep, 192u * 1024u );
 		keep = ( Q_max( keep, floor_bytes ) + 32767u ) & ~32767u;
 		if( gc_wd_cache_size > keep )
 		{
