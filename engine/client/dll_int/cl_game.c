@@ -5175,6 +5175,39 @@ static void *pfnStudio_GCGetAnim( void *phdr, void *submodel, void *pseqdesc )
 }
 #endif
 
+/* The studio renderer asks for a player's weapon model by index (StudioDrawPlayer, pplayer->weaponmodel). On the GameCube the bots' third-person
+ * weapon models (p_enfield.mdl, ...) are named in the model table but never loaded, because nothing client side references them: the header
+ * came back NULL and StudioMergeBones read through it (a guest data fault that froze the match). Load such a model on demand, once, into
+ * the studio arena (never the heap), and let the DLL's own check skip the weapon if that fails. */
+#if XASH_GAMECUBE
+static model_t *CL_GCStudioModelByIndex( int modelindex )
+{
+	static const model_t *tried[32];
+	static int ntried;
+	model_t *m = CL_ModelHandle( modelindex );
+	int i;
+
+	if( !m || m->cache.data || !m->name[0] || !Q_stristr( m->name, ".mdl" ))
+		return m;
+	for( i = 0; i < ntried; i++ )
+		if( tried[i] == m )
+			return m;
+	if( ntried < (int)ARRAYSIZE( tried ))
+		tried[ntried++] = m;
+	{
+		model_t *loaded = Mod_ForName( m->name, false, false );
+
+		Con_Reportf( "Xash3D GameCube: weapon model %d %s loaded on demand: %s\n", modelindex, m->name,
+			loaded && loaded->cache.data ? "ok" : "failed" );
+		if( loaded )
+			m = loaded;
+	}
+	return m;
+}
+#else
+#define CL_GCStudioModelByIndex CL_ModelHandle
+#endif
+
 static engine_studio_api_t gStudioAPI =
 {
 	.Mem_Calloc              = Mod_Calloc,
@@ -5182,7 +5215,7 @@ static engine_studio_api_t gStudioAPI =
 	.LoadCacheFile           = Mod_LoadCacheFile,
 	.Mod_ForName             = pfnStudio_Mod_ForName,
 	.Mod_Extradata           = pfnStudio_Mod_Extradata,
-	.GetModelByIndex         = CL_ModelHandle,
+	.GetModelByIndex         = CL_GCStudioModelByIndex,
 	.GetCvar                 = CL_CvarGetPointer,
 	.GetChromeSprite         = pfnStudio_GetChromeSprite,
 	.GetAliasScale           = pfnStudio_GetAliasScale,
