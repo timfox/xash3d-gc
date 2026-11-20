@@ -1032,6 +1032,7 @@ void CL_CineInit( void );
 qboolean CL_CineActive( void );
 qboolean CL_CineView( vec3_t org, vec3_t ang, float *fov );
 qboolean CL_CineHideHUD( void );
+qboolean CL_GCCaptureMode( void );
 qboolean CL_CineHideViewModel( void );
 void CL_CineDraw2D( void );
 #if XASH_GAMECUBE

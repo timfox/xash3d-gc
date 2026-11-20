@@ -888,7 +888,7 @@ of bursts and tracers). Same process, same thread: hand them to the client
 directly through a small queue it drains every frame (CL_GCDrainLocalTempEnts).
 =======================
 */
-static byte	gc_local_tent_data[8192];
+static byte	gc_local_tent_data[4096];	/* drained every client frame; MEM1 is tight */
 static sizebuf_t	gc_local_tent_buf;
 static qboolean	gc_local_tent_init;
 unsigned	gc_local_tent_queued, gc_local_tent_dropped;

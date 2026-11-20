@@ -1846,6 +1846,10 @@ static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
  * these are admitted by the tag, ahead of the map's props. Keep the value in step
  * with DODGC_FILM_ACTOR_TAG in dod-gc's src/dod_film.h. */
 #define GC_FILM_ACTOR_TAG	0x46494C4D	/* 'FILM' */
+/* Studio slots in capture mode: dod-gc's 64-actor cast, the players and props. */
+#define GC_LEAN_STUDIO_MAX	72
+/* Brush entities (func_wall, doors, breakables) in capture mode, was 6. */
+#define GC_LEAN_BRUSH_MAX	16
 
 /* The lean emitter rebuilds each studio entity from its edict every frame, so
  * the client-side latch that crossfades a sequence change (0.2 s in
@@ -1941,23 +1945,74 @@ void CL_GCLeanPlayerEffects( void )
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
-	static cl_entity_t lean_brush_ents[6];
+	static cl_entity_t lean_brush_static[6];
+	cl_entity_t *lean_brush_ents = lean_brush_static;
 	/* WorldDL listen: emit every nearby map prop (avalanche has ~dozen
 	 * env_model instances across 5 unique MDLs). Was 4 — only sandbags. */
-	static cl_entity_t lean_studio_ents[40];	/* 24 film actors plus map props */
+	static cl_entity_t lean_studio_static[40];	/* 24 film actors plus map props */
+	/* -gccapture: a 64-actor cast plus props, from the spill or heap per map. */
+	static cl_entity_t *lean_studio_big;
+	cl_entity_t *lean_studio_ents = lean_studio_static;
+	int studio_budget = (int)( sizeof( lean_studio_static ) / sizeof( lean_studio_static[0] ));
 	static qboolean lean_player_seen;
 	edict_t *player;
 	vec3_t view_org;
 	int e, added = 0, studios = 0;
 	int scan_brush = 0, scan_far = 0, scan_nomod = 0, scan_nosurf = 0;
 	int scan_studio = 0, scan_studio_skip = 0;
-	const int budget = (int)( sizeof( lean_brush_ents ) / sizeof( lean_brush_ents[0] ));
-	const int studio_budget = (int)( sizeof( lean_studio_ents ) / sizeof( lean_studio_ents[0] ));
-	const float max_dist = 8000.0f;
+	int budget = (int)( sizeof( lean_brush_static ) / sizeof( lean_brush_static[0] ));
+	const float max_dist = CL_GCCaptureMode() ? 32000.0f : 8000.0f;
 	/* G371: denser AM NPC near dump/landmark eye. Xen bake eye→Nihilanth is
 	 * ~450u; keep headroom for companions. WorldDL props: whole-map radius. */
-	const float studio_max_dist = ( Sys_CheckParm( "-gcfullphysics" )
+	const float studio_max_dist = CL_GCCaptureMode() ? 32000.0f : ( Sys_CheckParm( "-gcfullphysics" )
 		|| Sys_CheckParm( "-gcworldrender" )) ? 12000.0f : 1600.0f;
+
+	if( CL_GCCaptureMode( ))
+	{
+		extern size_t GC_MemHeapFreeBytes( void );
+		extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
+		extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
+		const size_t big_bytes = sizeof( cl_entity_t ) * ( GC_LEAN_STUDIO_MAX + GC_LEAN_BRUSH_MAX );
+		static qboolean big_in_spill;
+		static int big_tried_spawn = -1;
+
+		/* A spill block dies with its map (the spill rewinds). */
+		if( lean_studio_big && big_in_spill && !Mod_GCWorldArraySpillHolds( lean_studio_big, big_bytes ))
+		{
+			lean_studio_big = NULL;
+			big_in_spill = false;
+		}
+		/* Once per map, in game: the world-array spill first (MEM1 is down to
+		 * a few KiB by then), the heap only with a margin, since Mem_Calloc
+		 * does not come back on failure. ~1.6 KiB per slot. */
+		if( !lean_studio_big && big_tried_spawn != svs.spawncount && cls.state == ca_active )
+		{
+			const char *where = "spill";
+
+			big_tried_spawn = svs.spawncount;
+			lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
+			if( lean_studio_big )
+			{
+				memset( lean_studio_big, 0, big_bytes );
+				big_in_spill = true;
+			}
+			else if( GC_MemHeapFreeBytes() > big_bytes + 512 * 1024 )
+			{
+				lean_studio_big = Mem_Calloc( host.mempool, big_bytes );
+				where = "heap";
+			}
+			Con_Reportf( "Xash3D GameCube: capture mode studio slots %d, brush slots %d %s in %s (%s)\n",
+				GC_LEAN_STUDIO_MAX, GC_LEAN_BRUSH_MAX, lean_studio_big ? "allocated" : "not allocated",
+				lean_studio_big ? where : "spill or heap", Q_memprint( big_bytes ));
+		}
+		if( lean_studio_big )
+		{
+			lean_studio_ents = lean_studio_big;
+			studio_budget = GC_LEAN_STUDIO_MAX;
+			lean_brush_ents = lean_studio_big + GC_LEAN_STUDIO_MAX;
+			budget = GC_LEAN_BRUSH_MAX;
+		}
+	}
 
 	/* CapFaces listen (-gcworldrender) also lacks a filled Flipper entity
 	 * list (solid=0) — env_model / mapmodels need the same lean emit path. */
@@ -2079,8 +2134,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		int studio_slots = 0;
 		int bodies[4];
 		int n_bodies = 0;
-		int picks[40];
-		float pick_dists[40];
+		int picks[GC_LEAN_STUDIO_MAX];
+		float pick_dists[GC_LEAN_STUDIO_MAX];
 		/* Leave room for the other players and bots (emitted after). */
 		const int pick_cap = Q_max( 1, studio_budget - Q_max( 0, svs.maxclients - 1 ));
 		int n_picks = 0;
