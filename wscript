@@ -628,6 +628,16 @@ def configure(conf):
 			# tables sized for a second player or for bots are cut to one
 			# (server client slots: 91 KB each).
 			conf.define('XASH_GC_LOSTCOAST', 1)
+			# The level has 85 map entities and a handful made in play. The
+			# edict tables (server edicts and baselines, client entities)
+			# are static data sized by these caps, and static data is heap
+			# here: at the stock 900 / 460 they held 1.8 MB, nearly all of
+			# it never touched (measured in Dolphin over the ride and the
+			# gate scene), while the heap could not find 8 KB to spawn the
+			# map's actors.
+			conf.define('DEFAULT_MAX_EDICTS', 256)
+			conf.define('GC_SP_EDICT_CAP', 256)
+			conf.define('GC_GCMAP_CLIENT_EDICTS', 256)
 		if conf.options.GAMEDIR == 'dod':
 			conf.define('XASH_DODGC_NETWORK', 1)
 			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
