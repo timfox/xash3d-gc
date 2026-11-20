@@ -2635,6 +2635,24 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 						if( slot )
 							mod->cache.data = slot;
 					}
+					/* Same for a mesh read into the world-array spill (the DoD
+					 * team bodies, map props): grow it in place by the few KB
+					 * of texture headers, before the skins can take the spill
+					 * tip. The calloc below used to run first and put a second
+					 * copy of the whole mesh on the heap while the spill copy
+					 * stayed pinned: 80 and 88 KB of heap for axis-inf and
+					 * brit-inf on dod_caen, with their spill reserve idle. */
+					else if( Mod_GCIsWorldArraySpillCache( buffer ) && mesh <= buffersize )
+					{
+						byte *slot = (byte *)Mod_GCWorldArraySpillTryGrow(
+							buffer, buffersize, merged, "mapmodel-tmerge" );
+
+						if( slot )
+						{
+							Mod_GCWorldArraySpillPinBase( slot, merged );
+							mod->cache.data = slot;
+						}
+					}
 					Image_GCPurgeDecodeScratch();
 					Mod_GCForceVmChromakeyMasks( thdr );
 					Mod_GCLoadTextures( mod, thdr );
