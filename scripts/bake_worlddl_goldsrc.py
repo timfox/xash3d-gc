@@ -91,40 +91,86 @@ class LmPage:
 		self.used = False
 		self.failed = False
 
-	def _try(self, w: int, h: int):
-		x, y, rh = self.x, self.y, self.row_h
-		if x + w > 32:
-			x = 0
-			y += rh
-			rh = 0
-		if y + h > 32:
-			return None
-		self.x, self.y, self.row_h = x + w, y, max(rh, h)
-		return (x, y, w, h)
+	def _shelf(self, sizes):
+		"""Shelf-pack (w, h) sizes, tallest first, beside the grey 2x2 at (0,0).
+		Returns a rect per size, or None when they do not all fit."""
+		order = sorted(range(len(sizes)), key=lambda i: (-sizes[i][1], -sizes[i][0]))
+		rects = [None] * len(sizes)
+		x, y, rh = 2, 0, 2
+		for i in order:
+			w, h = sizes[i]
+			if x + w > 32:
+				x = 0
+				y += rh
+				rh = 0
+			if w > 32 or y + h > 32:
+				return None
+			rects[i] = (x, y, w, h)
+			x += w
+			rh = max(rh, h)
+		return rects
 
-	def alloc(self, w: int, h: int):
-		if self.failed:
-			return None
-		side = max(2, min(16, max(w, h)))
-		for sz in (side, 8, 4, 2):
-			if sz > side:
-				continue
-			rect = self._try(sz, sz)
-			if rect:
+	def pack(self, dims):
+		"""Cells for every lit face of the chunk (dims: retail lw, lh each).
+		All faces are scaled by the largest common factor that fits, so a
+		crowded leaf gets a softer lightmap on every face instead of a full
+		one on the first three and flat grey on the rest (the light rectangles
+		on dod_charlie's beach).  Past 2x2 the smallest faces drop to a single
+		averaged luxel; None only when even that does not fit."""
+		if not dims:
+			return []
+		for k in range(16, 0, -1):
+			sizes = [(max(2, min(30, -(-lw * k // 16))), max(2, min(30, -(-lh * k // 16)))) for lw, lh in dims]
+			rects = self._shelf(sizes)
+			if rects:
 				self.used = True
-				return rect
+				return rects
+		by_area = sorted(range(len(dims)), key=lambda i: -(dims[i][0] * dims[i][1]))
+		for keep in range(len(dims) - 1, -1, -1):
+			sizes = [(1, 1)] * len(dims)
+			for i in by_area[:keep]:
+				sizes[i] = (2, 2)
+			rects = self._shelf(sizes)
+			if rects:
+				self.used = True
+				return rects
 		self.failed = True
-		return None
+		return [None] * len(dims)
 
 	def blit(self, rect, samples) -> None:
+		"""Resample the face lightmap into its cell: corner luxels stay on the
+		cell's corner texels (cell_st), box-filtered when the cell is smaller."""
 		x, y, w, h = rect
 		lh = len(samples)
 		lw = len(samples[0]) if lh else 1
+
+		def taps(n_dst: int, n_src: int, i: int):
+			if n_dst == 1:
+				return [(j, 1.0 / n_src) for j in range(n_src)]
+			c = i * (n_src - 1) / (n_dst - 1)
+			r = max(0.5, (n_src - 1) / (n_dst - 1) * 0.5)
+			out = []
+			for j in range(n_src):
+				wgt = max(0.0, 1.0 - abs(j - c) / (2.0 * r)) if r > 0.5 else max(0.0, 1.0 - abs(j - c))
+				if wgt > 0.0:
+					out.append((j, wgt))
+			tot = sum(wg for _j, wg in out)
+			return [(j, wg / tot) for j, wg in out]
+
+		xt = [taps(w, lw, px) for px in range(w)]
+		yt = [taps(h, lh, py) for py in range(h)]
 		for py in range(h):
 			for px in range(w):
-				sx = min(lw - 1, px * lw // w)
-				sy = min(lh - 1, py * lh // h)
-				self.pix[y + py][x + px] = samples[sy][sx]
+				acc = [0.0, 0.0, 0.0]
+				for sy, wy in yt[py]:
+					row = samples[sy]
+					for sx, wx in xt[px]:
+						c = row[sx]
+						wgt = wx * wy
+						acc[0] += c[0] * wgt
+						acc[1] += c[1] * wgt
+						acc[2] += c[2] * wgt
+				self.pix[y + py][x + px] = tuple(int(max(0, min(255, round(v)))) for v in acc)
 
 
 def rgb565_page(pix) -> bytes:
@@ -160,6 +206,7 @@ class Chunk:
 		self.lm = LmPage()
 		self.lm_keep = False
 		self.lm_index = 0
+		self.pending: list = []
 
 	def pos_index(self, p) -> int:
 		key = (
@@ -620,30 +667,43 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 		nrm = (-pl[0], -pl[1], -pl[2]) if f[1] else (pl[0], pl[1], pl[2])
 		for cluster in clusters:
 			chunk = chunks.setdefault(cluster, Chunk())
-			cell = None
 			lw = lh = 1
 			bmins = (0, 0)
+			samples = None
 			if not water and not (flags & TEX_SPECIAL) and f[6] >= 0 and bsp.lighting:
 				bmins, (lw, lh) = face_extents(ti0, ti1, pts)
 				samples = face_lightmap(bsp, f[6], lw, lh)
-				if samples:
-					cell = chunk.lm.alloc(lw, lh)
-					if cell:
-						chunk.lm.blit(cell, samples)
 			verts = []
 			for p, (s, t) in zip(pts, sts):
 				col = (96, 132, 140) if water else light_at(bsp, f, ti0, ti1, flags, pts, p)
-				if cell:
-					u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
-					v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
-					lu, lv = cell_st(cell, u, v, lw, lh)
-				else:
-					lu, lv = GREY_UV
-				verts.append((p, col, nrm, s, t, lu, lv))
-			chunk.emit(mat, GX_DRAW_TRIFAN, verts)
+				u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
+				v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
+				verts.append((p, col, nrm, s, t, u, v))
+			chunk.pending.append((mat, verts, lw, lh, samples))
 		n_faces += 1
 		if is_static:
 			n_static_faces += 1
+
+	# Lightmap cells are packed per chunk once all of its faces are known.
+	n_lm_soft = n_lm_flat = 0
+	for chunk in chunks.values():
+		lit = [i for i, rec in enumerate(chunk.pending) if rec[4]]
+		rects = chunk.lm.pack([(chunk.pending[i][2], chunk.pending[i][3]) for i in lit])
+		cells = dict(zip(lit, rects))
+		for i, (mat, verts, lw, lh, samples) in enumerate(chunk.pending):
+			cell = cells.get(i)
+			if cell:
+				chunk.lm.blit(cell, samples)
+				if cell[2] < min(lw, 30) or cell[3] < min(lh, 30):
+					n_lm_soft += 1
+			elif samples:
+				n_lm_flat += 1
+			out = []
+			for p, col, nrm, s, t, u, v in verts:
+				lu, lv = cell_st(cell, u, v, lw, lh) if cell else GREY_UV
+				out.append((p, col, nrm, s, t, lu, lv))
+			chunk.emit(mat, GX_DRAW_TRIFAN, out)
+		chunk.pending = []
 
 	# BSP tree for point-in-leaf → cluster (child encoding matches lostcoast)
 	plane_remap: dict[int, int] = {}
@@ -779,6 +839,7 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)}")
 	print(f"  MEM1 resident={ofs_pvsdir // 1024} KB  ARAM chunks={run // 1024} KB (max {max_chunk // 1024} KB)")
 	print(f"  lightmap pages={len(lm_pages) // 2048} ({len(lm_pages) // 1024} KB)")
+	print(f"  lightmap cells: {n_lm_soft} faces below retail size, {n_lm_flat} flat grey (no room)")
 	print(f"  wrote {out_path} ({len(body) // 1024} KB)")
 
 
