@@ -115,6 +115,29 @@ lives in ARAM too and is the next candidate after this.
   (which no longer have their own, so the three LZ4 paths together cost 8 KiB + 3 KiB of caches).
 - Tests: `tests/test_pvs_lz4.py` bakes dod_flash both ways and compares raw rows through the engine decoder.
 
+## 4d. Dolphin measurements, LZ4 off vs on (headless `-v Null`, 4 bots, own user dir; DoD DOL from master)
+
+| charlie | flag off | lightmap + lf | + PVS |
+|---|---|---|---|
+| world pack in ARAM (wd) | 2626 KiB | 1869 KiB | 1430 KiB |
+| light-face pack in ARAM (lf) | 1989 KiB | 1142 KiB | 1142 KiB |
+| ARAM total of the two | 4615 KiB | 3011 KiB | 2572 KiB (-2.0 MiB) |
+| heap at the same boot points (KB) | 453 / 227 / 211 | 453 / 226 / 210 | not compared |
+| `render: GX world faces` mean per frame | 12.40 ms | 11.91 ms | 12.65 ms |
+| lightmap page misses in the log samples | 0 | 0 | 0 |
+
+- Caen and avalanche: their file sizes shrink the same way (lf: avalanche 2204 -> 1221 KiB), but the world-draw times of
+  the off and on runs are not comparable: the 150-235 s runs reached different points of the game (caen never reached
+  world-draw frames headless, avalanche's `world faces` ranged 1.8-9.9 ms by phase). Heap at matching boot points was
+  within 1-2 KB. Headless Null time is emulated-clock timing, not GPU time; treat ms/frame here as "no visible cost",
+  not as a frame-time guarantee. A fixed camera path on the GPU queue would settle it.
+- A second pass was invalidated (two copies of my script ran together) and discarded; the figures above are from clean runs.
+- Dolphin with the PVS build: world renders, 237 visible chunks vs 230 in the earlier run, no LZ4 or PVS failure lines.
+- Reasons for not doing the rest of the list: texture dedup across maps frees nothing at run time (a map loads only its
+  own wt file; it would only shrink the disc image); per-chunk LZ4 sits on the hot chunk-refetch path (up to 500 KB a
+  frame) so it needs a GPU-queue frame measurement before it is worth trying; gp/pt packs are about 50-70 KiB a map.
+- Default: the disc builder now packs with LZ4 unless `DODGC_WD_LZ4=0` (4d PR).
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
