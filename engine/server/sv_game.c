@@ -1931,6 +1931,20 @@ static LINK_ENTITY_FUNC SV_GetEntityClass( const char *pszClassName )
 	return (LINK_ENTITY_FUNC)COM_GetProcAddress( svgame.hInstance, pszClassName );
 }
 
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+#define GC_EDICT_ESSENTIAL_RESERVE 16
+/* True when fewer than GC_EDICT_ESSENTIAL_RESERVE edicts are free: no free slot below the tip and the free ones already counted. */
+static qboolean SV_GCNamedSpawnBlocked( void )
+{
+	int i, used = 0;
+
+	for( i = 0; i < svgame.numEntities; i++ )
+		if( !svgame.edicts[i].free )
+			used++;
+	return GI->max_edicts - used <= GC_EDICT_ESSENTIAL_RESERVE;
+}
+#endif
+
 /*
 ==============
 SV_AllocPrivateData
@@ -1955,6 +1969,18 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 	if( !ent )
 	{
 		// allocate a new one
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+		/* The last few edicts belong to what the game cannot do without (a rocket or grenade made through GetClassPtr, which has no
+		 * name here and cannot take a NULL): a spawn by name (weapon box, gib, sparks, an item) stops short of them. */
+		if( !ent && svgame.numEntities > svs.maxclients && SV_GCNamedSpawnBlocked())
+		{
+			static int gc_reserve_logs;
+
+			if( gc_reserve_logs++ < 4 )
+				Con_Reportf( S_WARN "Xash3D GameCube: edict reserve: \"%s\" not created (%d so far)\n", pszClassName, gc_reserve_logs );
+			return NULL;
+		}
+#endif
 		ent = SV_AllocEdict();
 #if XASH_GAMECUBE
 		/* No free edict (the 460 tip): the caller gets NULL and carries on. Writing the classname through the NULL edict was a data
