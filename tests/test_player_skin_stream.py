@@ -61,6 +61,29 @@ class PlayerSkinStream(unittest.TestCase):
                 self.assertEqual((w, h), (plain[name][2], plain[name][3]), name)   # helmets etc. unchanged
         self.assertGreater(n_streamed, 0)
 
+    def test_engine_streamed_reader_sizes_match_the_layout(self):
+        # Mod_GCStudioTexDataBytes (engine/common/mod_studio.c): the texture-by-texture reader of big companions reads
+        # exactly this many bytes at each index, so it must end at the file end for the last texture and never cross the
+        # next texture's start.
+        def data_bytes(flags, w, h):
+            if not flags & disc.STUDIO_NF_GC_CMPR:
+                return w * h + 768
+            n = ((w + 7) // 8) * ((h + 7) // 8) * 32
+            if flags & disc.STUDIO_NF_GC_CMPR_STREAM:
+                n += (((w >> 1) + 7) // 8) * (((h >> 1) + 7) // 8) * 32
+            return n
+        for blob in (self.stream, self.plain):
+            tex = textures(blob)
+            for k, (name, flags, w, h, idx) in enumerate(tex):
+                end = idx + data_bytes(flags, w, h)
+                self.assertLessEqual(end, len(blob), name)
+                if k + 1 < len(tex):
+                    self.assertLessEqual(end, tex[k + 1][4], name)
+            last = tex[-1]
+            self.assertEqual(last[4] + data_bytes(last[1], last[2], last[3]), len(blob))
+        src = (ROOT / "engine/common/mod_studio.c").read_text()
+        self.assertIn("STUDIO_NF_GC_CMPR_STREAM", src[src.index("Mod_GCStudioTexDataBytes"):][:600])
+
     def test_default_bake_has_no_stream_flag(self):
         for _n, flags, *_ in textures(self.plain):
             self.assertFalse(flags & disc.STUDIO_NF_GC_CMPR_STREAM)

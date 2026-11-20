@@ -1842,6 +1842,23 @@ static qboolean Mod_GCDeferVmSkins( const model_t *mod )
 #endif
 }
 
+/* Bytes of one texture's pixel data in a gc_studio companion: palette indices plus the 768 byte palette, or for a baked
+ * CMPR skin (STUDIO_NF_GC_CMPR) the CMPR blocks, with the half-size low mip behind them for a streamed one. */
+static size_t Mod_GCStudioTexDataBytes( const mstudiotexture_t *t )
+{
+	const size_t w = (size_t)t->width, h = (size_t)t->height;
+
+	if( FBitSet( t->flags, STUDIO_NF_GC_CMPR ))
+	{
+		size_t bytes = (( w + 7u ) / 8u ) * (( h + 7u ) / 8u ) * 32u;
+
+		if( FBitSet( t->flags, STUDIO_NF_GC_CMPR_STREAM ))
+			bytes += (( ( w >> 1 ) + 7u ) / 8u ) * (( ( h >> 1 ) + 7u ) / 8u ) * 32u;
+		return bytes;
+	}
+	return w * h + 768u;
+}
+
 /* Read just the header, texture table and skin table of a big gc_studio companion into the 16 KB scratch and
  * remember where the pixels are. The in-memory header length is made to match, so the callers' checks pass. */
 static qboolean Mod_GCStudioTexStreamHeader( file_t *f, const char *path, fs_offset_t sz, fs_offset_t *size_out )
@@ -2010,7 +2027,7 @@ static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
 	table = (mstudiotexture_t *)((byte *)hdr + hdr->textureindex );
 	for( i = 0; i < hdr->numtextures; i++ )
 	{
-		const size_t pix = (size_t)table[i].width * (size_t)table[i].height + 768u;
+		const size_t pix = Mod_GCStudioTexDataBytes( &table[i] );
 
 		if( table[i].width <= 0 || table[i].height <= 0 || pix > 1024u * 1024u )
 			return;
@@ -2038,7 +2055,7 @@ static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
 	wtex = (mstudiotexture_t *)( win + hdr->textureindex );
 	for( i = 0; i < hdr->numtextures; i++ )
 	{
-		const size_t pix = (size_t)table[i].width * (size_t)table[i].height + 768u;
+		const size_t pix = Mod_GCStudioTexDataBytes( &table[i] );
 
 		if( FS_Seek( f, table[i].index, SEEK_SET ) != 0 || FS_Read( f, win + s0, pix ) != (fs_offset_t)pix )
 		{
