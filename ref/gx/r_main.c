@@ -2049,6 +2049,23 @@ static void R_EdgeDrawingGcmapProbe( void )
 					continue;
 				if( !R_GXBrushEntityVisible( be ))
 				{
+					/* -gccapture: name each brush model culled here once. */
+					if( R_GXCaptureMode())
+					{
+						static const model_t *culled[64];
+						static int nculled;
+						int ci;
+
+						for( ci = 0; ci < nculled && culled[ci] != be->model; ci++ )
+							;
+						if( ci == nculled && nculled < 64 )
+						{
+							culled[nculled++] = be->model;
+							gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled %s rm=%d org=%.0f %.0f %.0f\n",
+								be->model->name, r_gx_last_cull_was_pvs ? "pvs" : "frustum",
+								be->curstate.rendermode, be->origin[0], be->origin[1], be->origin[2] );
+						}
+					}
 					if( r_gx_last_cull_was_pvs )
 						cull_pvs++;
 					else
