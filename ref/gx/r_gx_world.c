@@ -6172,6 +6172,15 @@ static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
 /* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
 static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+#define GC_PROP_HINGES	4
+
+static struct
+{
+	float	pivot[3];
+	int	inst;	/* + 1, 0 = free */
+	float	speed, drag, stop, start;	/* the swing: degrees a second at start, lost at drag a second, until stop degrees */
+} gc_prop_hinge[GC_PROP_HINGES];
+static int gc_prop_nhinge;
 /* Pack v7: per-face prop lighting. Every vertex carries an index into 256
  * octahedral directions (the table lostcoast-gc tools/bake_lostcoast_props.py
  * also builds), and every instance three display-space colours taken from
@@ -6346,6 +6355,8 @@ static void R_GXPropMapCheck( void )
 	gc_prop_nmat = 0;
 	gc_prop_ninst = 0;
 	gc_prop_nmodels = 0;
+	gc_prop_nhinge = 0;
+	memset( gc_prop_hinge, 0, sizeof( gc_prop_hinge ));
 	gc_prop_cache = NULL;
 	gc_prop_cache_size = gc_prop_cache_head = 0;
 	gc_prop_cache_tried = false;
@@ -7389,12 +7400,89 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	return drawn;
 }
 
+/* A placed prop turned about a vertical hinge the map names (phys_hinge:
+ * the two leaves of the harbor gate, which the fisherman unlocks). The
+ * props are static here, so the game code hands over the push (speed at
+ * the start, what the hinge takes off it each second, the angle at which
+ * it meets something, when) and the leaf
+ * is turned at draw time. Its box is grown to the circle it sweeps so
+ * culling stays right at any angle. */
+void GC_PropHinge( const float *pivot, float speed, float drag, float stop, float start )
+{
+	int i, h = -1;
+	gc_prop_inst_t *in;
+
+	if( gc_prop_state != 1 )
+		return;
+	for( i = 0; i < GC_PROP_HINGES; i++ )
+	{
+		if( gc_prop_hinge[i].inst && gc_prop_hinge[i].pivot[0] == pivot[0] && gc_prop_hinge[i].pivot[1] == pivot[1] )
+		{
+			h = i;
+			break;
+		}
+	}
+	if( h < 0 )
+	{
+		/* The leaf on this hinge: the smallest prop whose box reaches the
+		 * hinge line and is not on another hinge already. */
+		int best = -1;
+		float bestvol = 0.0f;
+
+		for( h = 0; h < GC_PROP_HINGES && gc_prop_hinge[h].inst; h++ );
+		if( h == GC_PROP_HINGES )
+			return;
+		for( i = 0; i < gc_prop_ninst; i++ )
+		{
+			float vol;
+			int k;
+
+			in = &gc_prop_inst[i];
+			if( pivot[0] < in->mins[0] - 4 || pivot[0] > in->maxs[0] + 4
+				|| pivot[1] < in->mins[1] - 4 || pivot[1] > in->maxs[1] + 4
+				|| pivot[2] < in->mins[2] - 16 || pivot[2] > in->maxs[2] + 16 )
+				continue;
+			for( k = 0; k < GC_PROP_HINGES; k++ )
+				if( gc_prop_hinge[k].inst == i + 1 )
+					break;
+			if( k < GC_PROP_HINGES )
+				continue;
+			vol = (float)( in->maxs[0] - in->mins[0] + 1 ) * (float)( in->maxs[1] - in->mins[1] + 1 )
+				* (float)( in->maxs[2] - in->mins[2] + 1 );
+			if( best < 0 || vol < bestvol )
+			{
+				best = i;
+				bestvol = vol;
+			}
+		}
+		if( best < 0 )
+			return;
+		in = &gc_prop_inst[best];
+		gc_prop_hinge[h].inst = best + 1;
+		gc_prop_nhinge++;
+		VectorCopy( pivot, gc_prop_hinge[h].pivot );
+		{
+			/* the far corner of the box from the hinge: the swept circle */
+			float fx = Q_max( pivot[0] - in->mins[0], in->maxs[0] - pivot[0] );
+			float fy = Q_max( pivot[1] - in->mins[1], in->maxs[1] - pivot[1] );
+			float r = sqrtf( fx * fx + fy * fy ) + 1.0f;
+
+			in->mins[0] = (s16)( pivot[0] - r ); in->maxs[0] = (s16)( pivot[0] + r );
+			in->mins[1] = (s16)( pivot[1] - r ); in->maxs[1] = (s16)( pivot[1] + r );
+		}
+	}
+	gc_prop_hinge[h].speed = speed;
+	gc_prop_hinge[h].drag = drag;
+	gc_prop_hinge[h].stop = stop;
+	gc_prop_hinge[h].start = start;
+}
+
 static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 {
 	float mid[3], org[3];
 	const float k = 6.2831853f / 65536.0f;
 	const float *eye = RI.rvp.vieworigin;
-	float dx, dy, dz, r2, d2, cover2;
+	float dx, dy, dz, r2, d2, cover2, hinge_turn = 0.0f;
 
 	/* Named map props (high byte of the model word: ordinal + 1) are drawn
 	 * while their edict is drawable, so the good/destroyed pairs that
@@ -7436,6 +7524,37 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	org[0] = (float)in->org[0];
 	org[1] = (float)in->org[1];
 	org[2] = (float)in->org[2];
+	if( gc_prop_nhinge )
+	{
+		int h;
+
+		for( h = 0; h < GC_PROP_HINGES; h++ )
+		{
+			if( gc_prop_hinge[h].inst == ( in - gc_prop_inst ) + 1 )
+			{
+				/* Pushed once and slowed by the hinge: the speed dies
+				 * away at drag a second, the angle is its integral. */
+				const float t = ( gp_cl ? (float)gp_cl->time : 0.0f ) - gc_prop_hinge[h].start;
+				const float kd = gc_prop_hinge[h].drag;
+				const float *pv = gc_prop_hinge[h].pivot;
+				float deg = 0.0f, c, s2, hx, hy;
+
+				if( t > 0.0f )
+					deg = kd > 0.001f ? gc_prop_hinge[h].speed * ( 1.0f - expf( -kd * t )) / kd : gc_prop_hinge[h].speed * t;
+				/* (what it meets stops it dead: an iron gate on a wall) */
+				if( gc_prop_hinge[h].stop > 0.0f )
+					deg = bound( -gc_prop_hinge[h].stop, deg, gc_prop_hinge[h].stop );
+				hinge_turn = deg * ( 3.14159265f / 180.0f );
+				c = cosf( hinge_turn );
+				s2 = sinf( hinge_turn );
+				hx = org[0] - pv[0];
+				hy = org[1] - pv[1];
+				org[0] = pv[0] + hx * c - hy * s2;
+				org[1] = pv[1] + hx * s2 + hy * c;
+				break;
+			}
+		}
+	}
 	{
 		int drawn;
 
@@ -7491,7 +7610,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		}
 		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == ( in->model & 0xffu );
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
-			(float)in->ang[1] * k, (float)in->ang[2] * k,
+			(float)in->ang[1] * k + hinge_turn, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
 			 * (already resident) reads the same there, and the full
 			 * chains it asked for no longer compete for the cache. */
