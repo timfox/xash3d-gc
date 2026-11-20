@@ -122,6 +122,17 @@ SV_AddEntitiesToPacket
 
 =============
 */
+#if XASH_GAMECUBE
+/* gc_full_pack 1 (debug, default 0, only from a test cfg): a listen-server boot override disc packs with the game's own AddToFullPack like
+ * the menu play route does, instead of the lean seats-plus-brushes emitter, so packet sizes can be measured on the route that ships. */
+static qboolean SV_GCFullPackTest( void )
+{
+	convar_t *cv = Cvar_FindVar( "gc_full_pack" );
+
+	return cv && cv->value != 0.0f;
+}
+#endif
+
 static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_frame_t *frame, sv_ents_t *ents, qboolean from_client )
 {
 	byte		*clientpvs = NULL;
@@ -165,7 +176,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 	if( ( Sys_CheckParm( "-gcnewgame" )
 			|| Sys_CheckParm( "-gclistenserver" )
 			|| ( Sys_CheckParm( "-gcmenuplaystart" ) && !GC_MenuRunsServer() ))
-		&& from_client )
+		&& from_client && !SV_GCFullPackTest() )
 	{
 		int		e;
 		int		player_e = NUM_FOR_EDICT( pClient );
