@@ -766,7 +766,7 @@ qboolean R_GXActorDrawBodyLists( const byte *base, const mstudiomodel_t *sub, co
 	GX_InitLightAttn( &lo, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f );
 	GX_LoadLightObj( &lo, GX_LIGHT0 );
 	GX_SetNumChans( 1 );
-	GX_SetChanCtrl( GX_COLOR0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHT0, GX_DF_SIGN, GX_AF_NONE );
+	GX_SetChanCtrl( GX_COLOR0, GX_ENABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHT0, GX_DF_SIGNED, GX_AF_NONE );
 	GX_SetChanCtrl( GX_ALPHA0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
 	GX_SetChanAmbColor( GX_COLOR0A0, twothirds );
 	GX_SetChanMatColor( GX_COLOR0A0, white );
