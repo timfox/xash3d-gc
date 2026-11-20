@@ -197,6 +197,24 @@ unsigned int GC_GameFileToAram( const char *path, int *len )
 #endif
 }
 
+/* A small game data file read straight into the caller's buffer (a scene
+ * script onto the stack): FS_LoadFile wants the whole file from a heap that
+ * has run out of two-kilobyte pieces by the time the map's actors spawn.
+ * Returns the bytes read, 0 when the file is missing or does not fit. */
+int GC_GameFileRead( const char *path, void *dst, int max )
+{
+	file_t *f = FS_Open( path, "rb", false );
+	fs_offset_t size, n = 0;
+
+	if( !f )
+		return 0;
+	size = FS_FileLength( f );
+	if( size > 0 && size <= max )
+		n = FS_Read( f, dst, (size_t)size );
+	FS_Close( f );
+	return n == size ? (int)n : 0;
+}
+
 /* dst: 32-byte aligned, with room for bytes rounded up to 32. */
 void GC_GameAramRead( unsigned int aram, void *dst, int bytes )
 {

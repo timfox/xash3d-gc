@@ -1908,6 +1908,64 @@ static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 	}
 }
 
+/* The same for movement. A walking monster (MOVETYPE_STEP) moves and turns
+ * when it thinks, ten times a second, and the renderer carries it from the
+ * step before to this one (R_StudioLerpMovement) between its animtimes. The
+ * lean emitter latched "before" to "now" every frame, so nothing was carried:
+ * the Lost Coast fisherman walked and turned in ten jumps a second. Few
+ * things walk at once on this route, and static data is heap here: four. */
+typedef struct
+{
+	int	index;
+	float	animtime, prevanimtime;
+	vec3_t	origin, prevorigin;
+	vec3_t	angles, prevangles;
+} gc_movelatch_t;
+
+static gc_movelatch_t gc_movelatch[4];
+
+static void GC_LeanMoveLatch( cl_entity_t *ent )
+{
+	gc_movelatch_t *l = NULL, *spare = &gc_movelatch[0];
+	int i;
+
+	if( ent->index <= 0 || ent->curstate.movetype != MOVETYPE_STEP || ent->curstate.animtime <= 0.0f )
+		return;
+	for( i = 0; i < (int)ARRAYSIZE( gc_movelatch ); i++ )
+	{
+		if( gc_movelatch[i].index == ent->index )
+		{
+			l = &gc_movelatch[i];
+			break;
+		}
+		if( !gc_movelatch[i].index || gc_movelatch[i].animtime < spare->animtime )
+			spare = &gc_movelatch[i];
+	}
+	if( !l || ent->curstate.animtime < l->animtime || ent->curstate.animtime > l->animtime + 1.0f )
+	{
+		/* new here, a new level, or back after a pause: nothing to carry */
+		l = l ? l : spare;
+		l->index = ent->index;
+		l->animtime = l->prevanimtime = ent->curstate.animtime;
+		VectorCopy( ent->origin, l->origin );
+		VectorCopy( ent->origin, l->prevorigin );
+		VectorCopy( ent->angles, l->angles );
+		VectorCopy( ent->angles, l->prevangles );
+	}
+	else if( ent->curstate.animtime != l->animtime )
+	{
+		l->prevanimtime = l->animtime;
+		VectorCopy( l->origin, l->prevorigin );
+		VectorCopy( l->angles, l->prevangles );
+		l->animtime = ent->curstate.animtime;
+		VectorCopy( ent->origin, l->origin );
+		VectorCopy( ent->angles, l->angles );
+	}
+	ent->latched.prevanimtime = l->prevanimtime;
+	VectorCopy( l->prevorigin, ent->latched.prevorigin );
+	VectorCopy( l->prevangles, ent->latched.prevangles );
+}
+
 /*
 =============
 CL_GCLeanPlayerEffects
@@ -2768,6 +2826,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->latched.prevanimtime = ent->curstate.animtime;
 			memcpy( ent->latched.prevcontroller, ent->curstate.controller, sizeof( ent->latched.prevcontroller ));
 			GC_LeanSeqLatch( ent, ed, mod );
+			GC_LeanMoveLatch( ent );
 			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			{
 				studios++;
