@@ -3948,10 +3948,39 @@ static int R_StudioDrawModel( int flags )
 			return 1;
 	}
 
+#if XASH_GAMECUBE
+	/* A scripted film actor (dod-gc) is not a player, but plays like one: its legs
+	 * walk a gait sequence under the weapon's upper-body aim sequence. The gait
+	 * comes in controller[2] and the low bits of controller[3], flagged by bit 7 of
+	 * controller[3] (DoD player models have no bone controllers), and walks at the
+	 * entity's own frame. */
+	player_info_t *film_saved_pi = m_pPlayerInfo;
+	static player_info_t film_gait;
+
+	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 )
+		&& m_pStudioHeader && m_pStudioHeader->numbonecontrollers == 0 )
+	{
+		const int gs = RI.currententity->curstate.controller[2]
+			| (( RI.currententity->curstate.controller[3] & 0x7f ) << 8 );
+
+		if( gs > 0 && gs < m_pStudioHeader->numseq )
+		{
+			const mstudioseqdesc_t *gd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + gs;
+
+			memset( &film_gait, 0, sizeof( film_gait ));
+			film_gait.gaitsequence = gs;
+			film_gait.gaitframe = RI.currententity->curstate.frame * ( gd->numframes > 1 ? gd->numframes - 1 : 0 ) / 256.0f;
+			m_pPlayerInfo = &film_gait;
+		}
+	}
+#endif
 	if( RI.currententity->curstate.movetype == MOVETYPE_FOLLOW )
 		R_StudioMergeBones( RI.currententity, RI.currentmodel );
 	else
 		R_StudioSetupBones( RI.currententity );
+#if XASH_GAMECUBE
+	m_pPlayerInfo = film_saved_pi;
+#endif
 
 	R_StudioSaveBones();
 	R_STUDIO_PROF( "studio: bones" );
