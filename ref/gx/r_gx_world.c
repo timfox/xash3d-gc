@@ -2432,6 +2432,17 @@ qboolean R_GCHotWindowIsDurable( void )
 	return r_gx_hot_is_durable && r_gx_hot.base != NULL && r_gx_hot.size > 0;
 }
 
+/* What a late taker of heap must leave behind. A match with twelve bots runs
+ * with under 20 KiB free; a HUD sheet or a hot window that takes the rest
+ * leaves nothing for the next message or sound. Below the floor the caller
+ * reuses or evicts what it already has. */
+#define GC_GX_LATE_HEAP_FLOOR ( 48u * 1024u )
+
+static qboolean R_GXLateHeapRoom( size_t need )
+{
+	return GC_MemHeapFreeBytes() >= need + GC_GX_LATE_HEAP_FLOOR;
+}
+
 void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 {
 	static qboolean alloc_failed;
@@ -2444,7 +2455,9 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 		want = 96u * 1024u;
 	want = ( want + 31u ) & ~31u;
 
-	if( r_gx_durable_hot && r_gx_durable_hot_size >= want )
+	/* A smaller window than asked is kept: growing it meant a free and a new
+	 * block on every world frame, and every chain in it streamed in again. */
+	if( r_gx_durable_hot )
 	{
 		/* This is called every world frame. Preserve queued/resident chains
 		 * until map loading switches the active window. */
@@ -2455,15 +2468,9 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 	/* Tip is gone after WorldDL+studios — don't memalign-spam every frame. */
 	if( alloc_failed )
 		return;
-	if( r_gx_durable_hot )
-	{
-		free( r_gx_durable_hot );
-		r_gx_durable_hot = NULL;
-		r_gx_durable_hot_size = 0;
-	}
 	for( try_sz = want; try_sz >= 32u * 1024u; try_sz = ( try_sz > 48u * 1024u ) ? ( try_sz - 16u * 1024u ) : 0 )
 	{
-		r_gx_durable_hot = (byte *)memalign( 32, try_sz );
+		r_gx_durable_hot = R_GXLateHeapRoom( try_sz ) ? (byte *)memalign( 32, try_sz ) : NULL;
 		if( r_gx_durable_hot )
 		{
 			r_gx_durable_hot_size = try_sz;
@@ -3293,7 +3300,8 @@ static u16 *R_GXHudAllocBacking( size_t need, size_t *heap_bytes )
 	u16 *neu = (u16 *)GC_BootArenaAlloc( need );
 
 	*heap_bytes = 0;
-	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET )
+	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET
+		&& R_GXLateHeapRoom( need ))
 	{
 		neu = (u16 *)memalign( 32, need );
 		if( neu )
