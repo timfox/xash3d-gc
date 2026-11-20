@@ -2072,6 +2072,27 @@ static void *Mod_GCLoadStudioTexFile( const char *modname, fs_offset_t *size_out
 #endif
 
 #if XASH_GAMECUBE
+/* A window set aside for streamed skins on a map whose arena is too tight to
+ * stage one when a weapon is picked up (caen: the studio region's overflow
+ * slices and the packet rings took it, and the rifle drew magenta). Claimed
+ * by SV_GCSizePacketEntities from the map arena; gone with the arena. */
+static byte *gc_skin_window;
+static size_t gc_skin_window_size;
+
+static void Mod_GCDropSkinWindow( void )
+{
+	gc_skin_window = NULL;
+	gc_skin_window_size = 0;
+}
+
+void Mod_GCSetSkinWindow( byte *window, size_t size )
+{
+	gc_skin_window = window;
+	gc_skin_window_size = window ? size : 0;
+	if( window )
+		GC_SetMapArenaResetHook( Mod_GCDropSkinWindow );
+}
+
 /* Upload the textures of a companion header. A streamed one (Mod_GCStudioTexStreamHeader) has no pixels in memory:
  * each texture's pixels are read from the file into one reusable window together with a copy of the header and table
  * (the loader finds the pixels at header + index), the loader is pointed at that single texture, and the resulting
@@ -2104,7 +2125,13 @@ static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
 	}
 	win_size = ( s0 + maxpix + 31u ) & ~31u;
 	f = FS_Open( gc_texstream.path, "rb", false );
-	win = Mod_GCStudioArenaStage( win_size, &prev );
+	if( gc_skin_window && win_size <= gc_skin_window_size )
+	{
+		in_arena = false;
+		win = gc_skin_window;
+	}
+	else
+		win = Mod_GCStudioArenaStage( win_size, &prev );
 	if( !win )
 	{
 		in_arena = false;
