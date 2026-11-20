@@ -999,6 +999,16 @@ static void Mod_GCAnimUnpack( byte *buf, unsigned len )
 	}
 }
 
+/* Where a sequence goes when the ring has no room left this frame (every
+ * block in its way handed out this frame, or no free entry): a small block
+ * decodes into one of two spares instead of the whole body playing its bind
+ * pose. Two, because one model's bones take its sequence and its gait (or a
+ * blend) at once. Any block that fits; bigger ones still miss. */
+#define GC_ANIMPACK_SPARE ( 8u * 1024u )
+static byte gc_animspare[2][GC_ANIMPACK_SPARE] __attribute__((aligned( 32 )));
+static int gc_animspare_next;
+static const char *gc_animpack_miss;   /* why the last fetch missed, for the bind pose warning */
+
 static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 {
 	byte dirbuf[64] __attribute__((aligned( 32 )));
@@ -1016,13 +1026,16 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 			return gc_animpool + gc_animent[i].off;
 		}
 	}
+	gc_animpack_miss = "no such sequence or no pool";
 	if( seq < 0 || (unsigned)seq >= pk->numseq || !Mod_GCAnimPoolReady( ))
 		return NULL;
 
 	/* Directory entry: 8 bytes at 32 + 8 * seq, never across a 32-byte block. */
 	diroff = GC_ANIMPACK_HDR + 8u * (unsigned)seq;
+	gc_animpack_miss = "directory unreadable";
 	if( !Mod_GCAnimPackRead( pk, diroff & ~31u, dirbuf, 32 ))
 		return NULL;
+	gc_animpack_miss = "bad directory entry or too big for the pool";
 	off = ((unsigned *)( dirbuf + ( diroff & 31u )))[0];
 	size = ((unsigned *)( dirbuf + ( diroff & 31u )))[1];
 	if( pk->version >= 2 && ( size & 0x80000000u ))
@@ -1054,7 +1067,10 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( start + need > gc_animpool_size )
 		{
 			if( wraps++ )
-				return NULL;
+			{
+				gc_animpack_miss = "ring full this frame";
+				goto spare;
+			}
 			start = 0;
 		}
 		for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
@@ -1070,7 +1086,10 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 			break;
 		start = gc_animent[pinned].off + gc_animent[pinned].len;
 		if( ++tries > GC_ANIMPACK_ENTRIES )
-			return NULL;
+		{
+			gc_animpack_miss = "ring fragmented this frame";
+			goto spare;
+		}
 	}
 	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
 	{
@@ -1089,7 +1108,10 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	if( slot < 0 )
 		slot = oldest;
 	if( slot < 0 )
-		return NULL;
+	{
+		gc_animpack_miss = "every ring entry handed out this frame";
+		goto spare;
+	}
 	if( lz4 )
 	{
 		const unsigned cn = ( comp_len + 31u ) & ~31u;
@@ -1118,6 +1140,42 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	gc_animpool_cursor = start + need;
 	gc_animpack_fetch_len = gc_animent[slot].ret_len;
 	return gc_animpool + start;
+
+spare:
+	/* Not kept in the ring: fetched again next frame, when there may be room. */
+	if( need > GC_ANIMPACK_SPARE )
+		return NULL;
+	{
+		byte *buf = gc_animspare[gc_animspare_next];
+
+		gc_animspare_next ^= 1;
+		if( lz4 )
+		{
+			const unsigned cn = ( comp_len + 31u ) & ~31u;
+			byte *cdst = buf + need - cn;
+
+			if( cn > need || !Mod_GCAnimPackRead( pk, off, cdst, cn )
+				|| !Mod_GCLZ4Decode( cdst + 4, cdst + comp_len, buf, buf + raw_len ))
+				return NULL;
+			Mod_GCAnimUnpack( buf, raw_len );
+			memset( buf + raw_len, 0, (( raw_len + 31u ) & ~31u ) - raw_len );
+			gc_animpack_fetch_len = ( raw_len + 31u ) & ~31u;
+		}
+		else
+		{
+			if( !Mod_GCAnimPackRead( pk, off, buf, need ))
+				return NULL;
+			gc_animpack_fetch_len = need;
+		}
+		{
+			static int spare_logs;
+
+			if( spare_logs++ < 8 )
+				Con_Reportf( "Xash3D GameCube: animpack '%s' sequence %d from a spare (%s, %u bytes)\n",
+					pk->name, seq, gc_animpack_miss, need );
+		}
+		return buf;
+	}
 }
 
 /* Animation for a sequence of a split model, or NULL when the model's group
@@ -1139,14 +1197,15 @@ static void *Mod_GCAnimPackGet( studiohdr_t *phdr, mstudioseqdesc_t *pseqdesc )
 	if( Q_stricmp( ext, "gca" ))
 		return NULL;
 
+	gc_animpack_miss = NULL;
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
 		anim = Mod_GCAnimPackFetch( pk, (int)( pseqdesc - (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex )));
 	if( anim )
 		return anim;
 	if( warned++ < 8 )
-		Con_Reportf( S_WARN "Xash3D GameCube: animpack '%s' sequence '%s' unavailable, bind pose\n",
-			group->name, pseqdesc->label );
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack '%s' sequence '%s' unavailable (%s), bind pose\n",
+			group->name, pseqdesc->label, gc_animpack_miss ? gc_animpack_miss : "pack not open" );
 	if( (size_t)pseqdesc->numblends * phdr->numbones * sizeof( mstudioanim_t ) > sizeof( bindpose ))
 		Host_Error( "%s: no animation for %s\n", __func__, pseqdesc->label );
 	return (void *)bindpose;
