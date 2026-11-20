@@ -795,6 +795,9 @@ static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
 static byte *gc_wd_cache_heap;	/* the cache when it had to come from the heap */
 static byte *gc_wd_tables_heap;	/* the tables when the spill had no room */
+static byte *gc_wd_force_heap;	/* -gccapture: the overflow bounce when the cache has no tail to spare */
+static u32 gc_wd_force_heap_size;
+qboolean R_GXCaptureMode( void );
 static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots this map */
 /* More distinct world textures than full-size slots: distant chunks then
  * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
@@ -866,6 +869,15 @@ static void R_GXWorldDLUnload( void )
 		free( gc_wd_tables_heap );
 		gc_wd_tables_heap = NULL;
 	}
+	if( gc_wd_force_heap )
+	{
+		GX_DrawDone();
+		free( gc_wd_force_heap );
+		gc_wd_force_heap = NULL;
+		gc_wd_force_heap_size = 0;
+	}
+	gc_wd_force = NULL;
+	gc_wd_force_size = 0;
 	gc_wd_slots = NULL;
 	gc_wd_texnum = NULL;
 	gc_wd_pvs = NULL;
@@ -1647,6 +1659,35 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			gc_wd_cache_size -= tail;
 			gc_wd_force = gc_wd_cache + gc_wd_cache_size;
 			gc_wd_force_size = tail;
+		}
+		/* -gccapture: a 96 KiB cache holds the near ground of a wide shot
+		 * and nothing else. dod_charlie from the beach had ~1600 of 1830
+		 * chunks in view "waiting" every frame, never drawn: the bluff top,
+		 * its flag tower and the far bunkers were missing. Frame rate does
+		 * not matter there, so a bounce from the heap lets every chunk in
+		 * view draw, one at a time, straight from ARAM. */
+		if( !gc_wd_force && R_GXCaptureMode())
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+
+			if( gc_wd_force_heap && gc_wd_force_heap_size < tail )
+			{
+				GX_DrawDone();
+				free( gc_wd_force_heap );
+				gc_wd_force_heap = NULL;
+			}
+			if( !gc_wd_force_heap && GC_MemHeapFreeBytes() >= tail + 128u * 1024u )
+			{
+				gc_wd_force_heap = (byte *)memalign( 32, tail );
+				gc_wd_force_heap_size = gc_wd_force_heap ? tail : 0;
+			}
+			if( gc_wd_force_heap )
+			{
+				gc_wd_force = gc_wd_force_heap;
+				gc_wd_force_size = tail;
+			}
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture world DL overflow bounce %u KiB %s\n",
+				tail / 1024u, gc_wd_force_heap ? "from the heap" : "not allocated (heap low): far chunks will not draw" );
 		}
 	}
 	GC_HeapCheck( "world DL before mat pack" );
