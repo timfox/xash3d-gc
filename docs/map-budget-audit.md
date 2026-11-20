@@ -220,3 +220,35 @@ lives in ARAM too and is the next candidate after this.
 - **No Dolphin run, no heap KB or ms/frame measured**; no disc image built. Boot disk and Expansion1 are at 99-100%.
   Sizes above are measured file sizes; ARAM freed is computed from them.
 - Not done: gp/pt/cf compression, texture dedup, falaise chain cache, `_lf` pack, PVS dedup.
+
+## 7. Lean-path skips still active on the DoD route (server side) and PVS notes (2026-11-19, master 8d9738d8e7)
+
+Scope: the entity-parity budget, the packet ring, the CapFaces lean overflow and the `GC_MenuRunsServer()` gates in
+sv_game.c / sv_frame.c. (Client particle caps, decal resources, texture slots and the temp-entity pool belong to the
+Polish maps thread and are not listed.) Numbers are from Dolphin logs of the lean listen route, 4 bots.
+
+| Skip | Where | What it removes | Maps affected (measured) | Proposed fix |
+|---|---|---|---|---|
+| Parity budget, tier 1 "map logic" | `SV_GCBudgetParityEntities` / `SV_GCCapFacesOptionalEntity` (sv_game.c) | `trigger_relay`, `trigger_changetarget`, `trigger_auto`, `info_target`, `ambient_generic`, `env_explosion`: objective and target chains, round-win fanfares, scripted blasts | charlie: logic 59/153 kept (relay 10/51, changetarget 0/11, ambient_generic 28/47, info_target 8/23, explosion 10/16); caen 60/60 kept; avalanche 18/18 | Run pure-logic entities (relay, auto, changetarget, info_target) from a compact table with no edict and no private slab entry: they only forward targets, and cost an edict each (153 on charlie). The budget is edicts, not heap: `heap<16KB 0, private slab 0, edicts 3` in the logs |
+| Parity budget, tier 2 "decor and lights" | same | `env_sprite` (55 on charlie), `env_shake` (18), `env_shooter` (5), named `light` (11) | charlie lights 0/89; caen 5/56; avalanche has none | Bake `env_sprite` (glows, flames) into the world pack as sprite records drawn without edicts, like the static wall records; `env_shake` and `light` styles as small server tables |
+| Edict budget formula | `gc_parity_budget = cap - 32 reserve - (maxclients + 1) - always` | everything above: charlie `always=290` (env_model 33, env_render 32, trigger_multiple 21, func_breakable 17, particle_shooter 17, multi_manager 15, env_state 14 ...) leaves a budget of 121 of 304 parity entities | charlie budget 121/304, caen 239/290, avalanche 333/249 (nothing skipped) | `gc_static_walls=1` (records, no edict) returns the 62 charlie wall slots to the logic tier; it is off by default and was only checked with a self test. Next: env_render / env_state / func_mortar_field style "always" entities that have no per-frame work could join the compact table |
+| Static props without a pack | `GC_STATIC_PROP_MODELS 6` (server.h) | all but 6 unique prop models | none on a disc built with packs (the disc builder fails without one) | already engineered away by the `gp_` packs; keep the build check |
+| Packet ring fallback | `GC_PACKET_LIST` ring, "packet list overflow" guard (sv_frame.c) | farthest non-players dropped when more than the ring (256) are visible | none observed: largest list 17 per frame on charlie | no work needed; the guard stays |
+| CapFaces lean "optional" entities | `SV_GCCapFacesOptionalEntity` (sv_game.c) | `infodecal`, `env_glow`, `env_fade`, `env_message`, `env_beam`, `env_laser`, `env_bubbles`, unnamed `func_illusionary` (95 on charlie, baked into the world DL instead) | charlie optional=69, avalanche 103, caen 41 | glows/beams/bubbles as client-side records from the same baked table as sprites |
+| `GC_MenuRunsServer()` gates | sv_save.c, model.c, sv_init.c, mod_bmodel.c | the HL1 menu/save route: lean landmark stash, NPC and studio caps | not the DoD listen route (it never takes these branches) | out of scope for DoD |
+
+Order by value: (1) compact no-edict logic table (restores objective logic and ambience on charlie), (2) sprite/glow
+records in the world pack, (3) enable and default `gc_static_walls=1` once the draw side is confirmed, then (4)
+`env_shake` and light styles. None of these is implemented yet.
+
+### PVS notes (builds on LZ4 PVS rows, #409)
+
+- Visible fraction is already small: 3.5% (switch, zalec) to 9.3% (escape) of clusters per cluster on average, and no
+  row marks more than half of the map. Row sizes: 160-175 bytes RLE average, 6x smaller again as 4 KiB LZ4 blocks.
+- Row dedup is worth 0.3% (identical rows) and one-level XOR delta about 15%, so the only real memory win was the block
+  LZ4 already merged: caen 596 -> 204 KiB, charlie 618 -> 178 KiB, avalanche 424 -> 128 KiB.
+- Not done: tighter conservative vis at bake time (needs the BSP portals, which the baker does not parse, and any change
+  to the visible set risks popping in places like the charlie church doorway); entity PVS culling for networking and
+  draw; a per-cluster frustum/area pre-cull. The decode counters (#419) show PVS decodes are negligible
+  (2 block decodes in 5,632 frames on charlie), so the per-frame cost to attack is the leaf marking and draw-list build,
+  not decompression; that needs the `-gcprofile` stage timers on a fixed camera path, which I do not have.
