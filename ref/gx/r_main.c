@@ -214,6 +214,16 @@ qboolean R_OpaqueEntity( cl_entity_t *ent )
 	if( sw_noalphabrushes.value && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
 		return true;
 
+#if XASH_GAMECUBE
+	/* On the Flipper a see-through brush (rendermode 4: lattices, netting,
+	 * fences) is alpha-tested, never blended, so it draws with the solid
+	 * brush entities. The translucent pass never reached it on the capture
+	 * route: dod_charlie's radio tower (func_wall *178, {tension6 lattice)
+	 * was missing and the control-point flag on it hung in the sky. */
+	if( GC_UseGxWorldDraw() && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
+		return true;
+#endif
+
 	return false;
 }
 
