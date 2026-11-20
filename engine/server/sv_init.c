@@ -155,6 +155,28 @@ void SV_GCSizePacketEntities( void )
 	sv_gc_local_ring = NULL;
 	sv_gc_local_ring_entries = 0;
 	{
+		/* What a frame can carry on the listen route (SV_AddEntitiesToPacket, -gclistenserver): every spawned seat plus the lean brush
+		 * budget (4), nothing else, so lean_bound is a hard per-frame bound (13 players + 4 = 17 measured on charlie, spawn, bluff,
+		 * radio tent and spectator views). The ring holds the current and the reference frame of each client that takes frames (bots
+		 * take none): the host and 2 LAN peers is 3 x 2 x bound = 120 entries at the bound, and the static ring has 128. Charlie got
+		 * 144 entries (239 KB of arena) before; a longer LAN party falls back to full updates (not an error), and the overflow guard
+		 * still never drops a player. */
+		const int lean_bound = svs.maxclients + 4;
+		const int want = ( 3 * 2 * lean_bound + 7 ) & ~7;
+
+		if( want <= 128 )
+		{
+			/* The static 128-entry tables hold the host and two LAN peers at the bound: no arena ring, the whole 239 KB stays a post-load gap. */
+			svs.packet_entities = gc_singleplayer_packet_entities;
+			svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
+			sv_gc_frame_scratch = fallback_scratch;
+			sv_gc_visible_cap = 128;
+			Con_Reportf( "Xash3D GameCube: packet entities map=%s per-frame bound %d (%d seats + 4 brushes), 3 clients need %d entries: static tables (128), no arena ring, arena_tail_left=%s\n",
+				sv.name, lean_bound, svs.maxclients, want, Q_memprint( GC_MapArenaLargestGap()));
+			return;
+		}
+	}
+	{
 		const size_t gap = GC_MapArenaLargestGap();
 		const size_t each = sizeof( entity_state_t ) * 5;
 		extern size_t Mod_GCWorldEntityTextHeapBytes( void );
