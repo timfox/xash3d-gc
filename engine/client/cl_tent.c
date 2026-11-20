@@ -3711,6 +3711,45 @@ typedef enum
 	GC_LEAN_DECAL_KINDS
 } gc_lean_decal_kind_t;
 
+#if XASH_DODGC_NETWORK
+/* The DoD route draws decals as quads that darken the frame,
+ * frame * ( 1 - texel ) (R_GXDecalRingDraw): the GX effect textures carry no
+ * alpha, so a decal drawn "colour over the wall through its alpha" came out
+ * as an opaque black square. Turn colour-and-alpha pixels into how much of
+ * each channel to take away: alpha * ( 1 - colour ), black where the decal is
+ * clear. */
+static void CL_GCDecalPixelsToDarken( byte *rgba, size_t count )
+{
+	size_t i;
+
+	for( i = 0; i < count; i++, rgba += 4 )
+	{
+		const unsigned a = rgba[3];
+
+		rgba[0] = (byte)(( a * ( 255u - rgba[0] )) / 255u );
+		rgba[1] = (byte)(( a * ( 255u - rgba[1] )) / 255u );
+		rgba[2] = (byte)(( a * ( 255u - rgba[2] )) / 255u );
+		rgba[3] = 255;
+	}
+}
+
+/* A decal image as the loader returns it; false when its format is not one
+ * of the two the decal loader produces. */
+static qboolean CL_GCDecalImageToDarken( rgbdata_t *pic )
+{
+	if( !pic || !pic->buffer )
+		return false;
+	if( pic->type == PF_RGBA_32 )
+		CL_GCDecalPixelsToDarken( pic->buffer, (size_t)pic->width * pic->height );
+	else if( pic->type == PF_INDEXED_32 && pic->palette )
+		CL_GCDecalPixelsToDarken( pic->palette, 256 );
+	else
+		return false;
+	ClearBits( pic->flags, IMAGE_HAS_ALPHA | IMAGE_ONEBIT_ALPHA );
+	return true;
+}
+#endif
+
 static int CL_GCEnsureLeanDecalKind( gc_lean_decal_kind_t kind )
 {
 	static int tex[GC_LEAN_DECAL_KINDS];
@@ -3767,8 +3806,14 @@ static int CL_GCEnsureLeanDecalKind( gc_lean_decal_kind_t kind )
 		}
 	}
 
+#if XASH_DODGC_NETWORK
+	CL_GCDecalPixelsToDarken( dst, 16 * 16 );
+	tex[kind] = ref.dllFuncs.GL_CreateTexture( names[kind], 16, 16, dst,
+		TF_DECAL | TF_CLAMP | TF_NOMIPMAP );
+#else
 	tex[kind] = ref.dllFuncs.GL_CreateTexture( names[kind], 16, 16, dst,
 		TF_DECAL | TF_CLAMP | TF_NOMIPMAP | TF_HAS_ALPHA );
+#endif
 	if( tex[kind] > 0 )
 		Con_Reportf( "Xash3D GameCube: G295 lean %s decal tex=%d (embedded 16x16)\n",
 			names[kind] + 9, tex[kind] ); /* skip "#gc_lean_" */
@@ -3835,7 +3880,13 @@ int GAME_EXPORT CL_DecalIndex( int id )
 			if( !Q_strnicmp( host.draw_decals[id], "{shot", 5 )
 				&& GC_MemHeapFreeBytes() > 24 * 1024 )
 			{
-				gl_texturenum = ref.dllFuncs.GL_LoadTexture( host.draw_decals[id], NULL, 0, TF_DECAL );
+				rgbdata_t *pic = FS_LoadImage( host.draw_decals[id], NULL, 0 );
+
+				if( pic && CL_GCDecalImageToDarken( pic ))
+					gl_texturenum = ref.dllFuncs.GL_LoadTextureFromBuffer( host.draw_decals[id], pic,
+						TF_DECAL | TF_CLAMP | TF_NOMIPMAP, false );
+				if( pic )
+					FS_FreeImage( pic );
 				if( gl_texturenum > 0 )
 				{
 					static int logs;
