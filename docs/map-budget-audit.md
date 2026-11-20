@@ -176,6 +176,26 @@ lives in ARAM too and is the next candidate after this.
 - Prop textures: left at their baked size (`pt` packs are in ARAM already and are drawn from small slots; raising them
   changes the slot size the texture cache owns).
 
+## 4g. Nearest bodies at 256 px from the ARAM skin stream (opt-in, default off)
+
+- Build: `XASH_GC_SKIN_WINDOW_BSS=1 XASH_GC_SKIN_WINDOW_KIB=64` (static window pool; default KIB is 192 for the view
+  model window) and disc builder `GC_PLAYER_SKIN_STREAM=256`. Companions then carry, per 256 px body skin, the 256 px
+  CMPR texels plus a 128 px low mip (`STUDIO_NF_GC_CMPR_STREAM`). The low mip is the resident skin (the same 8 KiB as the
+  128 px baseline), the 256 px texels live in ARAM and the skin stream promotes them into the 64 KiB window, the nearest
+  two bodies at a time. A build without the window pool draws the low mip only: identical to the 128 px skins.
+- Measured, charlie, 4 bots, headless Dolphin: all 10 skins of both infantry companions load (`streamed skins 10/10`),
+  no decode failures; stream counters `promotions=4 evictions=2 full=12514 low=14212`: bodies beyond the nearest two
+  draw their resident 128 px low mip, as designed. Heap free after load **170 KB against 234 KB** for the 128 px
+  default DOL: the 64 KiB static window, as estimated (+64 KiB of MEM1, down from +86 KB fully resident). The heap cost is
+  the reason it stays opt-in.
+- Visual: GPU Dolphin captures with the spectator camera, `output/media/2026-11-19_charlie_spectator_axis_soldier_streamed_256px_skin.png`
+  and `..._axis_soldier_128px_skin_baseline.png`: dark camo tunic in both, nothing white, black or magenta.
+- A bug found on the way and fixed in the same PR: the texture-by-texture reader for big companions
+  (`Mod_GCStudioTexDataBytes`, mod_studio.c) read width x height + 768 bytes for every texture. For baked CMPR skins that is
+  twice the data and ran past the file end, so the last textures were "unreadable" and the torsos drew white. It now
+  sizes CMPR (and CMPR + low mip) textures correctly.
+- No frame-time measurement: the draw cost is the same GX CMPR bind; the stream counters show the promotion rate.
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
