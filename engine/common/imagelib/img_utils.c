@@ -1435,6 +1435,71 @@ qboolean Image_AddIndexedImageToPack( const byte *in, int width, int height )
 		: Mem_TryMalloc( host.imagepool, image.size );
 	if( !image.rgba && image.mdl_decode )
 		image.rgba = Mem_TryMalloc( host.imagepool, image.size );
+	/* The decode scratch was busy and the heap had no block of the full
+	 * size (a 256x256 view model skin on a tight or fragmented heap): the
+	 * skin then came out as the default texture, magenta. Decode it at half
+	 * size, or a quarter, instead: every second texel of the source, which
+	 * needs a block a quarter of the size. */
+	if( !image.rgba && image.mdl_decode && ( !expand_to_rgba || image.d_currentpal ))
+	{
+		int step;
+
+		for( step = 2; step <= 4 && !image.rgba; step <<= 1 )
+		{
+			const int w = scaled_width / step, h = scaled_height / step;
+			const size_t sz = (size_t)w * h * ( expand_to_rgba ? 4 : 1 );
+			int x, y;
+
+			if( w < 16 || h < 16 )
+				break;
+			image.rgba = Image_GCAllocMdlDecode( sz );
+			if( !image.rgba )
+				image.rgba = Mem_TryMalloc( host.imagepool, sz );
+			if( !image.rgba )
+				continue;
+			for( y = 0; y < h; y++ )
+			{
+				const byte *row = source + (size_t)( y * step ) * scaled_width;
+
+				if( expand_to_rgba )
+				{
+					uint *out = (uint *)image.rgba + (size_t)y * w;
+
+					for( x = 0; x < w; x++ )
+						out[x] = image.d_currentpal[row[x * step]];
+				}
+				else
+				{
+					byte *out = image.rgba + (size_t)y * w;
+
+					for( x = 0; x < w; x++ )
+						out[x] = row[x * step];
+				}
+			}
+			if( expand_to_rgba )
+			{
+				int i;
+
+				for( i = 0; i < 256; i++ )
+				{
+					const byte *col = (const byte *)&image.d_currentpal[i];
+
+					if( col[0] != col[1] || col[1] != col[2] )
+					{
+						image.flags |= IMAGE_HAS_COLOR;
+						break;
+					}
+				}
+				image.type = PF_RGBA_32;
+			}
+			Con_Reportf( "Xash3D GameCube: MDL skin %dx%d decoded at %dx%d (no %s block for the full size)\n",
+				scaled_width, scaled_height, w, h, Q_memprint( image.size ));
+			image.width = w;
+			image.height = h;
+			image.size = sz;
+			return true;
+		}
+	}
 	/* A HUD sheet loaded mid-match (DoD clip sheets) finds no heap block for
 	 * its expansion; the transient slab is idle once nothing is resampled. */
 	if( !image.rgba && image.hud_sprite )
