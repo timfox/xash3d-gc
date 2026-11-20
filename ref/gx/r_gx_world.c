@@ -11628,8 +11628,14 @@ void R_GXStudioBindTexnum( unsigned texnum )
 
 		r_gx_studio_bound_tex = texnum;
 		r_gx_studio_pending_tex = texnum;
-		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE. */
-		if( r_gx_studio_viewmodel )
+		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE.
+		 * Only while the view model is being drawn: the flag stays set
+		 * after R_GXStudioEnd, and the effects drawn next (bullet holes,
+		 * sprites, particles) bind through here too. Every bind after the
+		 * first of a batch then switched blending off and depth writes on,
+		 * so a bullet hole's darkening map was painted opaque on the wall:
+		 * a black square with a pale star. */
+		if( r_gx_studio_viewmodel && r_gx_studio_active )
 		{
 			image_t *vim = R_GetTexture( texnum );
 			const qboolean hands_ate = ( vim && vim->gc_gx_native_alpha
