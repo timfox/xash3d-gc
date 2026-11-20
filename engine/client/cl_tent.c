@@ -600,33 +600,43 @@ void CL_GCEnsureTempEntPool( void )
 	next_try = host.realtime + 5.0;
 	/* World spill first: 27 KiB of heap for the pool left the view model
 	 * and the crosshair without texture memory (dark rifle, crosshair OOM
-	 * on charlie). The heap only when it is plentiful. */
-	cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
-	if( cl_tempents )
+	 * on charlie). The heap only when it is plentiful, and only for the
+	 * smallest pool.
+	 * Sixteen entries dropped shell casings, debris and smoke puffs in a
+	 * firefight (four bots firing fill it in half a second), so take 48 or
+	 * 32 when the spill left over after the map's own claims holds them and
+	 * still keeps GC_TENT_SPILL_KEEP free for what loads later. */
+#define GC_TENT_SPILL_KEEP	( 64u * 1024u )
 	{
-		memset( cl_tempents, 0, bytes );
-		Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
-		gc_tempents_in_spill = true;
-		where = "spill";
-	}
-	else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
-		cl_tempents = Mem_Calloc( cls.mempool, bytes );
-	if( !cl_tempents && want > 16 )
-	{
-		/* No room for the capture pool: the usual 16 rather than none. */
-		Con_Reportf( "Xash3D GameCube: no room for %d client tempents (%s), trying 16\n", want, Q_memprint( bytes ));
-		want = 16;
-		bytes = sizeof( TEMPENTITY ) * want;
-		cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
-		if( cl_tempents )
+		extern size_t Mod_GCWorldArraySpillFree( void );
+		static const int sizes[] = { 48, 32, 16 };
+		int si = 0;
+
+		if( want > 48 )
+			si = -1;	/* capture pool first */
+		for( ; si < 3 && !cl_tempents; si++ )
 		{
-			memset( cl_tempents, 0, bytes );
-			Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
-			gc_tempents_in_spill = true;
-			where = "spill";
+			const int n = si < 0 ? want : sizes[si];
+			const size_t nb = sizeof( TEMPENTITY ) * n;
+
+			if( n > 16 && Mod_GCWorldArraySpillFree() < nb + GC_TENT_SPILL_KEEP )
+				continue;
+			cl_tempents = Mod_GCWorldArraySpillTryAlloc( nb, "client tempents" );
+			if( cl_tempents )
+			{
+				memset( cl_tempents, 0, nb );
+				Mod_GCWorldArraySpillPinBase( cl_tempents, nb );
+				gc_tempents_in_spill = true;
+				where = "spill";
+			}
+			else if( n == 16 && GC_MemHeapFreeBytes() > nb + 256 * 1024 )
+				cl_tempents = Mem_Calloc( cls.mempool, nb );
+			if( cl_tempents )
+			{
+				want = n;
+				bytes = nb;
+			}
 		}
-		else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
-			cl_tempents = Mem_Calloc( cls.mempool, bytes );
 	}
 	if( !cl_tempents )
 	{
