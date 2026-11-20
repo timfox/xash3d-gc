@@ -271,6 +271,7 @@ static int gc_wd_lm_miss, gc_wd_lm_miss_total;
 /* When a slot was last asked for within its frame: chunks are walked nearest
  * first, so the highest number of last frame is the farthest page. */
 static u16 gc_wd_lm_slot_seq[GC_WD_LM_SLOTS_MAX];
+#define GC_WD_LM_STEAL_MARGIN 48u	/* asks: a view makes 250 to 500 a frame, several a leaf */
 #define GC_WD_LM_STEALS_FRAME 24	/* 12 KiB of ARAM reads a frame at most */
 #define GC_WD_LM_TOUCH( i ) ( gc_wd_lm_slot_seq[i] = seq < 0xffffu ? seq++ : seq )
 #else
@@ -515,7 +516,14 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	 * slot for as long as it stayed in view and the nearer leaf that came into
 	 * view was drawn vertex lit: leaves changed shading as the camera moved,
 	 * and a leaf at the edge of the view lost and won its slot in turn. */
-	if( victim < 0 && far_slot >= 0 && steals < GC_WD_LM_STEALS_FRAME )
+	/* Only from a page that was clearly farther: asked for at least
+	 * GC_WD_LM_STEAL_MARGIN asks later last frame than this ask comes now.
+	 * Two leaves at about the same distance swap places in the walk as the
+	 * camera moves; without the margin they took the last slot from each
+	 * other in turn. A page that is resident stays until a leaf well nearer
+	 * needs its slot or it has been out of view for two frames. */
+	if( victim < 0 && far_slot >= 0 && steals < GC_WD_LM_STEALS_FRAME
+		&& (u32)gc_wd_lm_slot_seq[far_slot] >= (u32)seq + GC_WD_LM_STEAL_MARGIN )
 	{
 		victim = far_slot;
 		steals++;
