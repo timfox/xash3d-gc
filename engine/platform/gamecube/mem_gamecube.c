@@ -230,7 +230,13 @@ qboolean GC_HeapCheck( const char *tag )
 	}
 	__malloc_unlock( _REENT );
 	if( ok )
-		Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p\n", tag, chunks, (void *)top );
+	{
+		/* ~10 of these a frame: the first 40 and every 5000th are enough, and keep a long run under the host log cap. */
+		static unsigned ok_logs;
+
+		if( ok_logs++ < 40 || !( ok_logs % 5000 ))
+			Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p (#%u)\n", tag, chunks, (void *)top, ok_logs );
+	}
 	else
 	{
 		failures++;
@@ -279,8 +285,15 @@ void GC_HeapCensusReport( const char *stage );
 
 void GC_MapLoadBufferWorldSettled( qboolean settled );
 void GC_TexRegionReport( const char *stage );
+#ifdef XASH_GC_MALLOC_TRACE
+void GC_MallocTraceFlush( void );
+#endif
+
 void GC_MemSample( const char *stage )
 {
+#ifdef XASH_GC_MALLOC_TRACE
+	GC_MallocTraceFlush();
+#endif
 	size_t total = Mem_TotalRealSize();
 	size_t delta = (total >= gc_mem_last) ? (total - gc_mem_last) : 0;
 
@@ -289,6 +302,13 @@ void GC_MemSample( const char *stage )
 	/* Per-map budget: spawning is done, so move map-lifetime heap blocks into
 	 * the map's leftover memory (runs every map, unchanged totals or not).
 	 * From here on, arena carves must avoid the world's arrays. */
+	if( !Q_strcmp( stage, "bsp-buffer-release" ) || !Q_strcmp( stage, "entity spawn" ) || !Q_strcmp( stage, "pre-SV_Init" ))
+		GC_HeapCensusReport( stage );
+	if( !Q_strcmp( stage, "entity spawn" ))
+	{
+		extern void SV_GCParityReport( void );
+		SV_GCParityReport();
+	}
 	if( !Q_strcmp( stage, "map active" ))
 	{
 		extern void Mod_GCMoveWorldEntitiesToArena( void );
@@ -1884,10 +1904,19 @@ unsigned int GC_AramAllocTagged( unsigned int size, qboolean stream, const char 
 			stream ? "stream" : "reserve", tag ? tag : "?", Q_memprint( size ), base,
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )));
 	else
+	{
+		int i;
+
 		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s segs=%d/%d\n",
 			tag ? tag : "?", stream ? "stream" : "reserve", Q_memprint( size ),
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )),
 			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )), (int)gc_aram_heap.count, GC_ARAM_MAX_SEGS );
+		/* Say what fragments it: the whole segment table, once per refusal. */
+		for( i = 0; i < gc_aram_heap.count; i++ )
+			Con_Reportf( "Xash3D GameCube: ARAM map 0x%08x %s %s%s\n", gc_aram_heap.segs[i].offset,
+				Q_memprint( gc_aram_heap.segs[i].size ), gc_aram_heap.segs[i].used ? gc_aram_heap.segs[i].tag : "FREE",
+				gc_aram_heap.segs[i].used ? ( gc_aram_heap.segs[i].cls == GC_ARAM_STREAM ? " (stream)" : " (session)" ) : "" );
+	}
 	return base;
 }
 
@@ -2234,6 +2263,25 @@ void GC_PrefetchResetForMenu( void )
 	gc_prefetch_used = 0;
 	gc_prefetch_manifest_ready = false;
 	gc_prefetch_initialized = false;
+}
+
+/* The menu-idle first-map prefetch window is dead weight once the map is loaded (1 MiB of ARAM
+ * in a DoD match). Drop its entries first so no reader can see freed ARAM, then free the block;
+ * the next menu idle reserves a fresh one (GC_PrefetchResetForMenu clears the init flag). */
+void GC_PrefetchReleaseForMatch( void )
+{
+	unsigned int base = gc_prefetch_aram;
+
+	if( !base )
+		return;
+	memset( gc_prefetch, 0, sizeof( gc_prefetch ));
+	gc_prefetch_count = 0;
+	gc_prefetch_next = 0;
+	gc_prefetch_used = 0;
+	gc_prefetch_capacity = 0;
+	gc_prefetch_manifest_ready = true;
+	gc_prefetch_aram = 0;
+	GC_AramFree( base );
 }
 
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )

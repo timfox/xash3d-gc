@@ -1291,7 +1291,9 @@ static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 	 * free (ceres fsb). The static table holds 460 ents whatever maxclients
 	 * is, and cl_parse caps the map route to it, so nothing under-allocs;
 	 * maps over 460 take the map-arena path first. */
-	if( maxclients > 8 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* 16, not 8: the table does not depend on maxclients, and an 8-bot match is 9 clients (the heap table
+	 * of 744 KB then fails: "mem FAIL Client Edicts Zone"). */
+	if( maxclients > 16 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	if( GC_MapLoadMemoryOpt()
@@ -2035,6 +2037,16 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 			{
 				Image_GCPurgeDecodeScratch();
 				buf = CL_GCLoadHudSpriteBss( loadname, &size );
+			/* An effect sprite larger than the 128 KiB staging buffer (puff and smoke sprites, 190-215 KiB) never fits
+			 * as a whole file: the pool request below fails (a "mem FAIL FileSystem Pool" line and a texture-mip trim
+			 * on every map that loads one) and the streaming shrink at the end of the ladder is what serves it.
+			 * Take the shrink first for those. */
+			if( buf == NULL && gc_sprite_effect_load && type == SPR_CLIENT && GC_MapLoadMemoryOpt()
+				&& FS_FileSize( loadname, false ) > (fs_offset_t)( 128 * 1024 ))
+			{
+				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
+				used_sys = buf != NULL;
+			}
 			}
 			if( buf == NULL )
 				buf = FS_LoadFile( loadname, &size, false );
@@ -5153,6 +5165,16 @@ static int pfnStudio_IsHardware( void )
 	return 1;
 }
 
+#if XASH_GAMECUBE
+/* The client DLL's studio renderer asks for a sequence's animation here when its seqgroup file is an animation pack. */
+void *R_StudioGetAnim( studiohdr_t *m_pStudioHeader, model_t *m_pSubModel, mstudioseqdesc_t *pseqdesc );
+
+static void *pfnStudio_GCGetAnim( void *phdr, void *submodel, void *pseqdesc )
+{
+	return R_StudioGetAnim( (studiohdr_t *)phdr, (model_t *)submodel, (mstudioseqdesc_t *)pseqdesc );
+}
+#endif
+
 static engine_studio_api_t gStudioAPI =
 {
 	.Mem_Calloc              = Mod_Calloc,
@@ -5167,6 +5189,9 @@ static engine_studio_api_t gStudioAPI =
 	.StudioGetAliasTransform = pfnStudio_GetAliasTransform,
 	.GetViewEntity           = CL_GetViewModel,
 	.IsHardware              = pfnStudio_IsHardware,
+#if XASH_GAMECUBE
+	.GCGetAnim               = pfnStudio_GCGetAnim,
+#endif
 };
 
 static void CL_InitStudioAPI( void )
