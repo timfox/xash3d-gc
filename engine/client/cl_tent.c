@@ -605,8 +605,11 @@ void CL_GCEnsureTempEntPool( void )
 	 * Sixteen entries dropped shell casings, debris and smoke puffs in a
 	 * firefight (four bots firing fill it in half a second), so take 48 or
 	 * 32 when the spill left over after the map's own claims holds them and
-	 * still keeps GC_TENT_SPILL_KEEP free for what loads later. */
-#define GC_TENT_SPILL_KEEP	( 64u * 1024u )
+	 * still keeps GC_TENT_SPILL_KEEP free for what loads later: the prop
+	 * chain cache and the team body cores it leaves room for. With 64 KiB
+	 * kept, charlie's 48-entry pool cut its prop chain cache from 104 KB
+	 * to 18 KB. */
+#define GC_TENT_SPILL_KEEP	( 320u * 1024u )
 	{
 		extern size_t Mod_GCWorldArraySpillFree( void );
 		static const int sizes[] = { 48, 32, 16 };
