@@ -3889,7 +3889,11 @@ static int R_StudioDrawModel( int flags )
 			return 0;
 
 		// get copy of player
-		deadplayer = *R_StudioGetPlayerState( RI.currententity->curstate.renderamt - 1 );
+		const entity_state_t *dead_src = R_StudioGetPlayerState( RI.currententity->curstate.renderamt - 1 );
+
+		if( !dead_src )
+			return 0;	/* a corpse of a slot this client has no state for */
+		deadplayer = *dead_src;
 
 		// clear weapon, movement state
 		deadplayer.number = RI.currententity->curstate.renderamt;
@@ -4079,8 +4083,12 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	else
 	{
 		// select the properly method
-		if( e->player )
-			pStudioDraw->StudioDrawPlayer( flags, R_StudioGetPlayerState( e->index - 1 ));
+		/* A player-flagged entity past the client slots (scripted actors, ceres caen 12 bots: DAR 0x4 in the
+		 * client's StudioDrawPlayer at pplayer->number) has no player state: draw it as a model instead. */
+		entity_state_t *pstate = e->player ? R_StudioGetPlayerState( e->index - 1 ) : NULL;
+
+		if( pstate )
+			pStudioDraw->StudioDrawPlayer( flags, pstate );
 		else
 			pStudioDraw->StudioDrawModel( flags );
 	}
