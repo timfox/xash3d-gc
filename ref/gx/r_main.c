@@ -1195,7 +1195,27 @@ static void R_DrawEntitiesOnList( void )
 					if( GC_IsLowMemoryMode() && GC_UseGxWorldDraw() && !R_GXWorldDLActive())
 						break;
 					if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
+					{
+						/* -gccapture: name each see-through brush culled here once
+						 * (the solid pass logs its own). */
+						if( R_GXCaptureMode())
+						{
+							static const model_t *tculled[32];
+							static int ntculled;
+							int ci;
+
+							for( ci = 0; ci < ntculled && tculled[ci] != RI.currentmodel; ci++ )
+								;
+							if( ci == ntculled && ntculled < 32 )
+							{
+								tculled[ntculled++] = RI.currentmodel;
+								gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled trans rm=%d amt=%d\n",
+									RI.currentmodel->name, RI.currententity->curstate.rendermode,
+									RI.currententity->curstate.renderamt );
+							}
+						}
 						break;
+					}
 					R_DrawBrushModel( RI.currententity );
 					break;
 				}

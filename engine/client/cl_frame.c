@@ -2148,7 +2148,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		 * size), and leave out what is behind it: nearest-first gave every
 		 * slot to the beach obstacles in front of a shot looking up at the
 		 * bluff, and the radio tent's column still missed out. */
-		vec3_t feet[64];
+		/* Every map prop, not the first 64 in edict order: dod_charlie has
+		 * more than that before its control points. Static: 3 KB. */
+		static vec3_t feet[256];
 		int n_feet = 0;
 
 		AngleVectors( refState.viewangles, fwd, NULL, NULL );
@@ -2194,13 +2196,31 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				float score = VectorLength( delta ) / ( radius + 16.0f );
 				int f;
 
+				/* The prop's origin need not touch the brush: the control-point
+				 * flag's origin sits about 26 units above its pole's foot, and
+				 * the pole is sunk into the top of the column (dod_charlie cp3
+				 * on func_wall *178). So: over the box's footprint (8 units of
+				 * slack), and between its bottom and 64 units over its top. */
 				for( f = 0; f < n_feet; f++ )
 				{
-					if( feet[f][0] >= ed->v.absmin[0] && feet[f][0] <= ed->v.absmax[0]
-						&& feet[f][1] >= ed->v.absmin[1] && feet[f][1] <= ed->v.absmax[1]
-						&& feet[f][2] >= ed->v.absmin[2] && feet[f][2] <= ed->v.absmax[2] + 8.0f )
+					if( feet[f][0] >= ed->v.absmin[0] - 8.0f && feet[f][0] <= ed->v.absmax[0] + 8.0f
+						&& feet[f][1] >= ed->v.absmin[1] - 8.0f && feet[f][1] <= ed->v.absmax[1] + 8.0f
+						&& feet[f][2] >= ed->v.absmin[2] && feet[f][2] <= ed->v.absmax[2] + 64.0f )
 					{
+						static const model_t *told[32];
+						static int ntold;
+						int ti;
+
 						score = 0.0f;
+						for( ti = 0; ti < ntold && told[ti] != mod; ti++ )
+							;
+						if( ti == ntold && ntold < (int)ARRAYSIZE( told ))
+						{
+							told[ntold++] = mod;
+							Con_Reportf( "Xash3D GameCube: capture prop support %s rm=%d amt=%.0f top=%.0f prop feet=%.0f %.0f %.0f\n",
+								mod->name, ed->v.rendermode, ed->v.renderamt, ed->v.absmax[2],
+								feet[f][0], feet[f][1], feet[f][2] );
+						}
 						break;
 					}
 				}
