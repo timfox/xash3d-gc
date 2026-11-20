@@ -214,6 +214,16 @@ qboolean R_OpaqueEntity( cl_entity_t *ent )
 	if( sw_noalphabrushes.value && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
 		return true;
 
+#if XASH_GAMECUBE
+	/* On the Flipper a see-through brush (rendermode 4: lattices, netting,
+	 * fences) is alpha-tested, never blended, so it draws with the solid
+	 * brush entities. The translucent pass never reached it on the capture
+	 * route: dod_charlie's radio tower (func_wall *178, {tension6 lattice)
+	 * was missing and the control-point flag on it hung in the sky. */
+	if( GC_UseGxWorldDraw() && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
+		return true;
+#endif
+
 	return false;
 }
 
@@ -1195,7 +1205,27 @@ static void R_DrawEntitiesOnList( void )
 					if( GC_IsLowMemoryMode() && GC_UseGxWorldDraw() && !R_GXWorldDLActive())
 						break;
 					if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
+					{
+						/* -gccapture: name each see-through brush culled here once
+						 * (the solid pass logs its own). */
+						if( R_GXCaptureMode())
+						{
+							static const model_t *tculled[32];
+							static int ntculled;
+							int ci;
+
+							for( ci = 0; ci < ntculled && tculled[ci] != RI.currentmodel; ci++ )
+								;
+							if( ci == ntculled && ntculled < 32 )
+							{
+								tculled[ntculled++] = RI.currentmodel;
+								gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled trans rm=%d amt=%d\n",
+									RI.currentmodel->name, RI.currententity->curstate.rendermode,
+									RI.currententity->curstate.renderamt );
+							}
+						}
 						break;
+					}
 					R_DrawBrushModel( RI.currententity );
 					break;
 				}
