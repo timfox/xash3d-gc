@@ -3365,7 +3365,14 @@ int R_GXWorldDLDraw( void )
 	vec3_t normals[4];
 	u32 budget;
 	u32 i;
-	int cluster, drawn = 0, chunks = 0, waiting = 0, cur_mat = -1, bind_miss = 0;
+	int cluster, drawn = 0, chunks = 0, waiting = 0, cur_mat = -1, bind_miss = 0, bind_fail = 0;
+	/* The camera's own eye. `org` may move to the world centre below when
+	 * the eye sits in solid or outside the map (a film camera over the sea
+	 * or inside a hedgehog): that is right for picking a PVS row, but the
+	 * frustum test and the draw order need the real eye or the chunks in
+	 * front of the camera are culled from the wrong place. */
+	const float *eye = RI.rvp.vieworigin;
+	const qboolean eye_ok = isfinite( eye[0] ) && ( eye[0] || eye[1] || eye[2] );
 
 	gc_wd_pf_enter = gettime();
 	if( gc_wd_state != 1 )
@@ -3384,6 +3391,10 @@ int R_GXWorldDLDraw( void )
 	/* First ~90 frames: pull a denser visible set so CapFaces listen does not
 	 * open on a starved alley; after warmup keep 512 KiB/frame lazy stream. */
 	budget = ( gc_wd_frame <= 90 ) ? GC_WD_WARMUP_BUDGET : GC_WD_LOAD_BUDGET;
+	/* -gccapture: frame rate does not matter, so every chunk in view loads
+	 * this frame instead of streaming in over the next ones. */
+	if( R_GXCaptureMode())
+		budget = 0xffffffffu;
 	/* CapFaces wall-aim normally seeds vieworigin; World DL skips CapFaces so
 	 * early frames can sit at (0,0,0) / solid → cluster=-1 → all-vis. Prefer a
 	 * non-degenerate eye, then fall back to world AABB center from mins/maxs. */
@@ -3508,7 +3519,7 @@ int R_GXWorldDLDraw( void )
 		u32 tower_budget = 288u * 1024u;
 		u32 tower_grant, shore_budget;
 
-		R_GXWorldDLBoxTestSet( normals, r_gx_mirror ? RI.rvp.vieworigin : org );
+		R_GXWorldDLBoxTestSet( normals, ( r_gx_mirror || eye_ok ) ? RI.rvp.vieworigin : org );
 		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
 		{
 			const u16 cl = gc_wd_chunk_cluster[i];
@@ -3529,7 +3540,7 @@ int R_GXWorldDLDraw( void )
 		}
 		/* Spend the cache on the ground in front of the camera. Index order
 		 * filled it with whatever chunk id came first and left the shore out. */
-		gc_wd_sort_org = org;
+		gc_wd_sort_org = ( eye_ok && !r_gx_mirror ) ? eye : org;
 		/* Key each chunk once (the distance has a sqrt for tall chunks and
 		 * qsort asked for it ~10 times per chunk: 2.5 to 4.8 ms a frame in
 		 * the harbor), then shell-sort the packed keys. Distances are
@@ -3781,7 +3792,10 @@ int R_GXWorldDLDraw( void )
 
 						WD_PF( 4, bound = R_GXWorldDLBindTex( (unsigned)gc_wd_texnum[b->mat] ));
 						if( !bound )
+						{
+							bind_fail++;
 							continue;
+						}
 					}
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 					cur_mat = (int)b->mat;
@@ -3870,6 +3884,14 @@ int R_GXWorldDLDraw( void )
 			gEngfuncs.Con_Reportf(
 				"Xash3D GameCube: world DL pvs=%d frustum_drop=%d cull=%d towers=%d forced=%d\n",
 				pvs_hits, frustum_drop, frustum_cull ? 1 : 0, tower_chunks, forced_n );
+		/* Capture runs check every chunk in view got drawn: waiting and
+		 * bind_fail should stay 0, cluster -1 means the eye is outside the
+		 * map (all chunks are candidates then). */
+		if( capture && !r_gx_mirror && ( gc_wd_frame & 63 ) == 0 )
+			gEngfuncs.Con_Reportf(
+				"Xash3D GameCube: capture world DL frame=%d eye=(%.0f,%.0f,%.0f) cluster=%d chunks=%u in_view=%d frustum_drop=%d waiting=%d bind_miss=%d bind_fail=%d forced=%d zfar=%.0f\n",
+				gc_wd_frame, eye[0], eye[1], eye[2], cluster, (uint)gc_wd_hdr.n_chunks,
+				norder, frustum_drop, waiting, bind_miss, bind_fail, forced_n, RI.farClip );
 	}
 	R_GXCmprSetFar( false );
 	R_GXFogEnd();

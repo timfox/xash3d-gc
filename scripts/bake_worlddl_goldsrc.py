@@ -399,7 +399,8 @@ def _zero(val: str | None) -> bool:
 
 def static_brushes(bsp: "Bsp") -> list[tuple[int, bool]]:
 	"""Brush entities that never change: (model number, solid).  An unnamed
-	func_wall or func_illusionary drawn opaque at the lump origin cannot be
+	func_wall or func_illusionary drawn opaque (or masked, render mode 4 at
+	full amount) at the lump origin cannot be
 	triggered, moved, hidden or faded, so its faces are baked with the world
 	and the server keeps it out of the packets (GC_StaticBrushes, model.c).
 	The rule reads the entity lump only, so every machine with the same disc
@@ -424,8 +425,22 @@ def static_brushes(bsp: "Bsp") -> list[tuple[int, bool]]:
 			continue
 		if e.get("targetname") or e.get("globalname") or e.get("master"):
 			continue
-		if not all(_zero(e.get(k)) for k in ("rendermode", "renderfx", "origin", "angles", "effects")):
+		if not all(_zero(e.get(k)) for k in ("renderfx", "origin", "angles", "effects")):
 			continue
+		# Render mode 4 at full amount is "solid" with the texture's mask cut
+		# out: fences, wire, netting, masts.  It is as fixed as an opaque
+		# wall, and the texture pack already carries the mask, so its faces
+		# bake too (dod_charlie's flag 3 stands on such a mast, which was a
+		# packet entity and dropped out when the ring was full).
+		masked = False
+		if not _zero(e.get("rendermode")):
+			try:
+				masked = (float(e.get("rendermode", "0")) == 4.0
+					and float(e.get("renderamt", "0")) == 255.0)
+			except ValueError:
+				masked = False
+			if not masked:
+				continue
 		if cls == "func_illusionary" and e.get("skin", "0").strip() not in ("", "0", "-1"):
 			continue
 		first, count = bsp.models[num][14], bsp.models[num][15]
@@ -433,6 +448,8 @@ def static_brushes(bsp: "Bsp") -> list[tuple[int, bool]]:
 		for fi in range(first, first + count):
 			miptex = bsp.texinfos[bsp.faces[fi][4]][2]
 			name = bsp.mip_names[miptex].lower() if 0 <= miptex < len(bsp.mip_names) else ""
+			if name[:1] == "{" and masked:
+				continue
 			if name[:1] in ("{", "!", "*", "+", "-") or name.startswith("scroll") or "water" in name:
 				plain = False
 				break

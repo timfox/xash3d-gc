@@ -92,6 +92,10 @@ the DumpFrames capture reel so you stay in control.
 | ANODIZED MG | Dyed Mg metal × dual cool-green KONST IndTex |
 | FROST POLY | Frosted polycarb × dual cool KONST IndTex |
 | HOLO VINYL | Peel holo vinyl × dual chroma KONST IndTex |
+| TUNGSTEN FOAM | Dense dark porous W × dual cool gray KONST IndTex |
+| ALGAE GLASS | Soft green translucency × dual kelp KONST IndTex |
+| OBSIDIAN WOOL | Near-black loft × dual deep KONST IndTex |
+| TOPAZ DUST | Warm gold grit × dual amber KONST IndTex |
 | ASPHALT | Dark road body + sparse wet IndTex glints |
 | RUBBER | Soft wrap tire rubber, muted Fresnel |
 | PLASTIC ABS | Cool-tinted injection plastic + soft dielectric coat |

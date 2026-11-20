@@ -444,10 +444,28 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 R_GetFarClip
 ===============
 */
+qboolean R_GXCaptureMode( void );
+
 static float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
-		return gp_movevars->zmax * 1.73f;
+	{
+		float zfar = gp_movevars->zmax * 1.73f;
+
+		/* -gccapture: a film camera out at sea must still see the far end
+		 * of the beach, whatever sv_zmax the map was built with. */
+		if( R_GXCaptureMode())
+		{
+			vec3_t span;
+			float diag;
+
+			VectorSubtract( WORLDMODEL->maxs, WORLDMODEL->mins, span );
+			diag = VectorLength( span ) + 512.0f;
+			if( zfar < diag )
+				zfar = diag;
+		}
+		return zfar;
+	}
 	return 2048.0f;
 }
 
@@ -2031,6 +2049,23 @@ static void R_EdgeDrawingGcmapProbe( void )
 					continue;
 				if( !R_GXBrushEntityVisible( be ))
 				{
+					/* -gccapture: name each brush model culled here once. */
+					if( R_GXCaptureMode())
+					{
+						static const model_t *culled[64];
+						static int nculled;
+						int ci;
+
+						for( ci = 0; ci < nculled && culled[ci] != be->model; ci++ )
+							;
+						if( ci == nculled && nculled < 64 )
+						{
+							culled[nculled++] = be->model;
+							gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled %s rm=%d org=%.0f %.0f %.0f\n",
+								be->model->name, r_gx_last_cull_was_pvs ? "pvs" : "frustum",
+								be->curstate.rendermode, be->origin[0], be->origin[1], be->origin[2] );
+						}
+					}
 					if( r_gx_last_cull_was_pvs )
 						cull_pvs++;
 					else
