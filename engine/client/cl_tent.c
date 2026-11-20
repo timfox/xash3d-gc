@@ -45,7 +45,15 @@ static model_t *CL_GCLoadEffectSprite( const char *name )
 
 	/* Leave room for HUD sheets that load mid-match (the 128x128
 	 * crosshair needs 32 KiB). */
-	if( GC_MemHeapFreeBytes() < ( CL_GCCaptureMode() ? 32 : 80 ) * 1024 )
+	if( CL_GCCaptureMode( ))
+	{
+		/* A capture has no HUD sheets to keep room for: the file and a margin. */
+		const fs_offset_t fsize = FS_FileSize( name, false );
+
+		if( fsize <= 0 || GC_MemHeapFreeBytes() < (size_t)fsize + 8 * 1024 )
+			return NULL;
+	}
+	else if( GC_MemHeapFreeBytes() < 80 * 1024 )
 		return NULL;
 	gc_sprite_effect_load = true;
 	mod = CL_LoadClientSprite( name );
@@ -98,6 +106,58 @@ static model_t *CL_GCTentModelHandle( int modelindex )
  * sprites failed the 80 KiB gate above for the whole map. Load the server's
  * precached sprites right after the map goes active instead, one per frame.
  */
+/*
+ * -gccapture: load the film's explosion and smoke sprites (names with xplode,
+ * explode, steam, smoke or fire). In a match they come late in the precache
+ * list (fireball 368, smoke 370 on dod_charlie), after the prewarm stopped,
+ * and by the shot the heap was down to 30 KiB, so every burst was "No
+ * Sprite". Called once with all = true when the temp entity pool is made
+ * (the heap still has ~150 KiB then), and from the prewarm one at a time.
+ * Returns the next index to try, or -1 when the list is done.
+ */
+static int CL_GCLoadFilmSprites( int from, qboolean all )
+{
+	extern size_t R_GCFxPixelsFree( void );
+	static const char *const film_sprites[] = { "xplode", "explode", "steam", "smoke", "fire" };
+	int i, k;
+
+	if( !SV_Active( ))
+		return -1;
+	for( i = from > 0 ? from : 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		const char *name = sv.model_precache[i];
+		fs_offset_t fsize;
+		model_t *mod;
+
+		if( cl.models[i] || !Q_stristr( name, ".spr" ))
+			continue;
+		for( k = 0; k < (int)ARRAYSIZE( film_sprites ); k++ )
+			if( Q_stristr( name, film_sprites[k] ))
+				break;
+		if( k == (int)ARRAYSIZE( film_sprites ))
+			continue;
+		/* The frames go to the effect block; the heap pays for the file
+		 * read and the headers, so the file size plus a margin. */
+		fsize = FS_FileSize( name, false );
+		if( fsize <= 0 || GC_MemHeapFreeBytes() < (size_t)fsize + 16 * 1024 || R_GCFxPixelsFree() < 4 * 1024 )
+		{
+			Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s (%ld bytes) not loaded (heap %s, effect block free %s)\n",
+				i, name, (long)fsize, Q_memprint( GC_MemHeapFreeBytes( )), Q_memprint( R_GCFxPixelsFree( )));
+			continue;
+		}
+		gc_sprite_effect_load = true;
+		mod = CL_LoadClientSprite( name );
+		gc_sprite_effect_load = false;
+		if( mod )
+			cl.models[i] = mod;
+		Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s %s (heap %s)\n", i, name,
+			mod ? "loaded" : "failed", Q_memprint( GC_MemHeapFreeBytes( )));
+		if( !all )
+			return i + 1;
+	}
+	return -1;
+}
+
 static void CL_GCPrewarmEffectSprites( void )
 {
 	extern size_t R_GCFxPixelsFree( void );
@@ -122,49 +182,20 @@ static void CL_GCPrewarmEffectSprites( void )
 	}
 	if( done )
 		return;
-	/* -gccapture: the film's explosion and smoke sprites first. In a match
-	 * order they came late in the precache list (fireball 368, smoke 370 on
-	 * dod_charlie), after the prewarm had stopped, and the 80 KiB gate on a
-	 * later load kept them out, so a shot's bursts never drew. */
+	/* -gccapture: the film's explosion and smoke sprites (see
+	 * CL_GCLoadFilmSprites), one a frame, if the pool did not get them. */
 	if( CL_GCCaptureMode() && !film_done )
 	{
-		static const char *const film_sprites[] = { "xplode", "explode", "steam", "smoke", "fire" };
-		int i, k;
-
 		if( film_world != (const void *)cl.worldmodel )
 		{
 			film_world = cl.worldmodel;
 			film_next = 1;
 		}
-		for( i = film_next; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
-		{
-			const char *name = sv.model_precache[i];
-			model_t *mod;
-
-			if( cl.models[i] || !Q_stristr( name, ".spr" ))
-				continue;
-			for( k = 0; k < (int)ARRAYSIZE( film_sprites ); k++ )
-				if( Q_stristr( name, film_sprites[k] ))
-					break;
-			if( k == (int)ARRAYSIZE( film_sprites ))
-				continue;
-			if( GC_MemHeapFreeBytes() < 32 * 1024 || R_GCFxPixelsFree() < 4 * 1024 )
-			{
-				Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s not loaded (heap %s, effect block free %s)\n",
-					i, name, Q_memprint( GC_MemHeapFreeBytes( )), Q_memprint( R_GCFxPixelsFree( )));
-				film_next = i + 1;
-				return;
-			}
-			gc_sprite_effect_load = true;
-			mod = CL_LoadClientSprite( name );
-			gc_sprite_effect_load = false;
-			if( mod )
-				cl.models[i] = mod;
-			Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s %s\n", i, name, mod ? "loaded" : "failed" );
-			film_next = i + 1;
-			return; /* one a frame */
-		}
-		film_done = true;
+		film_next = CL_GCLoadFilmSprites( film_next, false );
+		if( film_next < 0 )
+			film_done = true;
+		else
+			return;
 	}
 	for( ; next < MAX_MODELS; next++ )
 	{
@@ -620,6 +651,8 @@ void CL_GCEnsureTempEntPool( void )
 	gc_tempents_lean_pool = true;
 	next_sprite_try = host.realtime + 5.0;
 	CL_GCLoadEffectSprites();
+	if( CL_GCCaptureMode( ))
+		CL_GCLoadFilmSprites( 1, true );
 	Con_Reportf( "Xash3D GameCube: client tempents %d in %s (%s), muzzle flash %s, heap %s\n",
 		want, where, Q_memprint( bytes ), cl_sprite_muzzleflash[0] ? "loaded" : "missing",
 		Q_memprint( GC_MemHeapFreeBytes( )));
