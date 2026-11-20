@@ -3957,6 +3957,15 @@ static int R_StudioDrawModel( int flags )
 	player_info_t *film_saved_pi = m_pPlayerInfo;
 	static player_info_t film_gait;
 
+	/* The film actor sets its frame and blend every server frame with no
+	 * interpolation to do: the blend lerp's stale latched half (0, the grid's
+	 * top row) had every man looking up whatever the server sent. */
+	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 ))
+	{
+		RI.currententity->latched.prevblending[0] = RI.currententity->curstate.blending[0];
+		RI.currententity->latched.prevblending[1] = RI.currententity->curstate.blending[1];
+	}
+
 	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 )
 		&& m_pStudioHeader && m_pStudioHeader->numbonecontrollers == 0 )
 	{

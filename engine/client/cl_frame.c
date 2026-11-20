@@ -2812,6 +2812,10 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->curstate.controller[1] = ed->v.controller[1];
 			ent->curstate.controller[2] = ed->v.controller[2];
 			ent->curstate.controller[3] = ed->v.controller[3];
+			/* And the blends: a player model's aim grid (torso yaw, pitch). Left at 0
+			 * the grid's corner had every scripted film actor looking up. */
+			ent->curstate.blending[0] = ed->v.blending[0];
+			ent->curstate.blending[1] = ed->v.blending[1];
 			ent->curstate.body = ed->v.body;
 			ent->curstate.skin = ed->v.skin;
 			ent->curstate.scale = ed->v.scale > 0.0f ? ed->v.scale : 1.0f;

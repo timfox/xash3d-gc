@@ -1007,6 +1007,10 @@ static void Mod_GCAnimUnpack( byte *buf, unsigned len )
 #define GC_ANIMPACK_SPARE ( 8u * 1024u )
 static byte gc_animspare[2][GC_ANIMPACK_SPARE] __attribute__((aligned( 32 )));
 static int gc_animspare_next;
+/* And one for an aim grid (stand/crouch_rifle_aim, about 19 KiB): a film actor
+ * plays one over a small gait sequence, so one big block at a time is enough. */
+#define GC_ANIMPACK_SPARE_BIG ( 20u * 1024u )
+static byte gc_animspare_big[GC_ANIMPACK_SPARE_BIG] __attribute__((aligned( 32 )));
 static const char *gc_animpack_miss;   /* why the last fetch missed, for the bind pose warning */
 
 static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
@@ -1143,12 +1147,18 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 
 spare:
 	/* Not kept in the ring: fetched again next frame, when there may be room. */
-	if( need > GC_ANIMPACK_SPARE )
+	if( need > GC_ANIMPACK_SPARE_BIG )
 		return NULL;
 	{
-		byte *buf = gc_animspare[gc_animspare_next];
+		byte *buf;
 
-		gc_animspare_next ^= 1;
+		if( need > GC_ANIMPACK_SPARE )
+			buf = gc_animspare_big;
+		else
+		{
+			buf = gc_animspare[gc_animspare_next];
+			gc_animspare_next ^= 1;
+		}
 		if( lz4 )
 		{
 			const unsigned cn = ( comp_len + 31u ) & ~31u;
