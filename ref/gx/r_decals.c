@@ -141,6 +141,8 @@ static void R_GXDecalRingAdd( int texture, const vec3_t pos, float scale )
 /* Drawn with the translucent effects, after the world. */
 void R_GXDecalRingDraw( void )
 {
+	extern qboolean r_gx_effects_darken;
+
 	int i, bound_tex = -1;
 	qboolean open = false;
 
@@ -148,6 +150,10 @@ void R_GXDecalRingDraw( void )
 		return;
 
 	GL_SetRenderMode( kRenderTransTexture );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* DoD decal textures say how much to darken (cl_tent.c): frame * ( 1 - texel ). */
+	r_gx_effects_darken = true;
+#endif
 	_TriColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
 	for( i = 0; i < gc_decal_ring_count; i++ )
 	{
@@ -194,6 +200,9 @@ void R_GXDecalRingDraw( void )
 		TriEnd();
 		R_GXEffectsTriEnd();
 	}
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	r_gx_effects_darken = false;
+#endif
 }
 #endif
 
