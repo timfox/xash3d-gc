@@ -3492,6 +3492,80 @@ static void R_StudioProcessGait( entity_state_t *pplayer )
 
 /*
 ===============
+R_StudioDrawWeaponModel
+
+The third-person weapon (p_*.mdl) on the current entity's saved bones: a player's,
+or (GameCube) a scripted film actor's, which carries one the same way.
+===============
+*/
+static void R_StudioDrawWeaponModel( int number, int weaponmodel, alight_t *lighting )
+{
+	cl_entity_t saveent = *RI.currententity;
+	model_t     *pweaponmodel = CL_ModelHandle( weaponmodel );
+
+	m_pStudioHeader = pweaponmodel ? (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel ) : NULL;
+#if XASH_GAMECUBE
+	{
+		static int weapon_logs;
+
+		if( weapon_logs < 4 )
+		{
+			weapon_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s\n",
+				number, weaponmodel, pweaponmodel ? pweaponmodel->name : "(null)",
+				m_pStudioHeader ? "yes" : "no" );
+		}
+	}
+	/* The lean precache can stand a resident w_crowbar in for a
+	 * p_*.mdl that is not loaded; merged onto player bones it lay
+	 * as a white crowbar at the bot's feet (ceres fmg). Attach
+	 * only real third-person weapon models. */
+	/* Bisect switch for the third-person weapon draw. */
+	if( m_pStudioHeader && gEngfuncs.Sys_CheckParm( "-gcnopweapondraw" ))
+		m_pStudioHeader = NULL;
+	/* A runtime-loaded p_ whose cache was reused would hand MergeBones
+	 * a garbage header (a wild seqdesc in EstimateFrame). */
+	if( m_pStudioHeader && ( m_pStudioHeader->ident != IDSTUDIOHEADER
+		|| m_pStudioHeader->numseq <= 0 || m_pStudioHeader->numbones <= 0
+		|| m_pStudioHeader->numbones > MAXSTUDIOBONES ))
+	{
+		static int bad_logs;
+
+		if( bad_logs++ < 4 )
+			gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: player weapon %s header is not a studio header (ident %08x); not drawn\n",
+				pweaponmodel->name, (unsigned)m_pStudioHeader->ident );
+		m_pStudioHeader = NULL;
+	}
+	if( m_pStudioHeader && !Q_stristr( pweaponmodel->name, "/p_" ))
+	{
+		static int stand_in_logs;
+
+		if( stand_in_logs < 4 )
+		{
+			stand_in_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player weapon %d is %s, not a p_ model; not attached\n",
+				weaponmodel, pweaponmodel->name );
+		}
+		m_pStudioHeader = NULL;
+	}
+#endif
+
+	/* The third-person p_*.mdl may not be resident on GameCube (the
+	 * studio budget defers it); a NULL header crashed MergeBones
+	 * (ceres 1ff66ba, DAR 0xA4 = studiohdr numseq). Skip the gun. */
+	if( m_pStudioHeader )
+	{
+		R_StudioMergeBones( RI.currententity, pweaponmodel );
+		R_StudioSetupLighting( lighting );
+		R_StudioRenderModel( );
+		R_StudioCalcAttachments( );
+	}
+
+	*RI.currententity = saveent;
+}
+
+/*
+===============
 R_StudioDrawPlayer
 
 ===============
@@ -3748,70 +3822,7 @@ static int R_StudioDrawPlayer( int flags, entity_state_t *pplayer )
 		m_pPlayerInfo = NULL;
 
 		if( pplayer->weaponmodel )
-		{
-			cl_entity_t saveent = *RI.currententity;
-			model_t     *pweaponmodel = CL_ModelHandle( pplayer->weaponmodel );
-
-			m_pStudioHeader = pweaponmodel ? (studiohdr_t *)gEngfuncs.Mod_Extradata( mod_studio, pweaponmodel ) : NULL;
-#if XASH_GAMECUBE
-			{
-				static int weapon_logs;
-
-				if( weapon_logs < 4 )
-				{
-					weapon_logs++;
-					gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s\n",
-						pplayer->number, pplayer->weaponmodel, pweaponmodel ? pweaponmodel->name : "(null)",
-						m_pStudioHeader ? "yes" : "no" );
-				}
-			}
-			/* The lean precache can stand a resident w_crowbar in for a
-			 * p_*.mdl that is not loaded; merged onto player bones it lay
-			 * as a white crowbar at the bot's feet (ceres fmg). Attach
-			 * only real third-person weapon models. */
-			/* Bisect switch for the third-person weapon draw. */
-			if( m_pStudioHeader && gEngfuncs.Sys_CheckParm( "-gcnopweapondraw" ))
-				m_pStudioHeader = NULL;
-			/* A runtime-loaded p_ whose cache was reused would hand MergeBones
-			 * a garbage header (a wild seqdesc in EstimateFrame). */
-			if( m_pStudioHeader && ( m_pStudioHeader->ident != IDSTUDIOHEADER
-				|| m_pStudioHeader->numseq <= 0 || m_pStudioHeader->numbones <= 0
-				|| m_pStudioHeader->numbones > MAXSTUDIOBONES ))
-			{
-				static int bad_logs;
-
-				if( bad_logs++ < 4 )
-					gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: player weapon %s header is not a studio header (ident %08x); not drawn\n",
-						pweaponmodel->name, (unsigned)m_pStudioHeader->ident );
-				m_pStudioHeader = NULL;
-			}
-			if( m_pStudioHeader && !Q_stristr( pweaponmodel->name, "/p_" ))
-			{
-				static int stand_in_logs;
-
-				if( stand_in_logs < 4 )
-				{
-					stand_in_logs++;
-					gEngfuncs.Con_Reportf( "Xash3D GameCube: player weapon %d is %s, not a p_ model; not attached\n",
-						pplayer->weaponmodel, pweaponmodel->name );
-				}
-				m_pStudioHeader = NULL;
-			}
-#endif
-
-			/* The third-person p_*.mdl may not be resident on GameCube (the
-			 * studio budget defers it); a NULL header crashed MergeBones
-			 * (ceres 1ff66ba, DAR 0xA4 = studiohdr numseq). Skip the gun. */
-			if( m_pStudioHeader )
-			{
-				R_StudioMergeBones( RI.currententity, pweaponmodel );
-				R_StudioSetupLighting( &lighting );
-				R_StudioRenderModel( );
-				R_StudioCalcAttachments( );
-			}
-
-			*RI.currententity = saveent;
-		}
+			R_StudioDrawWeaponModel( pplayer->number, pplayer->weaponmodel, &lighting );
 	}
 
 	return 1;
@@ -3938,6 +3949,11 @@ static int R_StudioDrawModel( int flags )
 		R_STUDIO_PROF( "studio: events+light setup" );
 
 		R_StudioRenderModel();
+#if XASH_GAMECUBE
+		/* Only the lean emitter sets weaponmodel on a non-player: scripted film actors. */
+		if( RI.currententity->curstate.weaponmodel )
+			R_StudioDrawWeaponModel( RI.currententity->index, RI.currententity->curstate.weaponmodel, &lighting );
+#endif
 	}
 
 	return 1;

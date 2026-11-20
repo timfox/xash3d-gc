@@ -1038,7 +1038,8 @@ static int gc_pads_missing_frames;
  * automated probes, which have no real pad packets. */
 qboolean GC_PadMissingNotice( void )
 {
-	return gc_pads_missing_frames > 45 && !GC_ShouldUseProbeInputFallback();
+	/* -gcnohud is a capture run (gamecube.cfg 'nohud'): no overlay of any kind, and nobody is holding a pad */
+	return gc_pads_missing_frames > 45 && !GC_ShouldUseProbeInputFallback() && !Sys_CheckParm( "-gcnohud" );
 }
 
 static void GC_ReadPads( void )
