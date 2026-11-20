@@ -112,7 +112,7 @@ int SV_GCEntityCount( void )
  * level at 0, caen's rings took the whole 177 KB gap and the player's rifle
  * and hands drew magenta ("streamed skins ... no window", ceres GPU run on
  * master 4e591475c0). */
-#define GC_DOD_VM_SKIN_KEEP ( 72u * 1024u )
+#define GC_DOD_VM_SKIN_KEEP ( 80u * 1024u )
 static entity_state_t *sv_gc_local_ring;
 static int sv_gc_local_ring_entries;
 
@@ -212,6 +212,19 @@ void SV_GCSizePacketEntities( void )
 			Con_Reportf( "Xash3D GameCube: %spacket entities map=%s per-frame cap %d%s, rings %d + %d entries, bytes=%s arena_tail_left=%s reserve level %d (text %s)\n",
 				level ? "Warning: reduced reserve " : "", sv.name, cap, static_scratch ? " (static list)" : "", E, E,
 				Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), level, Q_memprint( text ));
+			/* Levels 3 and 4 kept only the skin window's room: claim it now, or the studio region's overflow slices
+			 * (weapon models precached for every bot, sleeve view models) take it before a weapon's skins stream
+			 * (ceres caen, master 63fccf66e0: 76.9 KB left after the rings, then 211 "no window" lines). */
+			if( level >= 3 )
+			{
+				extern void Mod_GCSetSkinWindow( byte *window, size_t size );
+				const size_t wat = GC_MapArenaFind( GC_DOD_VM_SKIN_KEEP );
+				byte *win = wat == (size_t)-1 ? NULL : (byte *)GC_MapLoadBufferTailAlloc( wat, GC_DOD_VM_SKIN_KEEP );
+
+				Mod_GCSetSkinWindow( win, GC_DOD_VM_SKIN_KEEP );
+				Con_Reportf( "Xash3D GameCube: view model skin window %s (%s)\n", win ? "claimed" : "NOT claimed",
+					Q_memprint( GC_DOD_VM_SKIN_KEEP ));
+			}
 			return;
 		}
 	}

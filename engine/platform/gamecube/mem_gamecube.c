@@ -1256,21 +1256,39 @@ qboolean GC_MapLoadBufferIsWorldSettled( void )
 	return gc_mapload_world_settled;
 }
 
-static void (*gc_mapload_reset_hook)( void );
+#define GC_MAPLOAD_RESET_HOOKS 4
+static void (*gc_mapload_reset_hooks[GC_MAPLOAD_RESET_HOOKS])( void );
 
+/* Several owners (client temp entities, the view model skin window) may hold
+ * post-load claims at once; registering the same hook twice keeps one entry. */
 void GC_SetMapArenaResetHook( void (*hook)( void ))
 {
-	gc_mapload_reset_hook = hook;
+	int i, free_slot = -1;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		if( gc_mapload_reset_hooks[i] == hook )
+			return;
+		if( !gc_mapload_reset_hooks[i] && free_slot < 0 )
+			free_slot = i;
+	}
+	if( free_slot >= 0 )
+		gc_mapload_reset_hooks[free_slot] = hook;
 }
 
-/* Run once and forget: the hook's owner registers again with its next claim. */
+/* Run once and forget: each owner registers again with its next claim. */
 static void GC_RunMapArenaResetHook( void )
 {
-	void (*hook)( void ) = gc_mapload_reset_hook;
+	int i;
 
-	gc_mapload_reset_hook = NULL;
-	if( hook )
-		hook();
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		void (*hook)( void ) = gc_mapload_reset_hooks[i];
+
+		gc_mapload_reset_hooks[i] = NULL;
+		if( hook )
+			hook();
+	}
 }
 
 void *GC_BorrowMapLoadBuffer( size_t size )
