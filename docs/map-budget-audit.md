@@ -56,34 +56,61 @@ CapFaces spatial cell count (cf-cache: 65 MB on disk, 2,730 -> 635 KiB zlib for 
   thread; deliberately not duplicated here).
 - Several maps have no baked cf cells in the earlier probe (charlie, chemille, donner, falaise: "dens none").
 
-## 4. Ranked plan (cheapest, safest first)
+## 3b. Where the world pack's bytes really are (measured, caen; the other maps are alike)
 
-1. **Per-chunk LZ4 for `wd` (ARAM prefix and disc stream).** 54 MB -> about 15-27 MB of ARAM/disc across maps;
-   per map about 1.5-2.1 MiB (caen 3.0 MiB -> about 1.0 with zlib-class, LZ4 will be a little worse). Decode on
-   chunk fetch into the existing spill/bounce ring; the chunk dir stores compressed length. Same approach as the
-   already-merged GCAP v2 decode-in-place. Frees ARAM that the memory plan lists as 3.6-6.1 MiB short.
-2. **LZ4 for `gp`/`pt` and `cf` cells.** About 1.2 MiB (gp) and 2.1 MiB per big map (cf) of ARAM/disc.
-3. **World-texture dedup across maps** (the wt cache is content-hashed, 2,639 entries, 73 MB): measure shared
-   hashes per map pair before changing the ring.
-4. **Chain-cache cap fix** for falaise (222 > 180 KiB) and **stager cap 32 -> 40** for glider (39 MDLs), both
-   small constants/guards plus a disc build check.
-5. Instancing/streaming of repeated studio models once the above lands.
+| region of wd_*.gcd | KiB | zlib KiB | verdict |
+|---|---|---|---|
+| lightmap pages (512 x 2 KiB, always full) | 1024 | 115 (per page LZ4: 293) | **compress** (done, below) |
+| PVS rows | 596 | 97 whole / 508 per row | per-row compression gains nothing (rows are already RLE); the zlib gain is cross-row, so it needs row dedup or delta coding, not a codec |
+| display-list chunks (2981 chunks, 400 B each) | 1157 | 507 | small chunks; in-place decode impossible (see below); would need a staging buffer per fetch |
+| tree, planes, chunkdir | 187 | 114 | small |
 
-## 5. Done in this task
+Also unmeasured but large: the `wd_<map>_lf.gcd` light-face pack (1.7-3.5 MB a map, holds the BSP lighting lump)
+lives in ARAM too and is the next candidate after this.
 
-- Checked master: it does **not** contain the gc-mem work (2edbfb57ba is not an ancestor of origin/master).
-- Merged `gc-mem-engine-all` (82 commits: LZ4 anim packs, lazy/streamed 256 px VM skins, nav and entity text in
-  the map arena, weapon box pool, packet ring sizing) onto origin/master 121ec08515 with no conflicts: branch
-  `gc-mem-rebased-master`, tip 5effa689b3, worktree /home/tim/gc-mem-wt2. Host python tests: 29 test files, all pass.
-- Audit table and compression measurements above.
+## 4. Done: per-page LZ4 lightmaps (DODGC_WD_LZ4=1, default off)
 
-## 6. Not done (be explicit)
+- Baker: `scripts/bake_worlddl_goldsrc.py --lz4` (or env `DODGC_WD_LZ4=1`, which the disc builder honours and adds to
+  its cache key) packs each 2 KiB page with the new `scripts/gc_lz4.py` (pure python LZ4, no dependency).
+  Header flag `0x0010`; layout in `pack_lm_pages_lz4`.
+- Engine: `R_GXWorldDLLmFetch` (ref/gx/r_gx_worlddl.c) stages the blob in a 2 KiB static buffer and decodes it into the
+  page slot with the shared `Mod_GCLZ4Decode` (made non-static in mod_studio.c). Files without the flag load as before.
+  Cost: **+2 KiB of MEM1 BSS** (the staging buffer) and one LZ4 decode of at most 2 KiB per lightmap-page miss.
+- Why not decode in place or compress the 400-byte display-list chunks: for an exact-fit buffer the last match always
+  ends one byte past the read pointer, however the stream is cut (token byte of the final literal run), so in-place
+  needs a larger buffer than the slot. I first built a per-chunk in-place version, measured that 0 of 2,981 caen
+  chunks qualify, and dropped it.
+- Measured sizes (22 maps, from the local bake caches): lightmap region **22.0 MiB -> 6.0 MiB** in total, per map
+  1024 KiB -> 220-325 KiB, so **about 0.7 MiB of ARAM freed per map** and a wd file 25-40% smaller
+  (caen 2993 -> 2273 KiB, zalec 3118 -> 2417, flash 1911 -> 1210). Pure-python bake time about 1 s a map.
+- Tests: `tests/test_wd_lm_lz4.py` (4 tests): round trip of synthetic pages (zero, flat, smooth, incompressible-stays-raw)
+  and every 37th real caen page through the ENGINE's decoder source compiled with gcc, directory layout, and a
+  corrupt-block case. Full host suite: 207 passed, 5 skipped.
+- dod-gc: stager default caps raised from 32 models / 4 MiB to 48 models / 6 MiB (branch `mapmodel-cap-48`,
+  tip 24fd9c5, off dod-gc main f269158). dod_glider refs 39 MDLs = 5.1 MiB; saints (40), falaise (35), escape (35) and
+  sturm (34) were also over the old count cap.
 
-- **Not pushed, no PR**: the push of `gc-mem-rebased-master` was denied by the permission classifier. Tim runs:
-  `git -C /home/tim/gc-mem-wt2 push -u origin gc-mem-rebased-master`, then opens the PR (body must start with the
-  two attribution lines). dod-gc branch gc-mem-dod-integ9 (/home/tim/gc-mem-wt-dod) is untouched and also unpushed;
-  dod-gc local checkout is on another branch with 8 unpushed commits.
-- No new compression code was written and **no heap KB or ms/frame was measured**: no Dolphin run was made, the
-  boot disk (17 GB) and Expansion1 (9 GB) are at 99-100% and a combined build needs headroom. The numbers in
-  section 2 are file-size measurements only; the gains in section 4 are estimates, not results.
-- gamecube-heap-census.sh and the 12-bot recipe were not run.
+## 5. Ranked next steps (not done)
+
+1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
+   run the 12-bot recipe, check "world DL" and ARAM segment logs, and compare lightmap miss cost (`gc_wd_lm_miss`).
+   Only then flip the default on.
+2. **LZ4 the `_lf` light-face pack** (1.7-3.5 MB a map in ARAM): biggest remaining ARAM item.
+3. **PVS cross-row dedup/delta** (about 500 KiB a map, 6x in zlib).
+4. **Falaise chain cache (222 > 180 KiB):** on DoD the cache is `min(all chains, spill room - margin)`
+   (r_gx_world.c, "A map pack" branch), i.e. it is MEM1-spill bound, not a constant; the fix is more spill room or a
+   working-set policy, which needs the Dolphin heap/ms measurements. Not changed.
+5. **gp/pt/cf packs:** `gp` 2.3 MiB -> 1.1 MiB, `cf` cells 4.3x are load-time/disc only; not touched (no loader change
+   made). **Texture dedup across maps:** not measured (wt cache entries are content-hashed, 2,639 files).
+
+## 6. Branch state and what was not done
+
+- Engine: branch `gc-mem-rebased-master` in /home/tim/gc-mem-wt2 (origin/master 121ec08515 + gc-mem-engine-all merge
+  + audit + lightmap LZ4). **Not pushed**: the push was denied by the permission classifier. Tim runs
+  `git -C /home/tim/gc-mem-wt2 push -u origin gc-mem-rebased-master` and opens the PR (body must start with the two
+  attribution lines).
+- dod-gc: `git -C /home/tim/gc-mem-wt-dod2 push -u origin mapmodel-cap-48` (worktree /home/tim/gc-mem-wt-dod2); branch
+  gc-mem-dod-integ9 is untouched and unpushed.
+- **No Dolphin run, no heap KB or ms/frame measured**; no disc image built. Boot disk and Expansion1 are at 99-100%.
+  Sizes above are measured file sizes; ARAM freed is computed from them.
+- Not done: gp/pt/cf compression, texture dedup, falaise chain cache, `_lf` pack, PVS dedup.
