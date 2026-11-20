@@ -1849,7 +1849,7 @@ static model_t *CL_GCLeanPlayerBody( int e, qboolean *tried )
 /* Studio slots in capture mode: dod-gc's 64-actor cast, the players and props. */
 #define GC_LEAN_STUDIO_MAX	72
 /* Brush entities (func_wall, doors, breakables) in capture mode, was 6. */
-#define GC_LEAN_BRUSH_MAX	16
+#define GC_LEAN_BRUSH_MAX	32
 
 /* The lean emitter rebuilds each studio entity from its edict every frame, so
  * the client-side latch that crossfades a sequence change (0.2 s in
@@ -1961,6 +1961,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	int scan_brush = 0, scan_far = 0, scan_nomod = 0, scan_nosurf = 0;
 	int scan_studio = 0, scan_studio_skip = 0;
 	int budget = (int)( sizeof( lean_brush_static ) / sizeof( lean_brush_static[0] ));
+	qboolean capture_brush_pick = false;
+	int brush_picks[GC_LEAN_BRUSH_MAX];
+	int n_brush_picks = 0;
 	const float max_dist = CL_GCCaptureMode() ? 32000.0f : 8000.0f;
 	/* G371: denser AM NPC near dump/landmark eye. Xen bake eye→Nihilanth is
 	 * ~450u; keep headroom for companions. WorldDL props: whole-map radius. */
@@ -2011,6 +2014,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			studio_budget = GC_LEAN_STUDIO_MAX;
 			lean_brush_ents = lean_studio_big + GC_LEAN_STUDIO_MAX;
 			budget = GC_LEAN_BRUSH_MAX;
+			capture_brush_pick = true;
 		}
 	}
 
@@ -2042,13 +2046,45 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	else
 		VectorCopy( refState.vieworg, view_org );
 
-	for( e = svs.maxclients + 1; e < svgame.numEntities && added < budget; e++ )
+	/* -gccapture: the brush slots go to the nearest brush entities, not
+	 * the lowest edict numbers. dod_charlie has well over 16 drawn brush
+	 * entities, and the first-come pick left out the radio tent's column
+	 * (func_wall *178), so the control-point flag on it hung in the air. */
+	if( capture_brush_pick )
 	{
-		edict_t *ed = SV_EdictNum( e );
+		float brush_dists[GC_LEAN_BRUSH_MAX];
+
+		n_brush_picks = 0;
+		for( e = svs.maxclients + 1; e < svgame.numEntities; e++ )
+		{
+			edict_t *ed = SV_EdictNum( e );
+			model_t *mod;
+			vec3_t center, delta;
+
+			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex || FBitSet( ed->v.effects, EF_NODRAW ))
+				continue;
+			mod = SV_ModelHandle( ed->v.modelindex );
+			if( !mod || mod->type != mod_brush )
+				continue;
+			if( mod->nummodelsurfaces <= 0 && !( mod->name[0] == '*' ))
+				continue;
+			VectorAverage( ed->v.absmin, ed->v.absmax, center );
+			VectorSubtract( center, view_org, delta );
+			CL_GCLeanPick( brush_picks, brush_dists, &n_brush_picks, budget, e, VectorLength( delta ));
+		}
+	}
+
+	for( int bi = svs.maxclients + 1; ( capture_brush_pick ? bi - ( svs.maxclients + 1 ) < n_brush_picks
+		: bi < svgame.numEntities ) && added < budget; bi++ )
+	{
+		edict_t *ed;
 		model_t *mod;
 		cl_entity_t *ent;
 		vec3_t delta, center;
 		float dist;
+
+		e = capture_brush_pick ? brush_picks[bi - ( svs.maxclients + 1 )] : bi;
+		ed = SV_EdictNum( e );
 
 		if( !SV_IsValidEdict( ed ))
 			continue;
