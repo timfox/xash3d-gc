@@ -1894,8 +1894,11 @@ edict_t *GAME_EXPORT SV_AllocEdict( void )
 		 * pack owns world draw; remaining slots keep players/triggers. */
 		if( Sys_CheckParm( "-gcworldrender" ))
 		{
-			Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d) — soft-skip further spawns\n",
-				GI->max_edicts );
+			static int gc_tip_logs;
+
+			if( gc_tip_logs++ < 4 )
+				Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d) — soft-skip further spawns\n",
+					GI->max_edicts );
 			return NULL;
 		}
 #endif
@@ -1953,6 +1956,18 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 	{
 		// allocate a new one
 		ent = SV_AllocEdict();
+#if XASH_GAMECUBE
+		/* No free edict (the 460 tip): the caller gets NULL and carries on. Writing the classname through the NULL edict was a data
+		 * fault (DAR 0x288) that froze every crowded match at the cap: CEnvExplosion::Use, a dying player's weapon box, a grenade... */
+		if( !ent )
+		{
+			static int gc_noedict_logs;
+
+			if( gc_noedict_logs++ < 8 )
+				Con_Reportf( S_WARN "Xash3D GameCube: no free edict for \"%s\" (%d so far), not created\n", pszClassName, gc_noedict_logs );
+			return NULL;
+		}
+#endif
 	}
 	else if( ent->free )
 	{
