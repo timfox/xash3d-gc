@@ -12459,6 +12459,26 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 				mod->name, skip_alpha );
 		}
 	}
+	/* -gccapture: once per brush model, what reached the Flipper and what
+	 * was left out (settles whether a netting sheet or a flag pole goes
+	 * through here at all). */
+	if( R_GXCaptureMode())
+	{
+		static const model_t *seen[96];
+		static int nseen;
+		int si;
+
+		for( si = 0; si < nseen && seen[si] != mod; si++ )
+			;
+		if( si == nseen && nseen < 96 )
+		{
+			seen[nseen++] = mod;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s rm=%d surfs=%d sorted=%d drawn=%d plane=%d sky=%d edges=%d emit0=%d frustum=%d alpha=%d geom=%s org=%.0f %.0f %.0f\n",
+				mod->name, e->curstate.rendermode, mod->nummodelsurfaces, nsort, drawn,
+				skip_plane, skip_sky, skip_edges, emit_zero, skip_frustum, skip_alpha,
+				geom == mod ? "own" : "world", e->origin[0], e->origin[1], e->origin[2] );
+		}
+	}
 	{
 		static int tram_logs;
 
