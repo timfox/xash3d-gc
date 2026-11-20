@@ -3749,18 +3749,39 @@ static void CL_GCDecalPixelsToDarken( byte *rgba, size_t count )
 }
 
 /* A decal image as the loader returns it; false when its format is not one
- * of the two the decal loader produces. */
+ * of the two the decal loader produces. The result is always RGBA.
+ * An indexed image is expanded here, through its own palette: handing the
+ * upload an indexed image with a rewritten palette did not work, the
+ * expansion there (Image_Process, IMAGE_FORCE_RGBA) reads the palette the
+ * image library last installed, not the image's. The retail holes then went
+ * up with their original colours, white around the hole, and each decal
+ * darkened its whole square to black and left the hole itself clear. */
 static qboolean CL_GCDecalImageToDarken( rgbdata_t *pic )
 {
-	if( !pic || !pic->buffer )
+	if( !pic || !pic->buffer || pic->width < 1 || pic->height < 1 )
 		return false;
 	if( pic->type == PF_RGBA_32 )
 		CL_GCDecalPixelsToDarken( pic->buffer, (size_t)pic->width * pic->height );
 	else if( pic->type == PF_INDEXED_32 && pic->palette )
-		CL_GCDecalPixelsToDarken( pic->palette, 256 );
+	{
+		const size_t count = (size_t)pic->width * pic->height;
+		byte *rgba = Mem_Malloc( host.imagepool, count * 4 );
+		size_t i;
+
+		for( i = 0; i < count; i++ )
+			memcpy( rgba + i * 4, pic->palette + (size_t)pic->buffer[i] * 4, 4 );
+		CL_GCDecalPixelsToDarken( rgba, count );
+		Mem_Free( pic->buffer );	/* a decal is never in the decode slabs */
+		Mem_Free( pic->palette );
+		pic->buffer = rgba;
+		pic->palette = NULL;
+		pic->size = count * 4;
+		pic->type = PF_RGBA_32;
+	}
 	else
 		return false;
-	ClearBits( pic->flags, IMAGE_HAS_ALPHA | IMAGE_ONEBIT_ALPHA );
+	ClearBits( pic->flags, IMAGE_HAS_ALPHA | IMAGE_ONEBIT_ALPHA | IMAGE_COLORINDEX );
+	SetBits( pic->flags, IMAGE_HAS_COLOR );
 	return true;
 }
 #endif
