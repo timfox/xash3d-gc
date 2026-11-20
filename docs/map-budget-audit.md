@@ -151,6 +151,18 @@ lives in ARAM too and is the next candidate after this.
   pack was wrong for version 2; headless A/B timing could not see a 0.4 ms difference.
 - The lightmap and PVS decodes are cheap (charlie: 8 lightmap decodes and 2 PVS decodes in 4,608 frames).
 
+## 4f. 256 px player skins (flag `GC_PLAYER_SKIN_EDGE=256`, default 128 = off)
+
+- Disc builder knob, same style as `GC_VM_SKIN_EDGE`. Companion files: axis-inf 33 -> 81 KiB, us-inf 33 -> 81, brit-inf
+  29 -> 61, axis-para 25 -> 49, us-para 73 -> 153 (a body skin goes from 8 to 32 KiB of CMPR).
+- Dolphin, charlie, 4 bots, headless Null: both settings load every skin (body 256x256 32 KiB, helmets stay 64 px),
+  no "no room" warnings. **Heap free after load: 177 KB at 128 px, 91 KB at 256 px; lowest 161 -> 76 KB.** The player
+  skins live in the studio skin arena and spill into the heap, so the 256 px skins cost about 86 KB of MEM1 heap for
+  two teams of infantry. That is too much for a 12-bot match, which is why the flag stays off; it needs the skins
+  streamed from ARAM (the freed ARAM would pay for it) before it can be the default. No frame-time effect measured.
+- Prop textures: left at their baked size (`pt` packs are in ARAM already and are drawn from small slots; raising them
+  changes the slot size the texture cache owns).
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
