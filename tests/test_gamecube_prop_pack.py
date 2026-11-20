@@ -337,6 +337,18 @@ class DropToFloorTests(unittest.TestCase):
 		self.assertEqual([p["named"] for p in props], [0, 1, 2])
 		self.assertEqual([p["additive"] for p in props], [False, False, False])
 
+	def test_a_carried_dod_object_is_not_baked_into_the_pack(self):
+		# charlie's tnt satchels: a capture area wants the group, so the game spawns them; other groups stay decoration
+		ents = [
+			{"classname": "dod_capture_area", "area_object_group": "tnt"},
+			{"classname": "dod_object", "model": "models/b.mdl", "object_group": "tnt"},
+			{"classname": "dod_object", "model": "models/b.mdl", "object_group": "dev42"},
+			{"classname": "dod_object", "model": "models/b.mdl"},
+			{"classname": "env_model", "model": "models/a.mdl"},
+		]
+		props = self.props.static_props(ents)
+		self.assertEqual(len(props), 3)	# the tnt object is the only one left out
+
 	def test_footprint_light_ignores_a_dark_texel_under_the_origin(self):
 		light = self.props.FloorLight.__new__(self.props.FloorLight)
 		# Dark under the origin, lit ground to the east, no floor to the west.

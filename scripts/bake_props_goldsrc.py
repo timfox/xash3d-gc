@@ -326,8 +326,14 @@ def static_props(ents: list[dict]) -> list[dict]:
 	"""The entities SV_GCTryStaticProp consumes, with the keys it reads."""
 	out = []
 	named_ord = -1
+	# A dod_object whose object_group a dod_capture_area asks for is a satchel a player carries: the game spawns it as an
+	# entity (SV_GCFunctionalObject, sv_game.c), so it is not part of the prop pack.
+	area_groups = {e.get("area_object_group") for e in ents
+		if e.get("classname") == "dod_capture_area" and e.get("area_object_group")}
 	for ent_index, e in enumerate(ents):
 		if e.get("classname") not in PROP_CLASSES:
+			continue
+		if e.get("classname") == "dod_object" and e.get("object_group") in area_groups:
 			continue
 		model = e.get("model", "").replace("\\", "/")
 		if not model.lower().endswith(".mdl"):

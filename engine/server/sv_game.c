@@ -6661,6 +6661,60 @@ static qboolean SV_GCStaticPropClass( const char *classname )
 	return !Q_strcmp( classname, "env_model" ) || !Q_strcmp( classname, "dod_object" );
 }
 
+/* A dod_object is a carried satchel/TNT charge when a dod_capture_area of the map asks for its object_group (charlie's tnt, escape's
+ * allies_obj, glider's bunkerbomb, jagd's documents, vicenza's tnt). The game spawns those as entities; every other dod_object (charlie's
+ * dev42, escape's axis_obj, caen's twelve tnt with no area) stays a static prop and costs no edict. The groups come from a pre-scan of the
+ * entity lump (SV_GCScanObjectGroups), run before the census and the spawn loop. */
+#define GC_OBJECT_GROUPS_MAX 8
+static char gc_object_groups[GC_OBJECT_GROUPS_MAX][32];
+static int gc_num_object_groups;
+
+static void SV_GCScanObjectGroups( char *entities )
+{
+	char key[256], value[256], classname[64], group[32];
+	int i;
+
+	gc_num_object_groups = 0;
+	while( entities && ( entities = COM_ParseFile( entities, key, sizeof( key ))) != NULL )
+	{
+		if( key[0] != '{' )
+			return;
+		classname[0] = group[0] = '\0';
+		for( ;; )
+		{
+			if(( entities = COM_ParseFile( entities, key, sizeof( key ))) == NULL )
+				return;
+			if( key[0] == '}' && key[1] == '\0' )
+				break;
+			if(( entities = COM_ParseFile( entities, value, sizeof( value ))) == NULL )
+				return;
+			if( !Q_strcmp( key, "classname" ))
+				Q_strncpy( classname, value, sizeof( classname ));
+			else if( !Q_strcmp( key, "area_object_group" ))
+				Q_strncpy( group, value, sizeof( group ));
+		}
+		if( Q_strcmp( classname, "dod_capture_area" ) || !group[0] )
+			continue;
+		for( i = 0; i < gc_num_object_groups; i++ )
+			if( !Q_strcmp( gc_object_groups[i], group ))
+				break;
+		if( i == gc_num_object_groups && gc_num_object_groups < GC_OBJECT_GROUPS_MAX )
+			Q_strncpy( gc_object_groups[gc_num_object_groups++], group, sizeof( gc_object_groups[0] ));
+	}
+}
+
+static qboolean SV_GCFunctionalObject( const char *classname, const char *group )
+{
+	int i;
+
+	if( !group || !group[0] || Q_strcmp( classname, "dod_object" ))
+		return false;
+	for( i = 0; i < gc_num_object_groups; i++ )
+		if( !Q_strcmp( gc_object_groups[i], group ))
+			return true;
+	return false;
+}
+
 /* media/gp_<map>.gcp (scripts/bake_props_goldsrc.py): every unnamed
  * env_model / dod_object of the map as instanced display lists with their
  * own textures, drawn by the renderer straight from ARAM on the host and on
@@ -6775,7 +6829,7 @@ qboolean SV_GCEdictIsPackNamed( const edict_t *ent )
  * Otherwise leave *pfile where it was. */
 static qboolean SV_GCTryStaticProp( char **pfile )
 {
-	char key[256], value[256], model[64];
+	char key[256], value[256], model[64], classname[64] = "", group[32] = "";
 	char *p = *pfile;
 	qboolean is_prop = false, named = false;
 	gc_static_prop_t prop;
@@ -6800,8 +6854,11 @@ static qboolean SV_GCTryStaticProp( char **pfile )
 		{
 			if( !SV_GCStaticPropClass( value ))
 				return false;
+			Q_strncpy( classname, value, sizeof( classname ));
 			is_prop = true;
 		}
+		else if( !Q_strcmp( key, "object_group" ))
+			Q_strncpy( group, value, sizeof( group ));
 		else if( !Q_strcmp( key, "targetname" ) && value[0] )
 			named = true;
 		else if( !Q_strcmp( key, "model" ))
@@ -6845,7 +6902,7 @@ static qboolean SV_GCTryStaticProp( char **pfile )
 			prop.rendercolor.b = (byte)b;
 		}
 	}
-	if( !is_prop || named || ( !gc_static_prop_pack && gc_num_static_props >= GC_STATIC_PROPS_MAX ))
+	if( !is_prop || named || SV_GCFunctionalObject( classname, group ) || ( !gc_static_prop_pack && gc_num_static_props >= GC_STATIC_PROPS_MAX ))
 		return false;
 
 	*pfile = p;
@@ -6920,7 +6977,9 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	qboolean named;
 
 	int tier_count[GC_PARITY_TIERS] = { 0, 0, 0 }, baked = 0, t, left;
+	char object_group[32];
 
+	SV_GCScanObjectGroups( entities );
 	gc_parity_kept = 0;
 	gc_parity_budget = 0x7fffffff;
 	for( t = 0; t < GC_PARITY_TIERS; t++ )
@@ -6934,7 +6993,7 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	{
 		if( key[0] != '{' )
 			return;	/* malformed: leave it to the real parser */
-		classname[0] = '\0';
+		classname[0] = object_group[0] = '\0';
 		named = false;
 		for( ;; )
 		{
@@ -6948,11 +7007,13 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 				Q_strncpy( classname, value, sizeof( classname ));
 			else if( !Q_strcmp( key, "targetname" ) && value[0] )
 				named = true;
+			else if( !Q_strcmp( key, "object_group" ))
+				Q_strncpy( object_group, value, sizeof( object_group ));
 		}
 		if( !classname[0] || !Q_strcmp( classname, "worldspawn" ))
 			continue;
 		total++;
-		if( SV_GCStaticPropClass( classname ) && !named && !Sys_CheckParm( "-gcnostaticprops" ))
+		if( SV_GCStaticPropClass( classname ) && !named && !SV_GCFunctionalObject( classname, object_group ) && !Sys_CheckParm( "-gcnostaticprops" ))
 		{
 			statics++;
 			continue;
