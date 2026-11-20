@@ -120,6 +120,21 @@ extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
 extern qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend );
 
+/* Decode cost counters, logged with the 256-frame world DL line: how many LZ4 blocks were decoded and the time they
+ * took (kinds: 0 lightmap page, 1 light-face block, 2 PVS block). */
+static u32 gc_wd_lz4_n[3];
+static u64 gc_wd_lz4_ticks[3];
+
+static qboolean R_GXWdLz4Decode( int kind, const byte *ip, const byte *iend, byte *op, byte *oend )
+{
+	const u64 t0 = gettime();
+	const qboolean ok = Mod_GCLZ4Decode( ip, iend, op, oend );
+
+	gc_wd_lz4_ticks[kind] += gettime() - t0;
+	gc_wd_lz4_n[kind]++;
+	return ok;
+}
+
 /* Bytes of the map-load arena the live BSP scratch still occupies (master's
  * fix for DoD maps). On Lost Coast the stub BSP's scratch is the whole 3.7 MB
  * arena, which pushed the chunk ring to 234 KB and the texture slots out and
@@ -367,7 +382,7 @@ static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, GC_WD_LM_PAGE_BYTES );
 	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, gc_wd_stage, stored ))
 		return false;
-	if( !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
+	if( !R_GXWdLz4Decode( 0, gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
 		return false;
 	DCFlushRange( dst, GC_WD_LM_PAGE_BYTES );
 	return true;
@@ -1669,7 +1684,7 @@ static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 b
 	else
 	{
 		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_wd_stage, stored, false );
-		if( !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
+		if( !R_GXWdLz4Decode( 1, gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
 			return NULL;
 	}
 	gc_lf_blk_id[slot] = id;
@@ -1887,7 +1902,7 @@ static int R_GXWorldDLPvsByte( u32 raw )
 	else
 	{
 		if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ofs, gc_wd_stage, stored )
-			|| !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, gc_wd_pvs_blk, gc_wd_pvs_blk + GC_WD_PVS_BLOCK ))
+			|| !R_GXWdLz4Decode( 2, gc_wd_stage, gc_wd_stage + stored - pad, gc_wd_pvs_blk, gc_wd_pvs_blk + GC_WD_PVS_BLOCK ))
 			return -1;
 	}
 	gc_wd_pvs_blk_id = (s32)blk;
@@ -4216,6 +4231,11 @@ int R_GXWorldDLDraw( void )
 			"Xash3D GameCube: world DL frame=%d cluster=%d chunks=%d batches=%d waiting=%d bind_miss=%d lm_bind=%d lm_miss=%d\n",
 			gc_wd_frame, cluster, chunks, drawn, waiting, bind_miss,
 			gc_wd_lm_binds, gc_wd_lm_miss );
+		if( gc_wd_lz4_n[0] + gc_wd_lz4_n[1] + gc_wd_lz4_n[2] )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL LZ4 decodes (since load, %d frames): lightmap %u in %u us, lightface %u in %u us, pvs %u in %u us\n",
+				gc_wd_frame, gc_wd_lz4_n[0], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[0] ),
+				gc_wd_lz4_n[1], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[1] ),
+				gc_wd_lz4_n[2], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[2] ));
 	}
 	return drawn;
 }
