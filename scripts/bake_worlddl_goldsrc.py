@@ -497,22 +497,23 @@ def write_static_brushes(out_path: Path, statics: list[tuple[int, bool]], wd_byt
 LM_PAGE_BYTES = 2048
 
 
-def pack_lm_pages_lz4(lm_pages: bytes) -> bytes:
-	"""Lightmap region with every 2 KiB page LZ4-compressed (header flag WD_FLAG_LM_LZ4).
+def pack_blocks_lz4(data: bytes, block: int) -> bytes:
+	"""Random-access LZ4 region: data cut into `block`-byte blocks, each LZ4-compressed when that is smaller.
 
-	Layout: u32 n_pages, u32 offset[n_pages + 1] (bytes from the region start; a blob start is 32-aligned and its low
+	Layout: u32 n_blocks, u32 offset[n_blocks + 1] (bytes from the region start; a blob start is 32-aligned and its low
 	5 bits hold the zero padding bytes AFTER the LZ4 stream; the last offset is the region size), padded to 32; then
-	the page blobs, each padded to 32. A blob of 2048 bytes with no padding count is the raw page. The engine stages
-	a blob in a 2 KiB buffer and decodes it into the page slot (in-place decode of an exact-fit slot is impossible).
-	Pages compress about 3.5:1 (1 MiB of pages per map -> about 290 KiB)."""
+	the blobs, each padded to 32. A block stored raw has no padding count and a size of its raw length rounded up to
+	32 (a compressed block is always smaller than that). The last block may be short. The engine stages a blob and
+	decodes it into a cache buffer (in-place decode of an exact-fit buffer is impossible)."""
 	import gc_lz4
-	n = len(lm_pages) // LM_PAGE_BYTES
+	n = (len(data) + block - 1) // block
 	blobs = []	# (stored bytes incl. padding, padding count)
 	for i in range(n):
-		raw = bytes(lm_pages[i * LM_PAGE_BYTES:(i + 1) * LM_PAGE_BYTES])
+		raw = bytes(data[i * block:(i + 1) * block])
+		rawsz = (len(raw) + 31) & ~31
 		cand = gc_lz4.compress(raw)
 		size = (len(cand) + 31) & ~31
-		best = (cand + bytes(size - len(cand)), size - len(cand)) if size < LM_PAGE_BYTES else (raw, 0)
+		best = (cand + bytes(size - len(cand)), size - len(cand)) if size < rawsz else (raw + bytes(rawsz - len(raw)), 0)
 		blobs.append(best)
 	head_len = (4 + 4 * (n + 1) + 31) & ~31
 	region = bytearray(struct.pack(">I", n))
@@ -527,6 +528,15 @@ def pack_lm_pages_lz4(lm_pages: bytes) -> bytes:
 	for blob, _pad in blobs:
 		region += blob
 	return bytes(region)
+
+
+def pack_lm_pages_lz4(lm_pages: bytes) -> bytes:
+	"""Lightmap region with every 2 KiB page LZ4-compressed (header flag WD_FLAG_LM_LZ4); see pack_blocks_lz4.
+	Pages compress about 3.5:1 (1 MiB of pages per map -> about 290 KiB)."""
+	return pack_blocks_lz4(lm_pages, LM_PAGE_BYTES)
+
+
+LF_BLOCK = 1024
 
 
 def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
@@ -769,7 +779,7 @@ LF_FLAG_TILED = 2
 LF_NO_LIGHT = 0xFFFFFF
 
 
-def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
+def bake_lightfaces(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	"""media/wd_<map>_lf.gcd: what GoldSrc's light point needs from each face
 	when the world is drawn from the world DL and no msurface table exists
 	(runtime ref/common/ref_light.c).  Header (32 bytes, big-endian):
@@ -804,13 +814,28 @@ def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
 		ext = [(bmaxs[j] - bmins[j]) * 16 for j in range(2)]
 		lo = lightofs if 0 <= lightofs < len(bsp.lighting) else LF_NO_LIGHT
 		recs += struct.pack(">8f4iI4s", *vecs0, *vecs1, *tmins, *ext, (flags << 24) | (lo & LF_NO_LIGHT), styles)
-	body = bytearray(32)
-	body += recs
-	pad32(body)
-	lit_ofs = len(body)
-	body += bsp.lighting
-	pad32(body)
-	struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
+	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
+	if lz4:
+		# Version 2: both parts are random-access LZ4 regions (pack_blocks_lz4, LF_BLOCK-byte blocks).
+		# Header: "GClf", 2, faces, record region offset (32), lighting region offset, lighting raw bytes, file size,
+		# block size.
+		rec_region = pack_blocks_lz4(bytes(recs), LF_BLOCK)
+		lit_region = pack_blocks_lz4(bytes(bsp.lighting), LF_BLOCK) if bsp.lighting else b""
+		body = bytearray(32)
+		body += rec_region
+		pad32(body)
+		lit_ofs = len(body)
+		body += lit_region
+		pad32(body)
+		struct.pack_into(">4s7I", body, 0, b"GClf", 2, len(bsp.faces), 32, lit_ofs, len(bsp.lighting), len(body), LF_BLOCK)
+	else:
+		body = bytearray(32)
+		body += recs
+		pad32(body)
+		lit_ofs = len(body)
+		body += bsp.lighting
+		pad32(body)
+		struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
 	out_path.parent.mkdir(parents=True, exist_ok=True)
 	out_path.write_bytes(body)
 	print(f"  light faces: {len(bsp.faces)} faces, lighting {len(bsp.lighting) // 1024} KB, wrote {out_path} ({len(body) // 1024} KB)")
@@ -829,7 +854,7 @@ def main() -> int:
 	args = ap.parse_args()
 	out = args.out or (ROOT / "content/dod/media" / f"wd_{args.map.stem}.gcd")
 	bake(args.map, out, lz4=args.lz4)
-	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"))
+	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"), lz4=args.lz4)
 	return 0
 
 

@@ -90,12 +90,26 @@ lives in ARAM too and is the next candidate after this.
   tip 24fd9c5, off dod-gc main f269158). dod_glider refs 39 MDLs = 5.1 MiB; saints (40), falaise (35), escape (35) and
   sturm (34) were also over the old count cap.
 
+## 4b. Done: LZ4 `_lf` light-face pack (GClf version 2, same opt-in `DODGC_WD_LZ4=1`)
+
+- Both parts of `wd_<map>_lf.gcd` (56-byte face records, BSP lighting lump) become random-access LZ4 regions of
+  1 KiB blocks (`pack_blocks_lz4`, shared with the lightmap pages). Version 1 files load unchanged.
+- Engine (`R_GXLfBlock` / `R_GXLfRead2` in ref/gx/r_gx_worlddl.c): a block is staged and decoded into one of three
+  1 KiB cache buffers (one for records, two for lighting because each light style is read far from the last).
+  Cost **+4 KiB of MEM1 BSS** and one LZ4 decode of at most 1 KiB per cache miss in the light-point walk.
+- Measured on 6 maps (baked from the BSPs): anzio 2620 -> 1239 KiB, caen 3086 -> 1740, flash 1713 -> 1082,
+  zalec 3498 -> 2139, kalt 2141 -> 1167, glider 1917 -> 1308; total 14.6 -> 8.5 MiB (-42%), about 1 MiB of ARAM a map
+  on top of the lightmap saving.
+- Tests: `tests/test_lf_lz4.py` (random-access reads through the engine's decoder source compiled with gcc,
+  short/odd lengths, and a real dod_flash bake: v2 reads equal v1 bytes). Host suite 211 passed, 5 skipped.
+- Not measured: Dolphin (ms per light-point query with cache misses), heap, ms/frame.
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
    run the 12-bot recipe, check "world DL" and ARAM segment logs, and compare lightmap miss cost (`gc_wd_lm_miss`).
    Only then flip the default on.
-2. **LZ4 the `_lf` light-face pack** (1.7-3.5 MB a map in ARAM): biggest remaining ARAM item.
+2. ~~LZ4 the `_lf` light-face pack~~ done in 4b.
 3. **PVS cross-row dedup/delta** (about 500 KiB a map, 6x in zlib).
 4. **Falaise chain cache (222 > 180 KiB):** on DoD the cache is `min(all chains, spill room - margin)`
    (r_gx_world.c, "A map pack" branch), i.e. it is MEM1-spill bound, not a constant; the fix is more spill room or a
