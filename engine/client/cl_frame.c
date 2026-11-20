@@ -1944,6 +1944,24 @@ void CL_GCLeanPlayerEffects( void )
 
 #define GC_LEAN_WALL_POOL 40	/* static wall draw slots per frame: PVS + frustum visible, reported when exceeded */
 
+/* The wall draw pool (40 cl_entity_t, ~66 KB) is taken from the heap the first time a map has static wall records, not
+ * kept as static image: a build or map without gc_static_walls (Lost Coast, HL1) never pays for it. Kept for the session;
+ * NULL (walls not drawn, reported once) when the heap cannot give it. */
+static cl_entity_t *CL_GCLeanWallPool( void )
+{
+	static cl_entity_t *pool;
+	static qboolean failed;
+
+	if( !pool && !failed )
+	{
+		pool = (cl_entity_t *)calloc( GC_LEAN_WALL_POOL, sizeof( cl_entity_t ));
+		failed = !pool;
+		Con_Reportf( "Xash3D GameCube: static wall draw pool %s %s\n", Q_memprint( GC_LEAN_WALL_POOL * sizeof( cl_entity_t )),
+			pool ? "from the heap" : "REFUSED, static walls not drawn" );
+	}
+	return pool;
+}
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -2214,9 +2232,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 
 	/* Static func_wall records (gc_static_walls 1): no edict, so the scan above never sees them. Draw the nearest
 	 * visible ones from the record list, the way the static props are drawn. */
-	if( SV_GCStaticWallCount() > 0 && SV_GCStaticWallsMode() == 1 )
+	if( SV_GCStaticWallCount() > 0 && SV_GCStaticWallsMode() == 1 && CL_GCLeanWallPool() )
 	{
-		static cl_entity_t lean_wall_ents[GC_LEAN_WALL_POOL];
+		cl_entity_t *lean_wall_ents = CL_GCLeanWallPool();
 		extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
 		int wpick[GC_LEAN_WALL_POOL], wn = 0, wi, wj, drawn = 0, wvisible = 0;
 		float wdist[GC_LEAN_WALL_POOL];

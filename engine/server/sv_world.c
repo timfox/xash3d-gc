@@ -1251,9 +1251,19 @@ typedef struct
 
 /* Self test: SV_Move with the records switched off, to compare against the edict-only result. */
 qboolean gc_static_walls_disable;
-static gc_static_wall_t gc_static_walls[GC_STATIC_WALLS_MAX];
+/* Records and the temporary edict are taken from the heap on the first record, not kept as static image: only a map
+ * whose disc cfg turns gc_static_walls on pays for them (Lost Coast has no heap to give ~17 KB of BSS it never uses).
+ * They are kept for the session, like the static block they replace. */
+typedef struct
+{
+	edict_t          tmp_edict;
+	gc_static_wall_t walls[GC_STATIC_WALLS_MAX];
+} gc_static_wall_store_t;
+
+static gc_static_wall_store_t *gc_static_store;
 static int gc_num_static_walls;
-static edict_t gc_static_tmp_edict;
+#define gc_static_walls ( gc_static_store->walls )
+#define gc_static_tmp_edict ( gc_static_store->tmp_edict )
 
 int SV_GCStaticWallCount( void )
 {
@@ -1271,6 +1281,13 @@ qboolean SV_GCStaticWallAdd( int modelindex, const vec3_t origin, const vec3_t m
 
 	if( gc_num_static_walls >= GC_STATIC_WALLS_MAX )
 		return false;
+	if( !gc_static_store )
+	{
+		gc_static_store = (gc_static_wall_store_t *)calloc( 1, sizeof( *gc_static_store ));
+		if( !gc_static_store )
+			return false;	/* the func_wall keeps its edict */
+		Con_Reportf( "Xash3D GameCube: static wall records %s from the heap\n", Q_memprint( sizeof( *gc_static_store )));
+	}
 	w = &gc_static_walls[gc_num_static_walls++];
 	w->modelindex = modelindex;
 	VectorCopy( origin, w->origin );
