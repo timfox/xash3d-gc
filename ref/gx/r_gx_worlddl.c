@@ -121,9 +121,9 @@ extern size_t Mod_GCBspScratchFloor( void );
 extern qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend );
 
 /* Decode cost counters, logged with the 256-frame world DL line: how many LZ4 blocks were decoded and the time they
- * took (kinds: 0 lightmap page, 1 light-face block, 2 PVS block). */
-static u32 gc_wd_lz4_n[3];
-static u64 gc_wd_lz4_ticks[3];
+ * took (kinds: 0 lightmap page, 1 light-face record block, 2 PVS block, 3 light-face lighting block). */
+static u32 gc_wd_lz4_n[4], gc_wd_lf_hits[2];
+static u64 gc_wd_lz4_ticks[4];
 
 static qboolean R_GXWdLz4Decode( int kind, const byte *ip, const byte *iend, byte *op, byte *oend )
 {
@@ -1668,7 +1668,10 @@ static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 b
 		return NULL;
 	for( i = 0; i < GC_LF_CACHE; i++ )
 		if( gc_lf_blk_id[i] == id )
+		{
+			gc_wd_lf_hits[region ? 1 : 0]++;
 			return gc_lf_blk[i];
+		}
 	slot = region == 0 ? 0 : 1 + ( gc_lf_lit_rr++ & 1 );
 	raw_len = Q_min( GC_LF_BLOCK, raw_total - blk * GC_LF_BLOCK );
 	rawsz = ( raw_len + 31u ) & ~31u;
@@ -1684,7 +1687,7 @@ static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 b
 	else
 	{
 		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_wd_stage, stored, false );
-		if( !R_GXWdLz4Decode( 1, gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
+		if( !R_GXWdLz4Decode( region ? 3 : 1, gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
 			return NULL;
 	}
 	gc_lf_blk_id[slot] = id;
@@ -4231,10 +4234,11 @@ int R_GXWorldDLDraw( void )
 			"Xash3D GameCube: world DL frame=%d cluster=%d chunks=%d batches=%d waiting=%d bind_miss=%d lm_bind=%d lm_miss=%d\n",
 			gc_wd_frame, cluster, chunks, drawn, waiting, bind_miss,
 			gc_wd_lm_binds, gc_wd_lm_miss );
-		if( gc_wd_lz4_n[0] + gc_wd_lz4_n[1] + gc_wd_lz4_n[2] )
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL LZ4 decodes (since load, %d frames): lightmap %u in %u us, lightface %u in %u us, pvs %u in %u us\n",
+		if( gc_wd_lz4_n[0] + gc_wd_lz4_n[1] + gc_wd_lz4_n[2] + gc_wd_lz4_n[3] )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL LZ4 decodes (since load, %d frames): lightmap %u in %u us, lf records %u in %u us (%u hits), lf lighting %u in %u us (%u hits), pvs %u in %u us\n",
 				gc_wd_frame, gc_wd_lz4_n[0], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[0] ),
-				gc_wd_lz4_n[1], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[1] ),
+				gc_wd_lz4_n[1], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[1] ), gc_wd_lf_hits[0],
+				gc_wd_lz4_n[3], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[3] ), gc_wd_lf_hits[1],
 				gc_wd_lz4_n[2], (unsigned)ticks_to_microsecs( gc_wd_lz4_ticks[2] ));
 	}
 	return drawn;
