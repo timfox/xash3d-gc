@@ -37,6 +37,10 @@ void R_GXPropDrawHorizon( const float *org );
  * cache: a dozen chunks read from ARAM again every frame, 30 fps). A chunk
  * with no table (the 3D skybox, lit by its vertex colours) keeps them. */
 #define GC_WD_FLAG_CLR_INDEX	0x0004
+/* Lightmap pages are LZ4 blocks. The region at the lightmap stream is [u32 n_pages][u32 offset[n_pages + 1]],
+ * 32-aligned page blobs after it; a 2048-byte blob is a raw page. scripts/bake_worlddl_goldsrc.py pack_lm_pages_lz4.
+ * 1 MiB of pages a map shrinks to about 290 KiB of ARAM. */
+#define GC_WD_FLAG_LM_LZ4	0x0010
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
 #define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
@@ -105,6 +109,7 @@ extern unsigned Mod_GCWorldArraySpillGeneration( void );
 extern int GC_WorldTexnumByHash( unsigned hash );
 extern int GC_GetWaterFaceCount( void );
 extern size_t Mod_GCBspScratchFloor( void );
+extern qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend );
 
 /* Bytes of the map-load arena the live BSP scratch still occupies (master's
  * fix for DoD maps). On Lost Coast the stub BSP's scratch is the whole 3.7 MB
@@ -325,6 +330,41 @@ static int R_GXTevMatEmboss( int id )
  * is done with (the frame starts with DrawDone). Slots already used this
  * frame are left alone.
  */
+/* Page `page` into the 2048-byte slot dst (32-aligned). A compressed page is staged in a 2 KiB buffer and decoded into
+ * the slot (an exact-fit slot cannot be decoded in place: the last match always ends a byte past the read pointer). offset[i] is the blob start (32-aligned)
+ * with the count of zero padding bytes after the LZ4 stream in its low 5 bits. */
+static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
+{
+	static byte dir[64] __attribute__(( aligned( 32 )));
+	static byte stage[GC_WD_LM_PAGE_BYTES] __attribute__(( aligned( 32 )));
+	u32 w0, w1, ofs, pad, stored;
+	u32 e = 4u + 4u * page;	/* offset[page], offset[page + 1]: 8 bytes that may straddle a 32-byte line */
+
+	if( !( gc_wd_hdr.flags & GC_WD_FLAG_LM_LZ4 ))
+		return R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES, dst, GC_WD_LM_PAGE_BYTES );
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream, dir, 32 ))
+		return false;
+	if( page >= *(const u32 *)dir )
+		return false;
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ( e & ~31u ), dir, 64 ))
+		return false;
+	w0 = *(const u32 *)( dir + ( e & 31u ));
+	w1 = *(const u32 *)( dir + ( e & 31u ) + 4u );
+	ofs = w0 & ~31u;
+	pad = w0 & 31u;
+	stored = ( w1 & ~31u ) - ofs;
+	if( !stored || stored > GC_WD_LM_PAGE_BYTES || pad >= stored )
+		return false;
+	if( stored == GC_WD_LM_PAGE_BYTES && !pad )	/* a raw page */
+		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, GC_WD_LM_PAGE_BYTES );
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, stage, stored ))
+		return false;
+	if( !Mod_GCLZ4Decode( stage, stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
+		return false;
+	DCFlushRange( dst, GC_WD_LM_PAGE_BYTES );
+	return true;
+}
+
 static byte *R_GXWorldDLLmPage( u32 page )
 {
 	static u8 hint[2048];	/* page & 2047 -> slot it was last found in */
@@ -369,8 +409,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		full_frame = gc_wd_frame;
 		return NULL;
 	}
-	if( !R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES,
-		gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES, GC_WD_LM_PAGE_BYTES ))
+	if( !R_GXWorldDLLmFetch( page, gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES ))
 		return NULL;
 	if( gc_wd_lm_slot_page[victim] >= 0 )
 		GX_InvalidateTexAll();

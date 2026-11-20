@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import struct
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,6 +32,8 @@ LM_FRAC = 8
 WD_VERSION = 2
 # Header flags: GoldSrc lightmaps are applied at x1 (Lost Coast pages use x2).
 WD_FLAG_LIGHT_X1 = 0x0001
+# Lightmap pages are LZ4 blocks (see pack_lm_pages_lz4). Opt in with DODGC_WD_LZ4=1 or bake_worlddl_goldsrc.py --lz4.
+WD_FLAG_LM_LZ4 = 0x0010
 LM_PAGES_MAX = 512
 MAT_F_WATER = 0x01
 MAT_F_NOLIGHT = 0x02
@@ -472,7 +477,42 @@ def write_static_brushes(out_path: Path, statics: list[tuple[int, bool]], wd_byt
 	out_path.write_bytes(body)
 
 
-def bake(map_bsp: Path, out_path: Path) -> None:
+LM_PAGE_BYTES = 2048
+
+
+def pack_lm_pages_lz4(lm_pages: bytes) -> bytes:
+	"""Lightmap region with every 2 KiB page LZ4-compressed (header flag WD_FLAG_LM_LZ4).
+
+	Layout: u32 n_pages, u32 offset[n_pages + 1] (bytes from the region start; a blob start is 32-aligned and its low
+	5 bits hold the zero padding bytes AFTER the LZ4 stream; the last offset is the region size), padded to 32; then
+	the page blobs, each padded to 32. A blob of 2048 bytes with no padding count is the raw page. The engine stages
+	a blob in a 2 KiB buffer and decodes it into the page slot (in-place decode of an exact-fit slot is impossible).
+	Pages compress about 3.5:1 (1 MiB of pages per map -> about 290 KiB)."""
+	import gc_lz4
+	n = len(lm_pages) // LM_PAGE_BYTES
+	blobs = []	# (stored bytes incl. padding, padding count)
+	for i in range(n):
+		raw = bytes(lm_pages[i * LM_PAGE_BYTES:(i + 1) * LM_PAGE_BYTES])
+		cand = gc_lz4.compress(raw)
+		size = (len(cand) + 31) & ~31
+		best = (cand + bytes(size - len(cand)), size - len(cand)) if size < LM_PAGE_BYTES else (raw, 0)
+		blobs.append(best)
+	head_len = (4 + 4 * (n + 1) + 31) & ~31
+	region = bytearray(struct.pack(">I", n))
+	ofs = head_len
+	offs = []
+	for blob, pad in blobs:
+		offs.append(ofs | pad)
+		ofs += len(blob)
+	offs.append(ofs)
+	region += b"".join(struct.pack(">I", o) for o in offs)
+	region += bytes(head_len - len(region))
+	for blob, _pad in blobs:
+		region += blob
+	return bytes(region)
+
+
+def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	bsp = Bsp(map_bsp)
 	stem = map_bsp.stem
 	mat_index: dict[str, int] = {}
@@ -651,6 +691,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	pad32(body)
 	ofs_chunkdir = len(body)
 	run = 0
+	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
 	for cl, blob in zip(order, chunk_blobs):
 		ch = chunks[cl]
 		body += struct.pack(">II3h3hHH", run, len(blob), *ch.mins, *ch.maxs, cl, 0)
@@ -666,7 +707,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	for blob in chunk_blobs:
 		body += blob
 	pad32(body)
-	body += lm_pages
+	body += pack_lm_pages_lz4(lm_pages) if lz4 and lm_pages else lm_pages
 	max_chunk = max((len(b) for b in chunk_blobs), default=0)
 	struct.pack_into(
 		">4sHH13I",
@@ -674,7 +715,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		0,
 		b"GCwd",
 		WD_VERSION,
-		WD_FLAG_LIGHT_X1,
+		WD_FLAG_LIGHT_X1 | (WD_FLAG_LM_LZ4 if lz4 and lm_pages else 0),
 		bsp.numclusters,
 		len(order),
 		len(mat_recs),
@@ -767,9 +808,10 @@ def main() -> int:
 		default=None,
 		help="Output .gcd path (default: content/dod/media/wd_<map>.gcd)",
 	)
+	ap.add_argument("--lz4", action="store_true", help="LZ4-compress each lightmap page (also DODGC_WD_LZ4=1)")
 	args = ap.parse_args()
 	out = args.out or (ROOT / "content/dod/media" / f"wd_{args.map.stem}.gcd")
-	bake(args.map, out)
+	bake(args.map, out, lz4=args.lz4)
 	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"))
 	return 0
 
