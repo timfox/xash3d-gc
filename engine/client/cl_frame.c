@@ -1942,6 +1942,8 @@ void CL_GCLeanPlayerEffects( void )
 	CL_AddEntityEffects( lp );
 }
 
+#define GC_LEAN_WALL_POOL 40	/* static wall draw slots per frame: PVS + frustum visible, reported when exceeded */
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -1958,7 +1960,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	edict_t *player;
 	vec3_t view_org;
 	int e, added = 0, studios = 0;
-	int scan_brush = 0, scan_far = 0, scan_nomod = 0, scan_nosurf = 0;
+	int scan_brush = 0, scan_far = 0, scan_nomod = 0, scan_nosurf = 0, brush_beyond_budget = 0;
 	int scan_studio = 0, scan_studio_skip = 0;
 	int budget = (int)( sizeof( lean_brush_static ) / sizeof( lean_brush_static[0] ));
 	qboolean capture_brush_pick = false;
@@ -2148,6 +2150,11 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			continue;
 		}
 		scan_brush++;
+		if( added >= budget )
+		{
+			brush_beyond_budget++;
+			continue;
+		}
 		/* Inline *submodels may report surfaces via firstmodelsurface. */
 		if( mod->nummodelsurfaces <= 0 && !( mod->name[0] == '*' ))
 		{
@@ -2205,6 +2212,99 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		}
 	}
 
+	/* Static func_wall records (gc_static_walls 1): no edict, so the scan above never sees them. Draw the nearest
+	 * visible ones from the record list, the way the static props are drawn. */
+	if( SV_GCStaticWallCount() > 0 && SV_GCStaticWallsMode() == 1 )
+	{
+		static cl_entity_t lean_wall_ents[GC_LEAN_WALL_POOL];
+		extern qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs );
+		int wpick[GC_LEAN_WALL_POOL], wn = 0, wi, wj, drawn = 0, wvisible = 0;
+		float wdist[GC_LEAN_WALL_POOL];
+		static int wmax_visible;
+
+		for( wi = 0; wi < SV_GCStaticWallCount(); wi++ )
+		{
+			vec3_t wo, wmin, wmax, wabsmin, wabsmax, wc, wd;
+			int wmi;
+			float d;
+
+			SV_GCStaticWallInfo( wi, wo, wmin, wmax, &wmi );
+			SV_GCStaticWallBounds( wi, wabsmin, wabsmax, &wmi );
+			VectorAverage( wabsmin, wabsmax, wc );
+			VectorSubtract( wc, view_org, wd );
+			d = VectorLength( wd );
+			if( d > max_dist )
+				continue;
+			if( !R_GXWorldDLEntityVisible( 6144 + wi, wabsmin, wabsmax ))
+				continue;
+			wvisible++;
+			if( wn < GC_LEAN_WALL_POOL )
+				wn++;
+			else if( d >= wdist[wn - 1] )
+				continue;
+			for( wj = wn - 1; wj > 0 && wdist[wj - 1] > d; wj-- )
+			{
+				wdist[wj] = wdist[wj - 1];
+				wpick[wj] = wpick[wj - 1];
+			}
+			wdist[wj] = d;
+			wpick[wj] = wi;
+		}
+		for( wi = 0; wi < wn; wi++ )
+		{
+			vec3_t wo, wmin, wmax;
+			int wmi;
+			cl_entity_t *went = &lean_wall_ents[drawn];
+			model_t *wmod;
+
+			SV_GCStaticWallInfo( wpick[wi], wo, wmin, wmax, &wmi );
+			wmod = SV_ModelHandle( wmi );
+			if( !wmod || wmod->type != mod_brush )
+				continue;
+			if( wmi > 0 && wmi < MAX_MODELS )
+				cl.models[wmi] = wmod;
+			memset( went, 0, sizeof( *went ));
+			went->index = 0;
+			went->model = wmod;
+			VectorCopy( wo, went->origin );
+			VectorCopy( wo, went->curstate.origin );
+			VectorCopy( wmin, went->curstate.mins );
+			VectorCopy( wmax, went->curstate.maxs );
+			went->curstate.modelindex = wmi;
+			went->curstate.solid = SOLID_BSP;
+			went->curstate.movetype = MOVETYPE_PUSH;
+			went->curstate.rendermode = kRenderNormal;
+			went->curstate.entityType = ENTITY_NORMAL;
+			went->prevstate = went->curstate;
+			VectorCopy( went->origin, went->latched.prevorigin );
+			if( ref.dllFuncs.R_AddEntity( went, ET_NORMAL ))
+				drawn++;
+		}
+		{
+			static int wall_logs;
+
+			if( wvisible > wmax_visible )
+			{
+				wmax_visible = wvisible;
+				Con_Reportf( "Xash3D GameCube: static walls: new max visible %d (pool %d, drawn %d, records %d)%s\n", wvisible,
+					GC_LEAN_WALL_POOL, drawn, SV_GCStaticWallCount(), wvisible > GC_LEAN_WALL_POOL ? " TRUNCATED" : "" );
+			}
+			if( wall_logs++ < 3 || !( wall_logs % 600 ))
+				Con_Reportf( "Xash3D GameCube: static walls drawn %d of %d records (%d visible, view %.0f %.0f %.0f)\n",
+					drawn, SV_GCStaticWallCount(), wvisible, view_org[0], view_org[1], view_org[2] );
+		}
+	}
+
+	{
+		static int beyond_max, beyond_logs;
+
+		if( brush_beyond_budget > beyond_max && beyond_logs++ < 12 )
+		{
+			beyond_max = brush_beyond_budget;
+			Con_Reportf( "Xash3D GameCube: lean brush scan: %d brush edicts in range NOT drawn (budget %d, drew %d, scanned %d)\n",
+				brush_beyond_budget, budget, added, scan_brush );
+		}
+	}
 	GC_ProfMark( "render: lean emit brush scan" );
 
 	/* Already-resident world studios (w_* weapons + allowlisted NPCs +

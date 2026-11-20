@@ -470,6 +470,9 @@ void SV_ClearWorld( void )
 	}
 
 	memset( sv_areanodes, 0, sizeof( sv_areanodes ));
+#if XASH_GAMECUBE
+	SV_GCStaticWallsClear();
+#endif
 	iTouchLinkSemaphore = 0;
 	sv_numareanodes = 0;
 
@@ -1229,6 +1232,132 @@ static qboolean SV_ClipToEntity( edict_t *touch, moveclip_t *clip )
 	return true;
 }
 
+
+#if XASH_GAMECUBE
+/*
+ * Static func_wall records (gc_static_walls). An unnamed, unrendered, unrotated func_wall never moves or changes, so
+ * on the GameCube it need not be an edict: the map entity gate (sv_game.c SV_GCStaticWallRecord) keeps only its inline
+ * model, origin and bounds here. SV_Move / SV_MoveNoEnts clip against the records with the same SV_ClipMoveToEntity
+ * hull code, on one reused temporary edict that has exactly the fields CFuncWall::Spawn gives a func_wall (SOLID_BSP,
+ * MOVETYPE_PUSH, FL_WORLDBRUSH, no rendermode); a hit reports the WORLD edict as tr.pHit, so the game DLL treats it like
+ * any world brush (its TraceAttack/Instance calls get a valid edict).
+ */
+#define GC_STATIC_WALLS_MAX 256
+typedef struct
+{
+	int    modelindex;
+	vec3_t origin, mins, maxs, absmin, absmax;
+} gc_static_wall_t;
+
+/* Self test: SV_Move with the records switched off, to compare against the edict-only result. */
+qboolean gc_static_walls_disable;
+static gc_static_wall_t gc_static_walls[GC_STATIC_WALLS_MAX];
+static int gc_num_static_walls;
+static edict_t gc_static_tmp_edict;
+
+int SV_GCStaticWallCount( void )
+{
+	return gc_num_static_walls;
+}
+
+void SV_GCStaticWallsClear( void )
+{
+	gc_num_static_walls = 0;
+}
+
+qboolean SV_GCStaticWallAdd( int modelindex, const vec3_t origin, const vec3_t mins, const vec3_t maxs )
+{
+	gc_static_wall_t *w;
+
+	if( gc_num_static_walls >= GC_STATIC_WALLS_MAX )
+		return false;
+	w = &gc_static_walls[gc_num_static_walls++];
+	w->modelindex = modelindex;
+	VectorCopy( origin, w->origin );
+	VectorCopy( mins, w->mins );
+	VectorCopy( maxs, w->maxs );
+	/* SV_LinkEdict: absmin/absmax = origin + mins/maxs, one unit wider for a non-item entity */
+	VectorAdd( origin, mins, w->absmin );
+	VectorAdd( origin, maxs, w->absmax );
+	for( int i = 0; i < 3; i++ )
+	{
+		w->absmin[i] -= 1.0f;
+		w->absmax[i] += 1.0f;
+	}
+	return true;
+}
+
+/* The temporary edict for record i, as the DLL's CFuncWall::Spawn would have left a func_wall. */
+static edict_t *SV_GCStaticWallEdict( const gc_static_wall_t *w )
+{
+	edict_t *e = &gc_static_tmp_edict;
+
+	memset( e, 0, sizeof( *e ));
+	e->v.modelindex = w->modelindex;
+	e->v.solid = SOLID_BSP;
+	e->v.movetype = MOVETYPE_PUSH;
+	e->v.flags = FL_WORLDBRUSH;
+	e->v.rendermode = kRenderNormal;
+	VectorCopy( w->origin, e->v.origin );
+	VectorCopy( w->mins, e->v.mins );
+	VectorCopy( w->maxs, e->v.maxs );
+	VectorSubtract( w->maxs, w->mins, e->v.size );
+	VectorCopy( w->absmin, e->v.absmin );
+	VectorCopy( w->absmax, e->v.absmax );
+	return e;
+}
+
+/* Exact comparison primitive for the self test: the trace of the record's hull, no filters. */
+void SV_GCStaticWallTrace( int i, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace )
+{
+	SV_ClipMoveToEntity( SV_GCStaticWallEdict( &gc_static_walls[i] ), start, mins, maxs, end, trace );
+}
+
+void SV_GCStaticWallInfo( int i, vec3_t origin, vec3_t mins, vec3_t maxs, int *modelindex )
+{
+	VectorCopy( gc_static_walls[i].origin, origin );
+	VectorCopy( gc_static_walls[i].mins, mins );
+	VectorCopy( gc_static_walls[i].maxs, maxs );
+	*modelindex = gc_static_walls[i].modelindex;
+}
+
+void SV_GCStaticWallBounds( int i, vec3_t absmin, vec3_t absmax, int *modelindex )
+{
+	VectorCopy( gc_static_walls[i].absmin, absmin );
+	VectorCopy( gc_static_walls[i].absmax, absmax );
+	*modelindex = gc_static_walls[i].modelindex;
+}
+
+static void SV_ClipToStaticWalls( moveclip_t *clip )
+{
+	int i;
+
+	if( gc_static_walls_disable )
+		return;
+	for( i = 0; i < gc_num_static_walls; i++ )
+	{
+		const gc_static_wall_t *w = &gc_static_walls[i];
+		trace_t trace;
+		edict_t *touch;
+
+		if( clip->trace.allsolid )
+			return;
+		if( !BoundsIntersect( clip->boxmins, clip->boxmaxs, w->absmin, w->absmax ))
+			continue;
+		/* SV_ClipToEntity's filters that can apply to a plain world-brush wall: the custom ShouldCollide hook sees the
+		 * wall as the world edict (a wall is world geometry for the DLL). */
+		if( svgame.dllFuncs2.pfnShouldCollide && SV_IsValidEdict( clip->passedict )
+			&& !svgame.dllFuncs2.pfnShouldCollide( SV_EdictNum( 0 ), clip->passedict ))
+			continue;
+		if( SV_IsValidEdict( clip->passedict ) && !VectorIsNull( clip->passedict->v.size ) && VectorIsNull( SV_GCStaticWallEdict( w )->v.size ))
+			continue;
+		touch = SV_GCStaticWallEdict( w );
+		SV_ClipMoveToEntity( touch, clip->start, clip->mins, clip->maxs, clip->end, &trace );
+		clip->trace = World_CombineTraces( &clip->trace, &trace, SV_EdictNum( 0 ));
+	}
+}
+#endif
+
 /*
 ====================
 SV_ClipToLinks
@@ -1380,6 +1509,9 @@ trace_t SV_Move( const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end,
 
 		World_MoveBounds( start, clip.mins2, clip.maxs2, trace_endpos, clip.boxmins, clip.boxmaxs );
 		SV_ClipToLinks( sv_areanodes, &clip );
+#if XASH_GAMECUBE
+		SV_ClipToStaticWalls( &clip );
+#endif
 		SV_ClipToPortals( sv_areanodes, &clip );
 
 		clip.trace.fraction *= trace_fraction;
@@ -1422,6 +1554,9 @@ trace_t GAME_EXPORT SV_MoveNoEnts( const vec3_t start, vec3_t mins, vec3_t maxs,
 
 		World_MoveBounds( start, clip.mins2, clip.maxs2, trace_endpos, clip.boxmins, clip.boxmaxs );
 		SV_ClipToWorldBrush( sv_areanodes, &clip );
+#if XASH_GAMECUBE
+		SV_ClipToStaticWalls( &clip );
+#endif
 		SV_ClipToPortals( sv_areanodes, &clip );
 
 		clip.trace.fraction *= trace_fraction;

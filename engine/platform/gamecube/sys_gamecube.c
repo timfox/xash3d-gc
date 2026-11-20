@@ -1083,6 +1083,13 @@ static qboolean gc_smoke_map_configured;
 static qboolean gc_listenserver_configured;
 static qboolean gc_dumpeye_configured;
 static qboolean gc_vst_configured;
+static qboolean gc_vm256_configured;
+/* "cvar <name> <value>" lines of gamecube.cfg: set once the cvar system is up (GCube_ApplyCfgCvars). */
+#define GC_CFG_CVARS_MAX 8
+static struct { char name[48]; char value[64]; } gc_cfg_cvars[GC_CFG_CVARS_MAX];
+static int gc_cfg_cvar_count;
+static qboolean gc_cvars_up;	/* Cvar_Init has run: a cfg re-read applies its cvar lines at once */
+void GCube_ApplyCfgCvars( void );
 static qboolean gc_connect_configured;
 static qboolean gc_newgame_configured;
 static qboolean gc_menu_newgame_configured;
@@ -1164,6 +1171,8 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_dumpeye_configured = false;
 	gc_dumpeye_arg[0] = '\0';
 	gc_vst_configured = false;
+	gc_vm256_configured = false;
+	gc_cfg_cvar_count = 0;
 	gc_connect_configured = false;
 	gc_connect_addr[0] = '\0';
 	gc_net_ip_configured = false;
@@ -1882,6 +1891,50 @@ static void GCube_LoadDiscBootOverrides( void )
 			continue;
 		}
 
+		/* View-model skins at their 256 px source size (see -gcvm256 in r_image.c / img_utils.c). */
+		if( !Q_strnicmp( cursor, "gcvm256", 7 ))
+		{
+			char ch = cursor[7];
+
+			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
+			{
+				gc_vm256_configured = true;
+				continue;
+			}
+		}
+
+		/* cvar <name> <value>: the game's cvars (dod_bots, dod_gc_autojoin...) cannot be set by a plain cfg line, the
+		 * console is not running when this file is read. */
+		if( !Q_strnicmp( cursor, "cvar ", 5 ) && gc_cfg_cvar_count < GC_CFG_CVARS_MAX )
+		{
+			char *tok = cursor + 5, *end;
+			size_t n;
+
+			while( *tok == ' ' || *tok == '\t' )
+				tok++;
+			for( end = tok; *end && *end != ' ' && *end != '\t' && *end != '\r' && *end != '\n'; end++ );
+			n = (size_t)( end - tok );
+			if( n > 0 && n < sizeof( gc_cfg_cvars[0].name ))
+			{
+				char *val = end, *vend;
+
+				while( *val == ' ' || *val == '\t' )
+					val++;
+				if( *val == '"' )
+					val++;
+				for( vend = val; *vend && *vend != '"' && *vend != '\r' && *vend != '\n'; vend++ );
+				if( (size_t)( vend - val ) < sizeof( gc_cfg_cvars[0].value ))
+				{
+					memcpy( gc_cfg_cvars[gc_cfg_cvar_count].name, tok, n );
+					gc_cfg_cvars[gc_cfg_cvar_count].name[n] = '\0';
+					memcpy( gc_cfg_cvars[gc_cfg_cvar_count].value, val, (size_t)( vend - val ));
+					gc_cfg_cvars[gc_cfg_cvar_count].value[vend - val] = '\0';
+					gc_cfg_cvar_count++;
+					continue;
+				}
+			}
+		}
+
 		/* On-rails VST. Wins over dumpeye: the camera rides the path. */
 		if( !Q_strnicmp( cursor, "gcvst", 5 ))
 		{
@@ -1995,6 +2048,8 @@ static void GCube_LoadDiscBootOverrides( void )
 	}
 
 	fclose( file );
+	if( gc_cvars_up )
+		GCube_ApplyCfgCvars();
 #endif
 }
 
@@ -2072,6 +2127,8 @@ static void GCube_ReinjectMissingBootArgv( void )
 		gc_argv[n++] = "-gcmap";
 		gc_argv[n++] = gc_smoke_map;
 	}
+	if( gc_vm256_configured && !Sys_CheckParm( "-gcvm256" ) && n + 1 < cap )
+		gc_argv[n++] = "-gcvm256";
 	if( gc_vst_configured && !Sys_CheckParm( "-gcvst" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcvst";
 	else if( !gc_vst_configured && gc_dumpeye_configured && gc_dumpeye_arg[0]
@@ -2094,6 +2151,46 @@ static void GCube_ReinjectMissingBootArgv( void )
 		gc_argv[n++] = "-gcstartmap";
 		gc_argv[n++] = gc_startmap;
 	}
+
+	/* The rest of the routes GCube_GetArgv builds from gamecube.cfg. A disc whose cfg is only readable after
+	 * chdir got a menu-only argv, and without these a "listenserver MAP" disc stayed in the retail menu (the
+	 * log said "disc boot override listenserver" and then "boot phase=menu"). Each flag is added only if
+	 * it is missing, in the same form the builder uses. */
+#define REINJECT_FLAG( cond, flag ) \
+	do { if(( cond ) && !Sys_CheckParm( flag ) && n + 1 < cap ) gc_argv[n++] = (char *)( flag ); } while( 0 )
+#define REINJECT_ARG( cond, flag, value ) \
+	do { if(( cond ) && !Sys_CheckParm( flag ) && n + 2 < cap ) { gc_argv[n++] = (char *)( flag ); gc_argv[n++] = (char *)( value ); } } while( 0 )
+	REINJECT_FLAG( gc_newgame_configured, "-gcnewgame" );
+	REINJECT_FLAG( gc_menu_newgame_configured, "-gcmenuplaystart" );
+	REINJECT_FLAG( gc_menu_newgame_configured, "-gcfullactors" );
+	REINJECT_ARG( gc_listenserver_configured, "-gclistenserver", gc_listenserver_map );
+	REINJECT_ARG( gc_listenserver_configured && !gc_smoke_map_configured, "-gcmap", gc_listenserver_map );
+	REINJECT_ARG( gc_connect_configured, "-gcconnect", gc_connect_addr );
+	if( gc_retail_newgame_configured && !gc_menu_newgame_configured )
+	{
+		REINJECT_FLAG( true, "-gcmenuplaystart" );
+		REINJECT_FLAG( true, "-gcfullactors" );
+		REINJECT_FLAG( true, "-gcplayerinput" );
+	}
+	REINJECT_FLAG( gc_memreport_configured, "-gcmemreport" );
+	REINJECT_FLAG( gc_net_configured, "-net" );
+	REINJECT_FLAG( gc_netfast_configured, "-netfast" );
+	REINJECT_FLAG( gc_netstatic_configured, "-netstatic" );
+	REINJECT_ARG( gc_net_ip_configured, "-gcnetip", gc_net_ip_override );
+	REINJECT_ARG( gc_net_mask_override[0], "-gcnetmask", gc_net_mask_override );
+	REINJECT_ARG( gc_net_gw_override[0], "-gcnetgw", gc_net_gw_override );
+	REINJECT_FLAG( gc_headless_configured, "-gcheadless" );
+	REINJECT_FLAG(( gc_listenserver_configured || gc_connect_configured ) && !gc_headless_configured, "-gcplayerinput" );
+	REINJECT_FLAG( gc_profile_configured, "-gcprofile" );
+	REINJECT_FLAG( gc_nolivepvs_configured, "-gcnolivepvs" );
+	REINJECT_FLAG( gc_nonativetex_configured, "-gcnonativetex" );
+	REINJECT_FLAG( gc_leanpvs_configured, "-gcleanpvs" );
+	REINJECT_FLAG( gc_fullphysics_configured, "-gcfullphysics" );
+	REINJECT_ARG( gc_video_mode_configured, "-gcvideo", gc_video_mode );
+	REINJECT_FLAG( gc_nativetex_configured, "-gcnativetex" );
+	REINJECT_FLAG( gc_notexpacks_configured, "-gcnotexpacks" );
+#undef REINJECT_FLAG
+#undef REINJECT_ARG
 
 	if( n != host.argc )
 	{
@@ -2151,6 +2248,8 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 		gc_argv[fake_argc++] = "-gcmap";
 		gc_argv[fake_argc++] = gc_smoke_map;
 	}
+	if( gc_vm256_configured )
+		gc_argv[fake_argc++] = "-gcvm256";
 	if( gc_vst_configured )
 		gc_argv[fake_argc++] = "-gcvst";
 	else if( gc_dumpeye_configured && gc_dumpeye_arg[0] )
@@ -2426,4 +2525,20 @@ void GC_PrintBuildInfo( void )
 		lines++;
 	}
 	Mem_Free( data );
+}
+
+
+/* Called by Host_InitCommon once Cvar_Init has run: create the cvars the disc cfg named, so the game's own registration
+ * finds (and, through Dod_CvarRegisterKeep, keeps) them. */
+void GCube_ApplyCfgCvars( void )
+{
+	int i;
+
+	gc_cvars_up = true;
+	for( i = 0; i < gc_cfg_cvar_count; i++ )
+	{
+		Cvar_Get( gc_cfg_cvars[i].name, gc_cfg_cvars[i].value, FCVAR_TEMPORARY, "disc cfg" );
+		Cvar_DirectSet( Cvar_FindVar( gc_cfg_cvars[i].name ), gc_cfg_cvars[i].value );
+		SYS_Report( "Xash3D GameCube: disc cfg cvar set\n" );
+	}
 }
