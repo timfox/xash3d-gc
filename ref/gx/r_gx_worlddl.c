@@ -72,8 +72,14 @@ static s32 gc_wd_pvs_blk_id = -1;
  * 384 KiB below is not paid for there: it overflowed MEM1 at cvar init. v1
  * world packs have no lightmap pages, so a handful of slots is enough. */
 #define GC_WD_LM_SLOTS		8
+/* DoD packs do have lightmap pages (v2, one or more per leaf), and a view of
+ * dod_charlie binds about 40: with 8 slots only the nearest leaves were
+ * lightmapped and the rest fell to vertex colour, in hard-edged patches. The
+ * store is taken from the heap at world load when it has the room. */
+#define GC_WD_LM_SLOTS_MAX	64
 #else
 #define GC_WD_LM_SLOTS		192
+#define GC_WD_LM_SLOTS_MAX	GC_WD_LM_SLOTS
 #endif
 #define GC_WD_LM_PAGE_BYTES	2048u
 
@@ -241,10 +247,13 @@ static byte *gc_wd_force;
 static u32 gc_wd_force_size;
 static int gc_wd_tev_gens = 1;
 /* Lightmap pages: copied once from ARAM, kept at full 32×32. TEXMAP2. */
-static byte gc_wd_lm_store[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__(( aligned( 32 )));
+static byte gc_wd_lm_bss[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__(( aligned( 32 )));
+static byte *gc_wd_lm_store = gc_wd_lm_bss;	/* the BSS store, or gc_wd_lm_heap */
+static byte *gc_wd_lm_heap;	/* a larger store from the heap, freed with the world */
+static int gc_wd_lm_nslots = GC_WD_LM_SLOTS;
 static u32 gc_wd_lm_stream;	/* file offset of page 0 */
-static s32 gc_wd_lm_slot_page[GC_WD_LM_SLOTS];
-static s32 gc_wd_lm_slot_frame[GC_WD_LM_SLOTS];
+static s32 gc_wd_lm_slot_page[GC_WD_LM_SLOTS_MAX];
+static s32 gc_wd_lm_slot_frame[GC_WD_LM_SLOTS_MAX];
 static int gc_wd_lm_miss, gc_wd_lm_miss_total;
 static int gc_wd_lm_binds;
 static int gc_wd_chunk_lm;	/* current chunk uses TEXMAP2 lightmap */
@@ -409,7 +418,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	s32 oldest = 0x7fffffff;
 
 	i = hint[page & 2047u];
-	if( i < GC_WD_LM_SLOTS && gc_wd_lm_slot_page[i] == (s32)page )
+	if( i < gc_wd_lm_nslots && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
 		return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
@@ -421,7 +430,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	 * so a hint miss on a full frame means the page is not resident. */
 	if( full_frame == gc_wd_frame && gc_wd_hdr.n_chunks <= 2048u )
 		return NULL;
-	for( i = 0; i < GC_WD_LM_SLOTS; i++ )
+	for( i = 0; i < gc_wd_lm_nslots; i++ )
 	{
 		if( gc_wd_lm_slot_page[i] == (s32)page )
 		{
@@ -887,6 +896,14 @@ static void R_GXWorldDLUnload( void )
 		free( gc_wd_tables_heap );
 		gc_wd_tables_heap = NULL;
 	}
+	if( gc_wd_lm_heap )
+	{
+		GX_DrawDone();
+		free( gc_wd_lm_heap );
+		gc_wd_lm_heap = NULL;
+	}
+	gc_wd_lm_store = gc_wd_lm_bss;
+	gc_wd_lm_nslots = GC_WD_LM_SLOTS;
 	if( gc_wd_force_heap )
 	{
 		GX_DrawDone();
@@ -1565,15 +1582,41 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				last_end = end;
 		}
 		gc_wd_lm_stream = gc_wd_hdr.ofs_chunks + (( last_end + 31u ) & ~31u );
-		for( i = 0; i < GC_WD_LM_SLOTS; i++ )
+#if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
+		if( !gc_wd_lm_heap )
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+			static const int tries[] = { GC_WD_LM_SLOTS_MAX, 40, 24 };
+			unsigned t;
+
+			/* 640 KiB stays for what the map still loads from the heap
+			 * (prop chain cache, view model skins, sounds). */
+			for( t = 0; t < sizeof( tries ) / sizeof( tries[0] ) && !gc_wd_lm_heap; t++ )
+			{
+				const size_t bytes = (size_t)tries[t] * GC_WD_LM_PAGE_BYTES;
+
+				if( GC_MemHeapFreeBytes() < bytes + 640u * 1024u )
+					continue;
+				gc_wd_lm_heap = (byte *)memalign( 32, bytes );
+				if( gc_wd_lm_heap )
+				{
+					gc_wd_lm_store = gc_wd_lm_heap;
+					gc_wd_lm_nslots = tries[t];
+				}
+			}
+		}
+#endif
+		for( i = 0; i < (u32)gc_wd_lm_nslots; i++ )
 		{
 			gc_wd_lm_slot_page[i] = -1;
 			gc_wd_lm_slot_frame[i] = -1000;
 		}
+		GX_InvalidateTexAll();
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: world DL lightmap pages stream@%u slots=%d (%u Kb)\n",
-			(unsigned)gc_wd_lm_stream, GC_WD_LM_SLOTS,
-			(unsigned)( GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES / 1024u ));
+			"Xash3D GameCube: world DL lightmap pages stream@%u slots=%d (%u Kb%s)\n",
+			(unsigned)gc_wd_lm_stream, gc_wd_lm_nslots,
+			(unsigned)( (u32)gc_wd_lm_nslots * GC_WD_LM_PAGE_BYTES / 1024u ),
+			gc_wd_lm_heap ? " from heap" : "" );
 	}
 
 	gc_wd_tev_gens = gc_wd_hdr.version == 2 ? 2 : 1;
