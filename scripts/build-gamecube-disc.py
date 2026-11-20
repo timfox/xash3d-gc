@@ -3082,7 +3082,9 @@ def compress_animpack(payload: bytes) -> bytes:
 # bytes but one model per body part is drawn: their meshes go to a pack the
 # engine keeps in ARAM (Mod_GCStudioMeshBase), so both team cores fit MEM1.
 GC_PLAYER_MESH_PATH = "models/player/mesh_%s.gcm"
-GC_PLAYER_SKIN_EDGE = 128  # longest edge of a baked player skin
+# Longest edge of a baked player skin: 128 by default; GC_PLAYER_SKIN_EDGE=256 keeps the retail 256 px body skins
+# (CMPR 32 KiB each instead of 8; they stream through the 192 KiB skin window, so more of them cycle through it).
+GC_PLAYER_SKIN_EDGE = int(os.environ.get("GC_PLAYER_SKIN_EDGE", "") or 128)
 GC_PLAYER_PART_EDGE = 64  # faces, hats, helmets, hair
 GC_SKIN_PART_PREFIXES = (b"face", b"k43_face", b"hat", b"helmet", b"hair", b"head")
 
