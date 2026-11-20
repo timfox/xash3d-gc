@@ -136,7 +136,20 @@ lives in ARAM too and is the next candidate after this.
 - Reasons for not doing the rest of the list: texture dedup across maps frees nothing at run time (a map loads only its
   own wt file; it would only shrink the disc image); per-chunk LZ4 sits on the hot chunk-refetch path (up to 500 KB a
   frame) so it needs a GPU-queue frame measurement before it is worth trying; gp/pt packs are about 50-70 KiB a map.
-- Default: the disc builder now packs with LZ4 unless `DODGC_WD_LZ4=0` (4d PR).
+- Default: the disc builder now packs with LZ4 unless `DODGC_WD_LZ4=0` (4d PR). See 4e: the light-face pack changed to version 3.
+
+## 4e. Correction: LZ4 light-face records cost frame time; the pack is now version 3 (records raw)
+
+- The decode counters (PR 419) measured what the A/B could not (camera and game phase differ between runs): on
+  charlie with the version 2 pack the light-point walk decoded **94,690 record blocks in 4,608 frames = 20.5 a frame,
+  1.63 s = 0.35 ms a frame** (avalanche in the first counter build: 28 a frame, 0.52 ms). The walk reads the faces of
+  every node on a ray, which thrashes the one-block record cache (29,202 hits against 94,690 misses). The lighting
+  lump was fine: 176 decodes in total (3.8 ms over the whole run, 17,758 hits).
+- Fix: GClf **version 3** keeps the record array raw and packs only the lighting lump. The engine reads versions 1, 2
+  and 3. Saving per map is smaller: caen 3086 -> 2195 KiB, charlie 1942 -> 1447, avalanche 2152 -> 1627
+  (about 0.5-0.9 MiB instead of 1.0-1.4 MiB). So the earlier statement of "no visible frame cost" for the light-face
+  pack was wrong for version 2; headless A/B timing could not see a 0.4 ms difference.
+- The lightmap and PVS decodes are cheap (charlie: 8 lightmap decodes and 2 PVS decodes in 4,608 frames).
 
 ## 5. Ranked next steps (not done)
 
