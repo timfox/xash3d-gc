@@ -4591,7 +4591,16 @@ def stage_sd_card(
 	return valve
 
 
+def apply_wd_lz4_default() -> None:
+	"""The world DL packs (lightmap pages, light-face pack, PVS rows) are LZ4-packed unless DODGC_WD_LZ4=0.
+
+	Measured on charlie in Dolphin (docs/map-budget-audit.md): about 2.0 MiB less ARAM per map and no change in world
+	draw time or heap; the engine still loads files baked without the flag. The baker used on its own stays opt-in."""
+	os.environ.setdefault("DODGC_WD_LZ4", "1")
+
+
 def main() -> None:
+	apply_wd_lz4_default()
 	print(GC_BUILD_BANNER)
 	print("Xash3D GameCube: content build begins")
 	script_dir = Path(__file__).resolve().parent
