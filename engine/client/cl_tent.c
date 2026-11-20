@@ -45,7 +45,7 @@ static model_t *CL_GCLoadEffectSprite( const char *name )
 
 	/* Leave room for HUD sheets that load mid-match (the 128x128
 	 * crosshair needs 32 KiB). */
-	if( GC_MemHeapFreeBytes() < 80 * 1024 )
+	if( GC_MemHeapFreeBytes() < ( CL_GCCaptureMode() ? 32 : 80 ) * 1024 )
 		return NULL;
 	gc_sprite_effect_load = true;
 	mod = CL_LoadClientSprite( name );
@@ -105,12 +105,16 @@ static void CL_GCPrewarmEffectSprites( void )
 	static int next, loaded;
 	static size_t heap_taken;
 	static qboolean done;
+	static const void *film_world;
+	static int film_next;
+	static qboolean film_done;
 
 	if( !SV_Active() || cls.state != ca_active || !cl.worldmodel )
 		return;
 	if( world != (const void *)cl.worldmodel )
 	{
 		world = cl.worldmodel;
+		film_done = false;
 		next = 1;
 		loaded = 0;
 		heap_taken = 0;
@@ -118,6 +122,50 @@ static void CL_GCPrewarmEffectSprites( void )
 	}
 	if( done )
 		return;
+	/* -gccapture: the film's explosion and smoke sprites first. In a match
+	 * order they came late in the precache list (fireball 368, smoke 370 on
+	 * dod_charlie), after the prewarm had stopped, and the 80 KiB gate on a
+	 * later load kept them out, so a shot's bursts never drew. */
+	if( CL_GCCaptureMode() && !film_done )
+	{
+		static const char *const film_sprites[] = { "xplode", "explode", "steam", "smoke", "fire" };
+		int i, k;
+
+		if( film_world != (const void *)cl.worldmodel )
+		{
+			film_world = cl.worldmodel;
+			film_next = 1;
+		}
+		for( i = film_next; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+		{
+			const char *name = sv.model_precache[i];
+			model_t *mod;
+
+			if( cl.models[i] || !Q_stristr( name, ".spr" ))
+				continue;
+			for( k = 0; k < (int)ARRAYSIZE( film_sprites ); k++ )
+				if( Q_stristr( name, film_sprites[k] ))
+					break;
+			if( k == (int)ARRAYSIZE( film_sprites ))
+				continue;
+			if( GC_MemHeapFreeBytes() < 32 * 1024 || R_GCFxPixelsFree() < 4 * 1024 )
+			{
+				Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s not loaded (heap %s, effect block free %s)\n",
+					i, name, Q_memprint( GC_MemHeapFreeBytes( )), Q_memprint( R_GCFxPixelsFree( )));
+				film_next = i + 1;
+				return;
+			}
+			gc_sprite_effect_load = true;
+			mod = CL_LoadClientSprite( name );
+			gc_sprite_effect_load = false;
+			if( mod )
+				cl.models[i] = mod;
+			Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s %s\n", i, name, mod ? "loaded" : "failed" );
+			film_next = i + 1;
+			return; /* one a frame */
+		}
+		film_done = true;
+	}
 	for( ; next < MAX_MODELS; next++ )
 	{
 		const char *name = sv.model_precache[next];
@@ -1706,7 +1754,15 @@ TEMPENTITY *R_DefaultSprite( const vec3_t pos, int spriteIndex, float framerate 
 
 	// don't spawn while paused
 	if( cl.time == cl.oldtime )
+	{
+#if XASH_GAMECUBE
+		static int paused_logs;
+
+		if( paused_logs++ < 4 )
+			Con_Reportf( "Xash3D GameCube: sprite %d refused, client time did not move (%.3f)\n", spriteIndex, cl.time );
+#endif
 		return NULL;
+	}
 
 	if(( psprite = CL_ModelHandle( spriteIndex )) == NULL || psprite->type != mod_sprite )
 	{
