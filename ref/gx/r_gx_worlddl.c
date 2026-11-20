@@ -41,6 +41,9 @@ void R_GXPropDrawHorizon( const float *org );
  * 32-aligned page blobs after it; a 2048-byte blob is a raw page. scripts/bake_worlddl_goldsrc.py pack_lm_pages_lz4.
  * 1 MiB of pages a map shrinks to about 290 KiB of ARAM. */
 #define GC_WD_FLAG_LM_LZ4	0x0010
+/* A crowded leaf has more than one lightmap page: the low three bits of a batch's pad word are its page, counted
+ * from the chunk's first (scripts/bake_worlddl_goldsrc.py). GoldSrc packs only; Lost Coast uses pad for $envmap. */
+#define GC_WD_FLAG_LM_MULTI	0x0040
 /* The PVS rows are a random-access LZ4 region of GC_WD_PVS_BLOCK-byte blocks (header word ofs_pvs is the region
  * start, pvsdir row offsets stay raw offsets into the uncompressed rows). pack_blocks_lz4. About 0.4 MiB a map. */
 #define GC_WD_FLAG_PVS_LZ4	0x0020
@@ -3942,6 +3945,8 @@ int R_GXWorldDLDraw( void )
 			qboolean forced = false;
 			qboolean chunk_far = false;
 			int lm_slot = 0;	/* lightmap store slot + 1, 0 = unlit */
+			u32 lm_first = 0;	/* the chunk's first lightmap page + 1, 0 = none */
+			int lm_delta = 0;	/* page of the chunk bound now, counted from the first */
 
 			i = order[oi] & 0x1fffu;
 			if((( order[oi] & 0x8000u ) != 0 ) != want_tower )
@@ -3995,6 +4000,7 @@ int R_GXWorldDLDraw( void )
 					lm_ofs = *(const u32 *)( chunk + 8 );
 				if( lm_ofs && gc_wd_lm_stream )
 				{
+					lm_first = lm_ofs;
 					WD_PF( 3, lm_page = R_GXWorldDLLmPage( lm_ofs - 1u ));
 					if( lm_page )
 					{
@@ -4025,6 +4031,32 @@ int R_GXWorldDLDraw( void )
 				if( ( m->flags & GC_WD_MAT_WATER ) && skip_water
 					&& gc_wd_chunk_maxs[i * 3 + 2] > -1024 )
 					continue;
+				/* A batch on another lightmap page of this chunk. A page that
+				 * is not resident leaves the batch vertex lit, as a chunk
+				 * without its page is. */
+				if( lm_first && ( gc_wd_hdr.flags & GC_WD_FLAG_LM_MULTI )
+					&& (int)( b->pad & 7u ) != lm_delta )
+				{
+					const int had = gc_wd_chunk_lm;
+					byte *pg = NULL;
+
+					lm_delta = (int)( b->pad & 7u );
+					WD_PF( 3, pg = R_GXWorldDLLmPage( lm_first - 1u + (u32)lm_delta ));
+					gc_wd_chunk_lm = 0;
+					lm_slot = 0;
+					if( pg )
+					{
+						lm_slot = (int)(( pg - gc_wd_lm_store ) / GC_WD_LM_PAGE_BYTES ) + 1;
+						GX_InitTexObj( &gc_wd_lm_obj, pg, 32, 32, GX_TF_RGB565,
+							GX_CLAMP, GX_CLAMP, GX_FALSE );
+						GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
+						GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
+						gc_wd_chunk_lm = 1;
+						gc_wd_lm_binds++;
+					}
+					if( had != gc_wd_chunk_lm )
+						cur_mat = -1;
+				}
 				/* Plain batch of a resident chunk: draw it with its material
 				 * group after the chunk loop (R_GXWorldDLDeferFlush). */
 				if( gc_wd_defer_on > 0 && !forced && gc_wd_defer_n < GC_WD_MAX_CHUNKS )

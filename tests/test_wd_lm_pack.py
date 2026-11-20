@@ -47,6 +47,42 @@ class LmPackTest(unittest.TestCase):
 		rects = self.check([(2, 2)] * 1100)
 		self.assertTrue(all(r is None for r in rects))
 
+	def check_pages(self, dims, npages):
+		cells = bake.lm_pack_pages(dims, npages)
+		self.assertEqual(len(cells), len(dims))
+		by_page = {}
+		for c in cells:
+			if c:
+				self.assertTrue(0 <= c[0] < npages)
+				by_page.setdefault(c[0], []).append(c[1])
+		for rects in by_page.values():
+			for i, a in enumerate(rects):
+				self.assertTrue(a[0] >= 0 and a[1] >= 0 and a[0] + a[2] <= 32 and a[1] + a[3] <= 32)
+				self.assertFalse(overlaps(a, (0, 0, 2, 2)))
+				for b in rects[i + 1:]:
+					self.assertFalse(overlaps(a, b))
+		return cells
+
+	def test_crowded_leaf_keeps_retail_size_on_more_pages(self):
+		dims = [(16, 16)] * 10
+		self.assertEqual(bake.lm_pages_needed(dims), 4)
+		cells = self.check_pages(dims, 4)
+		self.assertTrue(all(cells))
+		self.assertTrue(all(c[1][2] == 16 and c[1][3] == 16 for c in cells))
+		self.assertEqual(len({c[0] for c in cells}), 4)
+
+	def test_pages_needed(self):
+		self.assertEqual(bake.lm_pages_needed([]), 0)
+		self.assertEqual(bake.lm_pages_needed([(9, 7), (5, 5)]), 1)
+		self.assertEqual(bake.lm_pages_needed([(16, 16)] * 5), 2)
+		self.assertEqual(bake.lm_pages_needed([(17, 17)] * 40), bake.LM_CHUNK_PAGES)
+
+	def test_one_page_still_scales_everything(self):
+		cells = self.check_pages([(16, 16)] * 10, 1)
+		self.assertTrue(all(cells))
+		self.assertEqual({c[0] for c in cells}, {0})
+		self.assertEqual(bake.lm_pack_pages([(4, 4)], 0), [None])
+
 	def test_blit_same_size_is_exact_and_corners_hold_when_smaller(self):
 		samples = [[(x * 10, y * 10, 7) for x in range(9)] for y in range(5)]
 		page = bake.LmPage()
