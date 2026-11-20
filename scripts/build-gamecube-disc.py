@@ -2184,6 +2184,8 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	lf = cache / f"wd_{bsp.stem.lower()}_lf.gcd"
 	sb = cache / f"wd_{bsp.stem.lower()}_sb.gcd"
 	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb2"
+	if os.environ.get("DODGC_WD_LZ4", "") == "1":
+		key += ":lz4lm1"
 	if out.is_file() and lf.is_file() and sb.is_file() and stamp.is_file() and stamp.read_text() == key:
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
