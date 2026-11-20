@@ -557,6 +557,13 @@ This has to be done before the world logic, because
 player processing happens outside RunWorldFrame
 ================
 */
+#if XASH_GAMECUBE
+/* A player's shot (EF_MUZZLEFLASH) is gone before the listen client's next
+ * emit when the server runs several frames per render: keep a latch the lean
+ * player emit consumes (cl_frame.c), so third-person shoot poses can play. */
+byte sv_gc_muzzleflash[MAX_CLIENTS + 1];
+#endif
+
 static void SV_PrepWorldFrame( void )
 {
 	for( int i = 1; i < svgame.numEntities; i++ )
@@ -564,6 +571,10 @@ static void SV_PrepWorldFrame( void )
 		edict_t *ent = SV_EdictNum( i );
 		if( ent->free ) continue;
 
+#if XASH_GAMECUBE
+		if( i <= MAX_CLIENTS && FBitSet( ent->v.effects, EF_MUZZLEFLASH ))
+			sv_gc_muzzleflash[i] = 1;
+#endif
 		ClearBits( ent->v.effects, EF_MUZZLEFLASH|EF_NOINTERP );
 	}
 

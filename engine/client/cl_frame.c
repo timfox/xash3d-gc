@@ -2020,6 +2020,8 @@ static cl_entity_t *CL_GCLeanWallPool( void )
 	return pool;
 }
 
+extern byte sv_gc_muzzleflash[MAX_CLIENTS + 1];
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -3063,6 +3065,15 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					float speed = sqrtf( ed->v.velocity[0] * ed->v.velocity[0] + ed->v.velocity[1] * ed->v.velocity[1] );
 					int idle = CL_GCLeanFindSeq( bh, "idle" );
 					int gait;
+					/* One-shots on top of the aim/gait choice below: a shot (shoot
+					 * pose of the carried weapon, torso only) and whole-body poses
+					 * (stance change, jump, swim). anim clocks are per slot. */
+					static float shoot_base[MAX_CLIENTS + 1], shoot_until[MAX_CLIENTS + 1];
+					static float body_base[MAX_CLIENTS + 1], body_until[MAX_CLIENTS + 1], air_since[MAX_CLIENTS + 1];
+					static int body_hold[MAX_CLIENTS + 1], prev_prone[MAX_CLIENTS + 1];
+					qboolean shooting = false;
+					int body_seq = -1;
+					float body_t = 0.0f;
 
 					if( speed > 150.0f )
 						gait = CL_GCLeanFindSeq( bh, "run" );
@@ -3115,6 +3126,74 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							if( dgait <= 0 )
 								dgait = CL_GCLeanFindSeq( bh, "standing_idle" );
 						}
+						/* Sprinting: the carried weapon's sprint aim pose. */
+						if( tok && !prone && !FBitSet( ed->v.flags, FL_DUCKING ) && speed > 200.0f )
+						{
+							int sa;
+
+							Q_snprintf( label, sizeof( label ), "sprint_%s_aim", tok );
+							sa = CL_GCLeanFindSeq( bh, label );
+							if( sa >= 0 )
+								aim = sa;
+						}
+						/* A shot: the weapon sets EF_MUZZLEFLASH, which the server
+						 * clears at the start of its next frame. Play the shoot pose
+						 * of this stance for a third of a second. */
+						if( FBitSet( ed->v.effects, EF_MUZZLEFLASH ) || sv_gc_muzzleflash[e] )
+						{
+							sv_gc_muzzleflash[e] = 0;
+							shoot_base[e] = (float)cl.time;
+							shoot_until[e] = (float)cl.time + 0.35f;
+						}
+						if( tok && !dead && cl.time < shoot_until[e] )
+						{
+							int ss;
+
+							Q_snprintf( label, sizeof( label ), "%s_%s_shoot",
+								prone ? "prone" : FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
+							ss = CL_GCLeanFindSeq( bh, label );
+							if( ss >= 0 )
+							{
+								aim = ss;
+								shooting = true;
+							}
+						}
+						/* Whole-body poses, in priority order: a stance change,
+						 * swimming, jumping. They replace torso and legs. */
+						if( prone != prev_prone[e] && !dead )
+						{
+							const int ts = CL_GCLeanFindSeq( bh, prone ? "get_down" : "get_up" );
+
+							prev_prone[e] = prone;
+							if( ts > 0 )
+							{
+								body_hold[e] = ts;
+								body_base[e] = (float)cl.time;
+								body_until[e] = (float)cl.time + 0.9f;
+							}
+						}
+						if( cl.time < body_until[e] && body_hold[e] > 0 )
+						{
+							body_seq = body_hold[e];
+							body_t = body_base[e];
+						}
+						else if( ed->v.waterlevel > 1 )
+						{
+							body_seq = CL_GCLeanFindSeq( bh, speed > 10.0f ? "swim" : "swim_idle" );
+							body_t = 0.0f;
+						}
+						else
+						{
+							if( FBitSet( ed->v.flags, FL_ONGROUND ))
+								air_since[e] = 0.0f;
+							else if( air_since[e] <= 0.0f )
+								air_since[e] = (float)cl.time;
+							if( air_since[e] > 0.0f && cl.time - air_since[e] > 0.2f )
+							{
+								body_seq = CL_GCLeanFindSeq( bh, "jump" );
+								body_t = air_since[e];
+							}
+						}
 						if( aim >= 0 )
 							idle = aim;
 						if( dgait >= 0 )
@@ -3145,6 +3224,42 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							ent->curstate.sequence = idle;
 						if( ed->v.gaitsequence == 0 && gait >= 0 )
 							ent->curstate.gaitsequence = gait;
+						if( shooting )
+							ent->curstate.animtime = shoot_base[e];
+						if( body_seq >= 0 )
+						{
+							/* No legs overlay on a whole-body pose, so the renderer
+							 * keeps the root yaw-only and the pose plays as authored. */
+							ent->curstate.sequence = body_seq;
+							ent->curstate.gaitsequence = 0;
+							if( body_t > 0.0f )
+								ent->curstate.animtime = body_t;
+						}
+						{
+							/* Which sequences the game actually plays: the first time each one is chosen,
+							 * and every shot latch (EF_MUZZLEFLASH seen). */
+							static byte an_seen[512];
+							static int an_shots;
+							const mstudioseqdesc_t *asd = (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex );
+							const int qs = ent->curstate.sequence, qg = ent->curstate.gaitsequence;
+							int k;
+
+							for( k = 0; k < 2; k++ )
+							{
+								const int q = k ? qg : qs;
+
+								if( q > 0 && q < bh->numseq && q < 512 && !an_seen[q] )
+								{
+									an_seen[q] = 1;
+									Con_Reportf( "Xash3D GameCube: lean anim new seq %d '%s' (p%d t=%.1f speed %.0f)\n", q, asd[q].label, e, cl.time, speed );
+								}
+							}
+							if( shooting && an_shots < 8 && ent->curstate.animtime == shoot_base[e] && cl.time - shoot_base[e] < 0.1f )
+							{
+								an_shots++;
+								Con_Reportf( "Xash3D GameCube: lean anim shot p%d t=%.1f '%s'\n", e, cl.time, asd[qs].label );
+							}
+						}
 					}
 					if( seq_logs < 6 )
 					{
