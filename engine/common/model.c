@@ -1248,7 +1248,11 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 
 	/* The mirror exists but could not be read into memory: the retail file is 3-5x bigger and fails the same way
 	 * (zalec: v_bren 525 KB after the 125 KB mirror). The slot path loads the weapon when it is equipped. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	if( FS_FileExists( mirror, false )) /* every DoD match: one started from the menu has no -gclistenserver */
+#else
 	if( Sys_CheckParm( "-gclistenserver" ) && FS_FileExists( mirror, false ))
+#endif
 	{
 		static int skip_logs;
 
