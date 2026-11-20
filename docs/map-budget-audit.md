@@ -160,6 +160,19 @@ lives in ARAM too and is the next candidate after this.
   skins live in the studio skin arena and spill into the heap, so the 256 px skins cost about 86 KB of MEM1 heap for
   two teams of infantry. That is too much for a 12-bot match, which is why the flag stays off; it needs the skins
   streamed from ARAM (the freed ARAM would pay for it) before it can be the default. No frame-time effect measured.
+- **Purple view-model hands with the 256 px flag (cause found).** The still taken with `GC_PLAYER_SKIN_EDGE=256` showed
+  magenta hands. Retail `v_garand` `hands.bmp` is skin tone, so it is not the art. Dolphin logs, same disc, only the
+  player skin edge differing: at 128 px `v_garand/hands` and the other 256x256 view-model skins decode and bind; at 256 px
+  every 256x256 one logs `G392 MDL image decode failed name=#models/v_garand/hands.mdl bytes=66384` and the engine draws
+  the default magenta texture. The decode (Image_LoadMDL -> img_utils.c, 64 KiB of palette indices) takes the 128 KiB
+  static scratch, and when that is busy it needs a 64 KiB heap block; with the 256 px skins in the heap only 91 KB is
+  free and fragmented, so it fails. So it is not an independent bug: it is another symptom of the 86 KB heap cost, and
+  it disappears at 128 px. It would also hit any other big view-model skin on a tight heap.
+- Streaming the player skins from ARAM (so 256 can be the default) is not done. Design: the stream in
+  skin_stream.c already keeps full pixels in ARAM and a low mip in MEM1; a CMPR skin can be registered as a byte
+  surface (bpp 1, height/2) with a 128 px low mip baked next to the 256 px texels, and the CMPR branch of
+  `R_GXNativeTexture` (r_gx_world.c) would bind the streamed pixels. That touches the texture bind path the Polish maps
+  thread works in and cannot be checked without a body in view of a GPU capture, so I stopped there.
 - Prop textures: left at their baked size (`pt` packs are in ARAM already and are drawn from small slots; raising them
   changes the slot size the texture cache owns).
 
