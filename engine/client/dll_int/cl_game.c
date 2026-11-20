@@ -92,6 +92,12 @@ static void CL_GameCubeApplySmokeClientBudgets( void )
 	if( Sys_CheckParm( "-gcfullphysics" ))
 		particles = Q_max( particles, 96 );
 
+	/* -gccapture films a battle: tracers, blood and dirt streaks all draw from this
+	 * pool, and the lean 16-24 starved the tracers. 256 particles are 14 Kb; the
+	 * capture has no HUD and frame rate matters less than what is drawn. */
+	if( Sys_CheckParm( "-gccapture" ))
+		particles = Q_max( particles, 256 );
+
 	if( GI )
 	{
 		mutable_gi = (gameinfo_t *)GI;
