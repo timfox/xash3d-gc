@@ -107,7 +107,8 @@ void CL_InitParticles( void )
 #if XASH_GAMECUBE
 	if( Sys_CheckParm( "-gcmap" ) || GC_MapLoadMemoryOpt())
 	{
-		int cap = ( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcfullactors" )) ? 96 : 16;
+		int cap = ( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcfullactors" )
+			|| Sys_CheckParm( "-gccapture" )) ? 96 : 16;
 #if XASH_DODGC_NETWORK
 		/* DoD matches: impacts, sparks and streaks at close to retail counts.
 		 * 256 particles are 14 Kb; the extra 9 Kb is taken at client init,
