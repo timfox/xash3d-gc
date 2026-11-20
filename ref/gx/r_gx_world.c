@@ -6198,6 +6198,18 @@ static qboolean gc_prop_far_tried;
 static byte *gc_prop_cache;
 static u32 gc_prop_cache_size, gc_prop_cache_head;
 static qboolean gc_prop_cache_tried;
+/* Set when the cache is a heap block (a DoD map whose world-array spill had
+ * no room for it); every place that forgets the cache frees it first. */
+static byte *gc_prop_cache_heap;
+
+static void R_GXPropCacheHeapFree( void )
+{
+	if( !gc_prop_cache_heap )
+		return;
+	GX_DrawDone();	/* the GP may still be reading lists in it */
+	free( gc_prop_cache_heap );
+	gc_prop_cache_heap = NULL;
+}
 static int gc_prop_cache_generation = -1;
 static s32 gc_prop_cache_ofs[GC_PROP_MAX_MODELS];
 static u32 gc_prop_cache_used[GC_PROP_MAX_MODELS];
@@ -6364,6 +6376,7 @@ static void R_GXPropMapCheck( void )
 				|| Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark ))))
 		{
 			GX_DrawDone();
+			R_GXPropCacheHeapFree();
 			gc_prop_cache = NULL;
 			gc_prop_cache_size = gc_prop_cache_head = 0;
 			gc_prop_cache_tried = false;
@@ -6394,6 +6407,7 @@ static void R_GXPropMapCheck( void )
 	gc_prop_nmodels = 0;
 	gc_prop_nhinge = 0;
 	memset( gc_prop_hinge, 0, sizeof( gc_prop_hinge ));
+	R_GXPropCacheHeapFree();
 	gc_prop_cache = NULL;
 	gc_prop_cache_size = gc_prop_cache_head = 0;
 	gc_prop_cache_tried = false;
@@ -6945,6 +6959,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 		if( gc_prop_cache )
 			GX_DrawDone();
 		gc_prop_cache_generation = generation;
+		R_GXPropCacheHeapFree();
 		gc_prop_cache = NULL;
 		gc_prop_cache_size = gc_prop_cache_head = 0;
 		gc_prop_cache_tried = false;
@@ -7007,6 +7022,28 @@ static byte *R_GXPropCacheGet( unsigned model )
 				gc_prop_cache_size = try_sz;
 				gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
 				gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
+			}
+			/* No room in the spill (dod_caen: 48 KB free against 106 KB of
+			 * chains, so every chain was read from ARAM each frame, 62
+			 * reads): take the whole cache from the heap when that leaves
+			 * it 320 KiB. The spill mark and generation still tell when
+			 * the map goes; the block is freed there. */
+			if( !gc_prop_cache && all >= 8u * 1024u )
+			{
+				extern size_t GC_MemHeapFreeBytes( void );
+				extern size_t Mod_GCWorldArraySpillUsed( void );
+
+				if( GC_MemHeapFreeBytes() >= (size_t)all + 320u * 1024u )
+					gc_prop_cache_heap = (byte *)memalign( 32, all );
+				if( gc_prop_cache_heap )
+				{
+					gc_prop_cache = gc_prop_cache_heap;
+					gc_prop_cache_size = all;
+					gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
+					gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb from heap (heap free %u Kb)\n",
+						all / 1024u, (unsigned)( GC_MemHeapFreeBytes() / 1024u ));
+				}
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb of %u Kb (spill, %u Kb free)\n",
 				gc_prop_cache_size / 1024u, all / 1024u, (unsigned)( room / 1024u ));
