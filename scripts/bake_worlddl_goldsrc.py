@@ -34,6 +34,9 @@ WD_VERSION = 2
 WD_FLAG_LIGHT_X1 = 0x0001
 # Lightmap pages are LZ4 blocks (see pack_lm_pages_lz4). Opt in with DODGC_WD_LZ4=1 or bake_worlddl_goldsrc.py --lz4.
 WD_FLAG_LM_LZ4 = 0x0010
+# The PVS rows are a random-access LZ4 region of PVS_BLOCK-byte blocks (pack_blocks_lz4); row offsets stay raw offsets.
+WD_FLAG_PVS_LZ4 = 0x0020
+PVS_BLOCK = 4096
 LM_PAGES_MAX = 512
 MAT_F_WATER = 0x01
 MAT_F_NOLIGHT = 0x02
@@ -728,7 +731,12 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	body += pvs_dir
 	pad32(body)
 	ofs_pvs = len(body)
-	body += pvs_blob
+	if lz4 and pvs_blob:
+		# whole blocks only: the engine decodes every block to PVS_BLOCK bytes
+		pvs_blob += bytes(-len(pvs_blob) % PVS_BLOCK)
+		body += pack_blocks_lz4(bytes(pvs_blob), PVS_BLOCK)
+	else:
+		body += pvs_blob
 	pad32(body)
 	ofs_chunks = len(body)
 	for blob in chunk_blobs:
@@ -742,7 +750,7 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 		0,
 		b"GCwd",
 		WD_VERSION,
-		WD_FLAG_LIGHT_X1 | (WD_FLAG_LM_LZ4 if lz4 and lm_pages else 0),
+		WD_FLAG_LIGHT_X1 | (WD_FLAG_LM_LZ4 if lz4 and lm_pages else 0) | (WD_FLAG_PVS_LZ4 if lz4 and pvs_blob else 0),
 		bsp.numclusters,
 		len(order),
 		len(mat_recs),

@@ -41,6 +41,15 @@ void R_GXPropDrawHorizon( const float *org );
  * 32-aligned page blobs after it; a 2048-byte blob is a raw page. scripts/bake_worlddl_goldsrc.py pack_lm_pages_lz4.
  * 1 MiB of pages a map shrinks to about 290 KiB of ARAM. */
 #define GC_WD_FLAG_LM_LZ4	0x0010
+/* The PVS rows are a random-access LZ4 region of GC_WD_PVS_BLOCK-byte blocks (header word ofs_pvs is the region
+ * start, pvsdir row offsets stay raw offsets into the uncompressed rows). pack_blocks_lz4. About 0.4 MiB a map. */
+#define GC_WD_FLAG_PVS_LZ4	0x0020
+#define GC_WD_PVS_BLOCK		4096u
+/* One staging buffer for every LZ4 blob read in this file (lightmap pages, PVS blocks, light-face blocks): each
+ * decode finishes before the next starts. */
+static byte gc_wd_stage[GC_WD_PVS_BLOCK] __attribute__(( aligned( 32 )));
+static byte gc_wd_pvs_blk[GC_WD_PVS_BLOCK] __attribute__(( aligned( 32 )));
+static s32 gc_wd_pvs_blk_id = -1;
 #define GC_WD_MAGIC		0x47437764u /* 'GCwd' */
 #define GC_WD_MAT_WATER	0x01	/* SURF_WARP face */
 #define GC_WD_MAT_ENVMAP	0x04
@@ -336,7 +345,6 @@ static int R_GXTevMatEmboss( int id )
 static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 {
 	static byte dir[64] __attribute__(( aligned( 32 )));
-	static byte stage[GC_WD_LM_PAGE_BYTES] __attribute__(( aligned( 32 )));
 	u32 w0, w1, ofs, pad, stored;
 	u32 e = 4u + 4u * page;	/* offset[page], offset[page + 1]: 8 bytes that may straddle a 32-byte line */
 
@@ -357,9 +365,9 @@ static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 		return false;
 	if( stored == GC_WD_LM_PAGE_BYTES && !pad )	/* a raw page */
 		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, GC_WD_LM_PAGE_BYTES );
-	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, stage, stored ))
+	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, gc_wd_stage, stored ))
 		return false;
-	if( !Mod_GCLZ4Decode( stage, stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
+	if( !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
 		return false;
 	DCFlushRange( dst, GC_WD_LM_PAGE_BYTES );
 	return true;
@@ -824,6 +832,7 @@ static void R_GXWorldDLUnload( void )
 	gc_wd_aram_prefix = gc_wd_aram_lm_start = gc_wd_aram_lm_bytes = 0;
 	gc_wd_disc_reads = gc_wd_disc_bytes = 0;
 	gc_wd_pvs_cluster = -2;
+	gc_wd_pvs_blk_id = -1;
 }
 
 static void R_GXMatPackLoad( void )
@@ -1563,6 +1572,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			nslots >= 8 ? big_n : 0, big_bytes );
 	}
 	gc_wd_pvs_cluster = -2;
+	gc_wd_pvs_blk_id = -1;
 	/* The tail of the chunk cache is the overflow bounce. A frustum chunk
 	 * that does not fit the shore budget still draws from here. */
 	{
@@ -1602,7 +1612,6 @@ static u32 gc_lf_aram, gc_lf_cap, gc_lf_faces, gc_lf_rec_ofs, gc_lf_lit_ofs, gc_
 static u32 gc_lf_ver;
 static byte gc_lf_blk[GC_LF_CACHE][GC_LF_BLOCK] __attribute__(( aligned( 32 )));
 static s32 gc_lf_blk_id[GC_LF_CACHE];	/* ( region << 24 ) | block, -1 empty */
-static byte gc_lf_stage[GC_LF_BLOCK] __attribute__(( aligned( 32 )));
 static int gc_lf_lit_rr;
 
 /* Block `blk` of the region at ARAM offset region_ofs holding raw_total bytes -> a cached buffer, or NULL. */
@@ -1632,8 +1641,8 @@ static const byte *R_GXLfBlock( u32 region, u32 region_ofs, u32 raw_total, u32 b
 		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_lf_blk[slot], raw_len, false );
 	else
 	{
-		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_lf_stage, stored, false );
-		if( !Mod_GCLZ4Decode( gc_lf_stage, gc_lf_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
+		GC_AramCopy( gc_lf_aram + region_ofs + ofs, gc_wd_stage, stored, false );
+		if( !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, gc_lf_blk[slot], gc_lf_blk[slot] + raw_len ))
 			return NULL;
 	}
 	gc_lf_blk_id[slot] = id;
@@ -1820,6 +1829,67 @@ static int R_GXWorldDLEyeCluster( const float *org )
 	return idx == -1 ? -1 : -idx - 2;
 }
 
+
+/* Byte `raw` of the uncompressed PVS rows, or -1. */
+static int R_GXWorldDLPvsByte( u32 raw )
+{
+	static byte dir[64] __attribute__(( aligned( 32 )));
+	const u32 blk = raw / GC_WD_PVS_BLOCK;
+	u32 w0, w1, ofs, pad, stored, e;
+
+	if( (s32)blk == gc_wd_pvs_blk_id )
+		return gc_wd_pvs_blk[raw % GC_WD_PVS_BLOCK];
+	gc_wd_pvs_blk_id = -1;
+	e = 4u + 4u * blk;
+	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs, dir, 32 ) || blk >= *(const u32 *)dir )
+		return -1;
+	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ( e & ~31u ), dir, 64 ))
+		return -1;
+	w0 = *(const u32 *)( dir + ( e & 31u ));
+	w1 = *(const u32 *)( dir + ( e & 31u ) + 4u );
+	ofs = w0 & ~31u;
+	pad = w0 & 31u;
+	stored = ( w1 & ~31u ) - ofs;
+	if( !stored || stored > GC_WD_PVS_BLOCK || pad >= stored )
+		return -1;
+	if( stored == GC_WD_PVS_BLOCK && !pad )
+	{
+		if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ofs, gc_wd_pvs_blk, GC_WD_PVS_BLOCK ))
+			return -1;
+	}
+	else
+	{
+		if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_pvs + ofs, gc_wd_stage, stored )
+			|| !Mod_GCLZ4Decode( gc_wd_stage, gc_wd_stage + stored - pad, gc_wd_pvs_blk, gc_wd_pvs_blk + GC_WD_PVS_BLOCK ))
+			return -1;
+	}
+	gc_wd_pvs_blk_id = (s32)blk;
+	return gc_wd_pvs_blk[raw % GC_WD_PVS_BLOCK];
+}
+
+static void R_GXWorldDLLoadPVSLz4( u32 row, u32 visbytes )
+{
+	u32 out = 0;
+
+	memset( gc_wd_pvs, 0, visbytes );
+	while( out < visbytes )
+	{
+		int b = R_GXWorldDLPvsByte( row++ );
+
+		if( b < 0 )
+			break;
+		if( b )
+			gc_wd_pvs[out++] = (byte)b;
+		else
+		{
+			b = R_GXWorldDLPvsByte( row++ );
+			if( b < 0 )
+				break;
+			out += (u32)b;
+		}
+	}
+}
+
 static void R_GXWorldDLLoadPVS( int cluster )
 {
 	const u32 visbytes = ( gc_wd_hdr.n_clusters + 7 ) >> 3;
@@ -1836,6 +1906,11 @@ static void R_GXWorldDLLoadPVS( int cluster )
 	row = *(const u32 *)( gc_wd_scratch + ( dir_ofs - base ));
 	if( row == 0xffffffffu )
 		return;
+	if( gc_wd_hdr.flags & GC_WD_FLAG_PVS_LZ4 )
+	{
+		R_GXWorldDLLoadPVSLz4( row, visbytes );
+		return;
+	}
 	row += gc_wd_hdr.ofs_pvs;
 	base = row & ~31u;
 	if( !R_GXWorldDLFetch( base, gc_wd_scratch, sizeof( gc_wd_scratch )))
