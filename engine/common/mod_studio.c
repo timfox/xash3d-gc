@@ -2775,8 +2775,11 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				/* A DoD view model read into its studio-region slice stays there. The heap copy below succeeded or
 				 * failed with the heap's state at that moment (caen: v_stick's 57 KB copy fit by 1.3 KB, five such
 				 * copies took 76 KB before the entities spawned, and the entity gate then skipped all 289 func_walls
-				 * at 14 KB free). The slice is pinned either way, so the copy only cost MEM1. */
-				else if( Sys_CheckParm( "-gclistenserver" ) && Q_stristr( mod->name, "/v_" )
+				 * at 14 KB free). The slice is pinned either way, so the copy only cost MEM1.
+				 * A match started from the menu (Create Game) has no -gclistenserver, and there every weapon the
+				 * bots carried took the copy: caen with 12 bots lost 271 KB (v_crowbar, v_mp40, v_enfield) and
+				 * ran at 91 KB free. The route does not matter, only where the file was read. */
+				else if( Q_stristr( mod->name, "/v_" )
 					&& Mod_GCIsStudioBssCache( buffer ) && mesh <= buffersize )
 				{
 					mod->cache.data = NULL; /* taken below, as BSS-resident (G289) */
