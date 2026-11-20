@@ -877,6 +877,9 @@ hard to one side, looking up.
 static vec3_t pos2[MAXSTUDIOBONES], pos3[MAXSTUDIOBONES], pos4[MAXSTUDIOBONES];
 static vec4_t q2[MAXSTUDIOBONES], q3[MAXSTUDIOBONES], q4[MAXSTUDIOBONES];
 
+#define GC_GRID_SNAP_LO 0.01f
+#define GC_GRID_SNAP_HI 0.99f
+
 static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, mstudioseqdesc_t *pseqdesc,
 	mstudioanim_t *panim, float f, float s, float t )
 {
@@ -891,9 +894,22 @@ static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 	else s = 2.0f * s;
 	s = bound( 0.0f, s / 255.0f, 1.0f );
 
+	/* A weight within 1% of a cell is that cell: a man aiming level and straight ahead (blending 127, 127, the
+	 * usual case) then decodes one animation, not four, and one aiming up or down decodes two. Twelve bodies in
+	 * view spent 5 ms a frame here. The error is under 1% of the angle between two cells. */
+	if( s >= GC_GRID_SNAP_HI )
+	{
+		col++;
+		s = 0.0f;
+	}
+	else if( s <= GC_GRID_SNAP_LO )
+		s = 0.0f;
+
 	if( pseqdesc->numblends == 3 )
 	{
 		R_StudioCalcRotations( e, pos, q, pseqdesc, panim + col * nb, f );
+		if( s == 0.0f )
+			return;
 		R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( col + 1 ) * nb, f );
 		R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
 		return;
@@ -906,13 +922,28 @@ static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 	}
 	else t = 2.0f * t;
 	t = bound( 0.0f, t / 255.0f, 1.0f );
+	if( t >= GC_GRID_SNAP_HI )
+	{
+		row++;
+		t = 0.0f;
+	}
+	else if( t <= GC_GRID_SNAP_LO )
+		t = 0.0f;
 
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim + ( row * 3 + col ) * nb, f );
-	R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( row * 3 + col + 1 ) * nb, f );
+	if( s != 0.0f )
+	{
+		R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( row * 3 + col + 1 ) * nb, f );
+		R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
+	}
+	if( t == 0.0f )
+		return;
 	R_StudioCalcRotations( e, pos3, q3, pseqdesc, panim + (( row + 1 ) * 3 + col ) * nb, f );
-	R_StudioCalcRotations( e, pos4, q4, pseqdesc, panim + (( row + 1 ) * 3 + col + 1 ) * nb, f );
-	R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
-	R_StudioSlerpBones( nb, q3, pos3, q4, pos4, s );
+	if( s != 0.0f )
+	{
+		R_StudioCalcRotations( e, pos4, q4, pseqdesc, panim + (( row + 1 ) * 3 + col + 1 ) * nb, f );
+		R_StudioSlerpBones( nb, q3, pos3, q4, pos4, s );
+	}
 	R_StudioSlerpBones( nb, q, pos, q3, pos3, t );
 }
 
