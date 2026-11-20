@@ -77,7 +77,7 @@ static s32 gc_wd_pvs_blk_id = -1;
  * dod_charlie binds about 40: with 8 slots only the nearest leaves were
  * lightmapped and the rest fell to vertex colour, in hard-edged patches. The
  * store is taken from the heap at world load when it has the room. */
-#define GC_WD_LM_SLOTS_MAX	254	/* slot + 1 fits the byte of a deferred draw record */
+#define GC_WD_LM_SLOTS_MAX	510	/* slot + 1 sits in the low 16 bits of a deferred draw record */
 #define GC_WD_LM_HEAP_BYTES	( 128u * 1024u )
 /* One hint entry a page. A DoD map has 2000 lit leaves and more (dod_caen), each with a page or several. */
 #define GC_WD_LM_HINT		4096u
@@ -462,7 +462,7 @@ static void R_GXWorldDLLmDropStore( void )
 
 static byte *R_GXWorldDLLmPage( u32 page )
 {
-	static u8 hint[GC_WD_LM_HINT];	/* page & ( GC_WD_LM_HINT - 1 ) -> slot it was last found in */
+	static u16 hint[GC_WD_LM_HINT];	/* page & ( GC_WD_LM_HINT - 1 ) -> slot it was last found in */
 	static int full_frame = -1;	/* frame in which every slot was already in use */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
@@ -499,7 +499,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
 			GC_WD_LM_TOUCH( i );
-			hint[page & ( GC_WD_LM_HINT - 1u )] = (u8)i;
+			hint[page & ( GC_WD_LM_HINT - 1u )] = (u16)i;
 			return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
 		}
 		/* A page used by the previous world pass stays: with the water
@@ -552,7 +552,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	GC_WD_LM_TOUCH( victim );
 	gc_wd_lm_miss++;
 	gc_wd_lm_miss_total++;
-	hint[page & ( GC_WD_LM_HINT - 1u )] = (u8)victim;
+	hint[page & ( GC_WD_LM_HINT - 1u )] = (u16)victim;
 	return gc_wd_lm_store + (u32)victim * gc_wd_lm_page_bytes;
 }
 
@@ -1688,7 +1688,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		 * the heap nothing. */
 		if( !gc_wd_lm_heap && !gc_wd_lm_in_arena )
 		{
-			static const u32 tries[] = { GC_WD_LM_HEAP_BYTES, 96u * 1024u, 64u * 1024u };
+			/* Twice the store first: avalanche and caen show more than 254 pages down their long views, and a
+			 * leaf without a slot draws vertex lit until one frees (Tim: moments of missing lightmaps). */
+			static const u32 tries[] = { 2u * GC_WD_LM_HEAP_BYTES, GC_WD_LM_HEAP_BYTES, 96u * 1024u, 64u * 1024u };
 			unsigned t;
 
 			for( t = 0; t < sizeof( tries ) / sizeof( tries[0] ) && !gc_wd_lm_in_arena; t++ )
@@ -1712,7 +1714,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		if( !gc_wd_lm_heap && !gc_wd_lm_in_arena )
 		{
 			extern size_t GC_MemHeapFreeBytes( void );
-			static const u32 tries[] = { GC_WD_LM_HEAP_BYTES, 80u * 1024u, 48u * 1024u };
+			static const u32 tries[] = { 2u * GC_WD_LM_HEAP_BYTES, GC_WD_LM_HEAP_BYTES, 80u * 1024u, 48u * 1024u };
 			unsigned t;
 
 			/* 640 KiB stays for what the map still loads from the heap
@@ -3420,7 +3422,7 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 	{
 		const u64 r = gc_wd_keys[idx[k]];
 		const int ci = (int)( r >> 48 );
-		const int lm = (int)(( r >> 8 ) & 0xffu );
+		const int lm = (int)( r & 0xffffu );
 		byte *chunk;
 		const gc_wd_batch_t *b;
 
@@ -3510,7 +3512,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 		}
 		if( k == gc_wd_defer_n )
 			break;
-		const int lm = (int)(( r >> 8 ) & 0xffu );
+		const int lm = (int)( r & 0xffffu );
 		const u32 mat = (u32)key >> 1;
 		const int far_pool = key & 1;
 		byte *chunk;
@@ -4238,7 +4240,7 @@ int R_GXWorldDLDraw( void )
 				{
 					gc_wd_keys[gc_wd_defer_n++] = ( (u64)i << 48 ) | ( (u64)k << 32 )
 						| ( (u64)( b->mat * 2u + ( chunk_far ? 1u : 0u )) << 16 )
-						| ( (u64)( lm_slot & 0xff ) << 8 );
+						| (u64)( lm_slot & 0xffff );
 					drawn++;
 					continue;
 				}
