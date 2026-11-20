@@ -782,6 +782,7 @@ qboolean CL_DisableVisibility( void );
 qboolean CL_IsRecordDemo( void );
 qboolean CL_IsPlaybackDemo( void );
 void CL_CineFrameTime( double *frametime );
+qboolean CL_CineActive( void );
 qboolean UI_CreditsActive( void );
 void *UI_GetMenuFactory( void );
 int CL_GetMaxClients( void );
@@ -794,6 +795,7 @@ static inline qboolean CL_DisableVisibility( void ) { return false; }
 static inline qboolean CL_IsRecordDemo( void ) { return false; }
 static inline qboolean CL_IsPlaybackDemo( void ) { return false; }
 static inline void CL_CineFrameTime( double *frametime ) { (void)frametime; }
+static inline qboolean CL_CineActive( void ) { return false; }
 static inline qboolean UI_CreditsActive( void ) { return false; }
 static inline void *UI_GetMenuFactory( void ) { return NULL; }
 static inline int CL_GetMaxClients( void ) { return SV_GetMaxClients(); }

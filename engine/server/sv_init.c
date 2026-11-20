@@ -155,9 +155,36 @@ void SV_GCSizePacketEntities( void )
 	sv_gc_local_ring = NULL;
 	sv_gc_local_ring_entries = 0;
 	{
+		/* What a frame can carry on the listen route (SV_AddEntitiesToPacket, -gclistenserver): every spawned seat plus the lean brush
+		 * budget (4), nothing else, so lean_bound is a hard per-frame bound (13 players + 4 = 17 measured on charlie, spawn, bluff,
+		 * radio tent and spectator views). The ring holds the current and the reference frame of each client that takes frames (bots
+		 * take none): the host and 2 LAN peers is 3 x 2 x bound = 120 entries at the bound, and the static ring has 128. Charlie got
+		 * 144 entries (239 KB of arena) before; a longer LAN party falls back to full updates (not an error), and the overflow guard
+		 * still never drops a player. */
+		const int lean_bound = svs.maxclients + 4;
+		const int want = ( 3 * 2 * lean_bound + 7 ) & ~7;
+
+		if( want <= 128 )
+		{
+			/* The static 128-entry tables hold the host and two LAN peers at the bound: no arena ring, the whole 239 KB stays a post-load gap. */
+			svs.packet_entities = gc_singleplayer_packet_entities;
+			svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
+			sv_gc_frame_scratch = fallback_scratch;
+			sv_gc_visible_cap = 128;
+			Con_Reportf( "Xash3D GameCube: packet entities map=%s per-frame bound %d (%d seats + 4 brushes), 3 clients need %d entries: static tables (128), no arena ring, arena_tail_left=%s\n",
+				sv.name, lean_bound, svs.maxclients, want, Q_memprint( GC_MapArenaLargestGap()));
+			return;
+		}
+	}
+	{
 		const size_t gap = GC_MapArenaLargestGap();
 		const size_t each = sizeof( entity_state_t ) * 5;
-		int count = gap > GC_DOD_ARENA_KEEP ? (int)(( gap - GC_DOD_ARENA_KEEP ) / each ) : 0;
+		extern size_t Mod_GCWorldEntityTextHeapBytes( void );
+		/* Leave room for the entity text to move off the heap at MAP_READY: with the ring at
+		 * 256 the gap was 161 KB and the 180 KB text stayed on the heap (charlie, ceres). */
+		const size_t text = Mod_GCWorldEntityTextHeapBytes();
+		const size_t need = GC_DOD_ARENA_KEEP + ( text + 1023u ) / 1024u * 1024u;
+		int count = gap > need ? (int)(( gap - need ) / each ) : 0;
 
 		count = Q_min( count, visible ) & ~7;
 		if( count > 128 )
@@ -176,9 +203,9 @@ void SV_GCSizePacketEntities( void )
 				sv_gc_visible_cap = count;
 				sv_gc_local_ring = block + count * 3;
 				sv_gc_local_ring_entries = count * 2;
-				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s\n",
+				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s entity_text_reserved=%s\n",
 					count < visible ? "Warning: REDUCED " : "", sv.name, count, visible,
-					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()));
+					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), Q_memprint( text ));
 				return;
 			}
 		}

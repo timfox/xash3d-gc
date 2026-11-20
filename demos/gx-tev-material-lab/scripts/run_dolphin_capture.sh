@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 2980 (batch55 tungsten/algae/obsidian/topaz); DumpFrames slower than realtime.
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-620}"
+# Full reel ends ~frame 2420 (batch8 common materials); DumpFrames slower than realtime.
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-560}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -86,8 +86,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through tungsten/algae/obsidian/topaz (~2980 frames)
-	if (( n > 3150 )); then
+	# Full reel through oled/anodized/frost/holo (~2700 frames)
+	if (( n > 2850 )); then
 		break
 	fi
 done
@@ -171,5 +171,6 @@ pick 2750 "$OUT_DIR/shots/algae-glass.png"
 pick 2820 "$OUT_DIR/shots/obsidian-wool.png"
 pick 2890 "$OUT_DIR/shots/topaz-dust.png"
 pick 2960 "$OUT_DIR/shots/rust-hero-end.png"
+pick 2680 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

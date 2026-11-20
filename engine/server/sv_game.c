@@ -194,6 +194,65 @@ static qboolean gc_ent_priv_overflow_from_tip;
 static byte gc_ent_priv_overflow_bits[GC_ENTITY_OVERFLOW_BYTES / 16 / 8];
 static size_t gc_ent_priv_overflow_capacity;
 static size_t gc_ent_priv_overflow_used;
+#if XASH_DODGC_NETWORK
+/* Weapon boxes (a dead player's drop, 384 B of private data) come and go all match long, and at the end of a crowded match both the
+ * slab and the heap had nothing left for one: the game wrote into a NULL block and hung (dod_donner, 4 bots, ~265 s). A small fixed
+ * pool serves them first so they never need the heap. Other non-essential classes that miss everywhere get a shared scratch block
+ * and their edict is freed again (see SV_GCNonEssentialClass). */
+#define GC_BOX_PRIV_SLOTS 12
+#define GC_BOX_PRIV_BYTES 512
+static byte gc_box_priv[GC_BOX_PRIV_SLOTS][GC_BOX_PRIV_BYTES] __attribute__((aligned( 32 )));
+static unsigned gc_box_priv_used;
+static byte gc_nonessential_scratch[1024] __attribute__((aligned( 32 )));
+static int gc_box_pool_misses, gc_nonessential_drops, gc_box_pool_logs;
+
+/* dod_gc_boxstress (debug, default 0, never in a shipped cfg; the game registers it): 1 starves the slab and the overflow for weapon
+ * boxes so the fixed pool has to serve them, 2 takes the pool away too so the scratch fallback and the freed edict fire. */
+static int SV_GCBoxStress( void )
+{
+	convar_t *cv = Cvar_FindVar( "dod_gc_boxstress" );
+
+	return cv ? (int)cv->value : 0;
+}
+
+static void *SV_GCBoxPrivAlloc( size_t size )
+{
+	int i;
+
+	if( size > GC_BOX_PRIV_BYTES || SV_GCBoxStress() >= 2 )
+		return NULL;
+	for( i = 0; i < GC_BOX_PRIV_SLOTS; i++ )
+		if( !( gc_box_priv_used & ( 1u << i )))
+		{
+			gc_box_priv_used |= 1u << i;
+			if( SV_GCBoxStress() && gc_box_pool_logs++ < 4 )
+				Con_Reportf( "Xash3D GameCube: weapon box private block from the pool, slot %d (live mask 0x%x)\n", i, gc_box_priv_used );
+			return gc_box_priv[i];
+		}
+	return NULL;
+}
+
+static qboolean SV_GCBoxPrivFree( const void *ptr )
+{
+	const byte *p = (const byte *)ptr;
+
+	if( p < &gc_box_priv[0][0] || p >= &gc_box_priv[0][0] + sizeof( gc_box_priv ))
+		return false;
+	gc_box_priv_used &= ~( 1u << (( p - &gc_box_priv[0][0] ) / GC_BOX_PRIV_BYTES ));
+	return true;
+}
+
+static qboolean SV_GCNonEssentialClass( const char *cn )
+{
+	return !Q_stricmp( cn, "weaponbox" ) || !Q_stricmp( cn, "gib" ) || !Q_strnicmp( cn, "env_", 4 )
+		|| !Q_stricmp( cn, "spark_shower" ) || !Q_stricmp( cn, "beam" ) || !Q_stricmp( cn, "smokepuff" );
+}
+
+qboolean SV_GCIsNonEssentialScratch( const void *ptr )
+{
+	return ptr == gc_nonessential_scratch;
+}
+#endif
 
 /* Borrow only the unused tail of this world's retained map arena. The server
  * releases it after all entity private-data destructors have run. */
@@ -877,6 +936,58 @@ const char *SV_GCSoundPrecacheName( int index )
 }
 #endif
 
+#if XASH_GAMECUBE
+/*
+=======================
+SV_GCQueueLocalTempEnt
+
+GameCube listen route: temp entities bound for the local client did not reach
+its parser (fx diag TE=0 through a whole scripted shot while the game sent dozens
+of bursts and tracers). Same process, same thread: hand them to the client
+directly through a small queue it drains every frame (CL_GCDrainLocalTempEnts).
+=======================
+*/
+static byte	gc_local_tent_data[4096];	/* drained every client frame; MEM1 is tight */
+static sizebuf_t	gc_local_tent_buf;
+static qboolean	gc_local_tent_init;
+unsigned	gc_local_tent_queued, gc_local_tent_dropped;
+
+static qboolean SV_GCQueueLocalTempEnt( sizebuf_t *multicast )
+{
+	const int bits = MSG_GetNumBitsWritten( multicast );
+
+	if( !gc_local_tent_init )
+	{
+		MSG_Init( &gc_local_tent_buf, "GCLocalTempEnts", gc_local_tent_data, sizeof( gc_local_tent_data ));
+		gc_local_tent_init = true;
+	}
+	if( MSG_GetNumBitsLeft( &gc_local_tent_buf ) <= bits + 8 )
+	{
+		gc_local_tent_dropped++;
+		return true;	/* full this frame: drop it rather than send it the way that loses it */
+	}
+	MSG_WriteBits( &gc_local_tent_buf, MSG_GetData( multicast ), bits );
+	gc_local_tent_queued++;
+	return true;
+}
+
+/* The client side: copy out what was queued since the last call and empty the queue. */
+int SV_GCTakeLocalTempEnts( byte *out, int size )
+{
+	int bytes;
+
+	if( !gc_local_tent_init || !MSG_GetNumBitsWritten( &gc_local_tent_buf ))
+		return 0;
+	bytes = MSG_GetNumBytesWritten( &gc_local_tent_buf );
+	if( bytes > size )
+		bytes = 0;
+	else
+		memcpy( out, MSG_GetData( &gc_local_tent_buf ), bytes );
+	MSG_Clear( &gc_local_tent_buf );
+	return bytes;
+}
+#endif
+
 static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboolean usermessage, qboolean filter )
 {
 	byte		*mask = NULL;
@@ -944,6 +1055,24 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		return 0;
 	}
 
+#if XASH_GAMECUBE
+	/* Scripted shots: why a temp entity does or does not reach a client. */
+	{
+		static int te_logs;
+
+		if( te_logs < 24 && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity )
+		{
+			sv_client_t *c = svs.clients;
+
+			te_logs++;
+			Con_Reportf( "Xash3D GameCube: temp entity multicast dest=%d clients=%d c0 state=%d local=%d fake=%d edict=%d\n",
+				dest, numclients, c ? c->state : -1,
+				c ? NET_IsLocalAddress( c->netchan.remote_address ) : -1,
+				c ? FBitSet( c->flags, FCL_FAKECLIENT ) != 0 : -1, c && c->edict ? 1 : 0 );
+		}
+	}
+#endif
 	// send the data to all relevent clients (or once only)
 	for( j = 0, cl = current; j < numclients; j++, cl++ )
 	{
@@ -970,6 +1099,16 @@ static int SV_Multicast( int dest, const vec3_t origin, const edict_t *ent, qboo
 		if( !SV_CheckClientVisiblity( cl, mask ))
 			continue;
 
+#if XASH_GAMECUBE
+		if( !specproxy && !reliable && MSG_GetNumBytesWritten( &sv.multicast ) > 0
+			&& MSG_GetData( &sv.multicast )[0] == svc_temp_entity
+			&& NET_IsLocalAddress( cl->netchan.remote_address )
+			&& SV_GCQueueLocalTempEnt( &sv.multicast ))
+		{
+			numsends++;
+			continue;
+		}
+#endif
 		if( specproxy ) MSG_WriteBits( &sv.spec_datagram, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
 		else if( reliable ) MSG_WriteBits( &cl->netchan.message, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
 		else MSG_WriteBits( &cl->datagram, MSG_GetData( &sv.multicast ), MSG_GetNumBitsWritten( &sv.multicast ));
@@ -1623,6 +1762,12 @@ static void GAME_EXPORT SV_FreePrivateData( edict_t *pEdict )
 #if XASH_GAMECUBE
 	if( pEdict->pvPrivateData == gc_player_private_fallback )
 		; /* static New Game player fallback — never free() */
+#if XASH_DODGC_NETWORK
+	else if( pEdict->pvPrivateData == gc_nonessential_scratch )
+		; /* shared scratch of a non-essential entity that got no block: never free() */
+	else if( SV_GCBoxPrivFree( pEdict->pvPrivateData ))
+		; /* fixed weapon box pool slot */
+#endif
 	else if( pEdict->pvPrivateData == gc_soundent_private_fallback )
 	{
 		gc_soundent_fallback_used = false;
@@ -1845,6 +1990,17 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 
 	SpawnEdict( &ent->v );
 
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+	if( ent->pvPrivateData && SV_GCIsNonEssentialScratch( ent->pvPrivateData ))
+	{
+		if( gc_nonessential_drops++ < 3 )
+			Con_Reportf( S_WARN "Xash3D GameCube: no private block for %s (heap_free=%s), edict %d freed again (%d so far)\n",
+				pszClassName, Q_memprint( GC_MemHeapFreeBytes() ), NUM_FOR_EDICT( ent ), gc_nonessential_drops );
+		ent->pvPrivateData = NULL;	/* skip the game's free callback: the object lived in the shared scratch */
+		SV_FreeEdict( ent );
+		return NULL;
+	}
+#endif
 #if XASH_GAMECUBE
 	/* Tip MEM1: brush furniture / pickups can miss a private block without
 	 * ending the whole map. Boss/combat NPCs still abort after reclaim. */
@@ -3896,7 +4052,22 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 			 * holes left by destroyed entities before requesting heap memory. */
 			/* Prefer slab/overflow up through 2 KiB so GetClassPtr never sees
 			 * NULL mid-construction when tip heap is empty (c1a1f ~entity 408). */
+#if XASH_DODGC_NETWORK
+			if( !pEdict->pvPrivateData && NUM_FOR_EDICT( pEdict ) > svs.maxclients && !Q_stricmp( SV_ClassName( pEdict ), "weaponbox" ))
+			{
+				if(( pEdict->pvPrivateData = SV_GCBoxPrivAlloc( size )) != NULL )
+				{
+					memset( pEdict->pvPrivateData, 0, size );
+					used_fallback = true;
+				}
+				else if( gc_box_pool_misses++ == 0 )
+					Con_Reportf( S_WARN "Xash3D GameCube: weapon box pool of %d is full, taking the slab or heap\n", GC_BOX_PRIV_SLOTS );
+			}
+#endif
 			if( !pEdict->pvPrivateData && size <= 2048
+#if XASH_DODGC_NETWORK
+				&& !( SV_GCBoxStress() >= 1 && !Q_stricmp( SV_ClassName( pEdict ), "weaponbox" ))
+#endif
 				&& (( pEdict->pvPrivateData = SV_GCPrivateSlabAlloc( size )) != NULL
 					|| ( pEdict->pvPrivateData = SV_GCPrivateOverflowAlloc( size )) != NULL ))
 			{
@@ -3918,6 +4089,18 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 				Con_Reportf( S_WARN "Xash3D GameCube: ent private slab+overflow miss size=%zu edict=%d classname=%s\n",
 					size, NUM_FOR_EDICT( pEdict ), SV_ClassName( pEdict ));
 			}
+#if XASH_DODGC_NETWORK
+			/* A non-essential entity (weapon box, gib, effect) that finds no block anywhere: the game constructs into a NULL pointer
+			 * and hangs. Hand it a shared scratch block instead; SV_AllocPrivateData frees the edict again right after the
+			 * constructor returns (the class is only ever created through that path). */
+			if( !pEdict->pvPrivateData && NUM_FOR_EDICT( pEdict ) > svs.maxclients && size <= sizeof( gc_nonessential_scratch )
+				&& SV_GCNonEssentialClass( SV_ClassName( pEdict )))
+			{
+				memset( gc_nonessential_scratch, 0, size );
+				pEdict->pvPrivateData = gc_nonessential_scratch;
+				used_fallback = true;
+			}
+#endif
 			/* Player spawn must not return NULL — GetClassPtr crashes. Keep a
 			 * static fallback for the single-player client edict under New Game. */
 			if( !pEdict->pvPrivateData
@@ -6084,10 +6267,23 @@ static int gc_parity_kept;
 #define GC_PARITY_TIERS 3
 static int gc_parity_tier_budget[GC_PARITY_TIERS] = { 0x7fffffff, 0x7fffffff, 0x7fffffff };
 static int gc_parity_tier_kept[GC_PARITY_TIERS];
+static int gc_parity_tier_count[GC_PARITY_TIERS];	/* the census's per-tier totals, for the static wall credit */
 /* Slots left free for run-time entities (weapons, grenades, weapon boxes,
  * temp ents). DoD builds have five client slots; four bots and a player
  * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
 #define GC_PARITY_RUNTIME_RESERVE 32
+
+/* The heap a parity entity needs to spawn. Solid walls (tier 0) and pure logic entities (relays, retargeters, auto
+ * triggers, info_target: an edict and a 112-byte slab entry, no model/sound/sprite load) cost almost no heap, so they
+ * only give way at 4 KB; everything else keeps the 16 KB guard. Charlie's entities spawn with 13-16 KB free: at a flat
+ * 16 KB its whole objective logic (relays/changetargets) was dropped from run to run. */
+static unsigned SV_GCParityHeapFloorKB( const char *classname, int tier )
+{
+	if( tier == 0 || !Q_strcmp( classname, "trigger_relay" ) || !Q_strcmp( classname, "trigger_changetarget" )
+		|| !Q_strcmp( classname, "trigger_auto" ) || !Q_strcmp( classname, "info_target" ))
+		return 4;
+	return 16;
+}
 
 static int SV_GCParityTier( const char *classname )
 {
@@ -6101,11 +6297,25 @@ static int SV_GCParityTier( const char *classname )
 	return 1;
 }
 
-static qboolean SV_GCEntityPressure( void )
+/* Which condition tripped, for the per-class tally (heap, slab, edicts, budget). */
+static int gc_parity_why[4];
+
+static qboolean SV_GCEntityPressure( unsigned floor_kb )
 {
-	return GC_MemHeapFreeBytes() < 16u * 1024u
-		|| gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u
-		|| svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+	/* Tier 0 (func_wall family) is solid geometry players walk into and shoot at: it costs an edict and a 112-byte slab
+	 * entry, almost no heap, so it only gives way at 4 KB. The rest keeps the 16 KB guard. (Charlie sat at 13-16 KB
+	 * when the entities spawned: whether ALL its parity entities, walls included, were dropped depended on noise.) */
+	const qboolean heap = GC_MemHeapFreeBytes() < floor_kb * 1024u;
+	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
+	const qboolean ents = svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+
+	if( heap )
+		gc_parity_why[0]++;
+	else if( slab )
+		gc_parity_why[1]++;
+	else if( ents )
+		gc_parity_why[2]++;
+	return heap || slab || ents;
 }
 
 /* An unnamed func_illusionary is non-solid decoration nothing can target:
@@ -6124,17 +6334,215 @@ static qboolean SV_GCParityLight( const edict_t *ent, const char *classname )
 		&& ent && ent->v.targetname;
 }
 
+/* Per-class tally of the parity gate (kept / skipped), printed once at the "entity spawn" stage. */
+static struct { char name[32]; int kept, skipped; } gc_parity_tally[32];
+
+static void SV_GCParityTally( const char *classname, qboolean skip )
+{
+	int i;
+
+	for( i = 0; i < ARRAYSIZE( gc_parity_tally ) && gc_parity_tally[i].name[0]; i++ )
+		if( !Q_strcmp( gc_parity_tally[i].name, classname ))
+			break;
+	if( i >= ARRAYSIZE( gc_parity_tally ))
+		return;
+	if( !gc_parity_tally[i].name[0] )
+		Q_strncpy( gc_parity_tally[i].name, classname, sizeof( gc_parity_tally[i].name ));
+	if( skip )
+		gc_parity_tally[i].skipped++;
+	else
+		gc_parity_tally[i].kept++;
+}
+
+void SV_GCParityReport( void )
+{
+	char line[512];
+	int i, n = 0;
+
+	for( i = 0; i < ARRAYSIZE( gc_parity_tally ) && gc_parity_tally[i].name[0]; i++ )
+		n += Q_snprintf( line + n, sizeof( line ) - n, " %s=%d/%d", gc_parity_tally[i].name,
+			gc_parity_tally[i].kept, gc_parity_tally[i].skipped );
+	if( n > 0 )
+		Con_Reportf( "Xash3D GameCube: DoD parity tally (kept/skipped):%s | pressure: heap<16KB %d, private slab %d, edicts %d; budget/tier skips are the rest\n", line,
+			gc_parity_why[0], gc_parity_why[1], gc_parity_why[2] );
+	memset( gc_parity_why, 0, sizeof( gc_parity_why ));
+	memset( gc_parity_tally, 0, sizeof( gc_parity_tally ));
+}
+
+/* gc_static_walls: 0 off, 3 records without edict and without the draw path (diagnostic), 1 unnamed plain func_walls become static records with no edict (collision only until the
+ * client side draws them), 2 records AND edicts (the self test compares them at spawn complete). */
+int SV_GCStaticWallsMode( void )
+{
+	/* Not Cvar_Get: that would replace the FCVAR_TEMPORARY cvar the disc cfg ("cvar gc_static_walls 2") created with a
+	 * fresh default. The console (server.cfg / autoexec) can still create it. */
+	convar_t *cv = Cvar_FindVar( "gc_static_walls" );
+
+	return cv ? (int)cv->value : 0;
+}
+
+static qboolean SV_GCStaticWallRecord( edict_t *ent )
+{
+	const char *name = SV_GetString( ent->v.model );
+	model_t *mod;
+	int mi;
+
+	if( !name || name[0] != '*' || ent->v.targetname || ent->v.rendermode != kRenderNormal || ent->v.renderfx != kRenderFxNone
+		|| !VectorIsNull( ent->v.angles ))
+		return false;
+	if(( mi = SV_ModelIndex( name )) <= 0 || mi >= MAX_MODELS )
+		return false;
+	mod = sv.models[mi];
+	if( !mod )
+		mod = Mod_ForName( sv.model_precache[mi], false, false );
+	if( !mod || mod->type != mod_brush )
+		return false;
+	if( !SV_GCStaticWallAdd( mi, ent->v.origin, mod->mins, mod->maxs ))
+		return false;
+	/* In mode 1 this wall never gets an edict: its tier-0 slot in the edict budget is free for the map logic (tier 1),
+	 * which the census sized as if every wall were an edict. */
+	if(( SV_GCStaticWallsMode() == 1 || SV_GCStaticWallsMode() == 3 ) && gc_parity_tier_budget[1] < gc_parity_tier_count[1] )
+	{
+		gc_parity_tier_budget[1]++;
+		gc_parity_budget++;
+	}
+	return true;
+}
+
+/* Self test (mode 2, at spawn complete): the same trace against each record's hull and against its func_wall edict must
+ * agree exactly; prints the mismatch count and the first few. */
+void SV_GCStaticWallsSelfTest( void )
+{
+	static const float hulls[3][6] = {
+		{ 0, 0, 0, 0, 0, 0 }, { -16, -16, -36, 16, 16, 36 }, { -16, -16, -18, 16, 16, 18 } };
+	int i, k, tests = 0, bad = 0, noedict = 0, n = SV_GCStaticWallCount();
+
+	if( SV_GCStaticWallsMode() != 2 || n <= 0 )
+		return;
+	for( i = 0; i < n; i++ )
+	{
+		vec3_t amin, amax;
+		int mi, j;
+		edict_t *ed = NULL;
+
+		SV_GCStaticWallBounds( i, amin, amax, &mi );
+		for( j = 1; j < svgame.numEntities; j++ )
+		{
+			edict_t *e = SV_EdictNum( j );
+
+			if( !e->free && e->v.modelindex == mi && e->v.solid == SOLID_BSP && !Q_strcmp( SV_ClassName( e ), "func_wall" ))
+			{
+				ed = e;
+				break;
+			}
+		}
+		if( !ed )
+		{
+			noedict++;
+			continue;
+		}
+		for( k = 0; k < 96; k++ )
+		{
+			vec3_t start, end, mins, maxs;
+			trace_t a, b;
+			const float *hl = hulls[k % 3];
+			int c;
+
+			for( c = 0; c < 3; c++ )
+			{
+				start[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+				end[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+				mins[c] = hl[c];
+				maxs[c] = hl[3 + c];
+			}
+			SV_ClipMoveToEntity( ed, start, mins, maxs, end, &a );
+			SV_GCStaticWallTrace( i, start, mins, maxs, end, &b );
+			tests++;
+			if( a.fraction != b.fraction || a.startsolid != b.startsolid || a.allsolid != b.allsolid
+				|| !VectorCompare( a.plane.normal, b.plane.normal ) || !VectorCompare( a.endpos, b.endpos ))
+			{
+				if( bad++ < 4 )
+					Con_Reportf( S_ERROR "Xash3D GameCube: static wall %d mismatch: frac %f/%f solid %d/%d normal (%.2f %.2f %.2f)/(%.2f %.2f %.2f)\n",
+						i, a.fraction, b.fraction, a.startsolid, b.startsolid, a.plane.normal[0], a.plane.normal[1], a.plane.normal[2],
+						b.plane.normal[0], b.plane.normal[1], b.plane.normal[2] );
+			}
+		}
+	}
+	{
+		/* Whole-path check: SV_Move with the records on (records + the edicts) against the edicts alone must agree on
+		 * everything except which edict a wall hit reports (the world for a record). */
+		extern qboolean gc_static_walls_disable;
+		int mv_tests = 0, mv_bad = 0, mv_world = 0, mv_startsolid = 0;
+
+		for( i = 0; i < n; i++ )
+		{
+			vec3_t amin, amax;
+			int mi, hk;
+
+			SV_GCStaticWallBounds( i, amin, amax, &mi );
+			for( k = 0; k < 120; k++ )
+			{
+				vec3_t start, end, mins, maxs;
+				trace_t a, b;
+				const float *hl = hulls[k % 3];
+				int c;
+
+				for( c = 0; c < 3; c++ )
+				{
+					start[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+					end[c] = COM_RandomFloat( amin[c] - 80.0f, amax[c] + 80.0f );
+					mins[c] = hl[c];
+					maxs[c] = hl[3 + c];
+				}
+				gc_static_walls_disable = false;
+				a = SV_Move( start, mins, maxs, end, ( k & 1 ) ? MOVE_NOMONSTERS : MOVE_NORMAL, NULL, false );
+				gc_static_walls_disable = true;
+				b = SV_Move( start, mins, maxs, end, ( k & 1 ) ? MOVE_NOMONSTERS : MOVE_NORMAL, NULL, false );
+				gc_static_walls_disable = false;
+				mv_tests++;
+				if( a.ent == SV_EdictNum( 0 ) && b.ent != SV_EdictNum( 0 ))
+					mv_world++;
+				if( a.fraction != b.fraction || a.startsolid != b.startsolid || a.allsolid != b.allsolid
+					|| !VectorCompare( a.plane.normal, b.plane.normal ) || !VectorCompare( a.endpos, b.endpos ))
+				{
+					/* A trace that STARTS inside a solid is order dependent in World_CombineTraces (a startsolid trace
+					 * replaces whatever was combined before it), and the records run after the area-node walk: report
+					 * those separately from real disagreements. */
+					if( a.startsolid || b.startsolid || a.allsolid || b.allsolid )
+						mv_startsolid++;
+					else if( mv_bad++ < 6 )
+						Con_Reportf( S_ERROR "Xash3D GameCube: static wall SV_Move mismatch rec %d: frac %f/%f ent %d/%d\n",
+							i, a.fraction, b.fraction, a.ent ? NUM_FOR_EDICT( a.ent ) : -1, b.ent ? NUM_FOR_EDICT( b.ent ) : -1 );
+				}
+			}
+		}
+		Con_Reportf( "Xash3D GameCube: static wall SV_Move test: %d traces, %d mismatches (+%d start-solid order cases), %d hits reported as the world edict\n",
+			mv_tests, mv_bad, mv_startsolid, mv_world );
+	}
+	Con_Reportf( "Xash3D GameCube: static wall self test: %d records, %d traces, %d mismatches, %d records without an edict\n",
+		n, tests, bad, noedict );
+}
+
 static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *classname )
 {
 	if( COM_StringEmpty( classname ))
 		return false;
 	if( ent && SV_GCBakedIllusionary( classname, ent->v.targetname != 0 ))
 		return true;
+	if( ent && !Q_strcmp( classname, "func_wall" ) && SV_GCStaticWallsMode() >= 1 && SV_GCStaticWallRecord( (edict_t *)ent ))
+	{
+		if( SV_GCStaticWallsMode() == 1 || SV_GCStaticWallsMode() == 3 )
+			return true;	/* record only: no edict, no networked entity (3: and no draw path, to see what the world bake shows) */
+	}
 	if( SV_GCParityEntity( classname ) || SV_GCParityLight( ent, classname ))
 	{
 		static int kept, skipped;
 		const int tier = SV_GCParityTier( classname );
-		const qboolean skip = SV_GCEntityPressure() || gc_parity_kept >= gc_parity_budget
+		if( !kept && !skipped )
+		{
+			extern void GC_HeapCensusReport( const char *stage );
+			GC_HeapCensusReport( "first parity entity" );
+		}
+		const qboolean skip = SV_GCEntityPressure( SV_GCParityHeapFloorKB( classname, tier )) || gc_parity_kept >= gc_parity_budget
 			|| gc_parity_tier_kept[tier] >= gc_parity_tier_budget[tier];
 
 		if( !skip )
@@ -6144,6 +6552,7 @@ static qboolean SV_GCCapFacesOptionalEntity( const edict_t *ent, const char *cla
 		}
 
 		if( skip ) skipped++; else kept++;
+		SV_GCParityTally( classname, skip );
 		if(( kept + skipped ) % 16 == 1 || ( skip && skipped <= 4 ))
 			Con_Reportf( "Xash3D GameCube: DoD parity entity %s %s (kept=%d skipped=%d slab=%zu heap=%s edicts=%d)\n",
 				classname, skip ? "skipped" : "kept", kept, skipped, gc_ent_priv_slab_used,
@@ -6572,6 +6981,8 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
 		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
 	/* Walls first, then map logic, then lights. */
+	for( t = 0; t < GC_PARITY_TIERS; t++ )
+		gc_parity_tier_count[t] = tier_count[t];
 	for( t = 0, left = gc_parity_budget; t < GC_PARITY_TIERS; t++ )
 	{
 		gc_parity_tier_budget[t] = Q_min( tier_count[t], left );
@@ -7005,6 +7416,9 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;
 	memset( gc_ent_priv_slab_bits, 0, sizeof( gc_ent_priv_slab_bits ));
+#if XASH_DODGC_NETWORK
+	gc_box_priv_used = 0;
+#endif
 	gc_ent_priv_slab_hits = 0;
 	memset( gc_ent_priv_slab_size, 0, sizeof( gc_ent_priv_slab_size ));
 	gc_kv_slab_used = 0;

@@ -2183,7 +2183,7 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
 	lf = cache / f"wd_{bsp.stem.lower()}_lf.gcd"
 	sb = cache / f"wd_{bsp.stem.lower()}_sb.gcd"
-	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb1"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb2"
 	if out.is_file() and lf.is_file() and sb.is_file() and stamp.is_file() and stamp.read_text() == key:
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2282,13 +2282,15 @@ def build_prop_packs(
 		) if root.is_dir()
 	]
 	overlays: list[tuple[str, Path]] = []
+	failed: list[str] = []
+	missing_pack: list[str] = []
 	for bsp in sorted((source / "maps").glob("dod_*.bsp")):
 		stem = bsp.stem.lower()
 		if map_stems is not None and stem not in map_stems:
 			continue
 		st = bsp.stat()
 		gcp, gct, stamp = cache / f"gp_{stem}.gcp", cache / f"pt_{stem}.gct", cache / f"gp_{stem}.stamp"
-		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-11named"
+		key = f"{st.st_size}:{int(st.st_mtime)}:gp7-13motion"
 		if not (stamp.is_file() and stamp.read_text() == key):
 			for stale in (gcp, gct):
 				stale.unlink(missing_ok=True)
@@ -2298,6 +2300,7 @@ def build_prop_packs(
 			except (Exception, SystemExit) as error:  # the map keeps the engine's own static props
 				print(f"  props: bake failed for {bsp.name}: {error}")
 				stats = None
+				failed.append(stem)
 				for stale in (gcp, gct):
 					stale.unlink(missing_ok=True)
 			# A bake that could not find a model file is tried again next
@@ -2305,6 +2308,7 @@ def build_prop_packs(
 			if stats is None or not stats["missing"]:
 				stamp.write_text(key)
 		if not (gcp.is_file() and gct.is_file()):
+			missing_pack.append(stem)
 			continue
 		for name, src in ((f"gp_{stem}.gcp", gcp), (f"pt_{stem}.gct", gct)):
 			dest = output / "media" / name
@@ -2312,6 +2316,13 @@ def build_prop_packs(
 			shutil.copy2(src, dest)
 			overlays.append((f"media/{name}", dest))
 	print(f"  props: {len(overlays) // 2} map prop pack(s)")
+	# A map on the disc without its pack only loads GC_STATIC_PROP_MODELS (6) prop models, and most maps use 8 to 44.
+	# Fail the build rather than ship that silently; DODGC_ALLOW_MISSING_PROPPACK=1 keeps the old behaviour.
+	if missing_pack and os.environ.get("DODGC_ALLOW_MISSING_PROPPACK", "") != "1":
+		raise SystemExit(
+			"error: no prop pack (gp_<map>.gcp / pt_<map>.gct) for: " + ", ".join(sorted(missing_pack))
+			+ (" (bake failed: " + ", ".join(sorted(failed)) + ")" if failed else "")
+			+ ". Those maps would load only 6 prop models. Fix the bake, or set DODGC_ALLOW_MISSING_PROPPACK=1 to ship anyway.")
 	return overlays
 
 
@@ -2973,8 +2984,16 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 				*GC_STUDIO_PWEAPONS,
 			}
 			edge = 64 if stem in prop_tex64 else 128
+			companion_cap = 96 * 1024
+			# View models (v_*): the skins are 256 px in the retail MDLs, and the ARAM skin stream
+			# (R_GXSkinAttachVM, ref/gx/r_gx_skins.c) streams any palettised source above the 128 px decode in
+			# full resolution. GC_VM_SKIN_EDGE=256 keeps them at 256 (one skin is 64 KiB of palette indices; the
+			# companion is read through the studio scratch, so raise GC_VM_COMPANION_KB with it).
+			if stem.startswith("v_") and stem not in prop_tex64:
+				edge = int(os.environ.get("GC_VM_SKIN_EDGE", "") or 256)
+				companion_cap = int(os.environ.get("GC_VM_COMPANION_KB", "") or 400) * 1024
 			tex_payload = lean_studio_tex_companion_bytes(src, max_edge=edge)
-			if tex_payload and len(tex_payload) > 96 * 1024:
+			if tex_payload and len(tex_payload) > companion_cap:
 				tex_payload = lean_studio_tex_companion_bytes(src, max_edge=64)
 			if tex_payload:
 				archive.writestr(tex_arc, tex_payload, compress_type=zipfile.ZIP_STORED)
@@ -2991,6 +3010,72 @@ def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> i
 # (Mod_GCAnimPackGet), leaving a mesh core of about 250 KB for gc_studio/.
 GC_PLAYER_MODELS = ("axis-inf", "axis-para", "brit-inf", "us-inf", "us-para")
 GC_PLAYER_PACK_PATH = "models/player/anim_%s.gca"
+
+
+def animpack_prefilter(block: bytes) -> bytes:
+	"""Reversible: big-endian 16-bit deltas, then per 256 values the high bytes followed by the low bytes (an odd
+	trailing byte stays last). The engine undoes it in place (Mod_GCAnimUnpack). About 0.63 of the size with LZ4 where
+	plain LZ4 gets 0.82."""
+	import struct
+
+	n = len(block) // 2
+	vals = struct.unpack(">%dH" % n, block[: n * 2])
+	delta = [vals[0]] + [(vals[i] - vals[i - 1]) & 0xFFFF for i in range(1, n)] if n else []
+	raw = struct.pack(">%dH" % n, *delta)
+	out = bytearray()
+	for i in range(0, n, 256):
+		seg = raw[2 * i : 2 * (i + 256)]
+		out += seg[0::2] + seg[1::2]
+	return bytes(out) + block[n * 2 :]
+
+
+def compress_animpack(payload: bytes) -> bytes:
+	"""Lossless: LZ4-compress every sequence block of a GCAP v1 animation pack into a v2 pack.
+
+	The pack is the player MDL's animation data (about 65% of its size once compressed); the engine keeps the
+	whole pack in ARAM and decodes one sequence on demand (Mod_GCAnimPackFetch), in place, into its pool.
+	A block that does not shrink stays raw. Directory entries are (offset, size); bit 31 of size marks an LZ4 block,
+	which is stored as a big-endian u32 raw length followed by the LZ4 block of the prefiltered data (animpack_prefilter). DODGC_NO_ANIMPACK_LZ4=1 keeps v1."""
+	import struct
+
+	if os.environ.get("DODGC_NO_ANIMPACK_LZ4", "") == "1" or payload[:4] != b"GCAP":
+		return payload
+	try:
+		import lz4.block
+	except ImportError:
+		print("  animation pack: python lz4 not installed, pack stays uncompressed")
+		return payload
+	version, numseq, numbones, data_off, total, _pad = struct.unpack_from(">6I", payload, 4)
+	if version != 1 or len(payload) < total:
+		return payload
+	entries = [struct.unpack_from(">2I", payload, 32 + 8 * i) for i in range(numseq)]
+	head_len = (32 + numseq * 8 + 31) & ~31
+	body = bytearray()
+	new_entries = []
+	saved = 0
+	for off, size in entries:
+		if not off or not size:
+			new_entries.append((0, 0))
+			continue
+		block = payload[off : off + size]
+		comp = lz4.block.compress(animpack_prefilter(block), mode="high_compression", compression=12, store_size=False)
+		blob = struct.pack(">I", len(block)) + comp
+		start = head_len + len(body)
+		if len(blob) + 32 <= len(block) and len(block) >= 64:
+			new_entries.append((start, len(blob) | 0x80000000))
+			body += blob
+			saved += len(block) - len(blob)
+		else:
+			new_entries.append((start, len(block)))
+			body += block
+		while len(body) % 32:
+			body.append(0)
+	head = b"GCAP" + struct.pack(">6I", 2, numseq, numbones, head_len, head_len + len(body), 0) + b"\0\0\0\0"
+	head += b"".join(struct.pack(">2I", o, n) for o, n in new_entries)
+	head += b"\0" * (head_len - len(head))
+	out = bytes(head) + bytes(body)
+	print(f"  animation pack: {len(payload)} -> {len(out)} bytes (LZ4, {saved} saved)")
+	return out
 # Outfit variants (bodies, heads, helmets, gear) are ~70-80% of a core's mesh
 # bytes but one model per body part is drawn: their meshes go to a pack the
 # engine keeps in ARAM (Mod_GCStudioMeshBase), so both team cores fit MEM1.
@@ -3061,6 +3146,7 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 	for stem, src in found:
 		try:
 			files, _ = splitter.split(src.read_bytes(), stem, pack_path=GC_PLAYER_PACK_PATH)
+			files = {n: (compress_animpack(p) if n.endswith('.gca') else p) for n, p in files.items()}
 		except Exception as exc:  # StudioError or a malformed file: skip this body
 			print(f"  player model {stem}: split failed ({exc})")
 			continue
