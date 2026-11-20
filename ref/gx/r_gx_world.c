@@ -11445,12 +11445,27 @@ static void R_GXEnsureTriApiLayout( void )
 		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
-		else if( vid.rendermode == kRenderTransTexture
-			|| vid.rendermode == kRenderTransAlpha
-			|| vid.rendermode == kRenderTransColor )
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+		/* The same choice as R_GXEffectsTriBegin, darken included. This
+		 * relayout runs at the first emit after the world or a model changed
+		 * the vertex layout, after TriBegin chose the blend: without the
+		 * darken case here every bullet hole (always the first effect batch
+		 * after the world) was drawn with plain alpha blending, its
+		 * darkening map opaque: a black square with a grey star. */
+		{
+			extern qboolean r_gx_effects_darken;
+
+			r_gx_effects_mode = vid.rendermode | ( r_gx_effects_darken ? 0x100 : 0 );
+			if( r_gx_effects_darken ) /* frame * ( 1 - texel * vertex colour ) */
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_ZERO, GX_BL_INVSRCCLR, GX_LO_NOOP );
+			else if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
+			else if( vid.rendermode == kRenderTransTexture
+				|| vid.rendermode == kRenderTransAlpha
+				|| vid.rendermode == kRenderTransColor )
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+			else
+				r_gx_effects_mode = -1;	/* blend left as it was: let TriBegin set it */
+		}
 	}
 	/* Other draws may have loaded TEXMAP0 too: rebind on the next emit. */
 	r_gx_studio_bound_tex = 0;
@@ -11613,8 +11628,14 @@ void R_GXStudioBindTexnum( unsigned texnum )
 
 		r_gx_studio_bound_tex = texnum;
 		r_gx_studio_pending_tex = texnum;
-		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE. */
-		if( r_gx_studio_viewmodel )
+		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE.
+		 * Only while the view model is being drawn: the flag stays set
+		 * after R_GXStudioEnd, and the effects drawn next (bullet holes,
+		 * sprites, particles) bind through here too. Every bind after the
+		 * first of a batch then switched blending off and depth writes on,
+		 * so a bullet hole's darkening map was painted opaque on the wall:
+		 * a black square with a pale star. */
+		if( r_gx_studio_viewmodel && r_gx_studio_active )
 		{
 			image_t *vim = R_GetTexture( texnum );
 			const qboolean hands_ate = ( vim && vim->gc_gx_native_alpha
