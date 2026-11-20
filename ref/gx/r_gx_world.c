@@ -12369,8 +12369,9 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 
 	psurf = &geom->surfaces[mod->firstmodelsurface];
 	{
-	int skip_plane = 0, skip_sky = 0, skip_edges = 0, emit_zero = 0, skip_frustum = 0;
+	int skip_plane = 0, skip_sky = 0, skip_edges = 0, emit_zero = 0, skip_frustum = 0, skip_alpha = 0;
 	const qboolean unrotated = !e->angles[0] && !e->angles[1] && !e->angles[2];
+	const qboolean see_through = e->curstate.rendermode == kRenderTransAlpha;
 
 	int nsort = 0;
 	/* The sort table is the real bound. 256 cut large DoD props (bunkers,
@@ -12418,6 +12419,22 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 				continue;
 			}
 		}
+		/* A see-through brush (rendermode 4, camouflage netting) whose
+		 * masked '{' texture has no alpha here drew as a solid grey sheet
+		 * hanging in the air (dod_charlie *114 over the trenches). Leave
+		 * such a face out rather than draw it solid. */
+		if( see_through && psurf->texinfo && psurf->texinfo->texture
+			&& psurf->texinfo->texture->name[0] == '{' )
+		{
+			const texture_t *mt = psurf->texinfo->texture;
+			const image_t *img = mt->gl_texturenum > 0 ? R_GetTexture( (unsigned)mt->gl_texturenum ) : NULL;
+
+			if( !img || !img->gc_packed_alpha )
+			{
+				skip_alpha++;
+				continue;
+			}
+		}
 		/* No CPU backface — cabin walls face inward; angles break modelorg. */
 		if( !R_GXFaceSortPush( &nsort, psurf, i ))
 			break;
@@ -12430,6 +12447,17 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 		if( got <= 0 )
 			emit_zero++;
 		drawn += got;
+	}
+	if( skip_alpha )
+	{
+		static int alpha_logs;
+
+		if( alpha_logs < 6 )
+		{
+			alpha_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: brush %s rendermode 4: %d masked face(s) without alpha left out\n",
+				mod->name, skip_alpha );
+		}
 	}
 	{
 		static int tram_logs;
