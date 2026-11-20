@@ -43,6 +43,7 @@ Only Lost Coast bakes .gca files, so HL1 and DoD never take this path.
 #define GCA_HALFLAMBERT	0x01
 #define GCA_MASKED	0x02
 #define GCA_ADDITIVE	0x04
+#define GCA_EQUIPMENT	0x08	/* a weapon merged onto the character: gone once the entity's body has bit 0 (he dropped it) */
 
 typedef struct
 {
@@ -421,6 +422,8 @@ qboolean R_GXActorDraw( cl_entity_t *e, model_t *mod, studiohdr_t *hdr, matrix3x
 
 		if( texnum <= 0 || texnum >= MAX_TEXTURES )
 			continue; /* skins not uploaded yet */
+		if(( b->flags & GCA_EQUIPMENT ) && ( e->curstate.body & 1 ))
+			continue;
 		if( hl != lit_mode )
 		{
 			R_GXActorLights( view, pl, hl );
