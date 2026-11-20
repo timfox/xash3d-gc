@@ -207,13 +207,18 @@ extern void R_GXMirrorClipSet( qboolean on );
 #define GC_TEV_MAX		96
 #define GC_TEV_DETAIL		5440
 #define GC_TEV_ENVMASK		2048
+#define GC_TEV_MAX_ENVMASK	8	/* mask index base of the 32x32 table (format) */
 #define GC_TEV_EMBOSS		4096
-#define GC_TEV_MAX_ENVMASK	8
-/* Only Lost Coast world packs carry emboss height tiles (GCeh trailer):
- * other games keep one 4 KiB slot instead of 64 KiB of MEM1 BSS. */
+/* Only Lost Coast bakes media/tevmat.gcm (detail, envmask and emboss
+ * tiles from its VMTs). Other games keep one slot of each table instead of
+ * ~124 KiB of MEM1 BSS; a pack with more than one is ignored whole. */
 #if defined( XASH_GC_LOSTCOAST ) && XASH_GC_LOSTCOAST
+#define GC_TEV_MAX_DETAIL	8
+#define GC_TEV_ENVMASK_SLOTS	8
 #define GC_TEV_MAX_EMBOSS	16
 #else
+#define GC_TEV_MAX_DETAIL	1
+#define GC_TEV_ENVMASK_SLOTS	1
 #define GC_TEV_MAX_EMBOSS	1
 #endif
 #define GC_TEV_F_ENVMASK	0x04
@@ -223,15 +228,19 @@ static u8 gc_tev_nmat, gc_tev_ndet, gc_tev_nmask, gc_tev_nemboss;
 static s8 gc_tev_bound = -1;
 /* Detail tiles stay in MEM1. The map ARAM window is the world pack; a
  * second reserve returns that same base and would wipe the BSP tree. */
-static u8 gc_tev_store[8 * GC_TEV_DETAIL] __attribute__(( aligned( 32 )));
+static u8 gc_tev_store[GC_TEV_MAX_DETAIL * GC_TEV_DETAIL] __attribute__(( aligned( 32 )));
 static GXTexObj gc_tev_obj;
-static u8 gc_tev_envmask[GC_TEV_MAX_ENVMASK * GC_TEV_ENVMASK] __attribute__(( aligned( 32 )));
+static u8 gc_tev_envmask[GC_TEV_ENVMASK_SLOTS * GC_TEV_ENVMASK] __attribute__(( aligned( 32 )));
 /* Mask index GC_TEV_MAX_ENVMASK and up: a second table of 32x32 masks
  * (tevmat.gcm trailer GCes). The Lost Coast church's frescoes and walls each
  * carry their own mask, nineteen more than the 64x64 table holds, and a
  * material without a mask in a table gets no reflection. */
 #define GC_TEV_ENVMASK_SMALL		512
+#if defined( XASH_GC_LOSTCOAST ) && XASH_GC_LOSTCOAST
 #define GC_TEV_MAX_ENVMASK_SMALL	24
+#else
+#define GC_TEV_MAX_ENVMASK_SMALL	1
+#endif
 static u8 gc_tev_envmask_small[GC_TEV_MAX_ENVMASK_SMALL * GC_TEV_ENVMASK_SMALL] __attribute__(( aligned( 32 )));
 static u8 gc_tev_nmask_small;
 static GXTexObj gc_tev_envmask_obj;
@@ -1026,7 +1035,7 @@ static void R_GXMatPackLoad( void )
 	{
 		nmat = hdr[6];
 		gc_tev_ndet = hdr[7];
-		if( nmat > 0 && nmat <= GC_TEV_MAX && gc_tev_ndet <= 8
+		if( nmat > 0 && nmat <= GC_TEV_MAX && gc_tev_ndet <= GC_TEV_MAX_DETAIL
 			&& gEngfuncs.fsapi->Read( f, gc_tev_rec, nmat * 8u ) == (fs_offset_t)( nmat * 8u ))
 		{
 			u32 ofs = ( 8u + nmat * 8u + 31u ) & ~31u;
@@ -1044,7 +1053,7 @@ static void R_GXMatPackLoad( void )
 					&& trail[0] == 'G' && trail[1] == 'C' )
 				{
 					if( trail[2] == 'e' && trail[3] == 'm'
-						&& trail[4] > 0 && trail[4] <= GC_TEV_MAX_ENVMASK )
+						&& trail[4] > 0 && trail[4] <= GC_TEV_ENVMASK_SLOTS )
 					{
 						u32 mbytes = (u32)trail[4] * GC_TEV_ENVMASK;
 
