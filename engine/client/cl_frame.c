@@ -2048,9 +2048,15 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	const float studio_max_dist = CL_GCCaptureMode() ? 32000.0f : ( Sys_CheckParm( "-gcfullphysics" )
 		|| Sys_CheckParm( "-gcworldrender" )) ? 12000.0f : 1600.0f;
 
+/* Spill left for the world DL (its tables, ~55 KiB on dod_charlie, and the
+ * smallest chunk cache) when capture mode takes big blocks before it loads. */
+#ifndef GC_CAPTURE_WORLD_SPILL_KEEP
+#define GC_CAPTURE_WORLD_SPILL_KEEP	( 224u * 1024u )
+#endif
 	if( CL_GCCaptureMode( ))
 	{
 		extern size_t GC_MemHeapFreeBytes( void );
+		extern size_t Mod_GCWorldArraySpillFreeLasting( void );
 		extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 		extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
 		const size_t big_bytes = sizeof( cl_entity_t ) * ( GC_LEAN_STUDIO_MAX + GC_LEAN_BRUSH_MAX );
@@ -2071,13 +2077,18 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			const char *where = "spill";
 
 			big_tried_spawn = svs.spawncount;
-			lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
+			/* The world DL loads its tables and chunk cache from the spill on
+			 * the first frame drawn, after this. Taking the slots first left it
+			 * "no spill for tables" and capture runs drew no world at all (sky,
+			 * actors and smoke only). Leave it room, else use the heap. */
+			if( Mod_GCWorldArraySpillFreeLasting() >= big_bytes + GC_CAPTURE_WORLD_SPILL_KEEP )
+				lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
 			if( lean_studio_big )
 			{
 				memset( lean_studio_big, 0, big_bytes );
 				big_in_spill = true;
 			}
-			else if( GC_MemHeapFreeBytes() > big_bytes + 512 * 1024 )
+			else if( GC_MemHeapFreeBytes() > big_bytes + 192 * 1024 )
 			{
 				lean_studio_big = Mem_Calloc( host.mempool, big_bytes );
 				where = "heap";

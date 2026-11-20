@@ -759,6 +759,7 @@ static u32 *gc_wd_chunk_ofs;
 static byte *gc_wd_cache;
 static qboolean gc_wd_cache_in_arena;
 static byte *gc_wd_cache_heap;	/* the cache when it had to come from the heap */
+static byte *gc_wd_tables_heap;	/* the tables when the spill had no room */
 static qboolean cmpr_adopted;	/* the large-world branch adopted the CMPR slots this map */
 /* More distinct world textures than full-size slots: distant chunks then
  * bind from the small-mip pool. Lost Coast has 82 after the bake shares one
@@ -824,6 +825,11 @@ static void R_GXWorldDLUnload( void )
 		GX_DrawDone();	/* a list in it may still be in the FIFO */
 		free( gc_wd_cache_heap );
 		gc_wd_cache_heap = NULL;
+	}
+	if( gc_wd_tables_heap )
+	{
+		free( gc_wd_tables_heap );
+		gc_wd_tables_heap = NULL;
 	}
 	gc_wd_slots = NULL;
 	gc_wd_texnum = NULL;
@@ -966,6 +972,22 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		+ (( gc_wd_hdr.n_clusters + 7 ) >> 3 ) + 64
 		+ gc_wd_hdr.n_chunks * ( sizeof( u32 ) * 2 + sizeof( u16 ) + sizeof( s16 ) * 6 );
 	tbl = (byte *)Mod_GCWorldArraySpillTryAlloc( tables, "world DL tables" );
+	if( !tbl )
+	{
+		/* A full spill left the world undrawn (state -1, CapFaces already
+		 * skipped for the DL): take the tables from the heap when that
+		 * leaves it a working margin. */
+		extern size_t GC_MemHeapFreeBytes( void );
+
+		if( GC_MemHeapFreeBytes() >= tables + 128u * 1024u )
+			gc_wd_tables_heap = tbl = (byte *)memalign( 32, tables );
+		if( tbl )
+		{
+			memset( tbl, 0, tables );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL tables %u Kb from the heap (spill full)\n",
+				tables / 1024u );
+		}
+	}
 	if( !tbl )
 	{
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL no spill for tables %u Kb\n",
@@ -1380,7 +1402,12 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	}
 	gc_wd_cache_size = try_sz;
 	gc_wd_cache_head = 0;
-	if( gc_wd_cache_in_arena )
+	if( gc_wd_tables_heap )
+	{
+		if( !gc_wd_cache_in_arena )	/* only the cache is in the spill */
+			Mod_GCWorldArraySpillPinBase( gc_wd_cache, try_sz );
+	}
+	else if( gc_wd_cache_in_arena )
 		Mod_GCWorldArraySpillPinBase( tbl, tables );
 	else
 		Mod_GCWorldArraySpillPinBase( tbl, (size_t)(( gc_wd_cache + try_sz ) - tbl ));

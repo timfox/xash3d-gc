@@ -1889,6 +1889,37 @@ edict_t *GAME_EXPORT SV_AllocEdict( void )
 	if( i >= GI->max_edicts )
 	{
 #if XASH_GAMECUBE
+		/* The table is full but edicts freed in the last half second are
+		 * waiting out the reuse delay: take the oldest of them rather than
+		 * hand the game NULL, which a GetClassPtr/CREATE_NAMED_ENTITY caller
+		 * dereferences (a scripted film cast replaced shot to shot froze
+		 * Dolphin here). The delay only spares a client interpolating a
+		 * just-removed entity, a glitch of one frame at worst. */
+		{
+			edict_t *oldest = NULL;
+			int j;
+
+			for( j = svs.maxclients + 1; j < svgame.numEntities; j++ )
+			{
+				edict_t *f = SV_EdictNum( j );
+
+				if( f && f->free && ( !oldest || f->freetime < oldest->freetime ))
+					oldest = f;
+			}
+			if( oldest )
+			{
+				static int early_logs;
+
+				if( early_logs < 4 )
+				{
+					early_logs++;
+					Con_Reportf( "Xash3D GameCube: edicts full (%d), reusing one freed %.2f s ago\n",
+						GI->max_edicts, sv.time - oldest->freetime );
+				}
+				SV_InitEdict( oldest );
+				return oldest;
+			}
+		}
 		/* CapFaces Flipper: tip edict BSS stays at 460. Dense DoD maps
 		 * (caen ~621 ents) soft-skip decorative classes instead of FATAL —
 		 * pack owns world draw; remaining slots keep players/triggers. */
@@ -6273,6 +6304,18 @@ static int gc_parity_tier_count[GC_PARITY_TIERS];	/* the census's per-tier total
  * add 16-18 entities on dod_charlie, so 32 keeps twice that. */
 #define GC_PARITY_RUNTIME_RESERVE 32
 
+/* The edicts a map's own entities may fill. A capture build's bigger table
+ * (XASH_GC_MAX_EDICTS) is for the scripted cast: with the map allowed into
+ * it, dod_charlie's optional entities took ~100 of the extra slots and a
+ * 48-actor cast still came up 24 short. */
+#ifndef GC_MAP_EDICT_CAP
+#define GC_MAP_EDICT_CAP 460
+#endif
+static int SV_GCMapEdictCap( void )
+{
+	return GI->max_edicts < GC_MAP_EDICT_CAP ? GI->max_edicts : GC_MAP_EDICT_CAP;
+}
+
 /* The heap a parity entity needs to spawn. Solid walls (tier 0) and pure logic entities (relays, retargeters, auto
  * triggers, info_target: an edict and a 112-byte slab entry, no model/sound/sprite load) cost almost no heap, so they
  * only give way at 4 KB; everything else keeps the 16 KB guard. Charlie's entities spawn with 13-16 KB free: at a flat
@@ -6307,7 +6350,7 @@ static qboolean SV_GCEntityPressure( unsigned floor_kb )
 	 * when the entities spawned: whether ALL its parity entities, walls included, were dropped depended on noise.) */
 	const qboolean heap = GC_MemHeapFreeBytes() < floor_kb * 1024u;
 	const qboolean slab = gc_ent_priv_slab_used >= sizeof( gc_ent_priv_slab ) / 8u * 7u;
-	const qboolean ents = svgame.numEntities >= GI->max_edicts - GC_PARITY_RUNTIME_RESERVE;
+	const qboolean ents = svgame.numEntities >= SV_GCMapEdictCap() - GC_PARITY_RUNTIME_RESERVE;
 
 	if( heap )
 		gc_parity_why[0]++;
@@ -6977,7 +7020,7 @@ static void SV_GCBudgetParityEntities( const char *mapname, char *entities )
 			SV_GCCensusAdd( census_must, &n_must, classname );
 	}
 	must = total - parity - optional - nofunc - statics - baked;
-	gc_parity_budget = GI->max_edicts - GC_PARITY_RUNTIME_RESERVE - ( svs.maxclients + 1 ) - must;
+	gc_parity_budget = SV_GCMapEdictCap() - GC_PARITY_RUNTIME_RESERVE - ( svs.maxclients + 1 ) - must;
 	if( gc_parity_budget < 0 || Sys_CheckParm( "-gcnoparity" ))
 		gc_parity_budget = 0;	/* -gcnoparity: A/B testing */
 	/* Walls first, then map logic, then lights. */
