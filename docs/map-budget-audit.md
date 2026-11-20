@@ -104,13 +104,24 @@ lives in ARAM too and is the next candidate after this.
   short/odd lengths, and a real dod_flash bake: v2 reads equal v1 bytes). Host suite 211 passed, 5 skipped.
 - Not measured: Dolphin (ms per light-point query with cache misses), heap, ms/frame.
 
+## 4c. Done (PR pending): LZ4 PVS rows (header flag 0x20, same `DODGC_WD_LZ4=1`)
+
+- Exact duplicate rows are only 0.3% and one-level XOR delta vs a base row saves about 15%, so row dedup/delta was
+  dropped. The big gain is cross-row: LZ4 over 4 KiB blocks of the PVS blob takes caen 596 -> 204 KiB, charlie 618 -> 178,
+  avalanche 424 -> 128, zalec 483 -> 156 (about -66%, roughly 0.4 MiB of ARAM a map).
+- Baker pads the blob to whole 4 KiB blocks and packs it with `pack_blocks_lz4`; row offsets in the pvs directory stay
+  raw offsets. Engine: `R_GXWorldDLPvsByte` / `R_GXWorldDLLoadPVSLz4` read the row through one cached 4 KiB block.
+  MEM1 +4 KiB for the block cache; the 4 KiB staging buffer is shared with the lightmap and light-face decoders
+  (which no longer have their own, so the three LZ4 paths together cost 8 KiB + 3 KiB of caches).
+- Tests: `tests/test_pvs_lz4.py` bakes dod_flash both ways and compares raw rows through the engine decoder.
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
    run the 12-bot recipe, check "world DL" and ARAM segment logs, and compare lightmap miss cost (`gc_wd_lm_miss`).
    Only then flip the default on.
 2. ~~LZ4 the `_lf` light-face pack~~ done in 4b.
-3. **PVS cross-row dedup/delta** (about 500 KiB a map, 6x in zlib).
+3. ~~PVS cross-row dedup/delta~~ done as block LZ4 in 4c.
 4. **Falaise chain cache (222 > 180 KiB):** on DoD the cache is `min(all chains, spill room - margin)`
    (r_gx_world.c, "A map pack" branch), i.e. it is MEM1-spill bound, not a constant; the fix is more spill room or a
    working-set policy, which needs the Dolphin heap/ms measurements. Not changed.
