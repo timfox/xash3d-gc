@@ -6106,6 +6106,15 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
 	return R_GXBindTexnum( texnum, false ) != NULL;
 }
 
+/* A packed world texture that carries a cut-out mask ('{' textures: fences,
+ * lattices, netting). */
+qboolean R_GXTexnumMasked( unsigned texnum )
+{
+	const image_t *img = R_GetTexture( texnum );
+
+	return img && img->gc_packed && img->gc_packed_alpha;
+}
+
 /* Harbor props (media/gp_d2_lostcoast.gcp). The mesh lives in ARAM.
  * A frame draws the instances nearest the eye, flat-shaded, so the
  * boats read as one surface under the tight bloom. */
