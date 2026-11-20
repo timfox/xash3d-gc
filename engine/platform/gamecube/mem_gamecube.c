@@ -1256,10 +1256,28 @@ qboolean GC_MapLoadBufferIsWorldSettled( void )
 	return gc_mapload_world_settled;
 }
 
+static void (*gc_mapload_reset_hook)( void );
+
+void GC_SetMapArenaResetHook( void (*hook)( void ))
+{
+	gc_mapload_reset_hook = hook;
+}
+
+/* Run once and forget: the hook's owner registers again with its next claim. */
+static void GC_RunMapArenaResetHook( void )
+{
+	void (*hook)( void ) = gc_mapload_reset_hook;
+
+	gc_mapload_reset_hook = NULL;
+	if( hook )
+		hook();
+}
+
 void *GC_BorrowMapLoadBuffer( size_t size )
 {
 	if( size == 0 )
 		return NULL;
+	GC_RunMapArenaResetHook();
 	gc_mapload_world_settled = false;
 	/* Entity private objects may still point into this map's arena. */
 	if( SV_GCPrivateOverflowPinsMapArena() )
@@ -1670,6 +1688,7 @@ void GC_DiscardMapLoadBuffer( void )
 	if( gc_mapload_buf_in_use )
 		return;
 
+	GC_RunMapArenaResetHook();
 	if( gc_mapload_buf )
 	{
 		if( R_GCReleaseMapLoadStaticArena( gc_mapload_buf ))
