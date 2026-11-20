@@ -924,7 +924,7 @@ static qboolean Mod_GCAnimPackRead( gc_animpack_t *pk, unsigned off, byte *dst, 
 /* LZ4 block decoder. Written for an in-place decode (the compressed bytes sit at the end of the output buffer with
  * (compressed >> 8) + 32 bytes of margin, so the write pointer never passes the read pointer): literals are copied
  * forward a byte at a time, matches are copied forward (overlap is legal). Every length is checked. */
-static qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend )
+qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend )
 {
 	const byte *obase = op;
 

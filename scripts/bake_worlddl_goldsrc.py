@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import struct
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,6 +32,8 @@ LM_FRAC = 8
 WD_VERSION = 2
 # Header flags: GoldSrc lightmaps are applied at x1 (Lost Coast pages use x2).
 WD_FLAG_LIGHT_X1 = 0x0001
+# Lightmap pages are LZ4 blocks (see pack_lm_pages_lz4). Opt in with DODGC_WD_LZ4=1 or bake_worlddl_goldsrc.py --lz4.
+WD_FLAG_LM_LZ4 = 0x0010
 LM_PAGES_MAX = 512
 MAT_F_WATER = 0x01
 MAT_F_NOLIGHT = 0x02
@@ -489,7 +494,52 @@ def write_static_brushes(out_path: Path, statics: list[tuple[int, bool]], wd_byt
 	out_path.write_bytes(body)
 
 
-def bake(map_bsp: Path, out_path: Path) -> None:
+LM_PAGE_BYTES = 2048
+
+
+def pack_blocks_lz4(data: bytes, block: int) -> bytes:
+	"""Random-access LZ4 region: data cut into `block`-byte blocks, each LZ4-compressed when that is smaller.
+
+	Layout: u32 n_blocks, u32 offset[n_blocks + 1] (bytes from the region start; a blob start is 32-aligned and its low
+	5 bits hold the zero padding bytes AFTER the LZ4 stream; the last offset is the region size), padded to 32; then
+	the blobs, each padded to 32. A block stored raw has no padding count and a size of its raw length rounded up to
+	32 (a compressed block is always smaller than that). The last block may be short. The engine stages a blob and
+	decodes it into a cache buffer (in-place decode of an exact-fit buffer is impossible)."""
+	import gc_lz4
+	n = (len(data) + block - 1) // block
+	blobs = []	# (stored bytes incl. padding, padding count)
+	for i in range(n):
+		raw = bytes(data[i * block:(i + 1) * block])
+		rawsz = (len(raw) + 31) & ~31
+		cand = gc_lz4.compress(raw)
+		size = (len(cand) + 31) & ~31
+		best = (cand + bytes(size - len(cand)), size - len(cand)) if size < rawsz else (raw + bytes(rawsz - len(raw)), 0)
+		blobs.append(best)
+	head_len = (4 + 4 * (n + 1) + 31) & ~31
+	region = bytearray(struct.pack(">I", n))
+	ofs = head_len
+	offs = []
+	for blob, pad in blobs:
+		offs.append(ofs | pad)
+		ofs += len(blob)
+	offs.append(ofs)
+	region += b"".join(struct.pack(">I", o) for o in offs)
+	region += bytes(head_len - len(region))
+	for blob, _pad in blobs:
+		region += blob
+	return bytes(region)
+
+
+def pack_lm_pages_lz4(lm_pages: bytes) -> bytes:
+	"""Lightmap region with every 2 KiB page LZ4-compressed (header flag WD_FLAG_LM_LZ4); see pack_blocks_lz4.
+	Pages compress about 3.5:1 (1 MiB of pages per map -> about 290 KiB)."""
+	return pack_blocks_lz4(lm_pages, LM_PAGE_BYTES)
+
+
+LF_BLOCK = 1024
+
+
+def bake(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	bsp = Bsp(map_bsp)
 	stem = map_bsp.stem
 	mat_index: dict[str, int] = {}
@@ -668,6 +718,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	pad32(body)
 	ofs_chunkdir = len(body)
 	run = 0
+	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
 	for cl, blob in zip(order, chunk_blobs):
 		ch = chunks[cl]
 		body += struct.pack(">II3h3hHH", run, len(blob), *ch.mins, *ch.maxs, cl, 0)
@@ -683,7 +734,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	for blob in chunk_blobs:
 		body += blob
 	pad32(body)
-	body += lm_pages
+	body += pack_lm_pages_lz4(lm_pages) if lz4 and lm_pages else lm_pages
 	max_chunk = max((len(b) for b in chunk_blobs), default=0)
 	struct.pack_into(
 		">4sHH13I",
@@ -691,7 +742,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		0,
 		b"GCwd",
 		WD_VERSION,
-		WD_FLAG_LIGHT_X1,
+		WD_FLAG_LIGHT_X1 | (WD_FLAG_LM_LZ4 if lz4 and lm_pages else 0),
 		bsp.numclusters,
 		len(order),
 		len(mat_recs),
@@ -728,7 +779,7 @@ LF_FLAG_TILED = 2
 LF_NO_LIGHT = 0xFFFFFF
 
 
-def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
+def bake_lightfaces(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	"""media/wd_<map>_lf.gcd: what GoldSrc's light point needs from each face
 	when the world is drawn from the world DL and no msurface table exists
 	(runtime ref/common/ref_light.c).  Header (32 bytes, big-endian):
@@ -763,13 +814,28 @@ def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
 		ext = [(bmaxs[j] - bmins[j]) * 16 for j in range(2)]
 		lo = lightofs if 0 <= lightofs < len(bsp.lighting) else LF_NO_LIGHT
 		recs += struct.pack(">8f4iI4s", *vecs0, *vecs1, *tmins, *ext, (flags << 24) | (lo & LF_NO_LIGHT), styles)
-	body = bytearray(32)
-	body += recs
-	pad32(body)
-	lit_ofs = len(body)
-	body += bsp.lighting
-	pad32(body)
-	struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
+	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
+	if lz4:
+		# Version 2: both parts are random-access LZ4 regions (pack_blocks_lz4, LF_BLOCK-byte blocks).
+		# Header: "GClf", 2, faces, record region offset (32), lighting region offset, lighting raw bytes, file size,
+		# block size.
+		rec_region = pack_blocks_lz4(bytes(recs), LF_BLOCK)
+		lit_region = pack_blocks_lz4(bytes(bsp.lighting), LF_BLOCK) if bsp.lighting else b""
+		body = bytearray(32)
+		body += rec_region
+		pad32(body)
+		lit_ofs = len(body)
+		body += lit_region
+		pad32(body)
+		struct.pack_into(">4s7I", body, 0, b"GClf", 2, len(bsp.faces), 32, lit_ofs, len(bsp.lighting), len(body), LF_BLOCK)
+	else:
+		body = bytearray(32)
+		body += recs
+		pad32(body)
+		lit_ofs = len(body)
+		body += bsp.lighting
+		pad32(body)
+		struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
 	out_path.parent.mkdir(parents=True, exist_ok=True)
 	out_path.write_bytes(body)
 	print(f"  light faces: {len(bsp.faces)} faces, lighting {len(bsp.lighting) // 1024} KB, wrote {out_path} ({len(body) // 1024} KB)")
@@ -784,10 +850,11 @@ def main() -> int:
 		default=None,
 		help="Output .gcd path (default: content/dod/media/wd_<map>.gcd)",
 	)
+	ap.add_argument("--lz4", action="store_true", help="LZ4-compress each lightmap page (also DODGC_WD_LZ4=1)")
 	args = ap.parse_args()
 	out = args.out or (ROOT / "content/dod/media" / f"wd_{args.map.stem}.gcd")
-	bake(args.map, out)
-	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"))
+	bake(args.map, out, lz4=args.lz4)
+	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"), lz4=args.lz4)
 	return 0
 
 

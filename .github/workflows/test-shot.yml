@@ -1,0 +1,45 @@
+name: Test shot
+# A change that can alter what the game shows merges only after it was seen running:
+# the pull request records the commit that was tested in Dolphin and carries a still or clip
+# of it (or the reviewer ticks "Seen in Dolphin"). A push after the test makes the recorded
+# commit stale and the check fails again until a new test shot is recorded.
+# Docs, CI and host-tool changes tick "No in-game change" instead.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+jobs:
+  test-shot:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Tested commit and still recorded for the head commit
+        run: |
+          python3 - "$GITHUB_EVENT_PATH" <<'PY'
+          import json, re, sys
+          pr = json.load(open(sys.argv[1]))["pull_request"]
+          body = pr.get("body") or ""
+          head = pr["head"]["sha"]
+          ticked = lambda label: re.search(r"^\s*[-*] \[[xX]\] " + label, body, re.M | re.I)
+          if ticked(r"No in-game change"):
+              print("No in-game change ticked: no test shot needed.")
+              sys.exit(0)
+          errors = []
+          m = re.search(r"Tested commit:\s*`?([0-9a-f]{7,40})`?", body, re.I)
+          if not m:
+              errors.append("Add 'Tested commit: `<sha>`' naming the commit that ran in Dolphin.")
+          elif not head.startswith(m.group(1).lower()):
+              errors.append(f"Tested commit {m.group(1)} is not the head commit {head[:10]}: "
+                            "the change moved after the test. Run it again and record the new commit.")
+          media = re.search(r"!\[[^\]]*\]\(https?://|<img\s|<video\s|user-attachments/assets/|"
+                            r"https?://\S+\.(png|jpe?g|gif|webp|mp4|webm)\b", body, re.I)
+          if not media and not ticked(r"Seen in Dolphin"):
+              errors.append("Attach a Dolphin still or clip of the tested commit, "
+                            "or have the reviewer tick 'Seen in Dolphin' after watching it.")
+          if errors:
+              print("::error::No test shot for this change. " + " ".join(errors))
+              for e in errors:
+                  print(" - " + e)
+              sys.exit(1)
+          print(f"Test shot recorded for {head[:10]}.")
+          PY
