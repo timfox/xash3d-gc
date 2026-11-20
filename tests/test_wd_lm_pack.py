@@ -140,5 +140,27 @@ class LmCmprTest(unittest.TestCase):
 		self.assertGreater(c0, c1)
 
 
+class LmGrantTest(unittest.TestCase):
+	def test_every_chunk_gets_a_page_before_any_gets_two(self):
+		needs = [("big", 4), ("mid", 2), ("small", 1), ("crowded", 3)]
+		self.assertEqual(bake.lm_grant_pages(needs, 4), {"big": 1, "mid": 1, "small": 1, "crowded": 1})
+		self.assertEqual(bake.lm_grant_pages(needs, 6), {"big": 2, "mid": 2, "small": 1, "crowded": 1})
+		self.assertEqual(bake.lm_grant_pages(needs, 7), {"big": 2, "mid": 2, "small": 1, "crowded": 2})
+
+	def test_budget_is_never_exceeded_and_needs_are_met_when_it_lasts(self):
+		needs = [(i, 1 + i % 4) for i in range(40)]
+		for budget in (0, 1, 39, 40, 57, 100, 1000):
+			got = bake.lm_grant_pages(needs, budget)
+			self.assertLessEqual(sum(got.values()), budget)
+			self.assertTrue(all(got[c] <= n for c, n in needs if c in got))
+		self.assertEqual(bake.lm_grant_pages(needs, 1000), dict(needs))
+
+	def test_a_crowded_leaf_with_two_cmpr_pages_has_no_face_without_a_cell(self):
+		dims = [(2, 2)] * 100	# 63 one-luxel cells is all a CMPR page holds
+		self.assertFalse(all(bake.lm_pack_pages(dims, 1, 4)))
+		self.assertTrue(all(bake.lm_pack_pages(dims, 2, 4)))
+		self.assertGreaterEqual(bake.lm_pages_needed(dims, 4), 2)
+
+
 if __name__ == "__main__":
 	unittest.main()
