@@ -204,18 +204,29 @@ static size_t gc_ent_priv_overflow_used;
 static byte gc_box_priv[GC_BOX_PRIV_SLOTS][GC_BOX_PRIV_BYTES] __attribute__((aligned( 32 )));
 static unsigned gc_box_priv_used;
 static byte gc_nonessential_scratch[1024] __attribute__((aligned( 32 )));
-static int gc_box_pool_misses, gc_nonessential_drops;
+static int gc_box_pool_misses, gc_nonessential_drops, gc_box_pool_logs;
+
+/* dod_gc_boxstress (debug, default 0, never in a shipped cfg; the game registers it): 1 starves the slab and the overflow for weapon
+ * boxes so the fixed pool has to serve them, 2 takes the pool away too so the scratch fallback and the freed edict fire. */
+static int SV_GCBoxStress( void )
+{
+	convar_t *cv = Cvar_FindVar( "dod_gc_boxstress" );
+
+	return cv ? (int)cv->value : 0;
+}
 
 static void *SV_GCBoxPrivAlloc( size_t size )
 {
 	int i;
 
-	if( size > GC_BOX_PRIV_BYTES )
+	if( size > GC_BOX_PRIV_BYTES || SV_GCBoxStress() >= 2 )
 		return NULL;
 	for( i = 0; i < GC_BOX_PRIV_SLOTS; i++ )
 		if( !( gc_box_priv_used & ( 1u << i )))
 		{
 			gc_box_priv_used |= 1u << i;
+			if( SV_GCBoxStress() && gc_box_pool_logs++ < 4 )
+				Con_Reportf( "Xash3D GameCube: weapon box private block from the pool, slot %d (live mask 0x%x)\n", i, gc_box_priv_used );
 			return gc_box_priv[i];
 		}
 	return NULL;
@@ -3974,6 +3985,9 @@ static void *GAME_EXPORT pfnPvAllocEntPrivateData( edict_t *pEdict, long cb )
 			}
 #endif
 			if( !pEdict->pvPrivateData && size <= 2048
+#if XASH_DODGC_NETWORK
+				&& !( SV_GCBoxStress() >= 1 && !Q_stricmp( SV_ClassName( pEdict ), "weaponbox" ))
+#endif
 				&& (( pEdict->pvPrivateData = SV_GCPrivateSlabAlloc( size )) != NULL
 					|| ( pEdict->pvPrivateData = SV_GCPrivateOverflowAlloc( size )) != NULL ))
 			{
