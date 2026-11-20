@@ -1396,11 +1396,16 @@ static size_t gc_texreg_live;
  * return the size a map load may use. */
 size_t GC_TexRegionNoteArena( byte *base, size_t capacity )
 {
+	/* Blocks are carved down from the top in 32-byte multiples behind a 32-byte header, so their data is
+	 * 32-aligned only when the top is: an arena ending 8 past a boundary put a carried rifle's CMPR skin at
+	 * +8, GX drew it as 16-bit texels (striped red, white and green guns). */
+	const uintptr_t top = ((uintptr_t)base + capacity ) & ~(uintptr_t)31u;
+
 	gc_texreg_base = base;
-	gc_texreg_cap = capacity;
-	if( gc_texreg_bytes > capacity )
+	gc_texreg_cap = top > (uintptr_t)base ? (size_t)( top - (uintptr_t)base ) : 0;
+	if( gc_texreg_bytes > gc_texreg_cap )
 		gc_texreg_bytes = 0;
-	return capacity - gc_texreg_bytes;
+	return gc_texreg_cap - gc_texreg_bytes;
 }
 
 qboolean GC_TexRegionOwns( const void *p )

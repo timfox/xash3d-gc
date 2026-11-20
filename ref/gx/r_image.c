@@ -993,6 +993,17 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
 		if( !dst )
 			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+		/* GX samples CMPR only from 32-aligned texels (R_GXNativeTexture): an unaligned plane would draw
+		 * as 16-bit texels, garbage. Take the plain path instead. */
+		if( dst && ((uintptr_t)dst & 31 ))
+		{
+			static int cmpr_align_logs;
+
+			if( cmpr_align_logs++ < 4 )
+				gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: CMPR skin %s at %p is not 32-byte aligned, not CMPR\n",
+					tex->name, (void *)dst );
+			dst = NULL;
+		}
 		if( dst )
 		{
 			const qboolean masked = !sw_noalphabrushes.value && FBitSet( pic->flags, IMAGE_ONEBIT_ALPHA );
