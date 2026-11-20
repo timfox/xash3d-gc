@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "server.h"
+#include "sv_lazy_logic.h"
 #include "net_encode.h"
 #include "event_flags.h"
 #include "library.h"
@@ -2501,6 +2502,96 @@ static void GAME_EXPORT pfnChangePitch( edict_t* ent )
 	ent->v.angles[PITCH] = SV_AngleMod( ent->v.idealpitch, ent->v.angles[PITCH], ent->v.pitch_speed );
 }
 
+#if XASH_GAMECUBE
+/* Lazy map logic (sv_gc_lazy_logic 1, default 0): relays, retargeters, info_targets and targeted ambient sounds that the
+ * parity budget skips are remembered by their lump text position and spawned the first time something looks them up by
+ * targetname (sv_lazy_logic.c); the game DLL's own code then handles them as if they had been spawned at load. */
+static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index );
+static qboolean gc_lazy_active;
+static int gc_lazy_logs;
+
+static qboolean SV_GCLazyLogicCvar( void )
+{
+	convar_t *cv = Cvar_FindVar( "sv_gc_lazy_logic" );	/* not Cvar_Get: that would reset the disc cfg's FCVAR_TEMPORARY value */
+
+	return cv && cv->value != 0.0f;
+}
+
+static qboolean SV_GCLazyEligibleClass( const char *classname )
+{
+	return !Q_strcmp( classname, "trigger_relay" ) || !Q_strcmp( classname, "trigger_changetarget" )
+		|| !Q_strcmp( classname, "info_target" ) || !Q_strcmp( classname, "ambient_generic" );
+}
+
+/* The targetname inside one entity block of the lump (text positioned just after its '{'). */
+static qboolean SV_GCLazyBlockTargetname( const char *text, char *out, size_t size )
+{
+	char key[128], value[256];
+
+	out[0] = '\0';
+	while(( text = COM_ParseFile( text, key, sizeof( key ))) != NULL )
+	{
+		if( key[0] == '}' )
+			break;
+		if(( text = COM_ParseFile( text, value, sizeof( value ))) == NULL )
+			break;
+		if( !Q_strcmp( key, "targetname" ))
+		{
+			Q_strncpy( out, value, size );
+			return true;
+		}
+	}
+	return false;
+}
+
+typedef struct { const char *name; } sv_lazy_ctx_t;
+
+static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
+{
+	const sv_lazy_ctx_t *lc = (const sv_lazy_ctx_t *)ctx;
+	const char *base = sv.worldmodel ? sv.worldmodel->entities : NULL;
+	char tname[64], *p;
+	edict_t *ent;
+	int r;
+
+	( void )len;
+	if( !base || GC_MemHeapFreeBytes() < 4u * 1024u )
+		return -1;
+	SV_GCLazyBlockTargetname( base + ofs, tname, sizeof( tname ));
+	if( Q_strcmp( tname, lc->name ))
+		return 0;	/* hash collision: another name */
+	ent = SV_AllocEdict();
+	if( !ent )
+		return -1;
+	p = (char *)base + ofs;
+	if( !SV_ParseEdict( &p, ent, -1 ) || !SV_IsValidEdict( ent ))
+	{
+		if( ent && !ent->free )
+			SV_FreeEdict( ent );
+		return -1;
+	}
+	r = svgame.dllFuncs.pfnSpawn( ent );
+	if( r == -1 && !FBitSet( ent->v.flags, FL_KILLME ))
+	{
+		SV_FreeEdict( ent );
+		return 1;	/* the game rejected it, exactly as it would have at load */
+	}
+	return 1;
+}
+
+static void SV_GCLazyMaterialize( const char *name )
+{
+	sv_lazy_ctx_t ctx;
+	int n;
+
+	ctx.name = name;
+	n = LazyLogic_Materialize( LazyLogic_Hash( name ), SV_GCLazySpawn, &ctx );
+	if( n && gc_lazy_logs++ < 24 )
+		Con_Reportf( "Xash3D GameCube: lazy logic spawned %d x '%s' (pending %d of %d, edicts %d, heap %s)\n",
+			n, name, LazyLogic_Pending(), LazyLogic_Total(), svgame.numEntities, Q_memprint( GC_MemHeapFreeBytes( )));
+}
+#endif
+
 /*
 =========
 SV_FindEntityByString
@@ -2516,6 +2607,12 @@ static edict_t *GAME_EXPORT SV_FindEntityByString( edict_t *pStartEdict, const c
 		return svgame.edicts;
 
 	if( pStartEdict ) e = NUM_FOR_EDICT( pStartEdict );
+
+#if XASH_GAMECUBE
+	/* The start of a scan by name: bring in the deferred logic entities of that name first. */
+	if( gc_lazy_active && e == 0 && LazyLogic_Pending() > 0 && !Q_strcmp( pszField, "targetname" ))
+		SV_GCLazyMaterialize( pszValue );
+#endif
 
 	for( int i = 0; i < ARRAYSIZE( gEntvarsDescription ); i++ )
 	{
@@ -7570,6 +7667,9 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_kv_slab_used = 0;
 	SV_GCStaticPropsReset();
 	SV_GCBudgetParityEntities( mapname, entities );
+	LazyLogic_Reset();
+	gc_lazy_logs = 0;
+	gc_lazy_active = SV_GCLazyLogicCvar() && Sys_CheckParm( "-gcworldrender" );
 #endif
 
 	// user dll can override spawn entities function (Xash3D extension)
@@ -7579,6 +7679,8 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 		int entity_index = 0;
 #if XASH_GAMECUBE
 		int gc_cf_opt_skip = 0;
+		const char *gc_ents_base = entities;
+		const char *gc_blk = NULL;
 #endif
 
 		// parse ents
@@ -7635,6 +7737,9 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 
 			if( SV_GCMapEntityDiagVerbose() && entity_index >= 400 )
 				Con_Reportf( "Xash3D GameCube: entity parse begin=%d\n", entity_index );
+#if XASH_GAMECUBE
+			gc_blk = entities;	/* just after this entity's '{' */
+#endif
 			if( !SV_ParseEdict( &entities, ent, entity_index++ ))
 			{
 #if XASH_GAMECUBE
@@ -7716,6 +7821,14 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 						entity_index - 1, SV_ClassName( ent ));
 				}
 				gc_cf_opt_skip++;
+				/* Lazy logic: keep where this one's text is, spawn it when something looks its name up. */
+				if( gc_lazy_active && ent->v.targetname && gc_blk && SV_GCLazyEligibleClass( SV_ClassName( ent )))
+				{
+					const char *tn = SV_GetString( ent->v.targetname );
+
+					if( tn && tn[0] )
+						LazyLogic_Add( LazyLogic_Hash( tn ), (uint32_t)( gc_blk - gc_ents_base ), (uint32_t)( entities - gc_blk ));
+				}
 				SV_FreeEdict( ent );
 				inhibited++;
 				continue;
