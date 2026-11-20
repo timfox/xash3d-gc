@@ -444,10 +444,28 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 R_GetFarClip
 ===============
 */
+qboolean R_GXCaptureMode( void );
+
 static float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
-		return gp_movevars->zmax * 1.73f;
+	{
+		float zfar = gp_movevars->zmax * 1.73f;
+
+		/* -gccapture: a film camera out at sea must still see the far end
+		 * of the beach, whatever sv_zmax the map was built with. */
+		if( R_GXCaptureMode())
+		{
+			vec3_t span;
+			float diag;
+
+			VectorSubtract( WORLDMODEL->maxs, WORLDMODEL->mins, span );
+			diag = VectorLength( span ) + 512.0f;
+			if( zfar < diag )
+				zfar = diag;
+		}
+		return zfar;
+	}
 	return 2048.0f;
 }
 
