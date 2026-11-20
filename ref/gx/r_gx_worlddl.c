@@ -44,6 +44,7 @@ void R_GXPropDrawHorizon( const float *org );
 /* A crowded leaf has more than one lightmap page: the low three bits of a batch's pad word are its page, counted
  * from the chunk's first (scripts/bake_worlddl_goldsrc.py). GoldSrc packs only; Lost Coast uses pad for $envmap. */
 #define GC_WD_FLAG_LM_MULTI	0x0040
+#define GC_WD_FLAG_LM_CMPR	0x0080	/* lightmap pages are 32x32 CMPR, 512 bytes each */
 /* The PVS rows are a random-access LZ4 region of GC_WD_PVS_BLOCK-byte blocks (header word ofs_pvs is the region
  * start, pvsdir row offsets stay raw offsets into the uncompressed rows). pack_blocks_lz4. About 0.4 MiB a map. */
 #define GC_WD_FLAG_PVS_LZ4	0x0020
@@ -76,12 +77,15 @@ static s32 gc_wd_pvs_blk_id = -1;
  * dod_charlie binds about 40: with 8 slots only the nearest leaves were
  * lightmapped and the rest fell to vertex colour, in hard-edged patches. The
  * store is taken from the heap at world load when it has the room. */
-#define GC_WD_LM_SLOTS_MAX	64
+#define GC_WD_LM_SLOTS_MAX	254	/* slot + 1 fits the byte of a deferred draw record */
+#define GC_WD_LM_HEAP_BYTES	( 128u * 1024u )
 #else
 #define GC_WD_LM_SLOTS		192
 #define GC_WD_LM_SLOTS_MAX	GC_WD_LM_SLOTS
 #endif
 #define GC_WD_LM_PAGE_BYTES	2048u
+/* Pages stored as CMPR (512 bytes, GoldSrc packs with GC_WD_FLAG_LM_CMPR): four times the pages in the same store. */
+#define GC_WD_LM_CMPR_BYTES	512u
 
 typedef struct
 {
@@ -251,6 +255,8 @@ static byte gc_wd_lm_bss[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__(( a
 static byte *gc_wd_lm_store = gc_wd_lm_bss;	/* the BSS store, or gc_wd_lm_heap */
 static byte *gc_wd_lm_heap;	/* a larger store from the heap, freed with the world */
 static int gc_wd_lm_nslots = GC_WD_LM_SLOTS;
+static u32 gc_wd_lm_page_bytes = GC_WD_LM_PAGE_BYTES;	/* 2048 RGB565 or 512 CMPR */
+static u8 gc_wd_lm_fmt = GX_TF_RGB565;
 static u32 gc_wd_lm_stream;	/* file offset of page 0 */
 static s32 gc_wd_lm_slot_page[GC_WD_LM_SLOTS_MAX];
 static s32 gc_wd_lm_slot_frame[GC_WD_LM_SLOTS_MAX];
@@ -386,7 +392,7 @@ static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 	u32 e = 4u + 4u * page;	/* offset[page], offset[page + 1]: 8 bytes that may straddle a 32-byte line */
 
 	if( !( gc_wd_hdr.flags & GC_WD_FLAG_LM_LZ4 ))
-		return R_GXWorldDLFetch( gc_wd_lm_stream + page * GC_WD_LM_PAGE_BYTES, dst, GC_WD_LM_PAGE_BYTES );
+		return R_GXWorldDLFetch( gc_wd_lm_stream + page * gc_wd_lm_page_bytes, dst, gc_wd_lm_page_bytes );
 	if( !R_GXWorldDLFetch( gc_wd_lm_stream, dir, 32 ))
 		return false;
 	if( page >= *(const u32 *)dir )
@@ -398,15 +404,15 @@ static qboolean R_GXWorldDLLmFetch( u32 page, byte *dst )
 	ofs = w0 & ~31u;
 	pad = w0 & 31u;
 	stored = ( w1 & ~31u ) - ofs;
-	if( !stored || stored > GC_WD_LM_PAGE_BYTES || pad >= stored )
+	if( !stored || stored > gc_wd_lm_page_bytes || pad >= stored )
 		return false;
-	if( stored == GC_WD_LM_PAGE_BYTES && !pad )	/* a raw page */
-		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, GC_WD_LM_PAGE_BYTES );
+	if( stored == gc_wd_lm_page_bytes && !pad )	/* a raw page */
+		return R_GXWorldDLFetch( gc_wd_lm_stream + ofs, dst, gc_wd_lm_page_bytes );
 	if( !R_GXWorldDLFetch( gc_wd_lm_stream + ofs, gc_wd_stage, stored ))
 		return false;
-	if( !R_GXWdLz4Decode( 0, gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + GC_WD_LM_PAGE_BYTES ))
+	if( !R_GXWdLz4Decode( 0, gc_wd_stage, gc_wd_stage + stored - pad, dst, dst + gc_wd_lm_page_bytes ))
 		return false;
-	DCFlushRange( dst, GC_WD_LM_PAGE_BYTES );
+	DCFlushRange( dst, gc_wd_lm_page_bytes );
 	return true;
 }
 
@@ -421,7 +427,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	if( i < gc_wd_lm_nslots && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
-		return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
+		return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
 	}
 	/* A wide view asks for more pages than there are slots (500 chunks in
 	 * the Lost Coast harbor, 192 slots). Once the cache is full for this
@@ -436,7 +442,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
 			hint[page & 2047u] = (u8)i;
-			return gc_wd_lm_store + (u32)i * GC_WD_LM_PAGE_BYTES;
+			return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
 		}
 		/* A page used by the previous world pass stays: with the water
 		 * mirror there are two passes a frame, and when the two together
@@ -454,7 +460,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		full_frame = gc_wd_frame;
 		return NULL;
 	}
-	if( !R_GXWorldDLLmFetch( page, gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES ))
+	if( !R_GXWorldDLLmFetch( page, gc_wd_lm_store + (u32)victim * gc_wd_lm_page_bytes ))
 		return NULL;
 	if( gc_wd_lm_slot_page[victim] >= 0 )
 		GX_InvalidateTexAll();
@@ -463,7 +469,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_miss++;
 	gc_wd_lm_miss_total++;
 	hint[page & 2047u] = (u8)victim;
-	return gc_wd_lm_store + (u32)victim * GC_WD_LM_PAGE_BYTES;
+	return gc_wd_lm_store + (u32)victim * gc_wd_lm_page_bytes;
 }
 
 /* Diffuse × lightmap page (TEXMAP2), or diffuse × vertex colour when no page. */
@@ -1582,18 +1588,21 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				last_end = end;
 		}
 		gc_wd_lm_stream = gc_wd_hdr.ofs_chunks + (( last_end + 31u ) & ~31u );
+		gc_wd_lm_page_bytes = ( gc_wd_hdr.flags & GC_WD_FLAG_LM_CMPR ) ? GC_WD_LM_CMPR_BYTES : GC_WD_LM_PAGE_BYTES;
+		gc_wd_lm_fmt = ( gc_wd_hdr.flags & GC_WD_FLAG_LM_CMPR ) ? GX_TF_CMPR : GX_TF_RGB565;
+		gc_wd_lm_nslots = (int)( sizeof( gc_wd_lm_bss ) / gc_wd_lm_page_bytes );
 #if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
 		if( !gc_wd_lm_heap )
 		{
 			extern size_t GC_MemHeapFreeBytes( void );
-			static const int tries[] = { GC_WD_LM_SLOTS_MAX, 40, 24 };
+			static const u32 tries[] = { GC_WD_LM_HEAP_BYTES, 80u * 1024u, 48u * 1024u };
 			unsigned t;
 
 			/* 640 KiB stays for what the map still loads from the heap
 			 * (prop chain cache, view model skins, sounds). */
 			for( t = 0; t < sizeof( tries ) / sizeof( tries[0] ) && !gc_wd_lm_heap; t++ )
 			{
-				const size_t bytes = (size_t)tries[t] * GC_WD_LM_PAGE_BYTES;
+				const size_t bytes = (size_t)tries[t];
 
 				if( GC_MemHeapFreeBytes() < bytes + 640u * 1024u )
 					continue;
@@ -1601,11 +1610,13 @@ static void R_GXWorldDLLoad( const char *mapbase )
 				if( gc_wd_lm_heap )
 				{
 					gc_wd_lm_store = gc_wd_lm_heap;
-					gc_wd_lm_nslots = tries[t];
+					gc_wd_lm_nslots = (int)( tries[t] / gc_wd_lm_page_bytes );
 				}
 			}
 		}
 #endif
+		if( gc_wd_lm_nslots > GC_WD_LM_SLOTS_MAX )
+			gc_wd_lm_nslots = GC_WD_LM_SLOTS_MAX;
 		for( i = 0; i < (u32)gc_wd_lm_nslots; i++ )
 		{
 			gc_wd_lm_slot_page[i] = -1;
@@ -1613,10 +1624,10 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		}
 		GX_InvalidateTexAll();
 		gEngfuncs.Con_Reportf(
-			"Xash3D GameCube: world DL lightmap pages stream@%u slots=%d (%u Kb%s)\n",
+			"Xash3D GameCube: world DL lightmap pages stream@%u slots=%d (%u Kb%s%s)\n",
 			(unsigned)gc_wd_lm_stream, gc_wd_lm_nslots,
-			(unsigned)( (u32)gc_wd_lm_nslots * GC_WD_LM_PAGE_BYTES / 1024u ),
-			gc_wd_lm_heap ? " from heap" : "" );
+			(unsigned)( (u32)gc_wd_lm_nslots * gc_wd_lm_page_bytes / 1024u ),
+			gc_wd_lm_heap ? " from heap" : "", gc_wd_lm_fmt == GX_TF_CMPR ? ", CMPR pages" : "" );
 	}
 
 	gc_wd_tev_gens = gc_wd_hdr.version == 2 ? 2 : 1;
@@ -3312,8 +3323,8 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 			gc_wd_chunk_lm = 0;
 			if( lm > 0 )
 			{
-				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * GC_WD_LM_PAGE_BYTES,
-					32, 32, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE );
+				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * gc_wd_lm_page_bytes,
+					32, 32, gc_wd_lm_fmt, GX_CLAMP, GX_CLAMP, GX_FALSE );
 				GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
 				GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
 				gc_wd_chunk_lm = 1;
@@ -3404,8 +3415,8 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 			gc_wd_chunk_lm = 0;
 			if( lm > 0 )
 			{
-				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * GC_WD_LM_PAGE_BYTES,
-					32, 32, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE );
+				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * gc_wd_lm_page_bytes,
+					32, 32, gc_wd_lm_fmt, GX_CLAMP, GX_CLAMP, GX_FALSE );
 				GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
 				GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
 				gc_wd_chunk_lm = 1;
@@ -4047,8 +4058,8 @@ int R_GXWorldDLDraw( void )
 					WD_PF( 3, lm_page = R_GXWorldDLLmPage( lm_ofs - 1u ));
 					if( lm_page )
 					{
-						lm_slot = (int)(( lm_page - gc_wd_lm_store ) / GC_WD_LM_PAGE_BYTES ) + 1;
-						GX_InitTexObj( &gc_wd_lm_obj, lm_page, 32, 32, GX_TF_RGB565,
+						lm_slot = (int)(( lm_page - gc_wd_lm_store ) / gc_wd_lm_page_bytes ) + 1;
+						GX_InitTexObj( &gc_wd_lm_obj, lm_page, 32, 32, gc_wd_lm_fmt,
 							GX_CLAMP, GX_CLAMP, GX_FALSE );
 						GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
 						GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
@@ -4089,8 +4100,8 @@ int R_GXWorldDLDraw( void )
 					lm_slot = 0;
 					if( pg )
 					{
-						lm_slot = (int)(( pg - gc_wd_lm_store ) / GC_WD_LM_PAGE_BYTES ) + 1;
-						GX_InitTexObj( &gc_wd_lm_obj, pg, 32, 32, GX_TF_RGB565,
+						lm_slot = (int)(( pg - gc_wd_lm_store ) / gc_wd_lm_page_bytes ) + 1;
+						GX_InitTexObj( &gc_wd_lm_obj, pg, 32, 32, gc_wd_lm_fmt,
 							GX_CLAMP, GX_CLAMP, GX_FALSE );
 						GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
 						GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
@@ -4415,6 +4426,8 @@ qboolean R_GXWorldDLSampleLight( const float *org, byte rgb[3] )
 	if( !org || !rgb || !R_GXWorldDLActive() || !gc_wd_lm_stream
 		|| !gc_wd_chunk_cluster || !gc_wd_chunk_ofs || !gc_wd_slots )
 		return false;
+	if( gc_wd_lm_fmt != GX_TF_RGB565 )
+		return false;	/* reads RGB565 texels; GoldSrc packs light points from the light faces */
 	cluster = gc_wd_pvs_cluster;
 	if( cluster < 0 )
 		return false;

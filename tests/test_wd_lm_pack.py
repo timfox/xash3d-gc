@@ -98,5 +98,47 @@ class LmPackTest(unittest.TestCase):
 		self.assertEqual(page.pix[30][30], (40, 20, 7))
 
 
+class LmCmprTest(unittest.TestCase):
+	def test_page_is_512_bytes_and_close_to_the_source(self):
+		# a smooth lightmap: a diagonal gradient with a warm tint
+		pix = [[(min(255, 40 + 5 * x + 2 * y), min(255, 36 + 5 * x + 2 * y), min(255, 30 + 4 * x + 2 * y)) for x in range(32)] for y in range(32)]
+		data = bake.cmpr_page(pix)
+		self.assertEqual(len(data), bake.LM_CMPR_BYTES)
+		got = bake.cmpr_page_decode(data)
+		worst = max(abs(got[y][x][k] - pix[y][x][k]) for y in range(32) for x in range(32) for k in range(3))
+		self.assertLessEqual(worst, 12)
+
+	def test_aligned_cells_own_their_blocks(self):
+		dims = [(9, 7), (5, 5), (3, 12), (16, 16), (2, 2)]
+		cells = bake.lm_pack_pages(dims, 2, 4)
+		self.assertTrue(all(cells))
+		owned = {}
+		for n, (pg, (x, y, w, h)) in enumerate(cells):
+			self.assertEqual((x % 4, y % 4), (0, 0))
+			for by in range(y // 4, -(-(y + h) // 4)):
+				for bx in range(x // 4, -(-(x + w) // 4)):
+					self.assertNotEqual((bx, by), (0, 0), "cell in the grey block")
+					self.assertNotIn((pg, bx, by), owned)
+					owned[(pg, bx, by)] = n
+		# a bright cell beside a dark one: neither bleeds into the other through a shared block
+		page = bake.LmPage()
+		page.blit((4, 0, 3, 3), [[(250, 250, 250)] * 3] * 3, 4)
+		page.blit((8, 0, 3, 3), [[(10, 10, 10)] * 3] * 3, 4)
+		got = bake.cmpr_page_decode(bake.cmpr_page(page.pix))
+		self.assertGreaterEqual(got[1][5][0], 244)
+		self.assertLessEqual(got[1][9][0], 16)
+		self.assertTrue(120 <= got[0][0][0] <= 136)
+
+	def test_flat_block_uses_colour_zero(self):
+		block = bake.cmpr_block([(128, 128, 128)] * 16)
+		self.assertEqual(block[4:], bytes(4))
+		self.assertEqual(block[0:2], block[2:4])
+
+	def test_end_colours_ordered_for_four_colour_mode(self):
+		px = [(10 * i, 10 * i, 10 * i) for i in range(16)]
+		c0, c1 = int.from_bytes(bake.cmpr_block(px)[0:2], "big"), int.from_bytes(bake.cmpr_block(px)[2:4], "big")
+		self.assertGreater(c0, c1)
+
+
 if __name__ == "__main__":
 	unittest.main()
