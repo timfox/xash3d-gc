@@ -83,6 +83,18 @@ void GAME_EXPORT R_GetPackedColor( short *packed, short color )
 	if( packed ) *packed = 0;
 }
 
+#if XASH_GAMECUBE
+#define GC_PARTICLES_FULL 256
+
+/* burst trims (G127) exist for the 16/96 pools; a full pool takes retail counts */
+static qboolean CL_GCParticleBurstTrim( void )
+{
+	if( cl_numparticles >= GC_PARTICLES_FULL )
+		return false;
+	return GC_MapLoadMemoryOpt() || Sys_CheckParm( "-gcfullphysics" );
+}
+#endif
+
 /*
 ================
 CL_InitParticles
@@ -94,9 +106,17 @@ void CL_InitParticles( void )
 	int max_particles = GI->max_particles;
 #if XASH_GAMECUBE
 	if( Sys_CheckParm( "-gcmap" ) || GC_MapLoadMemoryOpt())
-		max_particles = Q_min( max_particles,
-			( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcfullactors" ) )
-				? 96 : 16 );
+	{
+		int cap = ( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcfullactors" )) ? 96 : 16;
+#if XASH_DODGC_NETWORK
+		/* DoD matches: impacts, sparks and streaks at close to retail counts.
+		 * 256 particles are 14 Kb; the extra 9 Kb is taken at client init,
+		 * before any map asks for heap. */
+		if( cap == 96 )
+			cap = GC_PARTICLES_FULL;
+#endif
+		max_particles = Q_min( max_particles, cap );
+	}
 #endif
 	cl_particles = Mem_Calloc( cls.mempool, sizeof( particle_t ) * max_particles );
 	cl_numparticles = max_particles;
@@ -1842,7 +1862,7 @@ void GAME_EXPORT R_BulletImpactParticles( const vec3_t pos )
 #if XASH_GAMECUBE
 	/* G127: close-range impacts request quantity*4 particles from the shared
 	 * pool and starve tracers (Overflow N). Cap the burst under MEM1. */
-	if(( GC_MapLoadMemoryOpt() || Sys_CheckParm( "-gcfullphysics" )) && quantity > 2 )
+	if( CL_GCParticleBurstTrim() && quantity > 2 )
 		quantity = 2;
 #endif
 
@@ -1903,7 +1923,7 @@ void GAME_EXPORT R_StreakSplash( const vec3_t pos, const vec3_t dir, int color, 
 	vec3_t		vel, vel2;
 #if XASH_GAMECUBE
 	/* G127: TE_STREAK_SPLASH count is a short and can exceed the lean pool. */
-	if(( GC_MapLoadMemoryOpt() || Sys_CheckParm( "-gcfullphysics" )) && count > 8 )
+	if( CL_GCParticleBurstTrim() && count > 8 )
 		count = 8;
 #endif
 
@@ -2011,7 +2031,7 @@ void GAME_EXPORT R_SparkStreaks( const vec3_t pos, int count, int velocityMin, i
 #if XASH_GAMECUBE
 	/* G127: one impact can request dozens of streaks and fill the shared
 	 * particle/tracer pool (Overflow N tracers). Keep a small burst. */
-	if(( GC_MapLoadMemoryOpt() || Sys_CheckParm( "-gcfullphysics" )) && count > 6 )
+	if( CL_GCParticleBurstTrim() && count > 6 )
 		count = 6;
 #endif
 
@@ -2045,7 +2065,7 @@ void GAME_EXPORT R_Implosion( const vec3_t end, float radius, int count, float l
 	if( life <= 0.0f ) life = 0.1f; // to avoid divide by zero
 	float factor = -1.0 / life;
 #if XASH_GAMECUBE
-	if(( GC_MapLoadMemoryOpt() || Sys_CheckParm( "-gcfullphysics" )) && count > 8 )
+	if( CL_GCParticleBurstTrim() && count > 8 )
 		count = 8;
 #endif
 
