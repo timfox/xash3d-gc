@@ -2849,6 +2849,12 @@ static byte *R_GXCmprBounce( void )
 	return r_gx_cmpr_bounce;
 }
 
+/* How many texture slots the cache has now. */
+int R_GXCmprSlotCount( void )
+{
+	return r_gx_cmpr_nslots;
+}
+
 /* Cumulative slot hits and misses, for the flythrough profile line. */
 void R_GXCmprStats( unsigned *hits, unsigned *misses )
 {
