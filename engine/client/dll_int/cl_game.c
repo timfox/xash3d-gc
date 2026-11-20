@@ -5180,6 +5180,7 @@ static void *pfnStudio_GCGetAnim( void *phdr, void *submodel, void *pseqdesc )
  * came back NULL and StudioMergeBones read through it (a guest data fault that froze the match). Load such a model on demand, once, into
  * the studio arena (never the heap), and let the DLL's own check skip the weapon if that fails. */
 #if XASH_GAMECUBE
+extern const char *CL_GCServerModelName( int modelindex );
 static model_t *CL_GCStudioModelByIndex( int modelindex )
 {
 	static const model_t *tried[32];
@@ -5189,10 +5190,10 @@ static model_t *CL_GCStudioModelByIndex( int modelindex )
 
 	/* The client's own table has no entry for a model the server precached late (the last index of the weapon set): look it up by the
 	 * server's name, which finds the resident model without a disc read and fills the slot. */
-	if( !m && modelindex > 0 && modelindex < MAX_MODELS && SV_Active() && sv.model_precache[modelindex][0]
-		&& Q_stristr( sv.model_precache[modelindex], ".mdl" ))
+	if( !m && modelindex > 0 && modelindex < MAX_MODELS && CL_GCServerModelName( modelindex )
+		&& Q_stristr( CL_GCServerModelName( modelindex ), ".mdl" ))
 	{
-		m = Mod_ForName( sv.model_precache[modelindex], false, false );
+		m = Mod_ForName( CL_GCServerModelName( modelindex ), false, false );
 		if( m )
 		{
 			cl.models[modelindex] = m;

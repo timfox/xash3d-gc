@@ -3646,3 +3646,13 @@ qboolean CL_GetMovieSpatialization( rawchan_t *ch )
 
 	return true;
 }
+
+#if XASH_GAMECUBE
+/* The name the (listen) server precached at this model index, or NULL: cl_game.c has no view of server_t. */
+const char *CL_GCServerModelName( int modelindex )
+{
+	if( modelindex <= 0 || modelindex >= MAX_MODELS || !SV_Active() || !sv.model_precache[modelindex][0] )
+		return NULL;
+	return sv.model_precache[modelindex];
+}
+#endif
