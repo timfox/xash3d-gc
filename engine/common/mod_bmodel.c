@@ -8765,6 +8765,23 @@ void Mod_GCMoveWorldEntitiesToArena( void )
 			Mod_GCWorldCanaryCheck( "after entity text move" );
 			return;
 		}
+		/* No arena room for the text (caen: the ring and the view model's skin window take it): the 128 KB reserve holds 91 KB of it.
+		 * Shrink the block to the text in place (a realloc to a smaller size splits the chunk and frees the tail: no copy, which a nearly
+		 * full heap could not afford), 37 KB back for caen. Avalanche's text goes to the arena above. */
+		{
+			char *shrunk = (char *)realloc( gc_static_entities, n );
+
+			if( shrunk )
+			{
+				mod->entities = shrunk;
+				gc_entities_malloc_block = shrunk;
+				gc_static_entities = NULL;
+				gc_entities_static_block = false;
+				Con_Reportf( "Xash3D GameCube: budget shrank the entity reserve to the text (%s), heap free %s\n",
+					Q_memprint( n ), Q_memprint( GC_MemHeapFreeBytes()));
+				return;
+			}
+		}
 	}
 #endif
 	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
