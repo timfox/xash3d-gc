@@ -551,7 +551,13 @@ static void R_GXReserveHudPool( void )
 	/* A DoD match draws only the retail HUD (ammo/health icons, shrunk to 64x64 on upload): slabs of 128x128 held
 	 * 96 KB of heap for it. 64x64 slabs are 24 KB; a bigger sprite grows its slot from the bounded on-demand
 	 * share (R_GXHudAllocBacking), as before. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Any DoD match (a world is loaded), not only -gclistenserver: a match started from the menu has no such
+	 * switch and held 98 KB here. The menu itself, with no world, keeps full slabs for its chrome. */
+	const size_t dim = ( WORLDMODEL || gEngfuncs.Sys_CheckParm( "-gclistenserver" )) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+#else
 	const size_t dim = gEngfuncs.Sys_CheckParm( "-gclistenserver" ) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+#endif
 	const size_t bytes = dim * dim * sizeof( u16 );
 
 	if( r_gx_hud_pool_ready )

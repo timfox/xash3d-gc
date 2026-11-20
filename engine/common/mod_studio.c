@@ -1905,7 +1905,8 @@ static void Mod_GCReleaseStudioTexBuf( void *ptr )
 static qboolean Mod_GCDeferVmSkins( const model_t *mod )
 {
 #if XASH_DODGC_NETWORK
-	return Sys_CheckParm( "-gclistenserver" ) && Q_stristr( mod->name, "models/v_" ) != NULL;
+	/* Every DoD match, not only -gclistenserver: a match started from the menu has no such switch. */
+	return Q_stristr( mod->name, "models/v_" ) != NULL;
 #else
 	return false;
 #endif
