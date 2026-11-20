@@ -155,59 +155,47 @@ void SV_GCSizePacketEntities( void )
 	sv_gc_local_ring = NULL;
 	sv_gc_local_ring_entries = 0;
 	{
-		/* What a frame can carry on the listen route (SV_AddEntitiesToPacket, -gclistenserver): every spawned seat plus the lean brush
-		 * budget (4), nothing else, so lean_bound is a hard per-frame bound (13 players + 4 = 17 measured on charlie, spawn, bluff,
-		 * radio tent and spectator views). The ring holds the current and the reference frame of each client that takes frames (bots
-		 * take none): the host and 2 LAN peers is 3 x 2 x bound = 120 entries at the bound, and the static ring has 128. Charlie got
-		 * 144 entries (239 KB of arena) before; a longer LAN party falls back to full updates (not an error), and the overflow guard
-		 * still never drops a player. */
-		const int lean_bound = svs.maxclients + 4;
-		const int want = ( 3 * 2 * lean_bound + 7 ) & ~7;
-
-		if( want <= 128 )
-		{
-			/* The static 128-entry tables hold the host and two LAN peers at the bound: no arena ring, the whole 239 KB stays a post-load gap. */
-			svs.packet_entities = gc_singleplayer_packet_entities;
-			svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
-			sv_gc_frame_scratch = fallback_scratch;
-			sv_gc_visible_cap = 128;
-			Con_Reportf( "Xash3D GameCube: packet entities map=%s per-frame bound %d (%d seats + 4 brushes), 3 clients need %d entries: static tables (128), no arena ring, arena_tail_left=%s\n",
-				sv.name, lean_bound, svs.maxclients, want, Q_memprint( GC_MapArenaLargestGap()));
-			return;
-		}
-	}
-	{
-		const size_t gap = GC_MapArenaLargestGap();
-		const size_t each = sizeof( entity_state_t ) * 5;
+		/* Per frame cap C: the retail 256 visible-entity limit. The real play route (menu start, the game's own AddToFullPack) put 111 entities
+		 * in one frame on dod_caen, 89 on charlie and 62 on avalanche (release pass, 4 bots); the lean boot-override route carries only seats + 4
+		 * brushes (17), which is not what ships. Each ring (server, local client) holds E entries, i.e. E / peak frames, 2 x 128 = 256 when the
+		 * arena allows: the largest arena gap after leaving room for the entity text to move off the heap and for the body models
+		 * (GC_DOD_ARENA_KEEP); when that leaves less than E_MIN, the text reservation and then the keep-out are given up before
+		 * the ring is, because the static 128 tables overflow at 111+ entities (149 "Ignored" lines on caen). */
 		extern size_t Mod_GCWorldEntityTextHeapBytes( void );
-		/* Leave room for the entity text to move off the heap at MAP_READY: with the ring at
-		 * 256 the gap was 161 KB and the 180 KB text stayed on the heap (charlie, ceres). */
-		const size_t text = Mod_GCWorldEntityTextHeapBytes();
-		const size_t need = GC_DOD_ARENA_KEEP + ( text + 1023u ) / 1024u * 1024u;
-		int count = gap > need ? (int)(( gap - need ) / each ) : 0;
+		const size_t gap = GC_MapArenaLargestGap();
+		const size_t es = sizeof( entity_state_t );
+		const size_t text = ( Mod_GCWorldEntityTextHeapBytes() + 1023u ) / 1024u * 1024u;
+		const size_t scratch = es * (size_t)visible;
+		const size_t reserve[4] = { GC_DOD_ARENA_KEEP + text, GC_DOD_ARENA_KEEP, GC_DOD_ARENA_KEEP / 2, 0 };
+		const int E_MIN = 128, E_MAX = 2 * visible;
+		int level;
 
-		count = Q_min( count, visible ) & ~7;
-		if( count > 128 )
+		for( level = 0; level < 4; level++ )
 		{
-			const size_t bytes = each * (size_t)count;
-			const size_t at = GC_MapArenaFind( bytes );
-			entity_state_t *block = at == (size_t)-1 ? NULL
-				: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+			const size_t need = reserve[level] + scratch;
+			int E = gap > need ? (int)(( gap - need ) / ( 2 * es )) : 0;
+			size_t bytes, at;
+			entity_state_t *block;
 
-			if( block )
-			{
-				memset( block, 0, bytes );
-				svs.packet_entities = block;
-				svs.num_client_entities = count * 2;
-				sv_gc_frame_scratch = block + count * 2;
-				sv_gc_visible_cap = count;
-				sv_gc_local_ring = block + count * 3;
-				sv_gc_local_ring_entries = count * 2;
-				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s entity_text_reserved=%s\n",
-					count < visible ? "Warning: REDUCED " : "", sv.name, count, visible,
-					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), Q_memprint( text ));
-				return;
-			}
+			E = Q_min( E, E_MAX ) & ~7;
+			if( E < E_MIN )
+				continue;
+			bytes = es * ( (size_t)visible + 2 * (size_t)E );
+			at = GC_MapArenaFind( bytes );
+			block = at == (size_t)-1 ? NULL : (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+			if( !block )
+				continue;
+			memset( block, 0, bytes );
+			svs.packet_entities = block;
+			svs.num_client_entities = E;
+			sv_gc_frame_scratch = block + E;
+			sv_gc_visible_cap = visible;
+			sv_gc_local_ring = block + E + visible;
+			sv_gc_local_ring_entries = E;
+			Con_Reportf( "Xash3D GameCube: %spacket entities map=%s per-frame cap %d, rings %d + %d entries (%d frames of 128), bytes=%s arena_tail_left=%s reserve level %d (text %s)\n",
+				level ? "Warning: reduced reserve " : "", sv.name, visible, E, E, E / 128, Q_memprint( bytes ),
+				Q_memprint( GC_MapArenaLargestGap()), level, Q_memprint( text ));
+			return;
 		}
 	}
 	if( false )

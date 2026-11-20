@@ -1925,8 +1925,11 @@ edict_t *GAME_EXPORT SV_AllocEdict( void )
 		 * pack owns world draw; remaining slots keep players/triggers. */
 		if( Sys_CheckParm( "-gcworldrender" ))
 		{
-			Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d) — soft-skip further spawns\n",
-				GI->max_edicts );
+			static int gc_tip_logs;
+
+			if( gc_tip_logs++ < 4 )
+				Con_Reportf( "Xash3D GameCube: CapFaces edict tip (%d) — soft-skip further spawns\n",
+					GI->max_edicts );
 			return NULL;
 		}
 #endif
@@ -1959,6 +1962,20 @@ static LINK_ENTITY_FUNC SV_GetEntityClass( const char *pszClassName )
 	return (LINK_ENTITY_FUNC)COM_GetProcAddress( svgame.hInstance, pszClassName );
 }
 
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+#define GC_EDICT_ESSENTIAL_RESERVE 16
+/* True when fewer than GC_EDICT_ESSENTIAL_RESERVE edicts are free: no free slot below the tip and the free ones already counted. */
+static qboolean SV_GCNamedSpawnBlocked( void )
+{
+	int i, used = 0;
+
+	for( i = 0; i < svgame.numEntities; i++ )
+		if( !svgame.edicts[i].free )
+			used++;
+	return GI->max_edicts - used <= GC_EDICT_ESSENTIAL_RESERVE;
+}
+#endif
+
 /*
 ==============
 SV_AllocPrivateData
@@ -1983,7 +2000,32 @@ static edict_t* SV_AllocPrivateData( edict_t *ent, string_t className, qboolean 
 	if( !ent )
 	{
 		// allocate a new one
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+		/* The last few edicts belong to what the game cannot do without: a spawning player's loadout (crowbar, sidearm, primary, grenades),
+		 * objectives, and rockets and grenades made through GetClassPtr (no name here, cannot take a NULL). Only the cosmetic or droppable
+		 * classes (weapon boxes, gibs, sparks, effects: SV_GCNonEssentialClass) stop short of them. */
+		if( !ent && svgame.numEntities > svs.maxclients && SV_GCNonEssentialClass( pszClassName ) && SV_GCNamedSpawnBlocked())
+		{
+			static int gc_reserve_logs;
+
+			if( gc_reserve_logs++ < 4 )
+				Con_Reportf( S_WARN "Xash3D GameCube: edict reserve: \"%s\" not created (%d so far)\n", pszClassName, gc_reserve_logs );
+			return NULL;
+		}
+#endif
 		ent = SV_AllocEdict();
+#if XASH_GAMECUBE
+		/* No free edict (the 460 tip): the caller gets NULL and carries on. Writing the classname through the NULL edict was a data
+		 * fault (DAR 0x288) that froze every crowded match at the cap: CEnvExplosion::Use, a dying player's weapon box, a grenade... */
+		if( !ent )
+		{
+			static int gc_noedict_logs;
+
+			if( gc_noedict_logs++ < 8 )
+				Con_Reportf( S_WARN "Xash3D GameCube: no free edict for \"%s\" (%d so far), not created\n", pszClassName, gc_noedict_logs );
+			return NULL;
+		}
+#endif
 	}
 	else if( ent->free )
 	{
