@@ -2508,7 +2508,7 @@ static void GAME_EXPORT pfnChangePitch( edict_t* ent )
  * targetname (sv_lazy_logic.c); the game DLL's own code then handles them as if they had been spawned at load. */
 static qboolean SV_ParseEdict( char **pfile, edict_t *ent, int entity_index );
 static qboolean gc_lazy_active;
-static int gc_lazy_logs;
+static int gc_lazy_logs, gc_lazy_fail_logs, gc_lazy_fail_seen;
 
 static qboolean SV_GCLazyLogicCvar( void )
 {
@@ -2570,6 +2570,7 @@ static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
 			SV_FreeEdict( ent );
 		return -1;
 	}
+	LazyLogic_NoteEdict( ofs, NUM_FOR_EDICT( ent ));
 	r = svgame.dllFuncs.pfnSpawn( ent );
 	if( r == -1 && !FBitSet( ent->v.flags, FL_KILLME ))
 	{
@@ -2579,6 +2580,67 @@ static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
 	return 1;
 }
 
+/* sv_gc_lazy_log 1: every lazy spawn and failure is logged (the default logs the first 24 spawns). */
+static qboolean SV_GCLazyLogAll( void )
+{
+	convar_t *cv = Cvar_FindVar( "sv_gc_lazy_log" );
+
+	return cv && cv->value != 0.0f;
+}
+
+/* Where the lazy table stands: totals, and with detail one line per entry (class, targetname, edict and whether that edict
+ * is still alive: a fire-once relay frees itself, exactly as it would have after spawning at load). */
+static void SV_GCLazyReport( const char *stage, qboolean detail )
+{
+	const char *base = sv.worldmodel ? sv.worldmodel->entities : NULL;
+	int i, spawned, edict;
+	uint32_t ofs, len;
+
+	if( !LazyLogic_Total())
+		return;
+	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, game time %.1f\n",
+		stage, LazyLogic_Total(), LazyLogic_Spawned(), LazyLogic_Pending(), LazyLogic_Failed(), sv.time );
+	for( i = 0; detail && base && LazyLogic_Entry( i, &ofs, &len, &spawned, &edict ); i++ )
+	{
+		char key[64], value[128], cls[48] = "?", tn[48] = "?";
+		const char *text = base + ofs;
+
+		while(( text = COM_ParseFile( text, key, sizeof( key ))) != NULL && key[0] != '}' )
+		{
+			if(( text = COM_ParseFile( text, value, sizeof( value ))) == NULL )
+				break;
+			if( !Q_strcmp( key, "classname" ))
+				Q_strncpy( cls, value, sizeof( cls ));
+			else if( !Q_strcmp( key, "targetname" ))
+				Q_strncpy( tn, value, sizeof( tn ));
+		}
+		Con_Reportf( "  lazy %3d %s '%s' %s edict=%d%s\n", i, cls, tn, spawned ? "spawned" : "pending", edict,
+			spawned && edict > 0 && ( SV_EdictNum( edict )->free ) ? " (gone: freed after use)" : "" );
+	}
+}
+
+static void SV_GCLazyReport_f( void )
+{
+	SV_GCLazyReport( "report", true );
+}
+
+/* With sv_gc_lazy_log 1: a one-line state every 60 s of server time, so a bot or round log can be lined up with the
+ * game DLL's own "DoD round restart" line (the engine does not see the DLL's round logic). Idle otherwise. */
+void SV_GCLazyLogicTick( void )
+{
+	static double next;
+
+	if( !gc_lazy_active || sv.time < next )
+		return;
+	if( !SV_GCLazyLogAll())
+	{
+		next = sv.time + 30.0;
+		return;
+	}
+	next = sv.time + 60.0;
+	SV_GCLazyReport( "tick", false );
+}
+
 static void SV_GCLazyMaterialize( const char *name )
 {
 	sv_lazy_ctx_t ctx;
@@ -2586,7 +2648,14 @@ static void SV_GCLazyMaterialize( const char *name )
 
 	ctx.name = name;
 	n = LazyLogic_Materialize( LazyLogic_Hash( name ), SV_GCLazySpawn, &ctx );
-	if( n && gc_lazy_logs++ < 24 )
+	if( LazyLogic_Failed() != gc_lazy_fail_seen )
+	{
+		if( gc_lazy_fail_logs++ < 8 || SV_GCLazyLogAll())
+			Con_Reportf( S_WARN "Xash3D GameCube: lazy logic could not spawn '%s' now (%d failures so far, edicts %d, heap %s); it stays pending\n",
+				name, LazyLogic_Failed(), svgame.numEntities, Q_memprint( GC_MemHeapFreeBytes( )));
+		gc_lazy_fail_seen = LazyLogic_Failed();
+	}
+	if( n && ( gc_lazy_logs++ < 24 || SV_GCLazyLogAll()))
 		Con_Reportf( "Xash3D GameCube: lazy logic spawned %d x '%s' (pending %d of %d, edicts %d, heap %s)\n",
 			n, name, LazyLogic_Pending(), LazyLogic_Total(), svgame.numEntities, Q_memprint( GC_MemHeapFreeBytes( )));
 }
@@ -7678,8 +7747,10 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	gc_kv_slab_used = 0;
 	SV_GCStaticPropsReset();
 	SV_GCBudgetParityEntities( mapname, entities );
+	/* The table is per map load (changelevel, restart, save load all come through here): say how the previous one ended. */
+	SV_GCLazyReport( "previous map table", SV_GCLazyLogAll());
 	LazyLogic_Reset();
-	gc_lazy_logs = 0;
+	gc_lazy_logs = gc_lazy_fail_logs = gc_lazy_fail_seen = 0;
 	gc_lazy_active = SV_GCLazyLogicCvar() && Sys_CheckParm( "-gcworldrender" );
 #endif
 
@@ -8107,6 +8178,18 @@ qboolean SV_LoadProgs( const char *name )
 	static globalvars_t		gpGlobals;
 	static playermove_t		gpMove;
 	qboolean init_entity_api = false;
+
+#if XASH_GAMECUBE
+	{
+		static qboolean lazy_cmd_added;
+
+		if( !lazy_cmd_added )
+		{
+			lazy_cmd_added = true;
+			Cmd_AddCommand( "gc_lazy_report", SV_GCLazyReport_f, "list the lazily spawned map logic entities (sv_gc_lazy_logic)" );
+		}
+	}
+#endif
 
 	if( svgame.hInstance )
 		return true;

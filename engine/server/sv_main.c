@@ -867,6 +867,9 @@ void Host_ServerFrame( void )
 	// let everything in the world think and move
 	if( !SV_RunGameFrame ()) return;
 #if XASH_GAMECUBE
+	SV_GCLazyLogicTick();
+#endif
+#if XASH_GAMECUBE
 	if( gc_fullphysics_trace )
 		Con_Reportf( "Xash3D GameCube: full server game frame ready\n" );
 #endif

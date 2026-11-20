@@ -770,6 +770,7 @@ void SV_GCStaticWallTrace( int i, const vec3_t start, vec3_t mins, vec3_t maxs, 
 void SV_GCStaticWallBounds( int i, vec3_t absmin, vec3_t absmax, int *modelindex );
 void SV_GCStaticWallInfo( int i, vec3_t origin, vec3_t mins, vec3_t maxs, int *modelindex );
 int SV_GCStaticWallsMode( void );
+void SV_GCLazyLogicTick( void );
 #endif
 void SV_UnlinkEdict( edict_t *ent );
 void SV_ClipMoveToEntity( edict_t *ent, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );

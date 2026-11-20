@@ -30,6 +30,12 @@ int  LazyLogic_Pending( void );
 /* Entries that were remembered / spawned since the last reset. */
 int  LazyLogic_Total( void );
 int  LazyLogic_Spawned( void );
+/* Lookups that wanted to spawn something and could not (no edict, no heap): the entries stay pending and retry. */
+int  LazyLogic_Failed( void );
+/* The engine records which edict a spawned entry got, so a report can say whether it still exists. */
+void LazyLogic_NoteEdict( uint32_t ofs, int edict );
+/* Entry i in the order they were added: lump offset, length, spawned flag, edict (0 = none recorded). 0 when i is out of range. */
+int  LazyLogic_Entry( int i, uint32_t *ofs, uint32_t *len, int *spawned, int *edict );
 
 /* Spawn callback: returns 1 when the entity now exists, 0 when it was not this name (hash collision: it stays
  * pending), -1 when it could not be spawned now (no edict, no heap: it stays pending for a later lookup). */
