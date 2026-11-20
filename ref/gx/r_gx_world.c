@@ -6637,6 +6637,20 @@ static qboolean R_GXPropPoolResident( u8 mat, int pool )
  * slots belong to the coast rocks in front of the eye. */
 static qboolean gc_prop_tex_nobig;
 
+/* Props draw from the shared world slot cache only when it is large. With
+ * the sixteen slots a DoD map gets from the tail of its chunk cache, forty
+ * prop materials a frame evicted the world's textures and each other (41
+ * re-reads a frame on dod_avalanche against 12 without them); there the
+ * props keep their own small slots. */
+static qboolean R_GXPropsShareSlots( void )
+{
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	return r_gx_cmpr_nslots >= 32;
+#else
+	return r_gx_cmpr_nslots > 8;
+#endif
+}
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6659,7 +6673,7 @@ static int R_GXPropBind( u8 mat )
 	 * to 128x128 (one mip less for a far instance), shared with the world
 	 * textures. The private slots below hold a single 64x64 level, which
 	 * turned the village atlas into mush. */
-	if( r_gx_cmpr_nslots > 8 )
+	if( R_GXPropsShareSlots() )
 	{
 		/* A small or distant prop asks for the far pool's copy, one mip down
 		 * (64x64). When the full chain of the same material already sits in
@@ -6756,7 +6770,7 @@ static int R_GXPropBind( u8 mat )
 			R_GXCmprSetFar( true );
 	}
 	/* Only without the shared slot cache: its 96 KB went to far LODs. */
-	if( !gc_prop_texmem_tried && r_gx_cmpr_nslots <= 8 && GC_MapLoadBufferTailPeak() > 0 )
+	if( !gc_prop_texmem_tried && !R_GXPropsShareSlots() && GC_MapLoadBufferTailPeak() > 0 )
 	{
 		const u32 extra = (u32)( GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
 
