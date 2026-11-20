@@ -222,6 +222,10 @@ enum {
 	FEAT_ALGAE_GLASS,	/* algae glass: scrolled IndTex × dual kelp KONST */
 	FEAT_OBSIDIAN_WOOL,	/* obsidian wool: dense IndTex × dual deep KONST */
 	FEAT_TOPAZ_DUST,	/* topaz dust: fine IndTex × dual amber KONST */
+	FEAT_PALLADIUM_FOIL,	/* palladium foil: fine IndTex × dual soft silver KONST */
+	FEAT_MYCELIUM_TILE,	/* mycelium tile: scrolled IndTex × dual warm tan KONST */
+	FEAT_SAPPHIRE_WOOL,	/* sapphire wool: dense IndTex × dual cool blue KONST */
+	FEAT_MALACHITE_DUST,	/* malachite dust: fine IndTex × dual emerald KONST */
 	FEAT_MOD2X_DETAIL,
 	FEAT_SPEC_MASK,
 	FEAT_FOG_HAZE,
@@ -343,6 +347,10 @@ static Material materials[] = {
 	{ "ALGAE GLASS","Kelp translucency - metal/normal/rough",{ 255, 255, 255, 255 }, 0.00f, 0.42f, MAPS_STONE },
 	{ "OBSIDIAN WOOL","Near-black loft - metal/normal/rough",{ 255, 255, 255, 255 }, 0.15f, 0.72f, MAPS_CORRUGATED },
 	{ "TOPAZ DUST","Warm gold grit - metal/normal/rough",{ 255, 255, 255, 255 }, 0.70f, 0.48f, MAPS_DAMASCUS },
+	{ "PALLADIUM FOIL","Soft silver sheet - metal/normal/rough",{ 255, 255, 255, 255 }, 0.96f, 0.28f, MAPS_STEEL },
+	{ "MYCELIUM TILE","Organic network - metal/normal/rough",{ 255, 255, 255, 255 }, 0.05f, 0.68f, MAPS_WOOD },
+	{ "SAPPHIRE WOOL","Deep blue loft - metal/normal/rough",{ 255, 255, 255, 255 }, 0.18f, 0.74f, MAPS_CORRUGATED },
+	{ "MALACHITE DUST","Banded green grit - metal/normal/rough",{ 255, 255, 255, 255 }, 0.55f, 0.52f, MAPS_STONE },
 };
 static const int materialCount = (int)(sizeof(materials) / sizeof(materials[0]));
 static int materialIndex = 0; /* open on RUST — full map set */
@@ -406,6 +414,10 @@ static const char *featureNames[FEAT_COUNT] = {
 	"ALGAE GLASS",
 	"OBSIDIAN WOOL",
 	"TOPAZ DUST",
+	"PALLADIUM FOIL",
+	"MYCELIUM TILE",
+	"SAPPHIRE WOOL",
+	"MALACHITE DUST",
 	"MOD2X DETAIL",
 	"SPEC MASK ADD",
 	"FOG HAZE",
@@ -2773,6 +2785,15 @@ static void setup_tev_wood_plank(const Material *mat)
 	im[0][0] = 0.20f;
 	im[1][1] = 0.08f; /* stretch — plank grain anisotropy */
 	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+	im[0][0] = 0.14f;
+	im[1][1] = 0.14f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 1.6f;
+	scroll[1][1] = 1.6f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
 
 	memset(scroll, 0, sizeof(scroll));
 	scroll[0][0] = 3.2f; /* long plank grain */
@@ -2803,6 +2824,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 176, 128, 72, 255 }); /* warm oak */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 168, 170, 166, 255 }); /* cool concrete */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
 
 	GX_SetTevDirect(GX_TEVSTAGE0);
@@ -2819,6 +2841,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* cool aggregate tint */
 	GX_SetTevDirect(GX_TEVSTAGE2);
 	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
@@ -2827,6 +2850,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
 	/* grain detail */
+	/* pebble detail × body (MOD2X-ish DIVIDE keeps it subtle) */
 	GX_SetTevDirect(GX_TEVSTAGE3);
 	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_CPREV, GX_CC_ZERO);
@@ -2835,6 +2859,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
 	/* soft plank sheen */
+	/* rough IndTex env glints — matte concrete */
 	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
 		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
 	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD2, GX_TEXMAP5, GX_COLORNULL);
@@ -2853,9 +2878,18 @@ static void setup_tev_brick(const Material *mat)
 {
 	PbrSet *pbr = active_pbr(mat);
 	f32 im[2][3];
+ * FEAT_WOOD_PLANK — plank timber: warm tint × albedo×AO × anisotropic grain
+ * scroll (U stretched), soft IndTex sheen. Distinct from VELVET nap / leather.
+ */
+static void setup_tev_wood_plank(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.03f;
 
 	GX_SetNumChans(1);
-	GX_SetNumTexGens(2);
+	GX_SetNumTexGens(3);
 	GX_SetNumTevStages(5);
 	GX_SetNumIndStages(1);
 	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
@@ -2865,17 +2899,30 @@ static void setup_tev_brick(const Material *mat)
 	im[0][0] = 0.22f;
 	im[1][1] = 0.22f;
 	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+	im[0][0] = 0.20f;
+	im[1][1] = 0.08f; /* stretch — plank grain anisotropy */
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 3.2f; /* long plank grain */
+	scroll[1][1] = 0.85f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_SetTexCoordGen(GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
 	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
 	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
 	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP2);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
-	GX_LoadTexObj(&pbr->rough, GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
 	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
@@ -2886,6 +2933,7 @@ static void setup_tev_brick(const Material *mat)
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 186, 92, 68, 255 }); /* fired clay */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 176, 128, 72, 255 }); /* warm oak */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
 
 	GX_SetTevDirect(GX_TEVSTAGE0);
@@ -2900,6 +2948,7 @@ static void setup_tev_brick(const Material *mat)
 	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
 	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
@@ -2911,16 +2960,19 @@ static void setup_tev_brick(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
 	/* sample metal (dielectric ≈0) into REG0 for map-aware completeness */
+	/* grain detail */
 	GX_SetTevDirect(GX_TEVSTAGE3);
-	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_CPREV, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* soft plank sheen */
 	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
 		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
 	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD2, GX_TEXMAP5, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
 	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
 	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
@@ -2934,6 +2986,10 @@ static void setup_tev_brick(const Material *mat)
  * (no soft wrap body — hard glaze over grid).
  */
 static void setup_tev_ceramic_tile(const Material *mat)
+ * FEAT_BRICK — fired clay brick: warm red tint × albedo×AO, mortar from AO
+ * emphasis, mid IndTex bumps. Distinct from leather (no scrolled grain hide).
+ */
+static void setup_tev_brick(const Material *mat)
 {
 	PbrSet *pbr = active_pbr(mat);
 	f32 im[2][3];
@@ -3037,6 +3093,129 @@ static void setup_tev_oled_void(const Material *mat)
 	f32 phase = animTime * 0.028f;
 
 	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.10f; /* tight OLED pixel grain */
+	im[1][1] = 0.12f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 14.0f; /* dense void grain */
+	scroll[1][1] = 15.5f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.30f) - (f32)(int)(phase * 0.30f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+	im[0][0] = 0.22f;
+	im[1][1] = 0.22f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.18f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+	(void)pbr->metal;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 18, 20, 28, 255 }); /* dual dark void body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 52, 78, 255 }); /* dual cool pin fleck */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 186, 92, 68, 255 }); /* fired clay */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* AO ×2 — mortar recesses read darker */
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* near-black OLED body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* sparse cool pin flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	/* sample metal (dielectric ≈0) into REG0 for map-aware completeness */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* dense IndTex void (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_ANODIZED_MG — magnesium anodize: scrolled IndTex × dual cool-green KONST.
+ * MAPS ON; no force-field shell; bloom stays off.
+ */
+static void setup_tev_anodized_mg(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.046f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+ * FEAT_CERAMIC_TILE — glazed floor/wall tile: cool glaze tint × albedo×AO ×
+ * tiled detail grid, sharp dielectric IndTex coat. Distinct from PORCELAIN
+ * (no soft wrap body — hard glaze over grid).
+ */
+static void setup_tev_ceramic_tile(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx tile;
+	f32 phase = animTime * 0.02f;
+
+	GX_SetNumChans(1);
 	GX_SetNumTexGens(3);
 	GX_SetNumTevStages(5);
 	GX_SetNumIndStages(1);
@@ -3044,6 +3223,149 @@ static void setup_tev_oled_void(const Material *mat)
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 
 	memset(im, 0, sizeof(im));
+	im[0][0] = 0.22f; /* anodize pore scroll */
+	im[1][1] = 0.10f; /* stretch — brushed Mg grain */
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 6.2f;
+	scroll[1][1] = 2.4f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.42f) - (f32)(int)(phase * 0.42f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+	im[0][0] = 0.28f;
+	im[1][1] = 0.28f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -3);
+
+	memset(tile, 0, sizeof(tile));
+	tile[0][0] = 4.0f; /* tile grid repeat */
+	tile[1][1] = 4.0f;
+	tile[0][3] = phase - (f32)(int)phase;
+	GX_LoadTexMtxImm(tile, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_SetTexCoordGen(GX_TEXCOORD2, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.36f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(current_roughness(mat) < 0.40f
+		? current_roughness(mat) * 0.45f : 0.22f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+	(void)pbr->metal;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 68, 96, 88, 255 }); /* dual cool Mg dye */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 98, 128, 112, 255 }); /* dual cool fleck */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 220, 226, 232, 255 }); /* cool glaze */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* dyed Mg body */
+	/* cool glaze tint */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* anodize pore flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	/* tile grid detail (grout lines) */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_CPREV, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* scrolled IndTex metal (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_FROST_POLY — frosted polycarbonate: open IndTex × dual cool KONST.
+ * Soft scatter dielectric; no ADDHALF pale washout; bloom stays off.
+ */
+static void setup_tev_frost_poly(const Material *mat)
+	/* sharp glaze × Fresnel — not porcelain wrap */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD2, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+}
+
+/*
+ * FEAT_OLED_VOID — near-black OLED panel: dense IndTex × dual dark KONST.
+ * MAPS ON; no force-field shell; bloom stays off. Avoid pale KONST+ADDHALF.
+ */
+static void setup_tev_oled_void(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.038f;
+	f32 phase = animTime * 0.028f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(3);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.34f; /* open frost scatter */
+	im[1][1] = 0.38f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 3.6f; /* soft poly frost density */
+	scroll[1][1] = 4.1f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.48f) - (f32)(int)(phase * 0.48f);
 	im[0][0] = 0.10f; /* tight OLED pixel grain */
 	im[1][1] = 0.12f;
 	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
@@ -3071,6 +3393,7 @@ static void setup_tev_oled_void(const Material *mat)
 	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.62f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(0.18f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
@@ -3086,6 +3409,11 @@ static void setup_tev_oled_void(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
+	/* mid cool frost — not pale washout */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 118, 138, 152, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 148, 168, 178, 255 });
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 18, 20, 28, 255 }); /* dual dark void body */
 	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 52, 78, 255 }); /* dual cool pin fleck */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
@@ -3107,6 +3435,7 @@ static void setup_tev_oled_void(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* frost poly body */
 	/* near-black OLED body */
 	/* cool aggregate tint */
 	GX_SetTevDirect(GX_TEVSTAGE2);
@@ -3116,6 +3445,7 @@ static void setup_tev_oled_void(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* soft scatter flecks */
 	/* sparse cool pin flecks */
 	GX_SetTevDirect(GX_TEVSTAGE3);
 	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
@@ -3124,6 +3454,107 @@ static void setup_tev_oled_void(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* open IndTex frost (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_HOLO_VINYL — peelable holo vinyl: scrolled IndTex × dual chroma KONST.
+ * Distinct from HOLO FOIL; no force-field shell; bloom stays off.
+ */
+static void setup_tev_holo_vinyl(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.055f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.16f; /* vinyl foil scroll */
+	im[1][1] = 0.20f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 5.4f;
+	scroll[1][1] = 7.0f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.62f) - (f32)(int)(phase * 0.62f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.16f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 92, 42, 128, 255 }); /* dual chroma vinyl */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 118, 148, 255 }); /* dual cyan fleck */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* holo vinyl body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* scrolled chroma flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* scrolled IndTex vinyl (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
 	/* dense IndTex void (no shell) */
 	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
 		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
@@ -3149,6 +3580,13 @@ static void setup_tev_oled_void(const Material *mat)
 }
 
 /*
+ * FEAT_TUNGSTEN_FOAM — dense dark porous W foam: open IndTex × dual cool gray KONST.
+ * MAPS ON; mid-dark body; no pale KONST+ADDHALF; bloom stays off.
+ */
+static void setup_tev_tungsten_foam(const Material *mat)
+}
+
+/*
  * FEAT_ANODIZED_MG — magnesium anodize: scrolled IndTex × dual cool-green KONST.
  * MAPS ON; no force-field shell; bloom stays off.
  */
@@ -3164,6 +3602,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	PbrSet *pbr = active_pbr(mat);
 	f32 im[2][3];
 	Mtx scroll;
+	f32 phase = animTime * 0.032f;
 	f32 phase = animTime * 0.03f;
 
 	GX_SetNumChans(1);
@@ -3174,6 +3613,15 @@ static void setup_tev_wood_plank(const Material *mat)
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 
 	memset(im, 0, sizeof(im));
+	im[0][0] = 0.28f; /* open pore foam */
+	im[1][1] = 0.32f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 8.5f; /* dense tungsten cells */
+	scroll[1][1] = 9.2f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.36f) - (f32)(int)(phase * 0.36f);
 	im[0][0] = 0.22f; /* anodize pore scroll */
 	im[1][1] = 0.10f; /* stretch — brushed Mg grain */
 	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
@@ -3201,6 +3649,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.28f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(0.36f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
@@ -3216,6 +3665,11 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
+	/* mid-dark cool gray — not pale washout */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 58, 62, 72, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 88, 94, 108, 255 });
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 68, 96, 88, 255 }); /* dual cool Mg dye */
 	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 98, 128, 112, 255 }); /* dual cool fleck */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
@@ -3237,6 +3691,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* tungsten foam body */
 	/* dyed Mg body */
 	GX_SetTevDirect(GX_TEVSTAGE2);
 	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
@@ -3245,6 +3700,7 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* cool pore flecks */
 	/* anodize pore flecks */
 	GX_SetTevDirect(GX_TEVSTAGE3);
 	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
@@ -3253,6 +3709,10 @@ static void setup_tev_wood_plank(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* open IndTex foam (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
 	/* scrolled IndTex metal (no shell) */
 	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
 		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
@@ -3278,6 +3738,10 @@ static void setup_tev_wood_plank(const Material *mat)
 }
 
 /*
+ * FEAT_ALGAE_GLASS — soft green translucency: scrolled IndTex × dual kelp KONST.
+ * MAPS ON; no force-field shell; bloom stays off.
+ */
+static void setup_tev_algae_glass(const Material *mat)
  * FEAT_FROST_POLY — frosted polycarbonate: open IndTex × dual cool KONST.
  * Soft scatter dielectric; no ADDHALF pale washout; bloom stays off.
  */
@@ -3286,384 +3750,7 @@ static void setup_tev_frost_poly(const Material *mat)
 	PbrSet *pbr = active_pbr(mat);
 	f32 im[2][3];
 	Mtx scroll;
-	f32 phase = animTime * 0.038f;
-}
-
-/*
- * FEAT_BRICK — fired clay brick: warm red tint × albedo×AO, mortar from AO
- * emphasis, mid IndTex bumps. Distinct from leather (no scrolled grain hide).
- */
-static void setup_tev_brick(const Material *mat)
-{
-	PbrSet *pbr = active_pbr(mat);
-	f32 im[2][3];
-
-	GX_SetNumChans(1);
-	GX_SetNumTexGens(2);
-	GX_SetNumTevStages(5);
-	GX_SetNumIndStages(1);
-	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
-		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
-
-	memset(im, 0, sizeof(im));
-	im[0][0] = 0.34f; /* open frost scatter */
-	im[1][1] = 0.38f;
-	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
-
-	memset(scroll, 0, sizeof(scroll));
-	scroll[0][0] = 3.6f; /* soft poly frost density */
-	scroll[1][1] = 4.1f;
-	scroll[0][3] = phase - (f32)(int)phase;
-	scroll[1][3] = (phase * 0.48f) - (f32)(int)(phase * 0.48f);
-	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
-
-	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
-	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
-	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
-	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
-	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP2);
-	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
-	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
-	GX_LoadTexObj(select_env_tex(0.62f), GX_TEXMAP5);
-	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
-	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
-	(void)pbr->rough;
-	(void)pbr->metal;
-
-	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
-	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
-
-	/* mid cool frost — not pale washout */
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 118, 138, 152, 255 });
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 148, 168, 178, 255 });
-	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
-	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 186, 92, 68, 255 }); /* fired clay */
-	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
-
-	GX_SetTevDirect(GX_TEVSTAGE0);
-	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
-	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
-	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* AO ×2 — mortar recesses read darker */
-	GX_SetTevDirect(GX_TEVSTAGE1);
-	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* frost poly body */
-	GX_SetTevDirect(GX_TEVSTAGE2);
-	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* soft scatter flecks */
-	GX_SetTevDirect(GX_TEVSTAGE3);
-	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* open IndTex frost (no shell) */
-	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
-		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
-	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
-	/* sample metal (dielectric ≈0) into REG0 for map-aware completeness */
-	GX_SetTevDirect(GX_TEVSTAGE3);
-	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
-	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
-		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
-	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
-	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
-	(void)pbr->metal;
-}
-
-/*
- * FEAT_HOLO_VINYL — peelable holo vinyl: scrolled IndTex × dual chroma KONST.
- * Distinct from HOLO FOIL; no force-field shell; bloom stays off.
- */
-static void setup_tev_holo_vinyl(const Material *mat)
-{
-	PbrSet *pbr = active_pbr(mat);
-	f32 im[2][3];
-	Mtx scroll;
-	f32 phase = animTime * 0.055f;
-}
-
-/*
- * FEAT_CERAMIC_TILE — glazed floor/wall tile: cool glaze tint × albedo×AO ×
- * tiled detail grid, sharp dielectric IndTex coat. Distinct from PORCELAIN
- * (no soft wrap body — hard glaze over grid).
- */
-static void setup_tev_ceramic_tile(const Material *mat)
-{
-	PbrSet *pbr = active_pbr(mat);
-	f32 im[2][3];
-	Mtx tile;
-	f32 phase = animTime * 0.02f;
-
-	GX_SetNumChans(1);
-	GX_SetNumTexGens(2);
-	GX_SetNumTevStages(5);
-	GX_SetNumIndStages(1);
-	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
-		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
-
-	memset(im, 0, sizeof(im));
-	im[0][0] = 0.16f; /* vinyl foil scroll */
-	im[1][1] = 0.20f;
-	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
-
-	memset(scroll, 0, sizeof(scroll));
-	scroll[0][0] = 5.4f;
-	scroll[1][1] = 7.0f;
-	scroll[0][3] = phase - (f32)(int)phase;
-	scroll[1][3] = (phase * 0.62f) - (f32)(int)(phase * 0.62f);
-	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
-	im[0][0] = 0.28f;
-	im[1][1] = 0.28f;
-	GX_SetIndTexMatrix(GX_ITM_0, im, -3);
-
-	memset(tile, 0, sizeof(tile));
-	tile[0][0] = 4.0f; /* tile grid repeat */
-	tile[1][1] = 4.0f;
-	tile[0][3] = phase - (f32)(int)phase;
-	GX_LoadTexMtxImm(tile, GX_TEXMTX0, GX_MTX2x4);
-
-	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
-	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
-	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
-	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
-	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
-	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
-	GX_LoadTexObj(select_env_tex(0.16f), GX_TEXMAP5);
-	GX_LoadTexObj(select_env_tex(current_roughness(mat) < 0.40f
-		? current_roughness(mat) * 0.45f : 0.22f), GX_TEXMAP5);
-	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
-	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
-	(void)pbr->rough;
-	(void)pbr->metal;
-
-	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
-	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
-
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 92, 42, 128, 255 }); /* dual chroma vinyl */
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 118, 148, 255 }); /* dual cyan fleck */
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 220, 226, 232, 255 }); /* cool glaze */
-	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
-	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
-
-	GX_SetTevDirect(GX_TEVSTAGE0);
-	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
-	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
-	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	GX_SetTevDirect(GX_TEVSTAGE1);
-	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* holo vinyl body */
-	/* cool glaze tint */
-	GX_SetTevDirect(GX_TEVSTAGE2);
-	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* scrolled chroma flecks */
-	GX_SetTevDirect(GX_TEVSTAGE3);
-	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
-	/* tile grid detail (grout lines) */
-	GX_SetTevDirect(GX_TEVSTAGE3);
-	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_CPREV, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* scrolled IndTex vinyl (no shell) */
-	/* sharp glaze × Fresnel — not porcelain wrap */
-	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
-		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
-	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
-	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
-	(void)pbr->metal;
-}
-
-/*
- * FEAT_TUNGSTEN_FOAM — dense dark porous W foam: open IndTex × dual cool gray KONST.
- * MAPS ON; mid-dark body; no pale KONST+ADDHALF; bloom stays off.
- */
-static void setup_tev_tungsten_foam(const Material *mat)
- * FEAT_OLED_VOID — near-black OLED panel: dense IndTex × dual dark KONST.
- * MAPS ON; no force-field shell; bloom stays off. Avoid pale KONST+ADDHALF.
- */
-static void setup_tev_oled_void(const Material *mat)
-{
-	PbrSet *pbr = active_pbr(mat);
-	f32 im[2][3];
-	Mtx scroll;
-	f32 phase = animTime * 0.032f;
-	f32 phase = animTime * 0.028f;
-
-	GX_SetNumChans(1);
-	GX_SetNumTexGens(2);
-	GX_SetNumTevStages(5);
-	GX_SetNumIndStages(1);
-	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
-		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
-
-	memset(im, 0, sizeof(im));
-	im[0][0] = 0.28f; /* open pore foam */
-	im[1][1] = 0.32f;
-	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
-
-	memset(scroll, 0, sizeof(scroll));
-	scroll[0][0] = 8.5f; /* dense tungsten cells */
-	scroll[1][1] = 9.2f;
-	scroll[0][3] = phase - (f32)(int)phase;
-	scroll[1][3] = (phase * 0.36f) - (f32)(int)(phase * 0.36f);
-	im[0][0] = 0.10f; /* tight OLED pixel grain */
-	im[1][1] = 0.12f;
-	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
-
-	memset(scroll, 0, sizeof(scroll));
-	scroll[0][0] = 14.0f; /* dense void grain */
-	scroll[1][1] = 15.5f;
-	scroll[0][3] = phase - (f32)(int)phase;
-	scroll[1][3] = (phase * 0.30f) - (f32)(int)(phase * 0.30f);
-	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
-
-	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
-	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
-	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
-	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
-	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
-	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
-	GX_LoadTexObj(select_env_tex(0.28f), GX_TEXMAP5);
-	GX_LoadTexObj(select_env_tex(0.18f), GX_TEXMAP5);
-	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
-	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
-	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
-	(void)pbr->rough;
-
-	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
-	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
-
-	/* mid-dark cool gray — not pale washout */
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 58, 62, 72, 255 });
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 88, 94, 108, 255 });
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 18, 20, 28, 255 }); /* dual dark void body */
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 52, 78, 255 }); /* dual cool pin fleck */
-	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
-	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
-
-	GX_SetTevDirect(GX_TEVSTAGE0);
-	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
-	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
-	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	GX_SetTevDirect(GX_TEVSTAGE1);
-	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* tungsten foam body */
-	/* near-black OLED body */
-	GX_SetTevDirect(GX_TEVSTAGE2);
-	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
-	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* cool pore flecks */
-	/* sparse cool pin flecks */
-	GX_SetTevDirect(GX_TEVSTAGE3);
-	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
-	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-
-	/* open IndTex foam (no shell) */
-	/* dense IndTex void (no shell) */
-	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
-		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
-	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
-	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
-	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
-	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
-	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
-	(void)pbr->metal;
-}
-
-/*
- * FEAT_ALGAE_GLASS — soft green translucency: scrolled IndTex × dual kelp KONST.
- * MAPS ON; no force-field shell; bloom stays off.
- */
-static void setup_tev_algae_glass(const Material *mat)
- * FEAT_ANODIZED_MG — magnesium anodize: scrolled IndTex × dual cool-green KONST.
- * MAPS ON; no force-field shell; bloom stays off.
- */
-static void setup_tev_anodized_mg(const Material *mat)
-{
-	PbrSet *pbr = active_pbr(mat);
-	f32 im[2][3];
-	Mtx scroll;
 	f32 phase = animTime * 0.044f;
-	f32 phase = animTime * 0.046f;
 
 	GX_SetNumChans(1);
 	GX_SetNumTexGens(2);
@@ -3682,15 +3769,6 @@ static void setup_tev_anodized_mg(const Material *mat)
 	scroll[1][1] = 5.6f;
 	scroll[0][3] = phase - (f32)(int)phase;
 	scroll[1][3] = (phase * 0.52f) - (f32)(int)(phase * 0.52f);
-	im[0][0] = 0.22f; /* anodize pore scroll */
-	im[1][1] = 0.10f; /* stretch — brushed Mg grain */
-	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
-
-	memset(scroll, 0, sizeof(scroll));
-	scroll[0][0] = 6.2f;
-	scroll[1][1] = 2.4f;
-	scroll[0][3] = phase - (f32)(int)phase;
-	scroll[1][3] = (phase * 0.42f) - (f32)(int)(phase * 0.42f);
 	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
 
 	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
@@ -3701,7 +3779,6 @@ static void setup_tev_anodized_mg(const Material *mat)
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
 	GX_LoadTexObj(select_env_tex(0.55f), GX_TEXMAP5);
-	GX_LoadTexObj(select_env_tex(0.36f), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
 	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
 	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
@@ -3716,8 +3793,6 @@ static void setup_tev_anodized_mg(const Material *mat)
 
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 48, 96, 62, 255 }); /* dual kelp body */
 	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 78, 132, 88, 255 }); /* dual algae fleck */
-	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 68, 96, 88, 255 }); /* dual cool Mg dye */
-	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 98, 128, 112, 255 }); /* dual cool fleck */
 	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
 	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
 
@@ -3736,7 +3811,6 @@ static void setup_tev_anodized_mg(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
 	/* algae glass body */
-	/* dyed Mg body */
 	GX_SetTevDirect(GX_TEVSTAGE2);
 	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
@@ -3745,7 +3819,6 @@ static void setup_tev_anodized_mg(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
 	/* scrolled kelp flecks */
-	/* anodize pore flecks */
 	GX_SetTevDirect(GX_TEVSTAGE3);
 	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
 	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
@@ -3754,7 +3827,6 @@ static void setup_tev_anodized_mg(const Material *mat)
 	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
 	/* scrolled IndTex glass (no shell) */
-	/* scrolled IndTex metal (no shell) */
 	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
 		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
 	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
@@ -3771,16 +3843,22 @@ static void setup_tev_anodized_mg(const Material *mat)
  * MAPS ON; mid-dark; no pale KONST+ADDHALF; bloom stays off.
  */
 static void setup_tev_obsidian_wool(const Material *mat)
- * FEAT_FROST_POLY — frosted polycarbonate: open IndTex × dual cool KONST.
- * Soft scatter dielectric; no ADDHALF pale washout; bloom stays off.
- */
-static void setup_tev_frost_poly(const Material *mat)
 {
 	PbrSet *pbr = active_pbr(mat);
 	f32 im[2][3];
 	Mtx scroll;
 	f32 phase = animTime * 0.026f;
 	f32 phase = animTime * 0.038f;
+}
+
+/*
+ * FEAT_BRICK — fired clay brick: warm red tint × albedo×AO, mortar from AO
+ * emphasis, mid IndTex bumps. Distinct from leather (no scrolled grain hide).
+ */
+static void setup_tev_brick(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
 
 	GX_SetNumChans(1);
 	GX_SetNumTexGens(2);
@@ -3818,6 +3896,592 @@ static void setup_tev_frost_poly(const Material *mat)
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
 	GX_LoadTexObj(select_env_tex(0.22f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(current_roughness(mat)), GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.62f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+	(void)pbr->metal;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	/* dual deep mid-dark — not black crush or pale wash */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 22, 20, 28, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 48, 44, 58, 255 });
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+	/* mid cool frost — not pale washout */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 118, 138, 152, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 148, 168, 178, 255 });
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 186, 92, 68, 255 }); /* fired clay */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* AO ×2 — mortar recesses read darker */
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* obsidian wool body */
+	/* frost poly body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* dense loft flecks */
+	/* soft scatter flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* dense IndTex loft (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	/* open IndTex frost (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	/* sample metal (dielectric ≈0) into REG0 for map-aware completeness */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD0, GX_TEXMAP4, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG0);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_TOPAZ_DUST — warm gold grit: fine IndTex × dual amber KONST.
+ * MAPS ON; no pale KONST+ADDHALF; bloom stays off.
+ */
+static void setup_tev_topaz_dust(const Material *mat)
+ * FEAT_HOLO_VINYL — peelable holo vinyl: scrolled IndTex × dual chroma KONST.
+ * Distinct from HOLO FOIL; no force-field shell; bloom stays off.
+ */
+static void setup_tev_holo_vinyl(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.050f;
+	f32 phase = animTime * 0.055f;
+}
+
+/*
+ * FEAT_CERAMIC_TILE — glazed floor/wall tile: cool glaze tint × albedo×AO ×
+ * tiled detail grid, sharp dielectric IndTex coat. Distinct from PORCELAIN
+ * (no soft wrap body — hard glaze over grid).
+ */
+static void setup_tev_ceramic_tile(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx tile;
+	f32 phase = animTime * 0.02f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.18f; /* fine grit */
+	im[1][1] = 0.22f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 7.8f;
+	scroll[1][1] = 6.4f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.58f) - (f32)(int)(phase * 0.58f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+	im[0][0] = 0.16f; /* vinyl foil scroll */
+	im[1][1] = 0.20f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 5.4f;
+	scroll[1][1] = 7.0f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.62f) - (f32)(int)(phase * 0.62f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+	im[0][0] = 0.28f;
+	im[1][1] = 0.28f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -3);
+
+	memset(tile, 0, sizeof(tile));
+	tile[0][0] = 4.0f; /* tile grid repeat */
+	tile[1][1] = 4.0f;
+	tile[0][3] = phase - (f32)(int)phase;
+	GX_LoadTexMtxImm(tile, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.24f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.16f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(current_roughness(mat) < 0.40f
+		? current_roughness(mat) * 0.45f : 0.22f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	/* dual amber — mid warm, not pale chrome grit */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 148, 98, 36, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 188, 142, 58, 255 });
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 92, 42, 128, 255 }); /* dual chroma vinyl */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 118, 148, 255 }); /* dual cyan fleck */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 220, 226, 232, 255 }); /* cool glaze */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* topaz dust body */
+	/* holo vinyl body */
+	/* cool glaze tint */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* fine amber grit flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	/* scrolled chroma flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	/* tile grid detail (grout lines) */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_CPREV, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* fine IndTex grit (no shell) */
+	/* scrolled IndTex vinyl (no shell) */
+	/* sharp glaze × Fresnel — not porcelain wrap */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_PALLADIUM_FOIL — soft silver sheet: fine IndTex × dual soft silver KONST.
+ * MAPS ON; mid silver (not pale washout); no ADDHALF; bloom stays off.
+ */
+static void setup_tev_palladium_foil(const Material *mat)
+ * FEAT_TUNGSTEN_FOAM — dense dark porous W foam: open IndTex × dual cool gray KONST.
+ * MAPS ON; mid-dark body; no pale KONST+ADDHALF; bloom stays off.
+ */
+static void setup_tev_tungsten_foam(const Material *mat)
+ * FEAT_OLED_VOID — near-black OLED panel: dense IndTex × dual dark KONST.
+ * MAPS ON; no force-field shell; bloom stays off. Avoid pale KONST+ADDHALF.
+ */
+static void setup_tev_oled_void(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.038f;
+	f32 phase = animTime * 0.032f;
+	f32 phase = animTime * 0.028f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.16f; /* fine foil grain */
+	im[1][1] = 0.19f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 9.2f;
+	scroll[1][1] = 8.4f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.42f) - (f32)(int)(phase * 0.42f);
+	im[0][0] = 0.28f; /* open pore foam */
+	im[1][1] = 0.32f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 8.5f; /* dense tungsten cells */
+	scroll[1][1] = 9.2f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.36f) - (f32)(int)(phase * 0.36f);
+	im[0][0] = 0.10f; /* tight OLED pixel grain */
+	im[1][1] = 0.12f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 14.0f; /* dense void grain */
+	scroll[1][1] = 15.5f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.30f) - (f32)(int)(phase * 0.30f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.20f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.28f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.18f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	/* mid soft silver — not pale KONST+ADDHALF chrome blowout */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 108, 114, 128, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 148, 154, 168, 255 });
+	/* mid-dark cool gray — not pale washout */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 58, 62, 72, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 88, 94, 108, 255 });
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 18, 20, 28, 255 }); /* dual dark void body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 42, 52, 78, 255 }); /* dual cool pin fleck */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* palladium foil body */
+	/* tungsten foam body */
+	/* near-black OLED body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* soft silver flecks (DIVIDE_2, no ADDHALF) */
+	/* cool pore flecks */
+	/* sparse cool pin flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* fine IndTex foil (no shell) */
+	/* open IndTex foam (no shell) */
+	/* dense IndTex void (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_MYCELIUM_TILE — organic network tile: scrolled IndTex × dual warm tan KONST.
+ * MAPS ON; no force-field shell; bloom stays off.
+ */
+static void setup_tev_mycelium_tile(const Material *mat)
+ * FEAT_ALGAE_GLASS — soft green translucency: scrolled IndTex × dual kelp KONST.
+ * MAPS ON; no force-field shell; bloom stays off.
+ */
+static void setup_tev_algae_glass(const Material *mat)
+ * FEAT_ANODIZED_MG — magnesium anodize: scrolled IndTex × dual cool-green KONST.
+ * MAPS ON; no force-field shell; bloom stays off.
+ */
+static void setup_tev_anodized_mg(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.044f;
+	f32 phase = animTime * 0.046f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.22f; /* network scroll */
+	im[1][1] = 0.28f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 5.1f;
+	scroll[1][1] = 6.8f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.61f) - (f32)(int)(phase * 0.61f);
+	im[0][0] = 0.20f; /* soft kelp scroll */
+	im[1][1] = 0.26f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 4.2f;
+	scroll[1][1] = 5.6f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.52f) - (f32)(int)(phase * 0.52f);
+	im[0][0] = 0.22f; /* anodize pore scroll */
+	im[1][1] = 0.10f; /* stretch — brushed Mg grain */
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 6.2f;
+	scroll[1][1] = 2.4f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.42f) - (f32)(int)(phase * 0.42f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.48f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.55f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.36f), GX_TEXMAP5);
+	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
+	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->ao, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&texDetail, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->normal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->metal, GX_REPEAT, GX_REPEAT);
+	GX_InitTexObjWrapMode(&pbr->rough, GX_REPEAT, GX_REPEAT);
+	(void)pbr->rough;
+
+	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
+	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
+
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 118, 92, 54, 255 }); /* dual warm tan body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 152, 122, 72, 255 }); /* dual mycelium fleck */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 48, 96, 62, 255 }); /* dual kelp body */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 78, 132, 88, 255 }); /* dual algae fleck */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 68, 96, 88, 255 }); /* dual cool Mg dye */
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 98, 128, 112, 255 }); /* dual cool fleck */
+	GX_SetTevKColorSel(GX_TEVSTAGE2, GX_TEV_KCSEL_K0);
+	GX_SetTevKColorSel(GX_TEVSTAGE3, GX_TEV_KCSEL_K1);
+
+	GX_SetTevDirect(GX_TEVSTAGE0);
+	GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+	GX_SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_ONE, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+	GX_SetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	GX_SetTevDirect(GX_TEVSTAGE1);
+	GX_SetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP1, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_CPREV, GX_CC_TEXC, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* mycelium tile body */
+	/* algae glass body */
+	/* dyed Mg body */
+	GX_SetTevDirect(GX_TEVSTAGE2);
+	GX_SetTevOrder(GX_TEVSTAGE2, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_ZERO);
+	GX_SetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* scrolled network flecks */
+	/* scrolled kelp flecks */
+	/* anodize pore flecks */
+	GX_SetTevDirect(GX_TEVSTAGE3);
+	GX_SetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD1, GX_TEXMAP2, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_KONST, GX_CC_TEXC, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE3, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+	GX_SetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+	/* scrolled IndTex network (no shell) */
+	/* scrolled IndTex glass (no shell) */
+	/* scrolled IndTex metal (no shell) */
+	GX_SetTevIndirect(GX_TEVSTAGE4, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_STU,
+		GX_ITM_0, GX_ITW_OFF, GX_ITW_OFF, GX_FALSE, GX_FALSE, GX_ITBA_OFF);
+	GX_SetTevOrder(GX_TEVSTAGE4, GX_TEXCOORD0, GX_TEXMAP5, GX_COLORNULL);
+	GX_SetTevColorIn(GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_TEXC, GX_CC_APREV, GX_CC_CPREV);
+	GX_SetTevColorOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_DIVIDE_2, GX_TRUE, GX_TEVPREV);
+	GX_SetTevAlphaIn(GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
+	GX_SetTevAlphaOp(GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+	GX_SetTevKAlphaSel(GX_TEVSTAGE4, GX_TEV_KASEL_1);
+	(void)pbr->metal;
+}
+
+/*
+ * FEAT_SAPPHIRE_WOOL — deep blue loft: dense IndTex × dual cool blue KONST.
+ * MAPS ON; mid-deep; no pale KONST+ADDHALF; bloom stays off.
+ */
+static void setup_tev_sapphire_wool(const Material *mat)
+ * FEAT_OBSIDIAN_WOOL — near-black loft: dense IndTex × dual deep KONST.
+ * MAPS ON; mid-dark; no pale KONST+ADDHALF; bloom stays off.
+ */
+static void setup_tev_obsidian_wool(const Material *mat)
+ * FEAT_FROST_POLY — frosted polycarbonate: open IndTex × dual cool KONST.
+ * Soft scatter dielectric; no ADDHALF pale washout; bloom stays off.
+ */
+static void setup_tev_frost_poly(const Material *mat)
+{
+	PbrSet *pbr = active_pbr(mat);
+	f32 im[2][3];
+	Mtx scroll;
+	f32 phase = animTime * 0.028f;
+	f32 phase = animTime * 0.026f;
+	f32 phase = animTime * 0.038f;
+
+	GX_SetNumChans(1);
+	GX_SetNumTexGens(2);
+	GX_SetNumTevStages(5);
+	GX_SetNumIndStages(1);
+	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_VTX, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+
+	memset(im, 0, sizeof(im));
+	im[0][0] = 0.11f; /* dense loft grain */
+	im[1][1] = 0.13f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 11.5f; /* dense sapphire loft */
+	scroll[1][1] = 12.8f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.31f) - (f32)(int)(phase * 0.31f);
+	im[0][0] = 0.12f; /* dense loft grain */
+	im[1][1] = 0.14f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -6);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 12.0f; /* dense wool loft */
+	scroll[1][1] = 13.5f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.28f) - (f32)(int)(phase * 0.28f);
+	im[0][0] = 0.34f; /* open frost scatter */
+	im[1][1] = 0.38f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -5);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 3.6f; /* soft poly frost density */
+	scroll[1][1] = 4.1f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.48f) - (f32)(int)(phase * 0.48f);
+	GX_LoadTexMtxImm(scroll, GX_TEXMTX0, GX_MTX2x4);
+
+	GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+	GX_SetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0);
+	GX_LoadTexObj(&pbr->albedo, GX_TEXMAP0);
+	GX_LoadTexObj(&pbr->ao, GX_TEXMAP1);
+	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
+	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
+	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.26f), GX_TEXMAP5);
+	GX_LoadTexObj(select_env_tex(0.22f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(0.62f), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
 	GX_InitTexObjWrapMode(&pbr->albedo, GX_REPEAT, GX_REPEAT);
@@ -3831,6 +4495,9 @@ static void setup_tev_frost_poly(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
+	/* dual cool blue — deep loft, not pale wash */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 28, 48, 118, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 52, 78, 158, 255 });
 	/* dual deep mid-dark — not black crush or pale wash */
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 22, 20, 28, 255 });
 	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 48, 44, 58, 255 });
@@ -3854,6 +4521,7 @@ static void setup_tev_frost_poly(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* sapphire wool body */
 	/* obsidian wool body */
 	/* frost poly body */
 	GX_SetTevDirect(GX_TEVSTAGE2);
@@ -3886,6 +4554,10 @@ static void setup_tev_frost_poly(const Material *mat)
 }
 
 /*
+ * FEAT_MALACHITE_DUST — banded green grit: fine IndTex × dual emerald KONST.
+ * MAPS ON; no pale KONST+ADDHALF; bloom stays off.
+ */
+static void setup_tev_malachite_dust(const Material *mat)
  * FEAT_TOPAZ_DUST — warm gold grit: fine IndTex × dual amber KONST.
  * MAPS ON; no pale KONST+ADDHALF; bloom stays off.
  */
@@ -3898,6 +4570,7 @@ static void setup_tev_holo_vinyl(const Material *mat)
 	PbrSet *pbr = active_pbr(mat);
 	f32 im[2][3];
 	Mtx scroll;
+	f32 phase = animTime * 0.052f;
 	f32 phase = animTime * 0.050f;
 	f32 phase = animTime * 0.055f;
 
@@ -3909,6 +4582,15 @@ static void setup_tev_holo_vinyl(const Material *mat)
 		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 
 	memset(im, 0, sizeof(im));
+	im[0][0] = 0.17f; /* fine grit */
+	im[1][1] = 0.21f;
+	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
+
+	memset(scroll, 0, sizeof(scroll));
+	scroll[0][0] = 7.4f;
+	scroll[1][1] = 6.2f;
+	scroll[0][3] = phase - (f32)(int)phase;
+	scroll[1][3] = (phase * 0.55f) - (f32)(int)(phase * 0.55f);
 	im[0][0] = 0.18f; /* fine grit */
 	im[1][1] = 0.22f;
 	GX_SetIndTexMatrix(GX_ITM_0, im, -4);
@@ -3936,6 +4618,7 @@ static void setup_tev_holo_vinyl(const Material *mat)
 	GX_LoadTexObj(&texDetail, GX_TEXMAP2);
 	GX_LoadTexObj(&pbr->normal, GX_TEXMAP3);
 	GX_LoadTexObj(&pbr->metal, GX_TEXMAP4);
+	GX_LoadTexObj(select_env_tex(0.32f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(0.24f), GX_TEXMAP5);
 	GX_LoadTexObj(select_env_tex(0.16f), GX_TEXMAP5);
 	GX_LoadTexObj(&pbr->rough, GX_TEXMAP6);
@@ -3950,6 +4633,9 @@ static void setup_tev_holo_vinyl(const Material *mat)
 	GX_SetIndTexOrder(GX_INDTEXSTAGE0, GX_TEXCOORD0, GX_TEXMAP3);
 	GX_SetIndTexCoordScale(GX_INDTEXSTAGE0, GX_ITS_1, GX_ITS_1);
 
+	/* dual emerald — banded grit, not pale wash */
+	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 28, 98, 58, 255 });
+	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 52, 138, 82, 255 });
 	/* dual amber — mid warm, not pale chrome grit */
 	GX_SetTevKColor(GX_KCOLOR0, (GXColor){ 148, 98, 36, 255 });
 	GX_SetTevKColor(GX_KCOLOR1, (GXColor){ 188, 142, 58, 255 });
@@ -3972,6 +4658,7 @@ static void setup_tev_holo_vinyl(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* malachite dust body */
 	/* topaz dust body */
 	/* holo vinyl body */
 	GX_SetTevDirect(GX_TEVSTAGE2);
@@ -3981,6 +4668,7 @@ static void setup_tev_holo_vinyl(const Material *mat)
 	GX_SetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
 	GX_SetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 
+	/* fine emerald grit flecks */
 	/* fine amber grit flecks */
 	/* scrolled chroma flecks */
 	GX_SetTevDirect(GX_TEVSTAGE3);
@@ -4163,6 +4851,9 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 		&& featureIndex != FEAT_OLED_VOID && featureIndex != FEAT_ANODIZED_MG
 		&& featureIndex != FEAT_FROST_POLY && featureIndex != FEAT_HOLO_VINYL
 		&& featureIndex != FEAT_TUNGSTEN_FOAM && featureIndex != FEAT_ALGAE_GLASS
+		&& featureIndex != FEAT_OBSIDIAN_WOOL && featureIndex != FEAT_TOPAZ_DUST
+		&& featureIndex != FEAT_PALLADIUM_FOIL && featureIndex != FEAT_MYCELIUM_TILE
+		&& featureIndex != FEAT_SAPPHIRE_WOOL && featureIndex != FEAT_MALACHITE_DUST) {
 		&& featureIndex != FEAT_OBSIDIAN_WOOL && featureIndex != FEAT_TOPAZ_DUST) {
 		&& featureIndex != FEAT_FROST_POLY && featureIndex != FEAT_HOLO_VINYL) {
 		setup_tev_flat_lit(mat);
@@ -4213,6 +4904,10 @@ static void setup_pbr_tev(const Material *mat, int use_env)
 	case FEAT_ALGAE_GLASS:   setup_tev_algae_glass(mat); break;
 	case FEAT_OBSIDIAN_WOOL: setup_tev_obsidian_wool(mat); break;
 	case FEAT_TOPAZ_DUST:    setup_tev_topaz_dust(mat); break;
+	case FEAT_PALLADIUM_FOIL: setup_tev_palladium_foil(mat); break;
+	case FEAT_MYCELIUM_TILE: setup_tev_mycelium_tile(mat); break;
+	case FEAT_SAPPHIRE_WOOL: setup_tev_sapphire_wool(mat); break;
+	case FEAT_MALACHITE_DUST: setup_tev_malachite_dust(mat); break;
 	case FEAT_MOD2X_DETAIL:  setup_tev_mod2x(mat); break;
 	case FEAT_SPEC_MASK:     setup_tev_spec_mask(mat); break;
 	case FEAT_SCALE2_LIGHT:  setup_tev_scale2_light(mat); break;
@@ -5366,10 +6061,6 @@ int main(int argc, char **argv)
 				select_material(27, 1); /* OBSIDIAN WOOL card + path */
 				featureIndex = FEAT_OBSIDIAN_WOOL;
 				roughnessOverride = 0.72f;
-			if (frame == 2580) {
-				select_material(24, 1); /* HOLO VINYL card + path */
-				featureIndex = FEAT_HOLO_VINYL;
-				roughnessOverride = 0.22f;
 				tint_sphere_vertices(&materials[materialIndex]);
 				skyIndex = 1;
 				bloomEnabled = 0;
@@ -5385,6 +6076,52 @@ int main(int argc, char **argv)
 				mirrorFloor = 0;
 			}
 			if (frame == 2930) {
+				select_material(29, 1); /* PALLADIUM FOIL card + path */
+				featureIndex = FEAT_PALLADIUM_FOIL;
+				roughnessOverride = 0.28f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 0;
+				bloomEnabled = 0;
+				mirrorFloor = 0;
+			}
+			if (frame == 3000) {
+				select_material(30, 1); /* MYCELIUM TILE card + path */
+				featureIndex = FEAT_MYCELIUM_TILE;
+				roughnessOverride = 0.68f;
+				tint_sphere_vertices(&materials[materialIndex]);
+			if (frame == 2580) {
+				select_material(24, 1); /* HOLO VINYL card + path */
+				featureIndex = FEAT_HOLO_VINYL;
+				roughnessOverride = 0.22f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 1;
+				bloomEnabled = 0;
+				mirrorFloor = 0;
+			}
+			if (frame == 3070) {
+				select_material(31, 1); /* SAPPHIRE WOOL card + path */
+				featureIndex = FEAT_SAPPHIRE_WOOL;
+				roughnessOverride = 0.74f;
+			if (frame == 2860) {
+				select_material(28, 1); /* TOPAZ DUST card + path */
+				featureIndex = FEAT_TOPAZ_DUST;
+				roughnessOverride = 0.48f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 2;
+				bloomEnabled = 0;
+				mirrorFloor = 0;
+			}
+			if (frame == 3140) {
+				select_material(32, 1); /* MALACHITE DUST card + path */
+				featureIndex = FEAT_MALACHITE_DUST;
+				roughnessOverride = 0.52f;
+				tint_sphere_vertices(&materials[materialIndex]);
+				skyIndex = 0;
+				bloomEnabled = 0;
+				mirrorFloor = 0;
+			}
+			if (frame == 3210) {
+			if (frame == 2930) {
 			if (frame == 2650) {
 				select_material(0, 1); /* RUST — back to hero PBR */
 				featureIndex = FEAT_HERO_RUST_PBR;
@@ -5392,6 +6129,7 @@ int main(int argc, char **argv)
 				tint_sphere_vertices(&materials[materialIndex]);
 				skyIndex = 0;
 			}
+			if (frame == 3260)
 			if (frame == 2980)
 			if (frame == 2700)
 				captureReel = 0;
