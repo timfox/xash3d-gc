@@ -52,6 +52,22 @@ int main( void )
 	in[1].key = "gamma"; strcpy( in[1].value, "1" );
 	assert( GC_SettingsPack( buf, 20, in, 2 ) == 0 );
 
+	/* the achievement blob travels as 192 hex characters under gc_ach */
+	{
+		gc_setting_t ach[1];
+		gc_setting_t back[2];
+		unsigned char big[GC_SETTINGS_MAX_BLOB];
+		int m, k;
+
+		ach[0].key = "gc_ach";
+		for( k = 0; k < 192; k++ ) ach[0].value[k] = "0123456789abcdef"[k & 15];
+		ach[0].value[192] = 0;
+		m = GC_SettingsPack( big, sizeof( big ), ach, 1 );
+		assert( m > 192 );
+		assert( GC_SettingsUnpack( big, (size_t)m, back, 2 ) == 1 );
+		assert( !strcmp( back[0].key, "gc_ach" ) && !strcmp( back[0].value, ach[0].value ));
+	}
+
 	puts( "settings blob ok" );
 	return 0;
 }
