@@ -79,7 +79,10 @@ static s32 gc_wd_pvs_blk_id = -1;
  * store is taken from the heap at world load when it has the room. */
 #define GC_WD_LM_SLOTS_MAX	254	/* slot + 1 fits the byte of a deferred draw record */
 #define GC_WD_LM_HEAP_BYTES	( 128u * 1024u )
+/* One hint entry a page. A DoD map has 2000 lit leaves and more (dod_caen), each with a page or several. */
+#define GC_WD_LM_HINT		4096u
 #else
+#define GC_WD_LM_HINT		2048u
 #define GC_WD_LM_SLOTS		192
 #define GC_WD_LM_SLOTS_MAX	GC_WD_LM_SLOTS
 #endif
@@ -255,6 +258,7 @@ static byte gc_wd_lm_bss[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__(( a
 static byte *gc_wd_lm_store = gc_wd_lm_bss;	/* the BSS store, or gc_wd_lm_heap */
 static byte *gc_wd_lm_heap;	/* a larger store from the heap, freed with the world */
 static qboolean gc_wd_lm_in_arena;	/* gc_wd_lm_store is a map arena block: dropped with the arena */
+static qboolean gc_wd_lm_hint_exact;	/* no more pages in the pack than hint entries */
 static u32 gc_wd_lm_refused;	/* page asks that found no slot (vertex colour drawn instead) */
 static int gc_wd_lm_nslots = GC_WD_LM_SLOTS;
 static u32 gc_wd_lm_page_bytes = GC_WD_LM_PAGE_BYTES;	/* 2048 RGB565 or 512 CMPR */
@@ -448,7 +452,7 @@ static void R_GXWorldDLLmDropStore( void )
 
 static byte *R_GXWorldDLLmPage( u32 page )
 {
-	static u8 hint[2048];	/* page & 2047 -> slot it was last found in */
+	static u8 hint[GC_WD_LM_HINT];	/* page & ( GC_WD_LM_HINT - 1 ) -> slot it was last found in */
 	static int full_frame = -1;	/* frame in which every slot was already in use */
 	int i, victim = -1;
 	s32 oldest = 0x7fffffff;
@@ -465,7 +469,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	}
 #endif
 
-	i = hint[page & 2047u];
+	i = hint[page & ( GC_WD_LM_HINT - 1u )];
 	if( i < gc_wd_lm_nslots && gc_wd_lm_slot_page[i] == (s32)page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
@@ -475,9 +479,9 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	/* A wide view asks for more pages than there are slots (500 chunks in
 	 * the Lost Coast harbor, 192 slots). Once the cache is full for this
 	 * frame every further request walked all the slots to learn that again:
-	 * up to 2.5 ms a world pass. With at most 2048 pages the hint is exact,
+	 * up to 2.5 ms a world pass. With no more pages than hint entries the hint is exact,
 	 * so a hint miss on a full frame means the page is not resident. */
-	if( full_frame == gc_wd_frame && gc_wd_hdr.n_chunks <= 2048u )
+	if( full_frame == gc_wd_frame && gc_wd_lm_hint_exact )
 		return NULL;
 	for( i = 0; i < gc_wd_lm_nslots; i++ )
 	{
@@ -485,7 +489,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		{
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
 			GC_WD_LM_TOUCH( i );
-			hint[page & 2047u] = (u8)i;
+			hint[page & ( GC_WD_LM_HINT - 1u )] = (u8)i;
 			return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
 		}
 		/* A page used by the previous world pass stays: with the water
@@ -531,7 +535,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	GC_WD_LM_TOUCH( victim );
 	gc_wd_lm_miss++;
 	gc_wd_lm_miss_total++;
-	hint[page & 2047u] = (u8)victim;
+	hint[page & ( GC_WD_LM_HINT - 1u )] = (u8)victim;
 	return gc_wd_lm_store + (u32)victim * gc_wd_lm_page_bytes;
 }
 
@@ -1652,6 +1656,11 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		gc_wd_lm_stream = gc_wd_hdr.ofs_chunks + (( last_end + 31u ) & ~31u );
 		gc_wd_lm_page_bytes = ( gc_wd_hdr.flags & GC_WD_FLAG_LM_CMPR ) ? GC_WD_LM_CMPR_BYTES : GC_WD_LM_PAGE_BYTES;
 		gc_wd_lm_fmt = ( gc_wd_hdr.flags & GC_WD_FLAG_LM_CMPR ) ? GX_TF_CMPR : GX_TF_RGB565;
+		/* Raw pages: the stream's size says how many there are. LZ4 pages: one a chunk at most. */
+		gc_wd_lm_hint_exact = ( gc_wd_hdr.flags & GC_WD_FLAG_LM_LZ4 )
+			? ( gc_wd_hdr.n_chunks <= GC_WD_LM_HINT && !( gc_wd_hdr.flags & GC_WD_FLAG_LM_MULTI ))
+			: ( gc_wd_hdr.file_size >= gc_wd_lm_stream
+				&& ( gc_wd_hdr.file_size - gc_wd_lm_stream ) / gc_wd_lm_page_bytes <= GC_WD_LM_HINT );
 		gc_wd_lm_nslots = (int)( sizeof( gc_wd_lm_bss ) / gc_wd_lm_page_bytes );
 #if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
 		/* The store comes from a gap in the map arena first: the heap gate

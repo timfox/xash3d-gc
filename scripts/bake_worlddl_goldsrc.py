@@ -40,8 +40,9 @@ PVS_BLOCK = 4096
 LM_PAGES_MAX = 1024
 # CMPR pages are a quarter of the size, and a cell there owns whole 4x4 blocks, so a page holds at most 63
 # one-luxel faces: with one page a leaf the crowded leaves had faces left with no cell at all (flat grey).
-# Twice the pages is still half the bytes of the RGB565 stream.  The runtime's page hint is exact to 2048.
-LM_PAGES_MAX_CMPR = 2048
+# dod_caen alone has more than 2000 lit leaves.  4096 CMPR pages are the bytes of the 1024 RGB565 pages before
+# (2 MB of the ARAM stream at most), and the runtime's page hint (GC_WD_LM_HINT) is exact to 4096.
+LM_PAGES_MAX_CMPR = 4096
 # A crowded leaf takes up to this many pages; a batch names its page in the low bits of its pad word.
 LM_CHUNK_PAGES = 4
 WD_FLAG_LM_MULTI = 0x0040
