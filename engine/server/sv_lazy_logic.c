@@ -9,10 +9,11 @@ typedef struct
 {
 	uint32_t hash, ofs, len;
 	uint8_t  spawned;
+	int16_t  edict;
 } lazy_entry_t;
 
 static lazy_entry_t lazy_tab[LAZY_LOGIC_MAX];
-static int lazy_count, lazy_pending, lazy_spawned;
+static int lazy_count, lazy_pending, lazy_spawned, lazy_failed;
 
 uint32_t LazyLogic_Hash( const char *name )
 {
@@ -26,7 +27,7 @@ uint32_t LazyLogic_Hash( const char *name )
 void LazyLogic_Reset( void )
 {
 	memset( lazy_tab, 0, sizeof( lazy_tab ));
-	lazy_count = lazy_pending = lazy_spawned = 0;
+	lazy_count = lazy_pending = lazy_spawned = lazy_failed = 0;
 }
 
 int LazyLogic_Add( uint32_t name_hash, uint32_t ofs, uint32_t len )
@@ -44,6 +45,27 @@ int LazyLogic_Add( uint32_t name_hash, uint32_t ofs, uint32_t len )
 int LazyLogic_Pending( void ) { return lazy_pending; }
 int LazyLogic_Total( void ) { return lazy_count; }
 int LazyLogic_Spawned( void ) { return lazy_spawned; }
+int LazyLogic_Failed( void ) { return lazy_failed; }
+
+void LazyLogic_NoteEdict( uint32_t ofs, int edict )
+{
+	int i;
+
+	for( i = 0; i < lazy_count; i++ )
+		if( lazy_tab[i].ofs == ofs )
+			lazy_tab[i].edict = (int16_t)edict;
+}
+
+int LazyLogic_Entry( int i, uint32_t *ofs, uint32_t *len, int *spawned, int *edict )
+{
+	if( i < 0 || i >= lazy_count )
+		return 0;
+	if( ofs ) *ofs = lazy_tab[i].ofs;
+	if( len ) *len = lazy_tab[i].len;
+	if( spawned ) *spawned = lazy_tab[i].spawned;
+	if( edict ) *edict = lazy_tab[i].edict;
+	return 1;
+}
 
 int LazyLogic_Materialize( uint32_t name_hash, lazy_spawn_fn spawn, void *ctx )
 {
@@ -70,6 +92,8 @@ int LazyLogic_Materialize( uint32_t name_hash, lazy_spawn_fn spawn, void *ctx )
 		{
 			e->spawned = 0;		/* collision or no room right now: stays pending */
 			lazy_pending++;
+			if( r < 0 )
+				lazy_failed++;
 		}
 	}
 	return n;

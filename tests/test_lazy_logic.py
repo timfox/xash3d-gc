@@ -150,3 +150,69 @@ class LazyLogic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LazyLogicLifecycle(LazyLogic):
+    """Restart and level change: the table belongs to one map load; nothing leaks into the next."""
+
+    def test_report_entries_and_failure_counter(self):
+        L = self.L
+        L.LazyLogic_Failed.restype = ctypes.c_int
+        L.LazyLogic_Entry.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+                                      ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+        h = L.LazyLogic_Hash(b"x")
+        L.LazyLogic_Add(h, 100, 7)
+        L.LazyLogic_Add(L.LazyLogic_Hash(b"y"), 200, 9)
+        fail = CB(lambda _c, _o, _l: -1)
+        self.assertEqual(L.LazyLogic_Materialize(h, fail, None), 0)
+        self.assertEqual(L.LazyLogic_Failed(), 1)
+        ok = CB(lambda _c, _o, _l: 1)
+        self.assertEqual(L.LazyLogic_Materialize(h, ok, None), 1)
+        L.LazyLogic_NoteEdict(100, 77)
+        ofs, ln, sp, ed = ctypes.c_uint32(), ctypes.c_uint32(), ctypes.c_int(), ctypes.c_int()
+        self.assertEqual(L.LazyLogic_Entry(0, ofs, ln, sp, ed), 1)
+        self.assertEqual((ofs.value, ln.value, sp.value, ed.value), (100, 7, 1, 77))
+        self.assertEqual(L.LazyLogic_Entry(1, ofs, ln, sp, ed), 1)
+        self.assertEqual((sp.value, ed.value), (0, 0), "an entry nobody asked for is still pending, no edict")
+        self.assertEqual(L.LazyLogic_Entry(2, ofs, ln, sp, ed), 0)
+
+    def test_reset_for_the_next_map_load_leaves_nothing_behind(self):
+        L = self.L
+        names = [b"a", b"b", b"c"]
+        for i, nm in enumerate(names):
+            L.LazyLogic_Add(L.LazyLogic_Hash(nm), i * 10, 4)
+        cb = CB(lambda _c, _o, _l: 1)
+        L.LazyLogic_Materialize(L.LazyLogic_Hash(b"a"), cb, None)
+        L.LazyLogic_NoteEdict(0, 12)
+        self.assertEqual((L.LazyLogic_Total(), L.LazyLogic_Spawned(), L.LazyLogic_Pending()), (3, 1, 2))
+        # level change / restart: SV_LoadFromFile resets before the new lump is scanned
+        L.LazyLogic_Reset()
+        self.assertEqual((L.LazyLogic_Total(), L.LazyLogic_Spawned(), L.LazyLogic_Pending(), L.LazyLogic_Failed()),
+                         (0, 0, 0, 0))
+        self.assertEqual(L.LazyLogic_Materialize(L.LazyLogic_Hash(b"b"), cb, None), 0, "old names do not spawn in the new map")
+        # the same lump again (restart of the same map): everything is deferred afresh, including what was spawned before
+        for i, nm in enumerate(names):
+            L.LazyLogic_Add(L.LazyLogic_Hash(nm), i * 10, 4)
+        self.assertEqual(L.LazyLogic_Materialize(L.LazyLogic_Hash(b"a"), cb, None), 1, "spawns again after a reload")
+
+    def test_a_fire_once_entity_that_freed_itself_is_not_respawned(self):
+        # Spawn, the DLL removes the entity after it fired (fire-once relay): the entry stays spawned, so a later lookup by the
+        # same name finds nothing, exactly as in the all-spawned path where that edict is gone for the rest of the map.
+        L = self.L
+        h = L.LazyLogic_Hash(b"game_playerjoin")
+        L.LazyLogic_Add(h, 0, 4)
+        calls = []
+        cb = CB(lambda _c, o, _l: calls.append(o) or 1)
+        self.assertEqual(L.LazyLogic_Materialize(h, cb, None), 1)
+        self.assertEqual(L.LazyLogic_Materialize(h, cb, None), 0)
+        self.assertEqual(calls, [0])
+
+    def test_round_restart_does_not_touch_the_table(self):
+        # DoD's round restart (dod_runtime.cpp) respawns players and resets objectives; DodGC_TrimEdicts only frees gibs and
+        # weapon boxes. The engine reloads the entity lump (SV_LoadFromFile) only on a map load. So nothing in the lazy
+        # table changes at a round restart: spawned entities live on, pending ones stay pending.
+        src = (ROOT / "engine/server/sv_game.c").read_text()
+        self.assertEqual(src.count("LazyLogic_Reset();"), 1)
+        self.assertIn('SV_GCLazyReport( "previous map table"', src)
+        self.assertIn("gc_lazy_report", src)
+        self.assertIn('Cvar_FindVar( "sv_gc_lazy_log" )', src)
