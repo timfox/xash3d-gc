@@ -1889,6 +1889,37 @@ edict_t *GAME_EXPORT SV_AllocEdict( void )
 	if( i >= GI->max_edicts )
 	{
 #if XASH_GAMECUBE
+		/* The table is full but edicts freed in the last half second are
+		 * waiting out the reuse delay: take the oldest of them rather than
+		 * hand the game NULL, which a GetClassPtr/CREATE_NAMED_ENTITY caller
+		 * dereferences (a scripted film cast replaced shot to shot froze
+		 * Dolphin here). The delay only spares a client interpolating a
+		 * just-removed entity, a glitch of one frame at worst. */
+		{
+			edict_t *oldest = NULL;
+			int j;
+
+			for( j = svs.maxclients + 1; j < svgame.numEntities; j++ )
+			{
+				edict_t *f = SV_EdictNum( j );
+
+				if( f && f->free && ( !oldest || f->freetime < oldest->freetime ))
+					oldest = f;
+			}
+			if( oldest )
+			{
+				static int early_logs;
+
+				if( early_logs < 4 )
+				{
+					early_logs++;
+					Con_Reportf( "Xash3D GameCube: edicts full (%d), reusing one freed %.2f s ago\n",
+						GI->max_edicts, sv.time - oldest->freetime );
+				}
+				SV_InitEdict( oldest );
+				return oldest;
+			}
+		}
 		/* CapFaces Flipper: tip edict BSS stays at 460. Dense DoD maps
 		 * (caen ~621 ents) soft-skip decorative classes instead of FATAL —
 		 * pack owns world draw; remaining slots keep players/triggers. */

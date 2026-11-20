@@ -630,8 +630,17 @@ def configure(conf):
 			conf.define('XASH_GC_LOSTCOAST', 1)
 		if conf.options.GAMEDIR == 'dod':
 			conf.define('XASH_DODGC_NETWORK', 1)
-			conf.define('DEFAULT_MAX_EDICTS', 460)
-			conf.define('GC_SP_EDICT_CAP', 460)
+			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
+			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
+			# screen) can be built with a bigger table: XASH_GC_MAX_EDICTS=560 costs about
+			# 0.8 KiB of edict + 0.3 KiB of baseline BSS and ~1.4 KiB of client entity per edict.
+			max_edicts = os.environ.get('XASH_GC_MAX_EDICTS', '460')
+			max_edicts = int(max_edicts) if max_edicts.isdigit() else 460
+			max_edicts = max(460, min(900, max_edicts))
+			conf.define('DEFAULT_MAX_EDICTS', max_edicts)
+			conf.define('GC_SP_EDICT_CAP', max_edicts)
+			if max_edicts != 460:
+				Logs.info('GameCube dod edicts: %d' % max_edicts)
 			# playermove_t array caps (two static copies, ~0.5 KiB per physent+visent+touch).
 			# Unset keeps the stock 600/64. dod-gc patches the SDK's pm_defs.h with the same
 			# numbers (scripts/integrate-dod-gameplay.py); both sides must agree.
