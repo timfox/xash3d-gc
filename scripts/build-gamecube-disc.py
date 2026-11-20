@@ -2679,6 +2679,7 @@ def lean_studio_tex_companion_bytes(src: Path, max_edge: int = 64) -> bytes | No
 
 STUDIO_NF_MASKED = 0x40
 STUDIO_NF_GC_CMPR = 1 << 28  # keep equal to STUDIO_NF_GC_CMPR in engine/studio.h
+STUDIO_NF_GC_CMPR_STREAM = 1 << 27  # keep equal to STUDIO_NF_GC_CMPR_STREAM in engine/studio.h
 
 
 def gc_cmpr_skin_edge(size: int, cap: int) -> int:
@@ -2690,7 +2691,9 @@ def gc_cmpr_skin_edge(size: int, cap: int) -> int:
 	return edge
 
 
-def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int | None = None) -> bytes | None:
+def gc_cmpr_skin_companion_bytes(
+	src: Path, max_edge: int = 128, part_edge: int | None = None, stream_edge: int | None = None
+) -> bytes | None:
 	"""A gc_studio/<stem>t.mdl whose skins are already GX CMPR.
 
 	Same layout as lean_studio_tex_companion_bytes (header, texture structs,
@@ -2699,6 +2702,11 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int 
 	aligned in the file. The engine copies them into the skin window as they
 	are (R_GCBakedCmprSkin): no palette decode and no encode at load.
 	Colour-remap textures (DM_Base, remap*) stay palettised.
+	stream_edge, when set (GC_PLAYER_SKIN_STREAM=256), bakes a skin whose edge would be stream_edge on both sides as
+	STUDIO_NF_GC_CMPR_STREAM: stream_edge x stream_edge CMPR texels followed by a half-size CMPR low mip. The header
+	keeps stream_edge as the texture size (the studio UV scale is 1/width); the engine keeps the low mip resident and
+	streams the full texels from ARAM where a skin window exists (R_GXSkinAttachCmpr), so a build without one draws a
+	plain 128 px skin.
 	part_edge, when set, caps the small parts (faces, hats, helmets, hair) at
 	that edge: they are a few dozen pixels on screen, and at full size a
 	team's six faces overflowed the studio skin window (ceres: Axis faces
@@ -2782,6 +2790,17 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int 
 			return None
 		# Chrome/additive are dropped as in the palettised companion.
 		keep = (flags & STUDIO_NF_MASKED) | STUDIO_NF_GC_CMPR
+		if stream_edge and (nw, nh) == (stream_edge, stream_edge):
+			lw, lh = nw // 2, nh // 2
+			lrgb = np.asarray(Image.fromarray(np.ascontiguousarray(rgb), "RGB").resize((lw, lh), Image.Resampling.LANCZOS))
+			lopaque = np.asarray(
+				Image.fromarray(opaque.astype(np.uint8) * 255, "L").resize((lw, lh), Image.Resampling.NEAREST)
+			) >= 128
+			low = gx_cmpr_encode_blocks(np.ascontiguousarray(lrgb), np.ascontiguousarray(lopaque))
+			if len(low) != lw * lh // 2:
+				return None
+			blob += low
+			keep |= STUDIO_NF_GC_CMPR_STREAM
 		struct.pack_into("<iiii", out, dst + 64, keep, nw, nh, len(out))
 		out += blob
 
@@ -3194,8 +3213,12 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 		kind = "palettised"
 		if tex_src is not None:
 			# Native first: 128 px CMPR is 8 KB a skin, less than 64 px palettised.
+			stream = int(os.environ.get("GC_PLAYER_SKIN_STREAM", "") or 0)
 			tex_payload = gc_cmpr_skin_companion_bytes(
-				tex_src, max_edge=GC_PLAYER_SKIN_EDGE, part_edge=GC_PLAYER_PART_EDGE
+				tex_src,
+				max_edge=stream or GC_PLAYER_SKIN_EDGE,
+				part_edge=GC_PLAYER_PART_EDGE,
+				stream_edge=stream or None,
 			)
 			if tex_payload:
 				kind = f"GX CMPR up to {GC_PLAYER_SKIN_EDGE} px"

@@ -4446,6 +4446,23 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		COM_FileBase( ptexture->name, name, sizeof( name ));
 		COM_StripExtension( mdlname );
 		Q_snprintf( texname, sizeof( texname ), "#%s/%s.mdl", mdlname, name );
+		if( FBitSet( ptexture->flags, STUDIO_NF_GC_CMPR_STREAM ))
+		{
+			/* width x height CMPR texels, then a half-size low mip: the low mip is the resident skin (same cost as a
+			 * 128 px skin), the full texels go to the ARAM skin stream where a window pool exists. */
+			const byte *full = (const byte *)phdr + ptexture->index;
+			const int lw = ptexture->width >> 1, lh = ptexture->height >> 1;
+			const qboolean masked = FBitSet( ptexture->flags, STUDIO_NF_MASKED ) ? true : false;
+
+			ptexture->index = R_GCBakedCmprSkin( texname, full + R_GXCmprBytes( ptexture->width, ptexture->height ),
+				lw, lh, masked );
+			if( ptexture->index )
+				R_GXSkinAttachCmpr( R_GetTexture( (unsigned)ptexture->index ), full, ptexture->width, ptexture->height, masked );
+			ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR|STUDIO_NF_GC_CMPR_STREAM );
+			if( !ptexture->index )
+				ptexture->index = tr.defaultTexture;
+			return;
+		}
 		ptexture->index = R_GCBakedCmprSkin( texname, (const byte *)phdr + ptexture->index,
 			ptexture->width, ptexture->height, FBitSet( ptexture->flags, STUDIO_NF_MASKED ));
 		ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR );	/* index is a texture number from here on */

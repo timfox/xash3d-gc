@@ -1985,22 +1985,41 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
 	{
 		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+		const pixel_t *cmpr_pixels = img->pixels[0];
+		int cmpr_w = img->width, cmpr_h = img->height;
 
-		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
-			|| r_gx_native_bound_pixels != img->pixels[0] )
+		/* A body skin with its full texels in the ARAM skin stream (R_GXSkinAttachCmpr) draws them while they are in
+		 * the window, the resident low mip until then. The stream holds CMPR as a byte surface: height is doubled back. */
+		if( img->gc_skin_handle )
 		{
-			r_gx_native_bound_pixels = img->pixels[0];
+			int sw = 0, sh = 0;
+			qboolean salpha = false, promoted = false;
+			const void *sp = R_GXSkinGet( img, &sw, &sh, &salpha, &promoted );
+
+			if( sp )
+			{
+				cmpr_pixels = (const pixel_t *)sp;
+				cmpr_w = sw;
+				cmpr_h = sh * 2;
+			}
+			if( promoted )
+				r_gx_bound_texnum = 0;
+		}
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
+			|| r_gx_native_bound_pixels != cmpr_pixels )
+		{
+			r_gx_native_bound_pixels = cmpr_pixels;
 			/* Sprite frames are whole pictures: wrapped, the linear filter
 			 * pulled the opposite edge in as a thin line. */
 			const u8 wrap = Q_stristr( img->name, "sprites/" ) ? GX_CLAMP : GX_REPEAT;
 
-			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
+			GX_InitTexObj( &t->obj, (void *)cmpr_pixels, (u16)cmpr_w, (u16)cmpr_h,
 				GX_TF_CMPR, wrap, wrap, GX_FALSE );
 			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
 			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
 			t->texnum = texnum;
-			t->w = img->width;
-			t->h = img->height;
+			t->w = cmpr_w;
+			t->h = cmpr_h;
 			t->fmt = GX_TF_CMPR;
 			t->valid = true;
 			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );

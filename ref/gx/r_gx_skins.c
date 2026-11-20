@@ -30,7 +30,10 @@ extern void *Image_GCAllocMdlDecode( size_t bytes );
 extern void Image_GCReleaseMdlDecode( void );
 
 #define GC_SKIN_MAX_DIM        256
-#define GC_SKIN_WINDOW_BYTES   ( 192 * 1024 )	/* a 256x256 body skin plus hands */
+#ifndef GC_SKIN_WINDOW_KIB
+#define GC_SKIN_WINDOW_KIB     192
+#endif
+#define GC_SKIN_WINDOW_BYTES   ( GC_SKIN_WINDOW_KIB * 1024 )	/* a 256x256 body skin plus hands */
 #define GC_SKIN_FRAME_BUDGET   ( 160 * 1024 )	/* promoted per frame at most */
 #define GC_SKIN_LOG_FRAMES     600
 
@@ -50,6 +53,7 @@ static qboolean r_skin_failed;
 static int r_skin_disabled = -1;
 static unsigned r_skin_gen = 1;
 static byte r_skin_alpha[GC_SKIN_MAX];
+static byte r_skin_cmpr[GC_SKIN_MAX];	/* 1: a CMPR body skin registered as a byte surface (height / 2) */
 static unsigned r_skin_frames;
 static unsigned r_skin_logged_promotions, r_skin_logged_low;
 
@@ -302,10 +306,51 @@ void R_GXSkinAttachVM( unsigned texnum, const byte *src, int w, int h, qboolean 
 		return;
 	}
 	r_skin_alpha[handle] = alpha ? 1 : 0;
+	r_skin_cmpr[handle] = 0;
 	img->gc_skin_handle = (short)( handle + 1 );
 	img->gc_skin_gen = r_skin_gen;
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM reg %s full=%dx%d low=%dx%d fmt=%s handle=%d\n",
 		img->name, w, h, img->width, img->height, alpha ? "RGB5A3" : "RGB565", handle );
+}
+
+/*
+A baked CMPR studio skin (player bodies, GC_PLAYER_SKIN_STREAM): the 128 px low mip is already the image's texture, the
+256 px texels in the companion go to ARAM. Registered as a byte surface (CMPR is half a byte a texel, so height / 2 at
+one byte a texel) so the policy in skin_stream.c needs no change. Only where a static window pool exists
+(XASH_GC_SKIN_WINDOW_BSS): without one the low mip is all there is, which is exactly the 128 px skin.
+*/
+void R_GXSkinAttachCmpr( image_t *img, const byte *texels, int w, int h, qboolean masked )
+{
+#if XASH_DODGC_NETWORK && defined( XASH_GC_SKIN_WINDOW_BSS )
+	char key[GC_ARAM_NAME_LEN];
+	int handle, low_w, low_h;
+
+	if( !img || img->gc_skin_handle || !texels || !img->pixels[0] || ( (uintptr_t)texels & 31u )
+		|| w < 16 || h < 16 || ( w & 7 ) || ( h & 7 ) || (size_t)w * h / 2u > GC_SKIN_WINDOW_BYTES )
+		return;
+	if( !R_GXSkinInit( ))
+		return;
+	low_w = img->width;
+	low_h = img->height;
+	R_GXSkinKey( img->name, key, sizeof( key ));
+	handle = GC_SkinStreamRegisterBpp( &r_skin_stream, key, (uint16_t)w, (uint16_t)( h / 2 ), texels,
+		(uint16_t)low_w, (uint16_t)( low_h / 2 ), img->pixels[0], 1 );
+	if( handle < 0 )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM refused CMPR %s %dx%d (ARAM/table full)\n", img->name, w, h );
+		return;
+	}
+	r_skin_alpha[handle] = masked ? 1 : 0;
+	r_skin_cmpr[handle] = 1;
+	img->gc_skin_handle = (short)( handle + 1 );
+	img->gc_skin_gen = r_skin_gen;
+	img->srcWidth = (uint16_t)w;
+	img->srcHeight = (uint16_t)h;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: SKIN-STREAM reg CMPR %s full=%dx%d low=%dx%d handle=%d\n",
+		img->name, w, h, low_w, low_h, handle );
+#else
+	(void)img; (void)texels; (void)w; (void)h; (void)masked;
+#endif
 }
 
 /*
