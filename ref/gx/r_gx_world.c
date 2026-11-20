@@ -670,12 +670,22 @@ int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, c
 	return handle;
 }
 
+static qboolean R_GXHudHiArena( void );
+
 void R_GXHudHiSetTexnum( int handle, int texnum )
 {
 	if( !r_hudhi_ready || handle < 0 )
 		return;
 	GC_HudHiSetTexnum( &r_hudhi, handle, texnum );
 	r_hudhi_sheets++;
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Day of Defeat takes the cell arena from the heap. Taken at the first
+	 * HUD draw it came after a full server had spent the heap (caen with
+	 * twelve bots: 1 to 4 KB free), every cell was refused and the HUD was
+	 * drawn from the 32 px fallback copies. Take it with the first sheet,
+	 * while the HUD loads. */
+	(void)R_GXHudHiArena();
+#endif
 }
 
 void R_GXHudHiBeginFrame( void )
@@ -9814,6 +9824,13 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GXPrefetchMapSkybox();
 	R_GXTrace( "durable hot window" );
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* After a level change the sheets stay registered and the arena was
+	 * released for the load: take it again with the first world frames,
+	 * not at the first HUD draw (asked once a second at most). */
+	if( r_hudhi_ready && r_hudhi_sheets > 0 )
+		(void)R_GXHudHiArena();
+#endif
 	R_GXTrace( "hot service" );
 	R_GXHotService();
 	{
