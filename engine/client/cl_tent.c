@@ -401,7 +401,8 @@ CL_ClearTempEnts
  * below GI->max_tents). Linking GI->max_tents entries wrote free-list
  * pointers past the end of a 4-entry allocation. */
 static int cl_tempents_count;
-static qboolean gc_tempents_in_spill;
+static qboolean gc_tempents_in_spill;	/* not on the heap: world spill or map arena, dies with the map */
+static qboolean gc_tempents_in_arena;	/* the map arena: dropped before the arena is borrowed again */
 /* The lean emit (cl_frame.c) clears the scene after CL_EmitEntities has
  * linked the temp entities, so it links them again from this list. */
 #define GC_TENT_RELINK_MAX 96
@@ -443,6 +444,7 @@ static void CL_ClearTempEnts( void )
 		cl_tempents = NULL;
 		cl_tempents_count = 0;
 		gc_tempents_in_spill = false;
+		gc_tempents_in_arena = false;
 		cl_free_tents = cl_active_tents = NULL;
 		return;
 	}
@@ -544,9 +546,18 @@ void CL_GCDropSpillTempEnts( void )
 	cl_tempents = NULL;
 	cl_tempents_count = 0;
 	gc_tempents_in_spill = false;
+	gc_tempents_in_arena = false;
 	cl_free_tents = cl_active_tents = NULL;
 	gc_tent_linked_n = 0;
 	gc_tent_update_frame = -1;
+}
+
+/* The map arena is about to be borrowed for another map or released: a pool
+ * in it would be written over while the client still walks it. */
+static void CL_GCDropArenaTempEnts( void )
+{
+	if( cl_tempents && gc_tempents_in_arena )
+		CL_GCDropSpillTempEnts();
 }
 
 /*
@@ -575,13 +586,14 @@ void CL_GCEnsureTempEntPool( void )
 	int i;
 
 	/* A spill pool dies with its map: drop it once the spill was rewound. */
-	if( cl_tempents && gc_tempents_in_spill
+	if( cl_tempents && gc_tempents_in_spill && !gc_tempents_in_arena
 		&& !Mod_GCWorldArraySpillHolds( cl_tempents, sizeof( TEMPENTITY ) * cl_tempents_count ))
 	{
 		cl_tempents = NULL;
 		cl_tempents_count = 0;
 		cl_free_tents = cl_active_tents = NULL;
 		gc_tempents_in_spill = false;
+		gc_tempents_in_arena = false;
 	}
 	if( !cl.worldmodel )
 		return;
@@ -612,6 +624,7 @@ void CL_GCEnsureTempEntPool( void )
 	 * still let it grow there: charlie has 438 KiB free at this point and
 	 * its prop chains (221 KB) plus the body cores (210 KB) want 431 KB. */
 #define GC_TENT_SPILL_KEEP	( 512u * 1024u )
+#define GC_TENT_ARENA_KEEP	( 160u * 1024u )	/* = GC_DOD_ARENA_KEEP in sv_init.c */
 	{
 		extern size_t Mod_GCWorldArraySpillFree( void );
 		static const int sizes[] = { 48, 32, 16 };
@@ -625,7 +638,24 @@ void CL_GCEnsureTempEntPool( void )
 			const size_t nb = sizeof( TEMPENTITY ) * n;
 
 			if( n > 16 && Mod_GCWorldArraySpillFree() < nb + GC_TENT_SPILL_KEEP )
+			{
+				/* The spill is short (caen: no prop chain cache at all): the map arena's free gap, while it keeps
+				 * GC_TENT_ARENA_KEEP for the body models and slices that load into it later. Dropped before the
+				 * arena is borrowed for the next map (CL_GCDropArenaTempEnts). */
+				const size_t at = GC_MapArenaLargestGap() >= nb + GC_TENT_ARENA_KEEP ? GC_MapArenaFind( nb ) : (size_t)-1;
+
+				cl_tempents = at == (size_t)-1 ? NULL : GC_MapLoadBufferTailAlloc( at, nb );
+				if( cl_tempents )
+				{
+					memset( cl_tempents, 0, nb );
+					gc_tempents_in_spill = gc_tempents_in_arena = true;
+					GC_SetMapArenaResetHook( CL_GCDropArenaTempEnts );
+					where = "map arena";
+					want = n;
+					bytes = nb;
+				}
 				continue;
+			}
 			cl_tempents = Mod_GCWorldArraySpillTryAlloc( nb, "client tempents" );
 			if( cl_tempents )
 			{
@@ -688,6 +718,7 @@ void CL_FreeTempEnts( void )
 		Mem_Free( cl_tempents );
 	cl_tempents_count = 0;
 	gc_tempents_in_spill = false;
+	gc_tempents_in_arena = false;
 #else
 	if( cl_tempents )
 		Mem_Free( cl_tempents );

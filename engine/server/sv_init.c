@@ -107,6 +107,12 @@ int SV_GCEntityCount( void )
 /* Room left in the map arena for what loads there after the rings: the
  * player body models (us-inf.mdl 86 KB, p_ models) take overflow slices. */
 #define GC_DOD_ARENA_KEEP ( 160u * 1024u )
+/* Never given up to the rings: the held view model's streamed skin window
+ * (v_garand 65.6 KB) loads into the arena after them. With the last reserve
+ * level at 0, caen's rings took the whole 177 KB gap and the player's rifle
+ * and hands drew magenta ("streamed skins ... no window", ceres GPU run on
+ * master 4e591475c0). */
+#define GC_DOD_VM_SKIN_KEEP ( 72u * 1024u )
 static entity_state_t *sv_gc_local_ring;
 static int sv_gc_local_ring_entries;
 
@@ -165,17 +171,24 @@ void SV_GCSizePacketEntities( void )
 		const size_t gap = GC_MapArenaLargestGap();
 		const size_t es = sizeof( entity_state_t );
 		const size_t text = ( Mod_GCWorldEntityTextHeapBytes() + 1023u ) / 1024u * 1024u;
-		const size_t scratch = es * (size_t)visible;
-		const size_t reserve[4] = { GC_DOD_ARENA_KEEP + text, GC_DOD_ARENA_KEEP, GC_DOD_ARENA_KEEP / 2, 0 };
-		/* E_MAX: one visible cap per ring, i.e. two frames at caen's 111 peak, ~3 at charlie's 89. A listen server's
-		 * client acks the previous frame, so deltas need only the last two; a missed delta base is a full update, not
-		 * a lost entity. The old 2 x visible took 472 + 472 entries (408 KB) on charlie and left the world texture
-		 * slots no arena room (release pass, master 1ef2491d66: 0 CMPR slots adopted on charlie, caen, avalanche). */
-		const int E_MIN = 128, E_MAX = visible;
+		/* Levels: [0] keep the body room and the entity text move, [1] give up the text, [2] half the body room,
+		 * [3] only the view model skin window, [4] the same with the frame list in the static 128-entry BSS table
+		 * (per-frame cap 128: caen's peak is 111-121) so the whole arena claim is the two rings. */
+		const size_t reserve[5] = { GC_DOD_ARENA_KEEP + text, GC_DOD_ARENA_KEEP, GC_DOD_ARENA_KEEP / 2,
+			GC_DOD_VM_SKIN_KEEP, GC_DOD_VM_SKIN_KEEP };
+		const int E_MIN = 128;
 		int level;
 
-		for( level = 0; level < 4; level++ )
+		for( level = 0; level < 5; level++ )
 		{
+			const qboolean static_scratch = level == 4;
+			const int cap = static_scratch ? 128 : visible;
+			/* E_MAX: one visible cap per ring, i.e. two frames at caen's 111 peak, ~3 at charlie's 89. A listen
+			 * server's client acks the previous frame, so deltas need only the last two; a missed delta base is a
+			 * full update, not a lost entity. 2 x visible took 472 + 472 entries (408 KB) on charlie and left the
+			 * world texture slots no arena room. */
+			const int E_MAX = visible;
+			const size_t scratch = static_scratch ? 0 : es * (size_t)cap;
 			const size_t need = reserve[level] + scratch;
 			int E = gap > need ? (int)(( gap - need ) / ( 2 * es )) : 0;
 			size_t bytes, at;
@@ -184,7 +197,7 @@ void SV_GCSizePacketEntities( void )
 			E = Q_min( E, E_MAX ) & ~7;
 			if( E < E_MIN )
 				continue;
-			bytes = es * ( (size_t)visible + 2 * (size_t)E );
+			bytes = scratch + es * 2 * (size_t)E;
 			at = GC_MapArenaFind( bytes );
 			block = at == (size_t)-1 ? NULL : (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
 			if( !block )
@@ -192,13 +205,13 @@ void SV_GCSizePacketEntities( void )
 			memset( block, 0, bytes );
 			svs.packet_entities = block;
 			svs.num_client_entities = E;
-			sv_gc_frame_scratch = block + E;
-			sv_gc_visible_cap = visible;
-			sv_gc_local_ring = block + E + visible;
+			sv_gc_frame_scratch = static_scratch ? fallback_scratch : block + E;
+			sv_gc_visible_cap = cap;
+			sv_gc_local_ring = static_scratch ? block + E : block + E + cap;
 			sv_gc_local_ring_entries = E;
-			Con_Reportf( "Xash3D GameCube: %spacket entities map=%s per-frame cap %d, rings %d + %d entries (%d frames of 128), bytes=%s arena_tail_left=%s reserve level %d (text %s)\n",
-				level ? "Warning: reduced reserve " : "", sv.name, visible, E, E, E / 128, Q_memprint( bytes ),
-				Q_memprint( GC_MapArenaLargestGap()), level, Q_memprint( text ));
+			Con_Reportf( "Xash3D GameCube: %spacket entities map=%s per-frame cap %d%s, rings %d + %d entries, bytes=%s arena_tail_left=%s reserve level %d (text %s)\n",
+				level ? "Warning: reduced reserve " : "", sv.name, cap, static_scratch ? " (static list)" : "", E, E,
+				Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), level, Q_memprint( text ));
 			return;
 		}
 	}

@@ -87,6 +87,9 @@ size_t GC_MapLoadBufferTailPeak( void );
 const byte *GC_MapLoadBufferBase( void );
 size_t GC_MapArenaFind( size_t bytes );
 size_t GC_MapArenaLargestGap( void );
+/* Called before the arena is borrowed for another map or released: a
+ * post-load claim that outlives its map (client temp entities) drops itself. */
+void GC_SetMapArenaResetHook( void (*hook)( void ));
 /* Only lowers the mark (spilled/abandoned tail residents). Never raises it. */
 void GC_MapLoadBufferLowerTailHighwater( size_t highwater );
 /* ARAM manager (aram_core.c). Session blocks last the boot and come from the
@@ -227,6 +230,7 @@ static inline void GC_MapLoadBufferWorldSettled( qboolean settled ) { (void)sett
 static inline const byte *GC_MapLoadBufferBase( void ) { return NULL; }
 static inline size_t GC_MapArenaFind( size_t bytes ) { (void)bytes; return (size_t)-1; }
 static inline size_t GC_MapArenaLargestGap( void ) { return 0; }
+static inline void GC_SetMapArenaResetHook( void (*hook)( void )) { (void)hook; }
 static inline void GC_MapLoadBufferLowerTailHighwater( size_t highwater ) { (void)highwater; }
 static inline void GC_BeginMapLoadMemoryOpt( void ) { }
 static inline void GC_EndMapLoadMemoryOpt( void ) { }
