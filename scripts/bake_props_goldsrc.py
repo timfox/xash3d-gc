@@ -158,13 +158,28 @@ class StudioModel:
 			if comp.is_file():
 				self.tex = StudioModel(comp)
 
+	def sequence_index(self, name: str) -> int:
+		"""LookupSequence: the index of a sequence by its label, or -1."""
+		want = name.strip().lower()
+		for i in range(self.numseq):
+			so = self.seqindex + i * SEQ_SZ
+			label = self.data[so:so + 32].split(b"\0", 1)[0].decode("latin1", "replace")
+			if label.lower() == want:
+				return i
+		return -1
+
 	def bone_matrices(self, sequence: int):
 		"""World matrices of the bones at frame 0 of a sequence (the bind
 		pose when the sequence is not in this file)."""
 		d = self.data
 		anim = None
+		motiontype, motionbone = 0, -1
 		if 0 <= sequence < self.numseq:
 			so = self.seqindex + sequence * SEQ_SZ
+			# The engine holds the motion bone at zero on the axes the
+			# sequence moves along (R_StudioCalcRotations): that travel is
+			# the entity's, not the mesh's.
+			motiontype, motionbone = struct.unpack_from("<ii", d, so + 68)
 			animindex, = struct.unpack_from("<i", d, so + 124)
 			seqgroup, = struct.unpack_from("<i", d, so + 156)
 			if seqgroup == 0 and 0 < animindex < len(d):
@@ -183,6 +198,10 @@ class StudioModel:
 						vo = ao + offs[j]
 						if offs[j] and vo + 4 <= len(d) and d[vo] > 0:
 							value[j] += struct.unpack_from("<h", d, vo + 2)[0] * scale[j]
+			if b == motionbone:
+				for j in range(3):
+					if motiontype & (1 << j):
+						value[j] = 0.0
 			local = _mat_quat_origin(_quat(value[3:6]), value[0:3])
 			mats.append(local if parent < 0 or parent >= len(mats) else _mat_concat(mats[parent], local))
 		return mats
@@ -307,8 +326,14 @@ def static_props(ents: list[dict]) -> list[dict]:
 	"""The entities SV_GCTryStaticProp consumes, with the keys it reads."""
 	out = []
 	named_ord = -1
+	# A dod_object whose object_group a dod_capture_area asks for is a satchel a player carries: the game spawns it as an
+	# entity (SV_GCFunctionalObject, sv_game.c), so it is not part of the prop pack.
+	area_groups = {e.get("area_object_group") for e in ents
+		if e.get("classname") == "dod_capture_area" and e.get("area_object_group")}
 	for ent_index, e in enumerate(ents):
 		if e.get("classname") not in PROP_CLASSES:
+			continue
+		if e.get("classname") == "dod_object" and e.get("object_group") in area_groups:
 			continue
 		model = e.get("model", "").replace("\\", "/")
 		if not model.lower().endswith(".mdl"):
@@ -334,6 +359,7 @@ def static_props(ents: list[dict]) -> list[dict]:
 				angles[1] = a
 		rendermode = int(_floats(e.get("rendermode", "0"), 1)[0])
 		renderamt = int(_floats(e.get("renderamt", "255"), 1)[0])
+		spawnflags = int(_floats(e.get("spawnflags", "0"), 1)[0])
 		if rendermode != 0 and renderamt <= 0 and not ordinal:
 			continue	# invisible in the retail game too (env_render may show a named one later)
 		out.append({
@@ -345,19 +371,59 @@ def static_props(ents: list[dict]) -> list[dict]:
 			# is a sprite key. Baking it made charlie's hedgehogs 2.5x too big.
 			"scale": 1.0,
 			"sequence": int(_floats(e.get("sequence", "0"), 1)[0]),
+			# env_model names its sequence: m_iszSequence_On, or _Off when
+			# spawnflag 1 starts it off (the retail class follows Spirit's
+			# env_model). ouitz_tree1 has one sequence per origin height
+			# ("tree_high_origin"), so sequence 0 left those trees in the air.
+			"sequence_name": (e.get("m_iszSequence_Off", "") if spawnflags & 1
+				else e.get("m_iszSequence_On", "")) if e.get("classname") == "env_model" else "",
 			"skin": int(_floats(e.get("skin", "0"), 1)[0]),
 			"body": int(_floats(e.get("body", "0"), 1)[0]),
 			# A named prop's rendermode 5 without an amount is its hidden state.
 			"additive": rendermode == 5 and not ordinal,
 			# env_model spawnflag 2: the game drops the model onto the floor
 			# at spawn (charlie's hedgehogs and wire sit 16-36 units up).
-			"drop": bool(int(_floats(e.get("spawnflags", "0"), 1)[0]) & 2),
+			"drop": bool(spawnflags & 2) and e.get("classname") == "env_model",
+			# dod_object is the item a player picks up: it never calls the
+			# floor drop, it falls like any tossed item once the map runs
+			# (every unnamed one on charlie and caen hung 5 to 32 units up).
+			"toss": e.get("classname") == "dod_object",
 			# Lump position: the game spawns entities in this order, and a
 			# prop dropping to the floor only meets what already spawned.
 			"ent": ent_index,
 			"named": ordinal,
 		})
 	return out
+
+
+def prop_sequence(mdl, prop: dict) -> int:
+	"""The sequence the game poses a prop in: the named one when the model
+	has it (CEnvModel::SetSequence falls back to 0), else the number."""
+	name = prop.get("sequence_name", "")
+	if name:
+		return max(0, mdl.sequence_index(name))
+	return prop["sequence"]
+
+
+def drop_like_the_game(floor, prop: dict):
+	"""CEnvModel::Spawn with spawnflag 2: lift the origin one unit, then
+	DROP_TO_FLOOR. A prop resting less than a unit inside the floor is lifted
+	out and lands on it; when the drop finds nothing, or still starts in
+	solid, the lift stays. Moves prop["origin"]; returns the floor z or None."""
+	x, y, z = prop["origin"][0], prop["origin"][1], prop["origin"][2] + 1.0
+	hit = floor.drop((x, y, z), before=prop.get("ent"))
+	prop["origin"] = [x, y, z if hit is None else hit]
+	return hit
+
+
+def fall_like_the_game(floor, prop: dict):
+	"""A tossed item (dod_object) falls until it meets solid. That happens
+	in play, after every entity spawned, so all solid brush entities count."""
+	x, y, z = prop["origin"]
+	hit = floor.drop((x, y, z), reach=2048.0, before=None)
+	if hit is not None:
+		prop["origin"] = [x, y, hit]
+	return hit
 
 
 def sun_direction(ents: list[dict]):
@@ -667,11 +733,14 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	if floor is not None:
 		floor.add_brush_entities(ents)
 		for prop in props:
+			if prop.get("toss"):
+				if fall_like_the_game(floor, prop) is not None:
+					dropped += 1
+				continue
 			if not prop["drop"]:
 				continue
-			z = floor.drop(prop["origin"], before=prop.get("ent"))
+			z = drop_like_the_game(floor, prop)
 			if z is not None:
-				prop["origin"] = [prop["origin"][0], prop["origin"][1], z]
 				dropped += 1
 		if dropped:
 			log(f"  props: {bsp_path.name}: {dropped} dropped to the floor")
@@ -720,7 +789,8 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		return mat_of[key]
 
 	def model_index(prop: dict) -> int | None:
-		key = (prop["model"], prop["body"], prop["skin"], prop["sequence"], round(prop["scale"], 3), prop["additive"])
+		key = (prop["model"], prop["body"], prop["skin"], prop["sequence"], prop.get("sequence_name", "").lower(),
+			round(prop["scale"], 3), prop["additive"])
 		if key in models:
 			return models[key]
 		models[key] = None
@@ -738,7 +808,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		if len(model_recs) >= GC_PR_MAX_MODELS:
 			return None
 		try:
-			cmds, textures = model_triangles(mdl, prop["body"], prop["skin"], prop["sequence"], prop["scale"])
+			cmds, textures = model_triangles(mdl, prop["body"], prop["skin"], prop_sequence(mdl, prop), prop["scale"])
 		except (struct.error, IndexError) as error:
 			log(f"  props: {rel}: {error}")
 			return None

@@ -230,7 +230,13 @@ qboolean GC_HeapCheck( const char *tag )
 	}
 	__malloc_unlock( _REENT );
 	if( ok )
-		Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p\n", tag, chunks, (void *)top );
+	{
+		/* ~10 of these a frame: the first 40 and every 5000th are enough, and keep a long run under the host log cap. */
+		static unsigned ok_logs;
+
+		if( ok_logs++ < 40 || !( ok_logs % 5000 ))
+			Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p (#%u)\n", tag, chunks, (void *)top, ok_logs );
+	}
 	else
 	{
 		failures++;
@@ -279,8 +285,15 @@ void GC_HeapCensusReport( const char *stage );
 
 void GC_MapLoadBufferWorldSettled( qboolean settled );
 void GC_TexRegionReport( const char *stage );
+#ifdef XASH_GC_MALLOC_TRACE
+void GC_MallocTraceFlush( void );
+#endif
+
 void GC_MemSample( const char *stage )
 {
+#ifdef XASH_GC_MALLOC_TRACE
+	GC_MallocTraceFlush();
+#endif
 	size_t total = Mem_TotalRealSize();
 	size_t delta = (total >= gc_mem_last) ? (total - gc_mem_last) : 0;
 
@@ -289,6 +302,13 @@ void GC_MemSample( const char *stage )
 	/* Per-map budget: spawning is done, so move map-lifetime heap blocks into
 	 * the map's leftover memory (runs every map, unchanged totals or not).
 	 * From here on, arena carves must avoid the world's arrays. */
+	if( !Q_strcmp( stage, "bsp-buffer-release" ) || !Q_strcmp( stage, "entity spawn" ) || !Q_strcmp( stage, "pre-SV_Init" ))
+		GC_HeapCensusReport( stage );
+	if( !Q_strcmp( stage, "entity spawn" ))
+	{
+		extern void SV_GCParityReport( void );
+		SV_GCParityReport();
+	}
 	if( !Q_strcmp( stage, "map active" ))
 	{
 		extern void Mod_GCMoveWorldEntitiesToArena( void );
@@ -1236,10 +1256,46 @@ qboolean GC_MapLoadBufferIsWorldSettled( void )
 	return gc_mapload_world_settled;
 }
 
+#define GC_MAPLOAD_RESET_HOOKS 4
+static void (*gc_mapload_reset_hooks[GC_MAPLOAD_RESET_HOOKS])( void );
+
+/* Several owners (client temp entities, the view model skin window) may hold
+ * post-load claims at once; registering the same hook twice keeps one entry. */
+void GC_SetMapArenaResetHook( void (*hook)( void ))
+{
+	int i, free_slot = -1;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		if( gc_mapload_reset_hooks[i] == hook )
+			return;
+		if( !gc_mapload_reset_hooks[i] && free_slot < 0 )
+			free_slot = i;
+	}
+	if( free_slot >= 0 )
+		gc_mapload_reset_hooks[free_slot] = hook;
+}
+
+/* Run once and forget: each owner registers again with its next claim. */
+static void GC_RunMapArenaResetHook( void )
+{
+	int i;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		void (*hook)( void ) = gc_mapload_reset_hooks[i];
+
+		gc_mapload_reset_hooks[i] = NULL;
+		if( hook )
+			hook();
+	}
+}
+
 void *GC_BorrowMapLoadBuffer( size_t size )
 {
 	if( size == 0 )
 		return NULL;
+	GC_RunMapArenaResetHook();
 	gc_mapload_world_settled = false;
 	/* Entity private objects may still point into this map's arena. */
 	if( SV_GCPrivateOverflowPinsMapArena() )
@@ -1376,11 +1432,16 @@ static size_t gc_texreg_live;
  * return the size a map load may use. */
 size_t GC_TexRegionNoteArena( byte *base, size_t capacity )
 {
+	/* Blocks are carved down from the top in 32-byte multiples behind a 32-byte header, so their data is
+	 * 32-aligned only when the top is: an arena ending 8 past a boundary put a carried rifle's CMPR skin at
+	 * +8, GX drew it as 16-bit texels (striped red, white and green guns). */
+	const uintptr_t top = ((uintptr_t)base + capacity ) & ~(uintptr_t)31u;
+
 	gc_texreg_base = base;
-	gc_texreg_cap = capacity;
-	if( gc_texreg_bytes > capacity )
+	gc_texreg_cap = top > (uintptr_t)base ? (size_t)( top - (uintptr_t)base ) : 0;
+	if( gc_texreg_bytes > gc_texreg_cap )
 		gc_texreg_bytes = 0;
-	return capacity - gc_texreg_bytes;
+	return gc_texreg_cap - gc_texreg_bytes;
 }
 
 qboolean GC_TexRegionOwns( const void *p )
@@ -1650,6 +1711,7 @@ void GC_DiscardMapLoadBuffer( void )
 	if( gc_mapload_buf_in_use )
 		return;
 
+	GC_RunMapArenaResetHook();
 	if( gc_mapload_buf )
 	{
 		if( R_GCReleaseMapLoadStaticArena( gc_mapload_buf ))
@@ -1884,10 +1946,19 @@ unsigned int GC_AramAllocTagged( unsigned int size, qboolean stream, const char 
 			stream ? "stream" : "reserve", tag ? tag : "?", Q_memprint( size ), base,
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )));
 	else
+	{
+		int i;
+
 		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s segs=%d/%d\n",
 			tag ? tag : "?", stream ? "stream" : "reserve", Q_memprint( size ),
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )),
 			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )), (int)gc_aram_heap.count, GC_ARAM_MAX_SEGS );
+		/* Say what fragments it: the whole segment table, once per refusal. */
+		for( i = 0; i < gc_aram_heap.count; i++ )
+			Con_Reportf( "Xash3D GameCube: ARAM map 0x%08x %s %s%s\n", gc_aram_heap.segs[i].offset,
+				Q_memprint( gc_aram_heap.segs[i].size ), gc_aram_heap.segs[i].used ? gc_aram_heap.segs[i].tag : "FREE",
+				gc_aram_heap.segs[i].used ? ( gc_aram_heap.segs[i].cls == GC_ARAM_STREAM ? " (stream)" : " (session)" ) : "" );
+	}
 	return base;
 }
 
@@ -2234,6 +2305,25 @@ void GC_PrefetchResetForMenu( void )
 	gc_prefetch_used = 0;
 	gc_prefetch_manifest_ready = false;
 	gc_prefetch_initialized = false;
+}
+
+/* The menu-idle first-map prefetch window is dead weight once the map is loaded (1 MiB of ARAM
+ * in a DoD match). Drop its entries first so no reader can see freed ARAM, then free the block;
+ * the next menu idle reserves a fresh one (GC_PrefetchResetForMenu clears the init flag). */
+void GC_PrefetchReleaseForMatch( void )
+{
+	unsigned int base = gc_prefetch_aram;
+
+	if( !base )
+		return;
+	memset( gc_prefetch, 0, sizeof( gc_prefetch ));
+	gc_prefetch_count = 0;
+	gc_prefetch_next = 0;
+	gc_prefetch_used = 0;
+	gc_prefetch_capacity = 0;
+	gc_prefetch_manifest_ready = true;
+	gc_prefetch_aram = 0;
+	GC_AramFree( base );
 }
 
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )
