@@ -1251,6 +1251,9 @@ typedef struct
 
 /* Self test: SV_Move with the records switched off, to compare against the edict-only result. */
 qboolean gc_static_walls_disable;
+/* Self test: records whose func_wall has no edict (the parity budget skipped it) add collision the edict-only path does not
+ * have, so the whole-path comparison leaves them out. Never set in normal play. */
+static byte gc_static_wall_skip[GC_STATIC_WALLS_MAX];
 /* Records and the temporary edict are taken from the heap on the first record, not kept as static image: only a map
  * whose disc cfg turns gc_static_walls on pays for them (Lost Coast has no heap to give ~17 KB of BSS it never uses).
  * They are kept for the session, like the static block they replace. */
@@ -1273,6 +1276,13 @@ int SV_GCStaticWallCount( void )
 void SV_GCStaticWallsClear( void )
 {
 	gc_num_static_walls = 0;
+	memset( gc_static_wall_skip, 0, sizeof( gc_static_wall_skip ));
+}
+
+void SV_GCStaticWallSetSkip( int i, qboolean skip )
+{
+	if( i >= 0 && i < GC_STATIC_WALLS_MAX )
+		gc_static_wall_skip[i] = skip ? 1 : 0;
 }
 
 qboolean SV_GCStaticWallAdd( int modelindex, const vec3_t origin, const vec3_t mins, const vec3_t maxs )
@@ -1359,6 +1369,8 @@ static void SV_ClipToStaticWalls( moveclip_t *clip )
 
 		if( clip->trace.allsolid )
 			return;
+		if( gc_static_wall_skip[i] )
+			continue;
 		if( !BoundsIntersect( clip->boxmins, clip->boxmaxs, w->absmin, w->absmax ))
 			continue;
 		/* SV_ClipToEntity's filters that can apply to a plain world-brush wall: the custom ShouldCollide hook sees the
