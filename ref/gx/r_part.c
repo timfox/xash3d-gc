@@ -371,8 +371,20 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 			// compute four vertexes
 			VectorSubtract( start, normal, verts[0] );
 			VectorAdd( start, normal, verts[1] );
+#if XASH_GAMECUBE
+			/* The far corners from the (possibly clipped) end, not start + delta: with
+			 * delta the near-lens clip moved only the start and the quad still ran past the lens. */
+			{
+				vec3_t seg;
+
+				VectorSubtract( end, start, seg );
+				VectorAdd( verts[0], seg, verts[2] );
+				VectorAdd( verts[1], seg, verts[3] );
+			}
+#else
 			VectorAdd( verts[0], delta, verts[2] );
 			VectorAdd( verts[1], delta, verts[3] );
+#endif
 
 			if( p->color < 0 || p->color >= sizeof( gTracerColors ) / sizeof( gTracerColors[0] ))
 			{
