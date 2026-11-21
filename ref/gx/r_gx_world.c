@@ -2768,7 +2768,6 @@ static qboolean r_gx_cmpr_big_for_props;
 #define GC_CMPR_EXT_CHUNK  8
 #define GC_CMPR_EXT_CHUNKS 8
 #define GC_CMPR_EXT_FLOOR_MIN  ( 224u * 1024u )	/* heap a later map of the match keeps free at the least */
-#define GC_CMPR_EXT_TRIM_BYTES ( 128u * 1024u )	/* heap below which heap slots go back during play */
 static byte *r_gx_cmpr_ext_base[GC_CMPR_EXT_CHUNKS];
 static int r_gx_cmpr_ext_n;
 /* No arena or cache-tail slots at all (dod_caen, a second visit to dod_avalanche): every slot is a heap one. */
@@ -3018,7 +3017,7 @@ int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor )
 	/* The floor is for what a match still takes from the heap (bots, HUD, sounds: 135 to 360 KB). A later map
 	 * of the same match finds that already taken (dod_avalanche: 751 KB the first time, 495 KB on a return
 	 * visit, and 10 KB more used from there), so what is gone since the best map comes off the floor.
-	 * R_GXCmprExtTrim hands slots back if the heap runs low all the same. */
+	 * R_GXMemBalance hands slots back if the heap runs low all the same. */
 	if( heap > heap_best )
 		heap_best = heap;
 	else
@@ -3097,24 +3096,26 @@ int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor )
 	return got;
 }
 
-/* Once a frame: with less than GC_CMPR_EXT_TRIM_BYTES of heap left, the last block of heap slots goes back
- * (dod_caen with 12 bots ran down to 165 KB with 16 heap slots). Textures reload into the slots that stay. */
-static void R_GXCmprExtTrim( void )
+/* Give the last block of heap slots back. In a map whose slots are all heap ones the first block stays: without
+ * it the next bind would build a slot layout of its own from the spill or the heap. Returns bytes freed. */
+static size_t R_GXCmprExtShrinkOne( void )
 {
-	extern size_t GC_MemHeapFreeBytes( void );
-	static unsigned tick;
+	size_t bytes;
 	int c, n;
 
-	if( !r_gx_cmpr_ext_n || ( ++tick & 15u ) || GC_MemHeapFreeBytes() >= GC_CMPR_EXT_TRIM_BYTES )
-		return;
+	if( !r_gx_cmpr_ext_n )
+		return 0;
 	c = ( r_gx_cmpr_ext_n - 1 ) / GC_CMPR_EXT_CHUNK;
 	n = r_gx_cmpr_ext_n - c * GC_CMPR_EXT_CHUNK;
-	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: heap down to %u Kb, %d of %d heap slots go back\n",
+	if( !c && r_gx_cmpr_ext_only )
+		return 0;
+	bytes = (size_t)n * r_gx_cmpr_bounce_cap;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: heap tight (%u Kb), %d of %d heap slots go back\n",
 		(unsigned)( GC_MemHeapFreeBytes() / 1024u ), n, r_gx_cmpr_ext_n );
 	if( !c )
 	{
 		R_GXCmprExtDrop();
-		return;
+		return bytes;
 	}
 	GX_DrawDone();
 	free( r_gx_cmpr_ext_base[c] );
@@ -3125,6 +3126,119 @@ static void R_GXCmprExtTrim( void )
 	GX_InvalidateTexAll();
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
+	return bytes;
+}
+
+/* Bytes one more block of heap slots would take, 0 when the layout cannot take one now. */
+static size_t R_GXCmprExtGrowWant( void )
+{
+	int c;
+
+	R_GXCmprDropStaleAdopted();
+	if( !r_gx_cmpr_adopted || !r_gx_cmpr_bounce || r_gx_cmpr_bounce_cap < 4096u || ( r_gx_cmpr_bounce_cap & 31u ))
+		return 0;
+	if( r_gx_cmpr_ext_n % GC_CMPR_EXT_CHUNK )	/* slot i is in block i / GC_CMPR_EXT_CHUNK: only after a full one */
+		return 0;
+	c = r_gx_cmpr_ext_n / GC_CMPR_EXT_CHUNK;
+	if( c >= GC_CMPR_EXT_CHUNKS || r_gx_cmpr_nslots + GC_CMPR_EXT_CHUNK > GC_CMPR_SLOTS_MAX )
+		return 0;
+	return (size_t)GC_CMPR_EXT_CHUNK * r_gx_cmpr_bounce_cap;
+}
+
+/* One more block of heap slots during play. Returns bytes taken. */
+static size_t R_GXCmprExtGrowOne( void )
+{
+	const size_t bytes = R_GXCmprExtGrowWant();
+	const int c = r_gx_cmpr_ext_n / GC_CMPR_EXT_CHUNK;
+	byte *blk;
+
+	if( !bytes )
+		return 0;
+	blk = (byte *)memalign( 32, bytes );
+	if( !blk )
+		return 0;
+	GX_DrawDone();
+	r_gx_cmpr_ext_base[c] = blk;
+	r_gx_cmpr_ext_n += GC_CMPR_EXT_CHUNK;
+	r_gx_cmpr_nslots += GC_CMPR_EXT_CHUNK;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: %d more from the heap during play (%u Kb), %d heap slots, %d in all\n",
+		GC_CMPR_EXT_CHUNK, (unsigned)( bytes / 1024u ), r_gx_cmpr_ext_n, r_gx_cmpr_nslots );
+	return bytes;
+}
+
+/*
+ * Once a world pass (DoD): the heap takers that can change size during play follow one heap pressure signal
+ * (GC_MemPressure*, with hysteresis), so they neither flap nor each read a different moment of the heap.
+ *  - Tight heap: texture heap slots go back first, a block at a time (textures then stream from ARAM a little
+ *    more often), and only when none are left does the lightmap store's second chunk (leaves would fall to
+ *    vertex light, which is what shows).
+ *  - Calm heap: lightmaps first, when leaves are being drawn without theirs; then a block of texture slots when
+ *    near-slot misses run high. One change at a time, a few seconds apart, and none soon after a tight spell.
+ */
+#define GC_MEMBAL_SHRINK_FRAMES	30	/* while tight, one give-back every half second */
+#define GC_MEMBAL_GROW_FRAMES	180	/* and one grow every three seconds at most */
+#define GC_MEMBAL_RATE_FRAMES	64
+#define GC_MEMBAL_LM_REFUSED_X16	8	/* half a leaf a frame without its lightmap */
+#define GC_MEMBAL_NEAR_MISS_X16	32	/* two texture slot misses a frame */
+static void R_GXMemBalance( void )
+{
+	extern u32 R_GXWorldDLLmRefusedRateX16( void );
+	extern size_t R_GXWorldDLLmExtWant( void );
+	extern size_t R_GXWorldDLLmExtGrow( size_t max_bytes );
+	extern size_t R_GXWorldDLLmExtShrink( void );
+	static unsigned frame, last_change, rate_frame, rate_mark, miss_x16;
+	size_t want;
+
+	frame++;
+	GC_MemPressureUpdate();
+	if( frame - rate_frame >= GC_MEMBAL_RATE_FRAMES )
+	{
+		miss_x16 = ( r_gx_cmpr_near_miss_total - rate_mark ) * 16u / ( frame - rate_frame );
+		rate_mark = r_gx_cmpr_near_miss_total;
+		rate_frame = frame;
+	}
+	if( GC_MemPressureTight())
+	{
+		if( frame - last_change < GC_MEMBAL_SHRINK_FRAMES )
+			return;
+		if( R_GXCmprExtShrinkOne() || R_GXWorldDLLmExtShrink())
+		{
+			last_change = frame;
+			GC_MemPressureNoteChange();
+		}
+		return;
+	}
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+	/* Lost Coast sizes its slots at load and keeps them: it only gives back, as before */
+	(void)want;
+	return;
+#endif
+	if( frame - last_change < GC_MEMBAL_GROW_FRAMES )
+		return;
+	if( R_GXWorldDLLmRefusedRateX16() >= GC_MEMBAL_LM_REFUSED_X16 && ( want = R_GXWorldDLLmExtWant()) != 0 )
+	{
+		/* the largest chunk the heap can spare, down to a quarter of what is wanted */
+		size_t bytes = want;
+
+		while( bytes >= want / 4u && !GC_MemPressureCanGrow( bytes ))
+			bytes /= 2u;
+		if( bytes >= want / 4u && R_GXWorldDLLmExtGrow( bytes ))
+		{
+			last_change = frame;
+			GC_MemPressureNoteChange();
+			return;
+		}
+	}
+	if( miss_x16 >= GC_MEMBAL_NEAR_MISS_X16 && ( want = R_GXCmprExtGrowWant()) != 0
+		&& GC_MemPressureCanGrow( want ) && R_GXCmprExtGrowOne())
+	{
+		last_change = frame;
+		GC_MemPressureNoteChange();
+	}
 }
 
 /* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
@@ -10066,7 +10180,7 @@ static void R_GXWaterMirrorPass( void )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
-	R_GXCmprExtTrim();
+	R_GXMemBalance();
 	r_gx_cmpr_prev_frame_clock = r_gx_cmpr_frame_clock;
 	r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
 	/* Flythrough stage timing: where the frame goes, every 120 frames. */

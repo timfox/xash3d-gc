@@ -148,6 +148,13 @@ void GC_HeapCheckArm( qboolean on );
 void GC_HeapCheckArmed( const char *tag );
 /* Free bytes inside the current MEM1 arena only (excludes unclaimed top). */
 size_t GC_MemArenaFreeBytes( void );
+/* Heap pressure with hysteresis for takers that grow and give back during play (mem_gamecube.c). */
+void GC_MemPressureUpdate( void );	/* once a frame */
+void GC_MemPressureReset( void );	/* level change */
+qboolean GC_MemPressureTight( void );
+size_t GC_MemPressureLowBytes( void );
+qboolean GC_MemPressureCanGrow( size_t bytes );
+void GC_MemPressureNoteChange( void );
 
 /* Memory budget telemetry */
 size_t GC_MemBudgetTotal( void );

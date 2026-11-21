@@ -14,6 +14,7 @@ Copyright (C) 2026 xash3d-gc contributors
 #include <ogc/system.h>
 #include <ogc/aram.h>
 #include <ogc/cache.h>
+#include <ogc/lwp_watchdog.h>
 
 void *R_GCBorrowMapLoadStaticArena( size_t size, size_t *capacity );
 qboolean R_GCReleaseMapLoadStaticArena( void *ptr );
@@ -267,6 +268,127 @@ size_t GC_MemHeapFreeBytes( void )
 
 	GC_MemHeapStats( &used, &free_in_heap, &unclaimed );
 	return free_in_heap + unclaimed;
+}
+
+/*
+ * Heap pressure with hysteresis, for the takers that size themselves to the free heap during play (texture heap
+ * slots, the lightmap store's second chunk). One signal for all of them, so they do not each read a different
+ * moment of the heap and flap: a taker grows only after the heap has stayed comfortable for a while, and gives
+ * back as soon as it is tight. mallinfo() walks the bins, so the heap is read every 8th update (about 7.5 Hz).
+ */
+#define GC_MEMP_TIGHT_ENTER	( 128u * 1024u )	/* under this the heap is tight: takers give back */
+#define GC_MEMP_TIGHT_LEAVE	( 192u * 1024u )	/* and stays tight until it has this much ... */
+#define GC_MEMP_LEAVE_MS	1000u			/* ... for this long */
+#define GC_MEMP_CALM_MS		8000u			/* no growing this soon after the heap was tight */
+#define GC_MEMP_RESERVE		( 256u * 1024u )	/* a grow leaves this much free, at the lowest point lately */
+#define GC_MEMP_BUCKET_MS	1000u
+#define GC_MEMP_BUCKETS		4			/* lowest free heap over the last 3 to 4 seconds */
+
+static struct
+{
+	qboolean tight;
+	qboolean seen;
+	u64 last_tight;		/* last update that found the heap tight */
+	u64 leave_start;	/* first update at or over GC_MEMP_TIGHT_LEAVE while tight, 0 = none */
+	u64 bucket_start;
+	size_t bucket_low[GC_MEMP_BUCKETS];
+	int bucket;
+	size_t free_now;
+	unsigned tick;
+} gc_memp;
+
+void GC_MemPressureUpdate( void )
+{
+	u64 now;
+	size_t heap, low;
+	int i;
+
+	if(( gc_memp.tick++ & 7u ) && gc_memp.seen )
+		return;
+	now = gettime();
+	heap = GC_MemHeapFreeBytes();
+	gc_memp.free_now = heap;
+	if( !gc_memp.seen )
+	{
+		gc_memp.seen = true;
+		gc_memp.bucket_start = now;
+		gc_memp.last_tight = now;	/* a fresh map starts calm only after GC_MEMP_CALM_MS */
+		for( i = 0; i < GC_MEMP_BUCKETS; i++ )
+			gc_memp.bucket_low[i] = heap;
+	}
+	if( diff_msec( gc_memp.bucket_start, now ) >= GC_MEMP_BUCKET_MS )
+	{
+		gc_memp.bucket = ( gc_memp.bucket + 1 ) % GC_MEMP_BUCKETS;
+		gc_memp.bucket_low[gc_memp.bucket] = heap;
+		gc_memp.bucket_start = now;
+	}
+	else if( heap < gc_memp.bucket_low[gc_memp.bucket] )
+		gc_memp.bucket_low[gc_memp.bucket] = heap;
+
+	if( !gc_memp.tight )
+	{
+		if( heap < GC_MEMP_TIGHT_ENTER )
+		{
+			gc_memp.tight = true;
+			gc_memp.leave_start = 0;
+			Con_Reportf( "Xash3D GameCube: heap pressure: tight at %s\n", Q_memprint( heap ));
+		}
+	}
+	else if( heap >= GC_MEMP_TIGHT_LEAVE )
+	{
+		if( !gc_memp.leave_start )
+			gc_memp.leave_start = now;
+		else if( diff_msec( gc_memp.leave_start, now ) >= GC_MEMP_LEAVE_MS )
+		{
+			gc_memp.tight = false;
+			low = GC_MemPressureLowBytes();
+			Con_Reportf( "Xash3D GameCube: heap pressure: eased at %s (low %s)\n", Q_memprint( heap ), Q_memprint( low ));
+		}
+	}
+	else
+		gc_memp.leave_start = 0;
+	if( gc_memp.tight )
+		gc_memp.last_tight = now;
+}
+
+/* A level change: the next map's loads move the heap a long way, so start over. */
+void GC_MemPressureReset( void )
+{
+	memset( &gc_memp, 0, sizeof( gc_memp ));
+}
+
+qboolean GC_MemPressureTight( void )
+{
+	return gc_memp.tight;
+}
+
+/* Lowest free heap seen over the last few seconds. */
+size_t GC_MemPressureLowBytes( void )
+{
+	size_t low = gc_memp.free_now;
+	int i;
+
+	for( i = 0; i < GC_MEMP_BUCKETS; i++ )
+		if( gc_memp.bucket_low[i] < low )
+			low = gc_memp.bucket_low[i];
+	return low;
+}
+
+/* May a taker add `bytes` from the heap now? Only when the heap has not been tight for GC_MEMP_CALM_MS and
+ * GC_MEMP_RESERVE stays free after it, also at the lowest point of the last few seconds. */
+qboolean GC_MemPressureCanGrow( size_t bytes )
+{
+	if( !gc_memp.seen || gc_memp.tight )
+		return false;
+	if( diff_msec( gc_memp.last_tight, gettime()) < GC_MEMP_CALM_MS )
+		return false;
+	return GC_MemPressureLowBytes() >= bytes + GC_MEMP_RESERVE && gc_memp.free_now >= bytes + GC_MEMP_RESERVE;
+}
+
+/* A taker just took or gave back heap: read it again on the next update rather than up to 8 updates later. */
+void GC_MemPressureNoteChange( void )
+{
+	gc_memp.tick = 0;
 }
 
 /* Tip pressure for menu/client bring-up — unclaimed MEM1 above the arena can
