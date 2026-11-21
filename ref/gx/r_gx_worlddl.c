@@ -1840,9 +1840,9 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	{
 		/* Whatever the arena or the cache tail gave: fill up to 48 near slots from the heap, keeping 512 KiB
 		 * of it for the match (bots, HUD, props and sounds took about 260 KB on avalanche with 4 bots). */
-		extern int R_GXCmprExtAdopt( int want_near, size_t heap_floor );
+		extern int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor );
 
-		(void)R_GXCmprExtAdopt( 48, 512u * 1024u );
+		(void)R_GXCmprExtAdopt( 48, 10944u, 512u * 1024u );
 	}
 #endif
 	gc_wd_pvs_cluster = -2;

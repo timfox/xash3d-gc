@@ -2763,9 +2763,14 @@ static qboolean r_gx_cmpr_use_big;
  * textures at 256x256); world textures keep to the near pool and hot window. */
 static qboolean r_gx_cmpr_big_for_props;
 
-/* More near slots in a heap block of their own (R_GXCmprExtAdopt): the last r_gx_cmpr_ext_n near slots. */
-static byte *r_gx_cmpr_ext_base;
+/* More near slots in heap blocks of their own (R_GXCmprExtAdopt): the last r_gx_cmpr_ext_n near slots.
+ * The blocks are GC_CMPR_EXT_CHUNK slots each: dod_avalanche had 795 KB of heap free and no 256 KiB run in it. */
+#define GC_CMPR_EXT_CHUNK  8
+#define GC_CMPR_EXT_CHUNKS 8
+static byte *r_gx_cmpr_ext_base[GC_CMPR_EXT_CHUNKS];
 static int r_gx_cmpr_ext_n;
+/* No arena or cache-tail slots at all (dod_caen, a second visit to dod_avalanche): every slot is a heap one. */
+static qboolean r_gx_cmpr_ext_only;
 
 static byte *R_GXCmprSlotPtr( int i )
 {
@@ -2777,7 +2782,8 @@ static byte *R_GXCmprSlotPtr( int i )
 	if( i < base_n )
 		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
 	if( i < near_n )
-		return r_gx_cmpr_ext_base + (size_t)( i - base_n ) * r_gx_cmpr_bounce_cap;
+		return r_gx_cmpr_ext_base[( i - base_n ) / GC_CMPR_EXT_CHUNK]
+			+ (size_t)(( i - base_n ) % GC_CMPR_EXT_CHUNK ) * r_gx_cmpr_bounce_cap;
 	return r_gx_cmpr_bounce + (size_t)base_n * r_gx_cmpr_bounce_cap
 		+ (size_t)( i - near_n ) * r_gx_cmpr_far_cap;
 }
@@ -2785,9 +2791,14 @@ static byte *R_GXCmprSlotPtr( int i )
 /* The heap block goes back whenever the slot layout is rebuilt. Callers have run GX_DrawDone. */
 static void R_GXCmprExtFree( void )
 {
-	if( r_gx_cmpr_ext_base )
-		free( r_gx_cmpr_ext_base );
-	r_gx_cmpr_ext_base = NULL;
+	int i;
+
+	for( i = 0; i < GC_CMPR_EXT_CHUNKS; i++ )
+	{
+		if( r_gx_cmpr_ext_base[i] )
+			free( r_gx_cmpr_ext_base[i] );
+		r_gx_cmpr_ext_base[i] = NULL;
+	}
 	r_gx_cmpr_ext_n = 0;
 }
 
@@ -2850,6 +2861,7 @@ static void R_GXCmprDropStaleAdopted( void )
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce: %d adopted slots belonged to the previous map, dropped\n",
 		r_gx_cmpr_nslots );
 	r_gx_cmpr_adopted = false;
+	r_gx_cmpr_ext_only = false;
 	R_GXCmprExtFree();
 	r_gx_cmpr_bounce = NULL;
 	r_gx_cmpr_nslots = 0;
@@ -2944,6 +2956,7 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 		return;
 	GX_DrawDone();
 	R_GXCmprExtFree();
+	r_gx_cmpr_ext_only = false;
 	r_gx_cmpr_adopted = true;
 	r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
 	r_gx_cmpr_bounce = base;
@@ -2972,6 +2985,15 @@ static void R_GXCmprExtDrop( void )
 	GX_DrawDone();
 	r_gx_cmpr_nslots -= r_gx_cmpr_ext_n;
 	R_GXCmprExtFree();
+	if( r_gx_cmpr_ext_only )
+	{
+		/* r_gx_cmpr_bounce pointed into the first block: nothing is left, the next bind starts over */
+		r_gx_cmpr_ext_only = false;
+		r_gx_cmpr_adopted = false;
+		r_gx_cmpr_bounce = NULL;
+		r_gx_cmpr_nslots = 0;
+		r_gx_cmpr_bounce_cap = 0;
+	}
 	R_GXCmprSlotsReset();
 	GX_InvalidateTexAll();
 	r_gx_bound_texnum = 0;
@@ -2980,39 +3002,84 @@ static void R_GXCmprExtDrop( void )
 
 /* After R_GXCmprBounceAdopt (and R_GXCmprBigAdopt): more near slots from the heap, up to want_near in all, while
  * heap_floor bytes stay free. dod_avalanche gets 11 slots from its chunk cache's tail and binds 25 to 53 textures
- * a frame: every bind was an ARAM read (3 to 6 ms a frame) while 500 KB of heap sat idle. Returns slots added. */
-int R_GXCmprExtAdopt( int want_near, size_t heap_floor )
+ * a frame: every bind was an ARAM read (3 to 6 ms a frame) while 500 KB of heap sat idle. A map that adopted
+ * nothing (slot_bytes says how large a slot is then) gets all its slots this way. Returns slots added. */
+int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor )
 {
 	extern size_t GC_MemHeapFreeBytes( void );
-	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
 	const size_t heap = GC_MemHeapFreeBytes();
-	int n = want_near - near_n;
-	byte *mem;
+	qboolean only = false;
+	int near_n, n, got = 0, c;
 
-	if( !r_gx_cmpr_adopted || !r_gx_cmpr_bounce || r_gx_cmpr_ext_n || r_gx_cmpr_bounce_cap < 4096u
-		|| near_n < 1 || heap <= heap_floor )
+	R_GXCmprDropStaleAdopted();
+	if( r_gx_cmpr_ext_n )
 		return 0;
+	if( !r_gx_cmpr_bounce && !r_gx_cmpr_nslots && slot_bytes >= 4096u && !( slot_bytes & 31u ))
+		only = true;
+	else if( !r_gx_cmpr_adopted || !r_gx_cmpr_bounce || r_gx_cmpr_bounce_cap < 4096u )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: none from the heap (%d slots of %u bytes not adopted)\n",
+			r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap );
+		return 0;
+	}
+	else
+		slot_bytes = r_gx_cmpr_bounce_cap;
+	near_n = only ? 0 : r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	n = want_near - near_n;
 	if( n > GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots )
 		n = GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots;
-	if( (size_t)n > ( heap - heap_floor ) / r_gx_cmpr_bounce_cap )
-		n = (int)(( heap - heap_floor ) / r_gx_cmpr_bounce_cap );
-	if( n < 4 )
+	if( n > GC_CMPR_EXT_CHUNK * GC_CMPR_EXT_CHUNKS )
+		n = GC_CMPR_EXT_CHUNK * GC_CMPR_EXT_CHUNKS;
+	if( heap <= heap_floor )
+		n = 0;
+	else if( (size_t)n > ( heap - heap_floor ) / slot_bytes )
+		n = (int)(( heap - heap_floor ) / slot_bytes );
+	/* whole blocks, so that slot i is always in block i / GC_CMPR_EXT_CHUNK */
+	for( c = 0; c < GC_CMPR_EXT_CHUNKS && n - got >= GC_CMPR_EXT_CHUNK; c++ )
+	{
+		r_gx_cmpr_ext_base[c] = (byte *)memalign( 32, (size_t)GC_CMPR_EXT_CHUNK * slot_bytes );
+		if( !r_gx_cmpr_ext_base[c] )
+			break;
+		got += GC_CMPR_EXT_CHUNK;
+	}
+	/* and what is left of the request in a last, shorter one */
+	if( c < GC_CMPR_EXT_CHUNKS && n - got >= 2 && n - got < GC_CMPR_EXT_CHUNK )
+	{
+		r_gx_cmpr_ext_base[c] = (byte *)memalign( 32, (size_t)( n - got ) * slot_bytes );
+		if( r_gx_cmpr_ext_base[c] )
+			got = n;
+	}
+	if( !got )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: none from the heap (%d near slots, wanted %d more x %u bytes, heap %u Kb, floor %u Kb)\n",
+			near_n, n, slot_bytes, (unsigned)( heap / 1024u ), (unsigned)( heap_floor / 1024u ));
 		return 0;
-	mem = (byte *)memalign( 32, (size_t)n * r_gx_cmpr_bounce_cap );
-	if( !mem )
-		return 0;
+	}
 	GX_DrawDone();
-	r_gx_cmpr_ext_base = mem;
-	r_gx_cmpr_ext_n = n;
-	r_gx_cmpr_nslots += n;
+	if( only )
+	{
+		r_gx_cmpr_ext_only = true;
+		r_gx_cmpr_adopted = true;
+		r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
+		r_gx_cmpr_bounce = r_gx_cmpr_ext_base[0];	/* never indexed: there are no base slots */
+		r_gx_cmpr_bounce_cap = slot_bytes;
+		r_gx_cmpr_far_n = 0;
+		r_gx_cmpr_far_cap = 0;
+		r_gx_cmpr_want_far = false;
+		r_gx_cmpr_big_n = 0;
+		r_gx_cmpr_big_cap = 0;
+		r_gx_cmpr_big_base = NULL;
+	}
+	r_gx_cmpr_ext_n = got;
+	r_gx_cmpr_nslots += got;
 	R_GXCmprSlotsReset();
 	GX_InvalidateTexAll();
 	r_gx_bound_texnum = 0;
 	r_gx_bound_fmt = 0;
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: %d more x %u bytes from the heap (%u Kb, heap was %u Kb), %d near slots\n",
-		n, r_gx_cmpr_bounce_cap, (unsigned)( (size_t)n * r_gx_cmpr_bounce_cap / 1024u ), (unsigned)( heap / 1024u ),
-		near_n + n );
-	return n;
+		got, slot_bytes, (unsigned)( (size_t)got * slot_bytes / 1024u ), (unsigned)( heap / 1024u ),
+		near_n + got );
+	return got;
 }
 
 /* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
