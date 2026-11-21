@@ -366,7 +366,9 @@ static void V_SetupViewModel( void )
 	{
 		static int gc_vm_tried_index = -1;
 
+		/* Not while a cinematic shot hides the weapon (cine_viewmodel 0). */
 		if( view->model && view->model->name[0] && Q_stristr( view->model->name, ".mdl" )
+			&& !CL_CineHideViewModel()
 			&& ( view->model->type != mod_studio || !view->model->cache.data )
 			&& cl.local.viewmodel != gc_vm_tried_index )
 		{

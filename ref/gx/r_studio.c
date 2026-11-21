@@ -877,6 +877,9 @@ hard to one side, looking up.
 static vec3_t pos2[MAXSTUDIOBONES], pos3[MAXSTUDIOBONES], pos4[MAXSTUDIOBONES];
 static vec4_t q2[MAXSTUDIOBONES], q3[MAXSTUDIOBONES], q4[MAXSTUDIOBONES];
 
+#define GC_GRID_SNAP_LO 0.01f
+#define GC_GRID_SNAP_HI 0.99f
+
 static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, mstudioseqdesc_t *pseqdesc,
 	mstudioanim_t *panim, float f, float s, float t )
 {
@@ -891,9 +894,22 @@ static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 	else s = 2.0f * s;
 	s = bound( 0.0f, s / 255.0f, 1.0f );
 
+	/* A weight within 1% of a cell is that cell: a man aiming level and straight ahead (blending 127, 127, the
+	 * usual case) then decodes one animation, not four, and one aiming up or down decodes two. Twelve bodies in
+	 * view spent 5 ms a frame here. The error is under 1% of the angle between two cells. */
+	if( s >= GC_GRID_SNAP_HI )
+	{
+		col++;
+		s = 0.0f;
+	}
+	else if( s <= GC_GRID_SNAP_LO )
+		s = 0.0f;
+
 	if( pseqdesc->numblends == 3 )
 	{
 		R_StudioCalcRotations( e, pos, q, pseqdesc, panim + col * nb, f );
+		if( s == 0.0f )
+			return;
 		R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( col + 1 ) * nb, f );
 		R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
 		return;
@@ -906,13 +922,28 @@ static void R_StudioCalcGridBlend( cl_entity_t *e, float pos[][3], vec4_t *q, ms
 	}
 	else t = 2.0f * t;
 	t = bound( 0.0f, t / 255.0f, 1.0f );
+	if( t >= GC_GRID_SNAP_HI )
+	{
+		row++;
+		t = 0.0f;
+	}
+	else if( t <= GC_GRID_SNAP_LO )
+		t = 0.0f;
 
 	R_StudioCalcRotations( e, pos, q, pseqdesc, panim + ( row * 3 + col ) * nb, f );
-	R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( row * 3 + col + 1 ) * nb, f );
+	if( s != 0.0f )
+	{
+		R_StudioCalcRotations( e, pos2, q2, pseqdesc, panim + ( row * 3 + col + 1 ) * nb, f );
+		R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
+	}
+	if( t == 0.0f )
+		return;
 	R_StudioCalcRotations( e, pos3, q3, pseqdesc, panim + (( row + 1 ) * 3 + col ) * nb, f );
-	R_StudioCalcRotations( e, pos4, q4, pseqdesc, panim + (( row + 1 ) * 3 + col + 1 ) * nb, f );
-	R_StudioSlerpBones( nb, q, pos, q2, pos2, s );
-	R_StudioSlerpBones( nb, q3, pos3, q4, pos4, s );
+	if( s != 0.0f )
+	{
+		R_StudioCalcRotations( e, pos4, q4, pseqdesc, panim + (( row + 1 ) * 3 + col + 1 ) * nb, f );
+		R_StudioSlerpBones( nb, q3, pos3, q4, pos4, s );
+	}
 	R_StudioSlerpBones( nb, q, pos, q3, pos3, t );
 }
 
@@ -1115,6 +1146,144 @@ static void R_GXStudioRestPoseFallback( mstudiobone_t *pbones )
 }
 #endif
 
+#if XASH_GAMECUBE
+/* Scripted film actors (dod-gc) cross-fade every change of what they play: a new
+ * sequence, the legs starting or stopping a gait under the rifle's aim, a death
+ * after a run. GoldSrc's own 0.2 s crossfade (below) only knows the whole-body
+ * sequence, so a man stopping a walk had his legs jump from the gait's stride to
+ * the standing aim's, and a man whose latch was lost in a crowd snapped outright.
+ * Each actor keeps here what it played on its last drawn frame (sequence, frame,
+ * aim blend, gait and gait frame); on a change the old pose, frozen where it was,
+ * eases into the new one over FILM_BLEND_TIME. The actor is tagged by the lean
+ * emitter (curstate.iuser4, cl_frame.c). */
+#define GC_FILM_ACTOR_TAG	0x46494C4D	/* 'FILM', dod-gc's DODGC_FILM_ACTOR_TAG */
+#define FILM_BLEND_TIME		0.3f
+#define FILM_LATCH_MAX		96
+
+typedef struct
+{
+	int	index;			/* entity index, 0 free */
+	int	drawn;			/* tr.realframecount of the last update */
+	int	seq, gait;		/* last drawn: sequence, gait (0 none) */
+	float	frame, gaitframe;	/* in frames */
+	byte	blend[2];
+	int	prevseq, prevgait;	/* before the change */
+	float	prevframe, prevgaitframe;
+	byte	prevblend[2];
+	float	changetime;		/* 0: nothing to fade */
+} film_latch_t;
+
+static film_latch_t film_latch[FILM_LATCH_MAX];
+static film_latch_t *g_film_latch;	/* the film actor being drawn, else NULL */
+static player_info_t *g_film_gait;	/* its gait record (R_StudioDrawModel), else NULL */
+
+static film_latch_t *R_GXFilmLatch( int index )
+{
+	film_latch_t *oldest = &film_latch[0];
+	int i;
+
+	for( i = 0; i < FILM_LATCH_MAX; i++ )
+	{
+		if( film_latch[i].index == index )
+			return &film_latch[i];
+		if( !film_latch[i].index || ( oldest->index && film_latch[i].drawn < oldest->drawn ))
+			oldest = &film_latch[i];
+	}
+	memset( oldest, 0, sizeof( *oldest ));
+	oldest->index = index;
+	oldest->drawn = -1;		/* new: the first update takes the pose as it is */
+	return oldest;
+}
+
+/* The legs (Bip01, the pelvis and everything under it but the spine) from a gait
+ * sequence, as the player gait copy below does. */
+static void R_GXFilmLegs( cl_entity_t *e, float pos[][3], vec4_t *q, int gait, float gaitframe )
+{
+	const mstudiobone_t *pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+	mstudioseqdesc_t *gd;
+	mstudioanim_t *panim;
+	qboolean copy_bones = true;
+	int i;
+
+	if( gait <= 0 || gait >= m_pStudioHeader->numseq )
+		return;
+	gd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + gait;
+	panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, gd );
+	R_StudioCalcRotations( e, pos2, q2, gd, panim, gaitframe );
+	for( i = 0; i < m_pStudioHeader->numbones; i++ )
+	{
+		if( !Q_strcmp( pbones[i].name, "Bip01 Spine" ))
+			copy_bones = false;
+		else if( pbones[i].parent >= 0 && !Q_strcmp( pbones[pbones[i].parent].name, "Bip01 Pelvis" ))
+			copy_bones = true;
+		if( !copy_bones )
+			continue;
+		VectorCopy( pos2[i], pos[i] );
+		Vector4Copy( q2[i], q[i] );
+	}
+}
+
+/* The film actor's pose so far (pos, q: its sequence at frame f) gets its gait's
+ * legs now, and the fade from what it played before. */
+static void R_GXFilmBlend( cl_entity_t *e, float pos[][3], vec4_t *q, float f )
+{
+	static vec3_t pos1b[MAXSTUDIOBONES];
+	static vec4_t q1b[MAXSTUDIOBONES];
+	film_latch_t *l = g_film_latch;
+	int gait = 0;
+	float gaitframe = 0.0f, dt;
+
+	if( g_film_gait && m_pPlayerInfo == g_film_gait && m_pPlayerInfo->gaitsequence > 0 )
+	{
+		/* m_pPlayerInfo is the actor's own gait record (R_StudioDrawModel):
+		 * the legs go on here, ahead of the fade, not after it */
+		gait = m_pPlayerInfo->gaitsequence;
+		gaitframe = m_pPlayerInfo->gaitframe;
+		R_GXFilmLegs( e, pos, q, gait, gaitframe );
+		m_pPlayerInfo->gaitsequence = 0;
+	}
+
+	if( l->drawn != tr.realframecount )
+	{
+		if( l->drawn != -1 && ( l->seq != e->curstate.sequence || l->gait != gait ))
+		{
+			l->prevseq = l->seq;
+			l->prevgait = l->gait;
+			l->prevframe = l->frame;
+			l->prevgaitframe = l->gaitframe;
+			l->prevblend[0] = l->blend[0];
+			l->prevblend[1] = l->blend[1];
+			l->changetime = (float)g_studio.time;
+		}
+		l->seq = e->curstate.sequence;
+		l->gait = gait;
+		l->frame = f;
+		l->gaitframe = gaitframe;
+		l->blend[0] = e->curstate.blending[0];
+		l->blend[1] = e->curstate.blending[1];
+		l->drawn = tr.realframecount;
+	}
+
+	dt = (float)g_studio.time - l->changetime;
+	if( l->changetime > 0.0f && dt >= 0.0f && dt < FILM_BLEND_TIME
+		&& l->prevseq >= 0 && l->prevseq < m_pStudioHeader->numseq )
+	{
+		mstudioseqdesc_t *pd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + l->prevseq;
+		mstudioanim_t *panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, pd );
+		float s = dt / FILM_BLEND_TIME;
+
+		if( pd->numblends == 9 || pd->numblends == 3 )
+			R_StudioCalcGridBlend( e, pos1b, q1b, pd, panim, l->prevframe, l->prevblend[0], l->prevblend[1] );
+		else
+			R_StudioCalcRotations( e, pos1b, q1b, pd, panim, l->prevframe );
+		if( l->prevgait )
+			R_GXFilmLegs( e, pos1b, q1b, l->prevgait, l->prevgaitframe );
+		s = s * s * ( 3.0f - 2.0f * s );	/* ease in and out */
+		R_StudioSlerpBones( m_pStudioHeader->numbones, q, pos, q1b, pos1b, 1.0f - s );
+	}
+}
+#endif
+
 /*
 ====================
 StudioSetupBones
@@ -1246,6 +1415,11 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		}
 	}
 
+#if XASH_GAMECUBE
+	if( g_film_latch )
+		R_GXFilmBlend( e, pos, q, f );
+	else
+#endif
 	if( g_studio.interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > g_studio.time ) && ( e->latched.prevsequence < m_pStudioHeader->numseq ))
 	{
 		// blend from last sequence
@@ -1443,9 +1617,14 @@ StudioSaveBones
 
 ====================
 */
+static unsigned r_gc_bones_serial = 1; /* one per bone setup: keys r_gx_actor.c's view x bone cache */
+
 static void R_StudioSaveBones( void )
 {
 	mstudiobone_t *pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+	if( ++r_gc_bones_serial == 0 )
+		r_gc_bones_serial = 1;
 
 	g_studio.cached_numbones = m_pStudioHeader->numbones;
 
@@ -2053,6 +2232,38 @@ static void R_StudioSetupSkin( studiohdr_t *ptexturehdr, int index )
 		ptexture = gEngfuncs.CL_GetRemapInfoForEntity( RI.currententity )->ptexture;
 	if( !ptexture )
 		ptexture = (mstudiotexture_t *)((byte *)ptexturehdr + ptexturehdr->textureindex );        // fallback
+#if XASH_GAMECUBE
+	{
+		/* One line per carried gun (p_*): which texture its skin binds. */
+		static char gun_seen[8][24];
+		int g;
+
+		for( g = 0; Q_stristr( ptexturehdr->name, "p_" ) && g < 8; g++ )
+		{
+			const char *base = ptexturehdr->name, *c;
+
+			for( c = ptexturehdr->name; *c; c++ )   /* MDL names carry the modeller's path, \\ or / */
+				if( *c == '\\' || *c == '/' )
+					base = c + 1;
+			if( Q_strnicmp( base, "p_", 2 ))
+				break;
+			if( !Q_strncmp( gun_seen[g], base, sizeof( gun_seen[g] ) - 1 ))
+				break;
+			if( !gun_seen[g][0] )
+			{
+				const int ti = ptexture[index].index;
+				image_t *img = ( ti > 0 && (unsigned)ti < (unsigned)MAX_TEXTURES ) ? R_GetTexture( (unsigned)ti ) : NULL;
+
+				Q_strncpy( gun_seen[g], base, sizeof( gun_seen[g] ));
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gun skin %s skin[%d] %s %dx%d flags=%x remap=%d -> tex=%d img=%s %dx%d\n",
+					base, index, ptexture[index].name, ptexture[index].width, ptexture[index].height,
+					ptexture[index].flags, (int)m_fDoRemap, ti,
+					( img && img->name[0] ) ? img->name : "?", img ? img->width : 0, img ? img->height : 0 );
+				break;
+			}
+		}
+	}
+#endif
 
 	if( r_lightmap->value && !r_fullbright->value )
 	{
@@ -2542,6 +2753,54 @@ R_StudioDrawPoints
 ===============
 */
 #if XASH_GAMECUBE
+/* R_StudioSetupSkin for r_gx_actor.c's list draw: binds mesh skin, as the CPU path does before each mesh. */
+static void R_StudioGXBodySkin( int texture )
+{
+	R_StudioSetupSkin( m_pStudioHeader, texture );
+	R_GXStudioRebindPending();
+}
+
+/* One body part from its display lists. False (nothing drawn) when this part or this frame needs the CPU path:
+ * no lists in the blob, a material the lists cannot express, dynamic lights, a render effect. */
+static qboolean R_StudioDrawPointsGX( const mstudiomesh_t *pmesh, const mstudiotexture_t *ptexture, const short *pskinref )
+{
+	static int disabled = -1;
+	const cl_entity_t *e = RI.currententity;
+	float lo, hi, amb[3], shade[3];
+	int k;
+
+	if( disabled < 0 )
+		disabled = gEngfuncs.Sys_CheckParm( "-gcbodycpu" ) ? 1 : 0;
+	if( disabled || !GC_UseGxWorldDraw() || e == tr.viewent || g_studio.numlocallights
+		|| e->curstate.rendermode != kRenderNormal || e->curstate.renderfx == kRenderFxGlowShell
+		|| g_nForceFaceFlags || FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ))
+		return false;
+	for( k = 0; k < m_pSubModel->nummesh; k++ )
+	{
+		const int ref = pmesh[k].skinref;
+		int tex;
+
+		if( ref < 0 || ref >= m_pStudioHeader->numskinref )
+			return false;
+		tex = pskinref[ref];
+		if( tex < 0 || tex >= m_pStudioHeader->numtextures || ptexture[tex].width <= 0 || ptexture[tex].height <= 0
+			|| FBitSet( ptexture[tex].flags, STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE | STUDIO_NF_FULLBRIGHT
+				| STUDIO_NF_FLATSHADE | STUDIO_NF_UV_COORDS ))
+			return false;
+	}
+	/* R_StudioLighting: ambient + shade x w, w = clamp(( 1 - cos ) / 1.5, 0, 1 ), then the gamma table. Flipper
+	 * computes w per vertex; the table is applied at both ends here and the ramp between them is linear. */
+	lo = (float)LightToTexGamma( (uint)( Q_min( g_studio.ambientlight, 255.0f ) * 4.0f )) / 1023.0f;
+	hi = (float)LightToTexGamma( (uint)( Q_min( g_studio.ambientlight + g_studio.shadelight, 255.0f ) * 4.0f )) / 1023.0f;
+	for( k = 0; k < 3; k++ )
+	{
+		amb[k] = g_studio.lightcolor[k] * lo;
+		shade[k] = g_studio.lightcolor[k] * ( hi - lo );
+	}
+	return R_GXActorDrawBodyLists( m_pSubModelBase, m_pSubModel, m_pStudioHeader, g_studio.bonestransform,
+		pmesh, ptexture, pskinref, g_studio.lightvec, amb, shade, R_StudioGXBodySkin, r_gc_bones_serial );
+}
+
 static qboolean r_gc_vm_bbox_logged;
 #endif
 static void R_StudioDrawPoints( void )
@@ -2593,6 +2852,18 @@ static void R_StudioDrawPoints( void )
 		: (short *)((byte *)m_pStudioHeader + m_pStudioHeader->skinindex );
 	if( !mesh_only && m_skinnum > 0 && m_skinnum < m_pStudioHeader->numskinfamilies )
 		pskinref += ( m_skinnum * m_pStudioHeader->numskinref );
+
+#if XASH_GAMECUBE
+	/* A streamed body part whose blob carries display lists (dod-gc split_studio_mdl.py gx_section): Flipper
+	 * skins and lights it. The CPU path below cost about 1 ms a body in transform, lighting and FIFO writes,
+	 * 12 ms with a full server in view. */
+	if( !mesh_only && m_pSubModel->unused == GC_STUDIO_MESH_STREAMED && m_pSubModelBase != (byte *)m_pStudioHeader
+		&& R_StudioDrawPointsGX( pmesh, ptexture, pskinref ))
+	{
+		R_STUDIO_PROF( "studio: gx body" );
+		return;
+	}
+#endif
 
 	if( FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS ) && m_pSubModel->blendvertinfoindex != 0 && m_pSubModel->blendnorminfoindex != 0 )
 	{
@@ -3511,9 +3782,9 @@ static void R_StudioDrawWeaponModel( int number, int weaponmodel, alight_t *ligh
 		if( weapon_logs < 4 )
 		{
 			weapon_logs++;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s\n",
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: player %d weaponmodel %d = %s header=%s carrier remap=%d\n",
 				number, weaponmodel, pweaponmodel ? pweaponmodel->name : "(null)",
-				m_pStudioHeader ? "yes" : "no" );
+				m_pStudioHeader ? "yes" : "no", (int)m_fDoRemap );
 		}
 	}
 	/* The lean precache can stand a resident w_crowbar in for a
@@ -3555,10 +3826,18 @@ static void R_StudioDrawWeaponModel( int number, int weaponmodel, alight_t *ligh
 	 * (ceres 1ff66ba, DAR 0xA4 = studiohdr numseq). Skip the gun. */
 	if( m_pStudioHeader )
 	{
+		/* The gun has its own skins. The carrier's colour remap (left on
+		 * by R_StudioSetRemapColors for a player model with remappable
+		 * skins) would index the carrier's remapped texture table with
+		 * the gun's skin refs: the gun drawn in the uniform's textures. */
+		const qboolean remap = m_fDoRemap;
+
+		m_fDoRemap = false;
 		R_StudioMergeBones( RI.currententity, pweaponmodel );
 		R_StudioSetupLighting( lighting );
 		R_StudioRenderModel( );
 		R_StudioCalcAttachments( );
+		m_fDoRemap = remap;
 	}
 
 	*RI.currententity = saveent;
@@ -3849,7 +4128,11 @@ static int R_StudioDrawModel( int flags )
 			return 0;
 
 		// get copy of player
-		deadplayer = *R_StudioGetPlayerState( RI.currententity->curstate.renderamt - 1 );
+		const entity_state_t *dead_src = R_StudioGetPlayerState( RI.currententity->curstate.renderamt - 1 );
+
+		if( !dead_src )
+			return 0;	/* a corpse of a slot this client has no state for */
+		deadplayer = *dead_src;
 
 		// clear weapon, movement state
 		deadplayer.number = RI.currententity->curstate.renderamt;
@@ -3908,10 +4191,54 @@ static int R_StudioDrawModel( int flags )
 			return 1;
 	}
 
+#if XASH_GAMECUBE
+	/* A scripted film actor (dod-gc) is not a player, but plays like one: its legs
+	 * walk a gait sequence under the weapon's upper-body aim sequence. The gait
+	 * comes in controller[2] and the low bits of controller[3], flagged by bit 7 of
+	 * controller[3] (DoD player models have no bone controllers), and walks at the
+	 * entity's own frame. */
+	player_info_t *film_saved_pi = m_pPlayerInfo;
+	static player_info_t film_gait;
+
+	g_film_latch = RI.currententity->curstate.iuser4 == GC_FILM_ACTOR_TAG && RI.currententity->index > 0
+		? R_GXFilmLatch( RI.currententity->index ) : NULL;
+
+	/* The film actor sets its frame and blend every server frame with no
+	 * interpolation to do: the blend lerp's stale latched half (0, the grid's
+	 * top row) had every man looking up whatever the server sent. */
+	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 ))
+	{
+		RI.currententity->latched.prevblending[0] = RI.currententity->curstate.blending[0];
+		RI.currententity->latched.prevblending[1] = RI.currententity->curstate.blending[1];
+	}
+
+	if( RI.currententity->curstate.weaponmodel && ( RI.currententity->curstate.controller[3] & 0x80 )
+		&& m_pStudioHeader && m_pStudioHeader->numbonecontrollers == 0 )
+	{
+		const int gs = RI.currententity->curstate.controller[2]
+			| (( RI.currententity->curstate.controller[3] & 0x7f ) << 8 );
+
+		if( gs > 0 && gs < m_pStudioHeader->numseq )
+		{
+			const mstudioseqdesc_t *gd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + gs;
+
+			memset( &film_gait, 0, sizeof( film_gait ));
+			film_gait.gaitsequence = gs;
+			film_gait.gaitframe = RI.currententity->curstate.frame * ( gd->numframes > 1 ? gd->numframes - 1 : 0 ) / 256.0f;
+			m_pPlayerInfo = &film_gait;
+			g_film_gait = &film_gait;
+		}
+	}
+#endif
 	if( RI.currententity->curstate.movetype == MOVETYPE_FOLLOW )
 		R_StudioMergeBones( RI.currententity, RI.currentmodel );
 	else
 		R_StudioSetupBones( RI.currententity );
+#if XASH_GAMECUBE
+	m_pPlayerInfo = film_saved_pi;
+	g_film_latch = NULL;
+	g_film_gait = NULL;
+#endif
 
 	R_StudioSaveBones();
 	R_STUDIO_PROF( "studio: bones" );
@@ -4001,8 +4328,12 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	else
 	{
 		// select the properly method
-		if( e->player )
-			pStudioDraw->StudioDrawPlayer( flags, R_StudioGetPlayerState( e->index - 1 ));
+		/* A player-flagged entity past the client slots (scripted actors, ceres caen 12 bots: DAR 0x4 in the
+		 * client's StudioDrawPlayer at pplayer->number) has no player state: draw it as a model instead. */
+		entity_state_t *pstate = e->player ? R_StudioGetPlayerState( e->index - 1 ) : NULL;
+
+		if( pstate )
+			pStudioDraw->StudioDrawPlayer( flags, pstate );
 		else
 			pStudioDraw->StudioDrawModel( flags );
 	}
@@ -4446,6 +4777,23 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		COM_FileBase( ptexture->name, name, sizeof( name ));
 		COM_StripExtension( mdlname );
 		Q_snprintf( texname, sizeof( texname ), "#%s/%s.mdl", mdlname, name );
+		if( FBitSet( ptexture->flags, STUDIO_NF_GC_CMPR_STREAM ))
+		{
+			/* width x height CMPR texels, then a half-size low mip: the low mip is the resident skin (same cost as a
+			 * 128 px skin), the full texels go to the ARAM skin stream where a window pool exists. */
+			const byte *full = (const byte *)phdr + ptexture->index;
+			const int lw = ptexture->width >> 1, lh = ptexture->height >> 1;
+			const qboolean masked = FBitSet( ptexture->flags, STUDIO_NF_MASKED ) ? true : false;
+
+			ptexture->index = R_GCBakedCmprSkin( texname, full + R_GXCmprBytes( ptexture->width, ptexture->height ),
+				lw, lh, masked );
+			if( ptexture->index )
+				R_GXSkinAttachCmpr( R_GetTexture( (unsigned)ptexture->index ), full, ptexture->width, ptexture->height, masked );
+			ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR|STUDIO_NF_GC_CMPR_STREAM );
+			if( !ptexture->index )
+				ptexture->index = tr.defaultTexture;
+			return;
+		}
 		ptexture->index = R_GCBakedCmprSkin( texname, (const byte *)phdr + ptexture->index,
 			ptexture->width, ptexture->height, FBitSet( ptexture->flags, STUDIO_NF_MASKED ));
 		ClearBits( ptexture->flags, STUDIO_NF_GC_CMPR );	/* index is a texture number from here on */
@@ -4539,6 +4887,28 @@ static void R_StudioLoadTexture( model_t *mod, studiohdr_t *phdr, mstudiotexture
 		/* Viewmodel skins must live in the persistent overflow BSS — temppool
 		 * reclaim left hands.mdl soft pixels as 0x0000 and the Garand latticed
 		 * (ava-play99-28). WorldDL listen is not -gcnewgame, so pin v_* always. */
+		/* A carried gun's (p_*) skin: what it is made from, and whether the
+		 * name was already a texture (GL_LoadTexture then keeps the old one). */
+		if( Q_stristr( mdlname, "models/p_" ))
+		{
+			static int gun_tex_logs;
+
+			if( gun_tex_logs++ < 8 )
+			{
+				const byte *px = (const byte *)phdr + ptexture->index;
+				/* The header size can be the UV domain (255x256), not the baked 64x64: read the palette
+				 * after the pixels only when that stays inside a 64x64 skin, else show zeros. */
+				static const byte nopal[768];
+				const byte *pal = ptexture->width * ptexture->height <= 64 * 64
+					? px + ptexture->width * ptexture->height : nopal;
+
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: gun skin load %s %dx%d src+%d existed=%d "
+					"px=%02x%02x%02x%02x%02x%02x%02x%02x pal0=%02x%02x%02x pal1=%02x%02x%02x pal255=%02x%02x%02x\n",
+					texname, ptexture->width, ptexture->height, ptexture->index, GL_FindTexture( texname ),
+					px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7],
+					pal[0], pal[1], pal[2], pal[3], pal[4], pal[5], pal[765], pal[766], pal[767] );
+			}
+		}
 		r_gc_studio_skins_in_arena = GC_MenuRunsServer()
 			|| gEngfuncs.Sys_CheckParm( "-gcnewgame" )
 			|| gEngfuncs.Sys_CheckParm( "-gcworldrender" )
@@ -4583,8 +4953,11 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 	{
 		extern qboolean Mod_GCForceStudioSkinUploadActive( void );
 
+		/* A listen server (the DoD play route) loads its team bodies after the map: they would draw white if their
+		 * skins were skipped like the CapFaces bake's. */
 		if( gEngfuncs.Sys_CheckParm( "-gcmap" )
 			&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" )
+			&& !gEngfuncs.Sys_CheckParm( "-gclistenserver" )
 			&& !Mod_GCForceStudioSkinUploadActive())
 			return;
 	}
@@ -4634,6 +5007,16 @@ void GAME_EXPORT Mod_StudioLoadTextures( model_t *mod, void *data )
 #endif
 		}
 #if XASH_GAMECUBE
+		/* A character body whose skins did not all load draws white: say so, whatever the route. */
+		if( Q_stristr( mod->name, "models/player/" ))
+		{
+			extern size_t R_GCStudioSkinOverflowUsed( void );
+			extern size_t R_GCStudioSkinOverflowCapacity( void );
+
+			gEngfuncs.Con_Reportf( "%sXash3D GameCube: player skins '%s' %d/%d fallback=%d overflow=%u/%u\n",
+				( loaded < phdr->numtextures ) ? S_WARN : "", mod->name, loaded, phdr->numtextures, fallback,
+				(uint)R_GCStudioSkinOverflowUsed(), (uint)R_GCStudioSkinOverflowCapacity());
+		}
 		if( gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
 		{
 			extern size_t R_GCStudioSkinOverflowUsed( void );
