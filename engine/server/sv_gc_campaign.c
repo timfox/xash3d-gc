@@ -245,6 +245,14 @@ static void SV_GCProbeCmdFrame( void )
  * the dod_live.bsp slot before it) inside the ISO in place; Dolphin serves the
  * image from the host file, so the next DVD read sees the new bytes.
  * Off by default: set cvar gc_livemap 1 (e.g. in the disc autoexec.cfg). */
+static struct
+{
+	qboolean pending;
+	int wait;
+	double capture_time;
+	vec3_t origin, angles;
+} gc_lm_restore;
+
 void SV_GCLiveMapFrame( void )
 {
 	static int last_serial = -1, armed = -1;
@@ -268,7 +276,33 @@ void SV_GCLiveMapFrame( void )
 			Mem_Free( buf );
 		Con_Reportf( "Xash3D GameCube: livemap armed=%d (file %s)\n", armed, len > 0 ? "found" : "absent" );
 	}
-	if(( !armed && !gc_livemap->value ) || ( ++tick % 60 ) != 0 ) /* ~1 s of server frames; host.realtime does not advance reliably here */
+	/* Carry the player across a live reload: after the new map spawns him, put him back where (and looking where) he was,
+	 * unless that spot is inside solid in the new map.  Runs every frame, the poll below only every 20th. */
+	/* The new map is the one whose clock restarted: sv.time is below the time the old map had when we asked for the reload. */
+	if( gc_lm_restore.pending && svs.clients && svs.clients[0].state == cs_spawned && svs.clients[0].edict
+		&& sv.state == ss_active && sv.time < gc_lm_restore.capture_time - 0.25 )
+	{
+		edict_t *pl = svs.clients[0].edict;
+
+		if( ++gc_lm_restore.wait >= 3 )	/* a few frames after spawn: the game's own spawn placement has run */
+		{
+			gc_lm_restore.pending = false;
+			if( SV_PointContents( gc_lm_restore.origin ) != CONTENTS_SOLID )
+			{
+				VectorCopy( gc_lm_restore.origin, pl->v.origin );
+				VectorCopy( gc_lm_restore.angles, pl->v.angles );
+				VectorCopy( gc_lm_restore.angles, pl->v.v_angle );
+				VectorClear( pl->v.velocity );
+				pl->v.fixangle = 1;
+				SV_LinkEdict( pl, false );
+				Con_Reportf( "Xash3D GameCube: livemap restored player (%.0f %.0f %.0f)\n",
+					gc_lm_restore.origin[0], gc_lm_restore.origin[1], gc_lm_restore.origin[2] );
+			}
+			else
+				Con_Reportf( "Xash3D GameCube: livemap: old position is solid in the new map, keeping the spawn\n" );
+		}
+	}
+	if(( !armed && !gc_livemap->value ) || ( ++tick % 20 ) != 0 ) /* ~1/3 s of server frames; host.realtime does not advance reliably here */
 		return;
 	buf = FS_LoadFile( "livemap.txt", &len, false );
 	if( !buf )
@@ -290,6 +324,17 @@ void SV_GCLiveMapFrame( void )
 	if( serial == last_serial )
 		return;
 	last_serial = serial;
+	if( svs.clients && svs.clients[0].state == cs_spawned && svs.clients[0].edict )
+	{
+		const edict_t *pl = svs.clients[0].edict;
+
+		VectorCopy( pl->v.origin, gc_lm_restore.origin );
+		VectorCopy( pl->v.v_angle, gc_lm_restore.angles );
+		gc_lm_restore.origin[2] += 2.0f;	/* a hair above the floor of the new geometry */
+		gc_lm_restore.pending = true;
+		gc_lm_restore.wait = 0;
+		gc_lm_restore.capture_time = sv.time;
+	}
 	Con_Reportf( "Xash3D GameCube: livemap reload serial=%d map=%s\n", serial, name );
 	Cbuf_AddText( va( "map %s\n", name ));
 }
