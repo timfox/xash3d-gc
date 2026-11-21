@@ -1084,6 +1084,7 @@ void Platform_RunEvents( void )
 	int port;
 	u16 held;
 	qboolean connected;
+	qboolean tas_drives = false;
 	u32 type;
 
 	GC_ReadPads();
@@ -1228,11 +1229,47 @@ void Platform_RunEvents( void )
 	}
 
 	held = gc_pad[port].button;
-	held = GC_MaybeOverlayListenProbeActions( held );
+	/* -gctas on a listen disc (-gcplayerinput): Dolphin's idle pad is
+	 * "connected", so the synthetic route that plays the replay never runs.
+	 * Play it here on the idle pad instead of the hardcoded burst and walk,
+	 * once the player has joined from the side/class overlay. */
+	if( Sys_CheckParm( "-gctas" ) && cls.state == ca_active && cls.signon == SIGNONS )
+	{
+		extern qboolean GC_CapFacesJoinPending( void );
+
+		tas_drives = true;
+		if( GC_CapFacesJoinPending( ))
+			GC_TasResetPlayback();
+		else if( GC_TasTryLoad() || GC_TasComplete() )
+		{
+			if( !gc_probe_action_logged )
+			{
+				gc_probe_action_logged = true;
+				Con_Reportf( "Xash3D GameCube: probe gameplay input begin (listen pad)\n" );
+			}
+			held |= GC_TasPollButtons();
+			if( GC_TasActive()
+				&& GC_ApplyStickDeadzone( gc_pad[port].stickX ) == 0
+				&& GC_ApplyStickDeadzone( gc_pad[port].stickY ) == 0 )
+			{
+				signed char sx = 0, sy = 0, cx = 0, cy = 0;
+
+				GC_TasGetSticks( &sx, &sy, &cx, &cy );
+				gc_pad[port].stickX = sx;
+				gc_pad[port].stickY = sy;
+				gc_pad[port].substickX = cx;
+				gc_pad[port].substickY = cy;
+			}
+		}
+		else
+			tas_drives = false;	/* no script: the burst below as before */
+	}
+	if( !tas_drives )
+		held = GC_MaybeOverlayListenProbeActions( held );
 	gc_pad[port].button = held;
 	/* Idle Dolphin pad never walks — inject main-stick forward through the
 	 * real HL1 usercmd path after listen sign-on (same as c0a0e autohop). */
-	if( Sys_CheckParm( "-gcworldrender" ) && Sys_CheckParm( "-gcmap" )
+	if( !tas_drives && Sys_CheckParm( "-gcworldrender" ) && Sys_CheckParm( "-gcmap" )
 		&& cls.state == ca_active && cls.signon == SIGNONS
 		&& GC_ApplyStickDeadzone( gc_pad[port].stickX ) == 0
 		&& GC_ApplyStickDeadzone( gc_pad[port].stickY ) == 0 )
