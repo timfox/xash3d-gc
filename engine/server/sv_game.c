@@ -2524,7 +2524,8 @@ static qboolean SV_GCLazyEligibleClass( const char *classname )
 		/* Named effects: explosion sprites, shakes and shooters that a relay or a mortar chain triggers. Their Spawn
 		 * precaches its model late (SV_ModelIndex sends it to the client), and they cost an edict only while they play.
 		 * Lights stay out: a named light's Spawn sets its starting light style, which has to happen at load. */
-		|| !Q_strcmp( classname, "env_sprite" ) || !Q_strcmp( classname, "env_shake" ) || !Q_strcmp( classname, "env_shooter" );
+		|| !Q_strcmp( classname, "env_sprite" ) || !Q_strcmp( classname, "env_shake" ) || !Q_strcmp( classname, "env_shooter" )
+		|| !Q_strcmp( classname, "env_explosion" );
 }
 
 /* The targetname inside one entity block of the lump (text positioned just after its '{'). */
@@ -2551,9 +2552,9 @@ static qboolean SV_GCLazyBlockTargetname( const char *text, char *out, size_t si
 typedef struct { const char *name; } sv_lazy_ctx_t;
 
 /* Spawned lazily, by class (the report and the tick print them). */
-static int gc_lazy_class_spawned[7];
-static const char *const gc_lazy_class_names[7] = { "trigger_relay", "trigger_changetarget", "info_target", "ambient_generic",
-	"env_sprite", "env_shake", "env_shooter" };
+static int gc_lazy_class_spawned[8];
+static const char *const gc_lazy_class_names[8] = { "trigger_relay", "trigger_changetarget", "info_target", "ambient_generic",
+	"env_sprite", "env_shake", "env_shooter", "env_explosion" };
 
 static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
 {
@@ -2584,7 +2585,7 @@ static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
 		const char *cn = SV_ClassName( ent );
 		int ci;
 
-		for( ci = 0; cn && ci < 7; ci++ )
+		for( ci = 0; cn && ci < 8; ci++ )
 			if( !Q_strcmp( cn, gc_lazy_class_names[ci] ))
 			{
 				gc_lazy_class_spawned[ci]++;
@@ -2618,10 +2619,10 @@ static void SV_GCLazyReport( const char *stage, qboolean detail )
 
 	if( !LazyLogic_Total())
 		return;
-	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, %d dropped (table full), game time %.1f; spawned by class: relay %d changetarget %d info_target %d ambient %d sprite %d shake %d shooter %d\n",
+	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, %d dropped (table full), game time %.1f; spawned by class: relay %d changetarget %d info_target %d ambient %d sprite %d shake %d shooter %d explosion %d\n",
 		stage, LazyLogic_Total(), LazyLogic_Spawned(), LazyLogic_Pending(), LazyLogic_Failed(), LazyLogic_Dropped(), sv.time,
 		gc_lazy_class_spawned[0], gc_lazy_class_spawned[1], gc_lazy_class_spawned[2], gc_lazy_class_spawned[3],
-		gc_lazy_class_spawned[4], gc_lazy_class_spawned[5], gc_lazy_class_spawned[6] );
+		gc_lazy_class_spawned[4], gc_lazy_class_spawned[5], gc_lazy_class_spawned[6], gc_lazy_class_spawned[7] );
 	for( i = 0; detail && base && LazyLogic_Entry( i, &ofs, &len, &spawned, &edict ); i++ )
 	{
 		char key[64], value[128], cls[48] = "?", tn[48] = "?";

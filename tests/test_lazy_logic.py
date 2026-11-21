@@ -225,7 +225,7 @@ class LazyEffects(unittest.TestCase):
         src = (ROOT / "engine/server/sv_game.c").read_text()
         body = src[src.index("static qboolean SV_GCLazyEligibleClass"):][:1500]
         for cls in ("trigger_relay", "trigger_changetarget", "info_target", "ambient_generic", "env_sprite", "env_shake",
-                    "env_shooter"):
+                    "env_shooter", "env_explosion"):
             self.assertIn(f'"{cls}"', body)
         self.assertNotIn('"light"', body)       # a named light sets its light style in Spawn: must happen at load
         self.assertNotIn('"light_spot"', body)
