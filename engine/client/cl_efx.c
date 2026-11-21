@@ -85,6 +85,11 @@ void GAME_EXPORT R_GetPackedColor( short *packed, short color )
 
 #if XASH_GAMECUBE
 #define GC_PARTICLES_FULL 256
+/* -gccapture (a film shot): tracers share this pool with every splash, streak
+ * and blood spray, and a dense beach shot filled all 256 for ten seconds at a
+ * time, so not one of its 445 tracer rounds reached the screen. 512 are 28 Kb,
+ * 14 Kb more, still taken at client init. */
+#define GC_PARTICLES_CAPTURE 512
 
 /* burst trims (G127) exist for the 16/96 pools; a full pool takes retail counts */
 static qboolean CL_GCParticleBurstTrim( void )
@@ -114,7 +119,7 @@ void CL_InitParticles( void )
 		 * 256 particles are 14 Kb; the extra 9 Kb is taken at client init,
 		 * before any map asks for heap. */
 		if( cap == 96 )
-			cap = GC_PARTICLES_FULL;
+			cap = Sys_CheckParm( "-gccapture" ) ? GC_PARTICLES_CAPTURE : GC_PARTICLES_FULL;
 #endif
 		max_particles = Q_min( max_particles, cap );
 	}

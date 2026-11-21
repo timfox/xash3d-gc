@@ -22,6 +22,10 @@ GNU General Public License for more details.
 #include "studio.h"
 
 #if XASH_GAMECUBE
+qboolean R_GXCaptureMode( void );
+#endif
+
+#if XASH_GAMECUBE
 /* Bounded per-particle trace for the first live EFX passes. */
 static int gc_part_trace = 48;
 #endif
@@ -67,6 +71,14 @@ void GAME_EXPORT CL_DrawParticles( double frametime, particle_t *cl_active_parti
 	// pglDepthMask( GL_FALSE );
 
 	int vis = GC_GetVisualQuality();
+#if XASH_GAMECUBE
+	/* -gccapture: a tracer must read in the film. The low-memory halving of
+	 * width and brightness left beach rounds under a pixel wide and dim, and a
+	 * capture frame is downscaled after, so draw them half again as wide. */
+	const qboolean capture = R_GXCaptureMode();
+	if( capture )
+		vis = 2;
+#endif
 	// Stable low-memory visual modes (G24c):
 	// Quality 0 (low-memory/smoke): 50% size, 50% brightness
 	// Quality 1 (medium):           75% size, full brightness
@@ -316,6 +328,10 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 				tracer_size *= 0.5f;
 			else if( vis == 1 )
 				tracer_size *= 0.75f;
+#if XASH_GAMECUBE
+			if( capture )
+				tracer_size *= 1.5f;
+#endif
 
 			// build point along noraml line (normal is -y, x)
 			VectorScale( RI.cull_vup, tmp[0] * tracer_size, normal );
