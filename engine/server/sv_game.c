@@ -6699,7 +6699,9 @@ void SV_GCStaticWallsSelfTest( void )
 		}
 		if( !ed )
 		{
-			noedict++;
+			if( noedict++ < 6 )
+				Con_Reportf( "Xash3D GameCube: static wall record %d (model *%d, origin %.0f %.0f %.0f) has no edict (the parity budget skipped its func_wall)\n",
+					i, mi, ( amin[0] + amax[0] ) * 0.5f, ( amin[1] + amax[1] ) * 0.5f, ( amin[2] + amax[2] ) * 0.5f );
 			continue;
 		}
 		for( k = 0; k < 96; k++ )
@@ -6772,8 +6774,39 @@ void SV_GCStaticWallsSelfTest( void )
 					if( a.startsolid || b.startsolid || a.allsolid || b.allsolid )
 						mv_startsolid++;
 					else if( mv_bad++ < 6 )
+					{
+						edict_t *we = NULL;
+						int j2;
+
 						Con_Reportf( S_ERROR "Xash3D GameCube: static wall SV_Move mismatch rec %d: frac %f/%f ent %d/%d\n",
 							i, a.fraction, b.fraction, a.ent ? NUM_FOR_EDICT( a.ent ) : -1, b.ent ? NUM_FOR_EDICT( b.ent ) : -1 );
+						for( j2 = 1; j2 < svgame.numEntities && !we; j2++ )
+						{
+							edict_t *e2 = SV_EdictNum( j2 );
+
+							if( !e2->free && e2->v.modelindex == mi && !Q_strcmp( SV_ClassName( e2 ), "func_wall" ))
+								we = e2;
+						}
+						if( we && mv_bad <= 3 )
+						{
+							/* The same ray against the edict and against the record, no path filters: a difference here is in the
+							 * clip fields, none means SV_ClipToEntity or the area walk drops the edict. */
+							trace_t te, tr;
+
+							SV_ClipMoveToEntity( we, start, mins, maxs, end, &te );
+							SV_GCStaticWallTrace( i, start, mins, maxs, end, &tr );
+							Con_Reportf( "Xash3D GameCube:   same ray: edict clip frac %f startsolid %d, record clip frac %f startsolid %d; edict angles %.1f %.1f %.1f size %.0f %.0f %.0f rendermode %d skin %d effects %x group %d groupinfo %x owner %d\n",
+								te.fraction, te.startsolid, tr.fraction, tr.startsolid, we->v.angles[0], we->v.angles[1], we->v.angles[2],
+								we->v.size[0], we->v.size[1], we->v.size[2], we->v.rendermode, we->v.skin, we->v.effects, we->v.groupinfo, we->v.groupinfo,
+								we->v.owner ? NUM_FOR_EDICT( we->v.owner ) : 0 );
+						}
+						if( we && mv_bad <= 2 )
+							Con_Reportf( "Xash3D GameCube:   rec %d model *%d edict %d solid %d movetype %d flags %x absmin %.0f %.0f %.0f absmax %.0f %.0f %.0f linked %d origin %.0f %.0f %.0f\n",
+								i, mi, NUM_FOR_EDICT( we ), we->v.solid, we->v.movetype, we->v.flags, we->v.absmin[0], we->v.absmin[1], we->v.absmin[2],
+								we->v.absmax[0], we->v.absmax[1], we->v.absmax[2], we->area.prev != NULL, we->v.origin[0], we->v.origin[1], we->v.origin[2] );
+						else if( !we && mv_bad <= 2 )
+							Con_Reportf( "Xash3D GameCube:   rec %d model *%d: no plain func_wall edict carries this model index\n", i, mi );
+					}
 				}
 			}
 		}
