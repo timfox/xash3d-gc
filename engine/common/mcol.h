@@ -8,7 +8,8 @@ against these brushes, LOD terrain heightfields and curved-patch triangles (thin
 prisms) the way Quake 3 does (CM_TraceThroughBrush): every
 plane is pushed out by the box, the brush bounds serve as its axial planes and
 bevels (so the file stores only angled planes), and hits stop
-MCOL_DIST_EPSILON short of the surface.
+MCOL_DIST_EPSILON short of the surface. A start less than MCOL_TOUCH_TOLERANCE
+inside a plane counts as touching it, so float error can't wedge a box.
 
 MCol_TraceBox must match mesh_collision.trace_box(). No engine dependencies
 on purpose, so tests/mcol_test.c can build it on the host.
@@ -21,6 +22,8 @@ on purpose, so tests/mcol_test.c can build it on the host.
 
 #define MCOL_VERSION		4
 #define MCOL_DIST_EPSILON	0.03125f
+#define MCOL_TOUCH_TOLERANCE	MCOL_DIST_EPSILON	// a start less than this inside one plane only touches it
+#define MCOL_TOUCH_SLACK	( 1.0f / 1024.0f )
 #define MCOL_MAX_STACK		128
 #define MCOL_TERRAIN_SAMPLES	9
 #define MCOL_TERRAIN_DEPTH	16.0f

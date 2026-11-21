@@ -237,6 +237,17 @@ static void MCol_TraceBrush( const mcol_t *m, mcol_work_t *w, const float *bmins
 		d1 = MCol_Dot( w->start, p->normal ) - dist;
 		d2 = MCol_Dot( w->end, p->normal ) - dist;
 
+		// a start this close is touching, not inside: float error in a move that
+		// ended on the surface (or a move by another collision path) left it there,
+		// and calling it solid would wedge the box for good
+		if( d1 > -MCOL_TOUCH_TOLERANCE && d1 <= 0.0f )
+		{
+			const float shift = MCOL_TOUCH_SLACK - d1;
+
+			d1 += shift;
+			d2 += shift;
+		}
+
 		if( d2 > 0.0f )
 			getsout = 1;
 		if( d1 > 0.0f )

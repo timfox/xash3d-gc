@@ -52,6 +52,14 @@ class McolTests(unittest.TestCase):
         (leaving,) = self.trace(FIX / "box.mcol", f"32 32 32 32 32 300 {PLAYER}")
         self.assertEqual((leaving[2], leaving[3]), (1, 0))
 
+    def test_start_just_inside_is_touching(self):
+        # feet 0.01 into the top of the 0..64 box: touching it, as mesh_collision.trace_box says
+        along, down, deep = self.trace(FIX / "box.mcol", f"32 32 99.99 40 32 99.99 {PLAYER}",
+                                       f"32 32 99.99 32 32 90 {PLAYER}", f"32 32 99.5 40 32 99.5 {PLAYER}")
+        self.assertEqual((along[0], along[2], along[3]), (1.0, 0, 0))
+        self.assertEqual((down[0], down[1], down[2]), (0.0, (0.0, 0.0, 1.0), 0))
+        self.assertEqual(deep[2], 1)
+
     def test_ramp_is_exact(self):
         (drop,) = self.trace(FIX / "ramp.mcol", f"128 0 400 128 0 0 {PLAYER}")
         # the box spans x 112..144, so the ramp's highest point under it carries the feet at 144
