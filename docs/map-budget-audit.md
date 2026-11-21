@@ -217,6 +217,20 @@ lives in ARAM too and is the next candidate after this.
   spawned) and the cp score relays were only exercised up to `cp3_mm`. That needs a longer or accelerated bot match; the
   bot thread should run it before the default is flipped.
 
+## 4i. Named effects through the lazy path (`sv_gc_lazy_logic 1`)
+
+- Lump check (charlie): of the 55 `env_sprite` the budget skips, 52 are named (explosion, flame and glow sprites a relay or mortar
+  chain triggers), the 18 `env_shake` and 5 `env_shooter` are named too; only 3 sprites are unnamed. Unnamed ones are static
+  decoration (caen: 11 `env_glow` + 4 sprites), named ones are events, so a static record list would have covered almost nothing
+  on charlie. Avalanche has only unnamed `light_spot`.
+- Named `env_sprite`, `env_shake` and `env_shooter` are now eligible for lazy spawn: they spawn when something looks their name up
+  and cost an edict only while they play. Late precache works (`SV_ModelIndex` sends the model to clients after loading), so the
+  sprite model is not needed at map load. Named lights stay out: a light's Spawn sets its light style, which has to happen at load.
+- Table raised to 256 entries (the first run filled the 192 and dropped some; charlie now defers 200, dropped 0, shown in the report).
+- Dolphin, charlie, 4 bots, 230 s: sprites spawned on demand (`cp3_sprite`, `883_exp` x5 in the 230 s run), no spawn failures, heap
+  after load 301-309 KB. No still captured; the explosions need a fired mortar chain, which a headless minute does not reach.
+- Not done: static records for the unnamed decoration (caen glows) and unnamed lights; a captured still of a lazy sprite playing.
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
