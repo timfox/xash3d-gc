@@ -889,9 +889,14 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
  * Soft imagepool empties alone leave these memalign() blocks on the tip and the
  * first pfnAddCommand (19-byte BaseCmd name) then Sys_Errors.
  */
+static void R_GXCmprExtDrop( void );
+
 void R_GXReleaseHudPoolForMapLoad( void )
 {
 	int i;
+
+	/* The heap texture slots too: the next map's load needs the heap, and takes its own after it. */
+	R_GXCmprExtDrop();
 
 	/* Reserved slabs and on-demand HUD slots (boot arena or heap; free()
 	 * releases either) — all before the map load takes the arena back. */
@@ -2758,16 +2763,32 @@ static qboolean r_gx_cmpr_use_big;
  * textures at 256x256); world textures keep to the near pool and hot window. */
 static qboolean r_gx_cmpr_big_for_props;
 
+/* More near slots in a heap block of their own (R_GXCmprExtAdopt): the last r_gx_cmpr_ext_n near slots. */
+static byte *r_gx_cmpr_ext_base;
+static int r_gx_cmpr_ext_n;
+
 static byte *R_GXCmprSlotPtr( int i )
 {
 	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	const int base_n = near_n - r_gx_cmpr_ext_n;
 
 	if( r_gx_cmpr_big_n && i >= r_gx_cmpr_nslots - r_gx_cmpr_big_n )
 		return r_gx_cmpr_big_base + (size_t)( i - ( r_gx_cmpr_nslots - r_gx_cmpr_big_n )) * r_gx_cmpr_big_cap;
-	if( i < near_n )
+	if( i < base_n )
 		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
-	return r_gx_cmpr_bounce + (size_t)near_n * r_gx_cmpr_bounce_cap
+	if( i < near_n )
+		return r_gx_cmpr_ext_base + (size_t)( i - base_n ) * r_gx_cmpr_bounce_cap;
+	return r_gx_cmpr_bounce + (size_t)base_n * r_gx_cmpr_bounce_cap
 		+ (size_t)( i - near_n ) * r_gx_cmpr_far_cap;
+}
+
+/* The heap block goes back whenever the slot layout is rebuilt. Callers have run GX_DrawDone. */
+static void R_GXCmprExtFree( void )
+{
+	if( r_gx_cmpr_ext_base )
+		free( r_gx_cmpr_ext_base );
+	r_gx_cmpr_ext_base = NULL;
+	r_gx_cmpr_ext_n = 0;
 }
 
 void R_GXCmprSetFar( qboolean far_pool )
@@ -2829,6 +2850,7 @@ static void R_GXCmprDropStaleAdopted( void )
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce: %d adopted slots belonged to the previous map, dropped\n",
 		r_gx_cmpr_nslots );
 	r_gx_cmpr_adopted = false;
+	R_GXCmprExtFree();
 	r_gx_cmpr_bounce = NULL;
 	r_gx_cmpr_nslots = 0;
 	r_gx_cmpr_bounce_cap = 0;
@@ -2921,6 +2943,7 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	if( nslots + far_n > GC_CMPR_SLOTS_MAX )
 		return;
 	GX_DrawDone();
+	R_GXCmprExtFree();
 	r_gx_cmpr_adopted = true;
 	r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
 	r_gx_cmpr_bounce = base;
@@ -2939,6 +2962,57 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u + %d x %u bytes = %u Kb (map arena)\n",
 		nslots, slot_bytes, far_n, far_bytes,
 		( nslots * slot_bytes + far_n * far_bytes ) / 1024u );
+}
+
+/* Give the heap slots back and keep the rest of the layout (before a map load). */
+static void R_GXCmprExtDrop( void )
+{
+	if( !r_gx_cmpr_ext_n )
+		return;
+	GX_DrawDone();
+	r_gx_cmpr_nslots -= r_gx_cmpr_ext_n;
+	R_GXCmprExtFree();
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+}
+
+/* After R_GXCmprBounceAdopt (and R_GXCmprBigAdopt): more near slots from the heap, up to want_near in all, while
+ * heap_floor bytes stay free. dod_avalanche gets 11 slots from its chunk cache's tail and binds 25 to 53 textures
+ * a frame: every bind was an ARAM read (3 to 6 ms a frame) while 500 KB of heap sat idle. Returns slots added. */
+int R_GXCmprExtAdopt( int want_near, size_t heap_floor )
+{
+	extern size_t GC_MemHeapFreeBytes( void );
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	const size_t heap = GC_MemHeapFreeBytes();
+	int n = want_near - near_n;
+	byte *mem;
+
+	if( !r_gx_cmpr_adopted || !r_gx_cmpr_bounce || r_gx_cmpr_ext_n || r_gx_cmpr_bounce_cap < 4096u
+		|| near_n < 1 || heap <= heap_floor )
+		return 0;
+	if( n > GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots )
+		n = GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots;
+	if( (size_t)n > ( heap - heap_floor ) / r_gx_cmpr_bounce_cap )
+		n = (int)(( heap - heap_floor ) / r_gx_cmpr_bounce_cap );
+	if( n < 4 )
+		return 0;
+	mem = (byte *)memalign( 32, (size_t)n * r_gx_cmpr_bounce_cap );
+	if( !mem )
+		return 0;
+	GX_DrawDone();
+	r_gx_cmpr_ext_base = mem;
+	r_gx_cmpr_ext_n = n;
+	r_gx_cmpr_nslots += n;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: %d more x %u bytes from the heap (%u Kb, heap was %u Kb), %d near slots\n",
+		n, r_gx_cmpr_bounce_cap, (unsigned)( (size_t)n * r_gx_cmpr_bounce_cap / 1024u ), (unsigned)( heap / 1024u ),
+		near_n + n );
+	return n;
 }
 
 /* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
@@ -2977,6 +3051,7 @@ void R_GXPreallocCmprBounce( void )
 /* r_gx_cmpr_clock at the start of the frame: a slot used after it is in
  * this frame's picture. */
 static unsigned r_gx_cmpr_frame_clock;
+static unsigned r_gx_cmpr_prev_frame_clock;	/* the same, one frame earlier */
 static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
@@ -3000,6 +3075,36 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 			return R_GXCmprSlotPtr( i );
 		}
 	}
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* A frame binds its textures in nearly the same order as the last one. With fewer slots than a view has
+	 * textures, least-recently-used then evicts exactly the texture needed next and every bind misses (avalanche:
+	 * 11 slots, 32 binds, 0 hits). Taking instead the slot whose texture comes up again last keeps all but one
+	 * slot hitting: first a slot the last frame did not use at all (oldest), then the one last frame used latest
+	 * that this frame has not reached, then the one this frame used latest. */
+	{
+		int cls = -1;
+
+		for( i = lo; i < hi; i++ )
+		{
+			const unsigned u = r_gx_cmpr_slot[i].used;
+			const int c = u <= r_gx_cmpr_prev_frame_clock ? 2 : u <= r_gx_cmpr_frame_clock ? 1 : 0;
+
+			if( !r_gx_cmpr_slot[i].valid )
+			{
+				pick = i;
+				break;
+			}
+			if( i == r_gx_cmpr_cur_slot && hi - lo > 1 )
+				continue;
+			if( pick < 0 || c > cls
+				|| ( c == cls && ( c == 2 ? u < r_gx_cmpr_slot[pick].used : u > r_gx_cmpr_slot[pick].used )))
+			{
+				pick = i;
+				cls = c;
+			}
+		}
+	}
+#else
 	for( i = lo; i < hi; i++ )
 	{
 		if( !r_gx_cmpr_slot[i].valid )
@@ -3010,6 +3115,7 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
 			pick = i;
 	}
+#endif
 	/* Every far slot is already in this frame's picture: taking one would
 	 * be taken back next frame. From inside the Lost Coast wreck the water
 	 * mirror, the far chunks and the far props want about 200 far chains
@@ -9805,6 +9911,7 @@ static void R_GXWaterMirrorPass( void )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	r_gx_cmpr_prev_frame_clock = r_gx_cmpr_frame_clock;
 	r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
 	/* Flythrough stage timing: where the frame goes, every 120 frames. */
 	static u64 st_acc[6], st_last;
