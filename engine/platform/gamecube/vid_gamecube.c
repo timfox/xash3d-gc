@@ -18365,6 +18365,16 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 							Con_Reportf( "Xash3D GameCube: class select %s\n",
 								classes[gc_capfaces_class_sel] );
 							Cbuf_AddText( va( "setinfo class %d\n", gc_capfaces_class_sel + 1 ));
+							/* Like the side above, the class has to reach the game DLL: a
+							 * human at its side menu only spawns once dod_class picks one
+							 * (without a dod_gc_autojoin cvar nothing else spawns them). */
+							{
+								static const char *const dod_class_cmd[5] = {
+									"rifleman", "assault", "support", "sniper", "mg"
+								};
+								CL_ServerCommand( true, va( "dod_class %s\n",
+									dod_class_cmd[gc_capfaces_class_sel] ));
+							}
 							/* WorldDL: drop CapFaces DumpFrames hold so final
 							 * XFB is live play, not a frozen class panel. */
 							if( gc_world_dl_armed )
