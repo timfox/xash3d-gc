@@ -702,6 +702,41 @@ def static_brushes(bsp: "Bsp") -> list[tuple[int, bool]]:
 	return out
 
 
+WATER_CLASSES = ("func_water",)
+
+
+def static_water(bsp: "Bsp") -> list[int]:
+	"""func_water brushes whose faces bake with the world (model numbers).  The
+	lean route has no live surface table for brush models, so a func_water drawn
+	as an entity never shows: Omaha's whole sea (dod_charlie *139) was missing.
+	An unnamed one at the lump origin never moves, so its faces bake like the
+	world's own water.  It stays a packet entity (it is not in the static list)
+	because the game still needs its water volume for swimming and splashes."""
+	ents = parse_entities(bsp.data)
+	uses: dict[str, int] = {}
+	for e in ents:
+		m = e.get("model", "")
+		if m.startswith("*"):
+			uses[m] = uses.get(m, 0) + 1
+	out: list[int] = []
+	for e in ents:
+		model = e.get("model", "")
+		if e.get("classname", "") not in WATER_CLASSES or not model.startswith("*") or uses.get(model) != 1:
+			continue
+		try:
+			num = int(model[1:])
+		except ValueError:
+			continue
+		if num < 1 or num >= min(len(bsp.models), SB_MODEL_MAX):
+			continue
+		if e.get("targetname") or e.get("globalname") or e.get("master"):
+			continue
+		if not all(_zero(e.get(k)) for k in ("renderfx", "origin", "angles", "effects", "rendermode")):
+			continue
+		out.append(num)
+	return out
+
+
 def face_clusters(bsp: "Bsp", f, pts) -> list[int]:
 	"""PVS clusters a brush entity face is seen from.  Its faces are not cut
 	by the world tree, so sample in front of the middle and of each corner;
@@ -819,6 +854,10 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False, lm_cmpr: bool | None 
 	statics = static_brushes(bsp)
 	face_list = [(fi, False) for fi in range(world_first, world_first + world_num)]
 	for num, _solid in statics:
+		first, count = bsp.models[num][14], bsp.models[num][15]
+		face_list += [(fi, True) for fi in range(first, first + count)]
+	waters = static_water(bsp)
+	for num in waters:
 		first, count = bsp.models[num][14], bsp.models[num][15]
 		face_list += [(fi, True) for fi in range(first, first + count)]
 	n_static_faces = 0
@@ -1063,6 +1102,7 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False, lm_cmpr: bool | None 
 	print(f"world DL bake {stem} (GoldSrc BSP30):")
 	print(f"  faces={n_faces} skip={n_skip} orphans={n_orphans} tris={tris}")
 	print(f"  static brush entities={len(statics)} (solid {sum(1 for _n, so in statics if so)}) faces={n_static_faces}")
+	print(f"  static func_water baked={len(waters)}")
 	print(f"  clusters={bsp.numclusters} chunks={len(order)} batches={batches} mats={len(mat_recs)}")
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)}")
 	print(f"  MEM1 resident={ofs_pvsdir // 1024} KB  ARAM chunks={run // 1024} KB (max {max_chunk // 1024} KB)")

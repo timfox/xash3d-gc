@@ -23,6 +23,8 @@ GNU General Public License for more details.
 
 #if XASH_GAMECUBE
 qboolean R_GXCaptureMode( void );
+/* -gccapture: no tracer is drawn nearer the lens than this (units along the view). */
+#define GC_TRACER_NEAR 96.0f
 #endif
 
 #if XASH_GAMECUBE
@@ -301,6 +303,23 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 		VectorAdd( p->org, delta, end );
 		VectorCopy( p->org, start );
 
+#if XASH_GAMECUBE
+		/* -gccapture: a round that passes by the lens is drawn at its world width, so a
+		 * tracer starting beside the camera filled a beach shot's top with an orange wedge.
+		 * Clip the segment to start at least GC_TRACER_NEAR in front of the eye. */
+		if( capture )
+		{
+			const float ds = DotProduct( start, RI.vforward ) - DotProduct( RI.rvp.vieworigin, RI.vforward );
+			const float de = DotProduct( end, RI.vforward ) - DotProduct( RI.rvp.vieworigin, RI.vforward );
+
+			if( ds < GC_TRACER_NEAR && de < GC_TRACER_NEAR )
+				continue;
+			if( ds < GC_TRACER_NEAR )
+				VectorLerp( start, ( GC_TRACER_NEAR - ds ) / ( de - ds ), end, start );
+			else if( de < GC_TRACER_NEAR )
+				VectorLerp( end, ( GC_TRACER_NEAR - de ) / ( ds - de ), start, end );
+		}
+#endif
 		if( !CL_CullTracer( p, start, end ))
 		{
 			vec3_t verts[4], tmp2;
