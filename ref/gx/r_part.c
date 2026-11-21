@@ -25,6 +25,9 @@ GNU General Public License for more details.
 qboolean R_GXCaptureMode( void );
 /* -gccapture: no tracer is drawn nearer the lens than this (units along the view). */
 #define GC_TRACER_NEAR 96.0f
+/* -gccapture: a tracer is at most this wide per unit of depth at its near end (about
+ * six pixels across a 640-wide frame), so a round fired past the lens stays a streak. */
+#define GC_TRACER_WIDTH_PER_DEPTH 0.012f
 #endif
 
 #if XASH_GAMECUBE
@@ -307,10 +310,13 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 		/* -gccapture: a round that passes by the lens is drawn at its world width, so a
 		 * tracer starting beside the camera filled a beach shot's top with an orange wedge.
 		 * Clip the segment to start at least GC_TRACER_NEAR in front of the eye. */
+		float near_depth = 0.0f;
 		if( capture )
 		{
 			const float ds = DotProduct( start, RI.vforward ) - DotProduct( RI.rvp.vieworigin, RI.vforward );
 			const float de = DotProduct( end, RI.vforward ) - DotProduct( RI.rvp.vieworigin, RI.vforward );
+
+			near_depth = Q_max( GC_TRACER_NEAR, Q_min( ds, de ));
 
 			if( ds < GC_TRACER_NEAR && de < GC_TRACER_NEAR )
 				continue;
@@ -349,7 +355,12 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 				tracer_size *= 0.75f;
 #if XASH_GAMECUBE
 			if( capture )
+			{
 				tracer_size *= 1.5f;
+				/* Every s66 round crosses the camera plane between the two lines: one
+				 * passing 20-100 units off the lens drew as an orange cone over the frame. */
+				tracer_size = Q_min( tracer_size, GC_TRACER_WIDTH_PER_DEPTH * near_depth );
+			}
 #endif
 
 			// build point along noraml line (normal is -y, x)
