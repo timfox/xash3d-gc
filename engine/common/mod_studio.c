@@ -723,10 +723,43 @@ static qboolean Mod_GCAnimEntPinned( const gc_animent_t *e, unsigned frame )
 	return e->pack && e->frame == frame && ( e->mesh || e->owner == gc_animpack_owner );
 }
 
+/* The mesh entry handed out last: its body part may not be queued for Flipper yet. */
+static int gc_mesh_last = -1;
+
+/* The ring is full of body meshes handed out this frame. Every one but the last has had its body part
+ * queued (the renderer fetches a part, draws it, then fetches the next), so once Flipper has drawn what
+ * is queued their room can go to the next part. Wait for that and release them: a frame that needs
+ * more meshes than the ring holds (two teams of crowds, every body, head and gear variant: about
+ * 390 KB against 256) costs a GPU wait instead of soldiers drawn without bodies (ceres ep02 s123,
+ * about 9 dropped parts a frame with #478 alone). False when there is nothing to release. */
+static qboolean Mod_GCAnimReleaseDrawn( unsigned frame )
+{
+	qboolean any = false;
+	int i;
+
+	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+		if( gc_animent[i].pack && gc_animent[i].mesh && gc_animent[i].frame == frame && i != gc_mesh_last )
+			any = true;
+	if( !any )
+		return false;
+	GC_GXFenceWait( GC_GXFenceNext( ));
+	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
+		if( gc_animent[i].pack && gc_animent[i].mesh && gc_animent[i].frame == frame && i != gc_mesh_last )
+			gc_animent[i].frame = frame - 1; /* kept for a later hit, its room free */
+	{
+		static unsigned waits;
+
+		if(( waits++ & 255 ) == 0 )
+			Con_Reportf( "Xash3D GameCube: animpack ring full of body meshes, waited for the GPU (%u times)\n", waits );
+	}
+	return true;
+}
+
 /* The pool is in the studio arena: every arena reset drops it. */
 void Mod_GCAnimPackReset( void )
 {
 	memset( gc_animent, 0, sizeof( gc_animent ));
+	gc_mesh_last = -1;
 	gc_animpool = NULL;
 	gc_animpool_size = 0;
 	gc_animpool_cursor = 0;
@@ -1041,7 +1074,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 	byte dirbuf[64] __attribute__((aligned( 32 )));
 	const unsigned frame = host.framecount;
 	unsigned diroff, off, size, need, start, tries = 0, wraps = 0, raw_len = 0, comp_len = 0;
-	qboolean lz4 = false;
+	qboolean lz4 = false, released = false;
 	int i, slot = -1, oldest = -1;
 
 	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
@@ -1050,6 +1083,8 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 		{
 			gc_animent[i].frame = frame;
 			gc_animent[i].owner = gc_animpack_owner;
+			if( mesh )
+				gc_mesh_last = i;
 			gc_animpack_fetch_len = gc_animent[i].ret_len;
 			return gc_animpool + gc_animent[i].off;
 		}
@@ -1087,7 +1122,10 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 		return NULL;
 
 	/* Place it at the cursor, stepping over blocks handed out this frame. */
+place:
 	start = gc_animpool_cursor;
+	tries = wraps = 0;
+	slot = oldest = -1;
 	for( ;; )
 	{
 		int pinned = -1;
@@ -1097,7 +1135,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 			if( wraps++ )
 			{
 				gc_animpack_miss = "ring full this frame";
-				goto spare;
+				goto full;
 			}
 			start = 0;
 		}
@@ -1116,7 +1154,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 		if( ++tries > GC_ANIMPACK_ENTRIES )
 		{
 			gc_animpack_miss = "ring fragmented this frame";
-			goto spare;
+			goto full;
 		}
 	}
 	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
@@ -1138,7 +1176,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 	if( slot < 0 )
 	{
 		gc_animpack_miss = "every ring entry handed out this frame";
-		goto spare;
+		goto full;
 	}
 	if( lz4 )
 	{
@@ -1166,11 +1204,19 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 	gc_animent[slot].frame = frame;
 	gc_animent[slot].owner = gc_animpack_owner;
 	gc_animent[slot].mesh = mesh;
+	if( mesh )
+		gc_mesh_last = slot;
 	gc_animent[slot].ret_len = lz4 ? ( raw_len + 31u ) & ~31u : need;
 	gc_animpool_cursor = start + need;
 	gc_animpack_fetch_len = gc_animent[slot].ret_len;
 	return gc_animpool + start;
 
+full:
+	if( !released && Mod_GCAnimReleaseDrawn( frame ))
+	{
+		released = true;
+		goto place;
+	}
 spare:
 	/* Not kept in the ring: fetched again next frame, when there may be room. A
 	 * mesh blob never goes to a spare: the next fetch would overwrite it before
@@ -1406,7 +1452,8 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 
 		/* Every drop is a soldier missing his body in that frame: the first few, then every 64th, so a
 		 * capture log shows a crowd that keeps losing bodies (film tools: capture log check). */
-		if( warned++ < 8 || ( ++drops & 63 ) == 0 )
+		drops++;
+		if( warned++ < 8 || ( drops & 63 ) == 0 )
 			Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame (%s; %u dropped so far)\n",
 				group->name, pmodel->name, gc_animpack_miss ? gc_animpack_miss : "pack not open", drops );
 	}
