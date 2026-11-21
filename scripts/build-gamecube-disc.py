@@ -2202,7 +2202,26 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb2-lmpack5-lmcmpr"
 	if os.environ.get("DODGC_WD_LZ4", "") == "1":
 		key += ":lz4lm1lf3pvs1"
+	def _pad_slots() -> None:
+		# Dev "live map" discs (tools/mapbridge): keep wd/lf/sb at fixed sizes so the host can rewrite them in the ISO
+		# in place.  GC_SLOT_PAD="dod_live:wd=1048576:lf=1048576:sb=65536".  The sb header records the wd size, so it
+		# is rewritten to the padded wd size (the runtime ignores a static-brush list whose recorded size differs).
+		for spec in os.environ.get("GC_SLOT_PAD", "").split(","):
+			parts = spec.split(":")
+			if parts[0].lower() != bsp.stem.lower():
+				continue
+			want = dict(kv.partition("=")[::2] for kv in parts[1:])
+			for kind, target in (("wd", out), ("lf", lf), ("sb", sb)):
+				if kind in want and target.is_file() and target.stat().st_size < int(want[kind]):
+					with open(target, "ab") as fh:
+						fh.truncate(int(want[kind]))
+			if "wd" in want and sb.is_file():
+				with open(sb, "r+b") as fh:
+					fh.seek(8)
+					fh.write(struct.pack(">I", out.stat().st_size))
+
 	if out.is_file() and lf.is_file() and sb.is_file() and stamp.is_file() and stamp.read_text() == key:
+		_pad_slots()
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
 	try:
