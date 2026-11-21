@@ -923,7 +923,9 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		byte *dst = NULL;
 
 		R_GXCmprSkinSize( pic->width, pic->height, &cw, &ch );
-		while(( cw > 128 || ch > 128 ) && cw > 8 && ch > 8 )
+		const int vm_cmpr_cap = gEngfuncs.Sys_CheckParm( "-gcvm128" ) ? 128 : 256;
+
+		while(( cw > vm_cmpr_cap || ch > vm_cmpr_cap ) && cw > 8 && ch > 8 )
 		{
 			cw >>= 1;
 			ch >>= 1;
@@ -991,6 +993,17 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		dst = (byte *)R_GCAllocStudioSkinOverflow( tex, bytes );
 		if( !dst )
 			dst = (byte *)R_GCAllocMip( tex, 0, bytes );
+		/* GX samples CMPR only from 32-aligned texels (R_GXNativeTexture): an unaligned plane would draw
+		 * as 16-bit texels, garbage. Take the plain path instead. */
+		if( dst && ((uintptr_t)dst & 31 ))
+		{
+			static int cmpr_align_logs;
+
+			if( cmpr_align_logs++ < 4 )
+				gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: CMPR skin %s at %p is not 32-byte aligned, not CMPR\n",
+					tex->name, (void *)dst );
+			dst = NULL;
+		}
 		if( dst )
 		{
 			const qboolean masked = !sw_noalphabrushes.value && FBitSet( pic->flags, IMAGE_ONEBIT_ALPHA );
@@ -1009,7 +1022,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			{
 				static int cmpr_logged;
 
-				if( cmpr_logged++ < 4 )
+				if( cmpr_logged++ < 4 || Q_stristr( tex->name, "models/player" ))
 					gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s %dx%d -> %dx%d (%s)\n",
 						tex->name, pic->width, pic->height, cw, ch, Q_memprint( bytes ));
 			}
@@ -1018,7 +1031,7 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 		{
 			static int cmpr_fail_logs;
 
-			if( cmpr_fail_logs++ < 4 )
+			if( cmpr_fail_logs++ < 4 || Q_stristr( tex->name, "models/player" ))
 				gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR skin %s no room (%s, window left %s)\n",
 					tex->name, Q_memprint( bytes ), Q_memprint( Mod_GCStudioSkinRemaining( )));
 		}

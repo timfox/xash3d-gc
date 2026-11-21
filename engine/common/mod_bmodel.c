@@ -81,6 +81,10 @@ static mleaf_t *gc_leafs_prealloc;
  * video and the main menu, which never use them. */
 static byte *gc_static_nodes;
 static void *gc_clipnodes_malloc_block;
+/* The raw clipnodes lump when Mod_GCReloadStdBspLump read it from disc into
+ * a plain malloc block (not scratch or spill): Mod_LoadClipnodes moves it into
+ * gc_static_clipnodes and frees it instead of keeping 254 KB of heap (caen). */
+static void *gc_clipnodes_reload_heap;
 static qboolean gc_clipnodes_pool_block;
 #if XASH_GAMECUBE
 /* Compact hull 1–3 clipnodes: campaign peak is c5a1 / rocket_frenzy ~32.3k
@@ -91,6 +95,13 @@ static qboolean gc_clipnodes_pool_block;
 #define GC_STATIC_HULL0_CAPACITY    16384
 static mclipnode16_t gc_static_clipnodes[GC_STATIC_CLIPNODE_CAPACITY]
 	__attribute__((aligned( 32 )));
+/* The routes whose Mod_LoadClipnodes owns a normalized copy (the pinned path):
+ * on DoD that copy is gc_static_clipnodes itself. */
+static qboolean Mod_GCClipnodesPinnedRoute( void )
+{
+	return Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcnewgame" )
+		|| Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcworldrender" );
+}
 /* Hull 0 as BSS (like clipnodes): heap memalign of even 26 KiB fails under
  * c4a3 smoke fragmentation (free≈50 Kb, probe 20261105-065947) after the
  * durable surfedges tail copy. 128 KiB fixed cost; never tip-fatal. */
@@ -5826,6 +5837,42 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 	Mod_GCWorldPackInitStub();
 	start = Sys_DoubleTime( );
 	size = FS_FileLength( f );
+#if XASH_DODGC_NETWORK
+	/* DoD: every measured map pack is 1.4-3.2 MiB, so a fixed 6 MiB ring held 2.8-4.6 MiB of ARAM the
+	 * match never touched, and the two 3.55 MiB player animation packs did not fit beside it. The ring
+	 * is this map's pack plus margin for the per-tag duplicates (full 6 MiB when that does not fit).
+	 * It is recomputed at every pack open: a later, larger pack must not wrap a smaller ring (the
+	 * wrap would overwrite textures of the same pack that gc_wt.aram[] still points at), so the ring is
+	 * released and reserved again at the larger size. The previous world's textures are already gone
+	 * here (the pack state was reset above) and the store entries are cleared with it. */
+	if( size > 0 && !Sys_CheckParm( "-gccapfacessmoke" ))
+	{
+		const uint32_t margin = Q_max( 512u * 1024u, (uint32_t)size / 8u );
+		const uint64_t want64 = (( (uint64_t)size + margin + 32767u ) & ~(uint64_t)32767u );
+		const uint32_t want = want64 < GC_WT_ARAM_BYTES ? (uint32_t)want64 : GC_WT_ARAM_BYTES;
+
+		if( gc_wt_store_base && gc_wt_store_bytes < want )
+		{
+			if( GC_AramFree( gc_wt_store_base ))
+			{
+				Con_Reportf( "Xash3D GameCube: world texture store ring %s too small for pack %s, reserving %s\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( want ));
+				gc_wt_store_base = 0;
+				gc_wt_store_head = gc_wt_store_next = 0;
+				memset( gc_wt_store, 0, sizeof( gc_wt_store ));
+			}
+			else
+				Con_Reportf( S_WARN "Xash3D GameCube: world texture store ring %s too small for pack %s and could not be released\n",
+					Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ));
+		}
+		if( !gc_wt_store_base )
+		{
+			gc_wt_store_bytes = want;
+			Con_Reportf( "Xash3D GameCube: world texture store ring %s for pack %s (full ring %s)\n",
+				Q_memprint( gc_wt_store_bytes ), Q_memprint( (size_t)size ), Q_memprint( GC_WT_ARAM_BYTES ));
+		}
+	}
+#endif
 	if( !gc_wt_store_base )
 	{
 		/* Size the ring to this pack when the map never changelevels into a
@@ -5849,6 +5896,12 @@ static void Mod_GCWorldPackLoad( const char *modelname, size_t surface_reserve )
 		if( size_to_pack )
 			gc_wt_store_bytes = ((uint32_t)size + 32767u ) & ~32767u;
 		gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		/* A reserve that fails at the right-sized ring retries at the full ring before giving up. */
+		if( !gc_wt_store_base && gc_wt_store_bytes < GC_WT_ARAM_BYTES )
+		{
+			gc_wt_store_bytes = GC_WT_ARAM_BYTES;
+			gc_wt_store_base = GC_AramReserveTagged( gc_wt_store_bytes, "wtstore" );
+		}
 	}
 	if( !gc_wt_store_base )
 	{
@@ -8501,6 +8554,7 @@ void Mod_GameCubeFreeMallocSurfaces( model_t *mod )
 		gc_clipnodes_pool_block = false;
 		gc_clipnodes_static_block = false;
 		gc_clipnodes_scratch_block = false;
+		gc_clipnodes_reload_heap = NULL;
 		gc_submodels_malloc_block = NULL;
 		gc_entities_malloc_block = NULL;
 		gc_planes_arena_tail = false;
@@ -8669,6 +8723,25 @@ free_submodels:
  */
 void Mod_GCWorldCanaryCheck( const char *when );
 
+/* Bytes the world's entity text will need in the map arena at MAP_READY
+ * (Mod_GCMoveWorldEntitiesToArena), or 0 when it is not a movable heap block.
+ * The DoD packet ring is sized with this left over, or the ring takes the gap
+ * and the text stays on the heap (180 KB on dod_charlie). */
+size_t Mod_GCWorldEntityTextHeapBytes( void )
+{
+	model_t *mod = worldmodel;
+
+	if( !mod || mod->type != mod_brush || !mod->entities )
+		return 0;
+#if XASH_DODGC_NETWORK
+	if( gc_entities_static_block && gc_static_entities && mod->entities == gc_static_entities )
+		return Q_strlen( mod->entities ) + 1;
+#endif
+	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
+		return 0;
+	return Q_strlen( mod->entities ) + 1;
+}
+
 void Mod_GCMoveWorldEntitiesToArena( void )
 {
 	model_t *mod = worldmodel;
@@ -8677,6 +8750,30 @@ void Mod_GCMoveWorldEntitiesToArena( void )
 
 	if( !mod || mod->type != mod_brush || !mod->entities )
 		return;
+#if XASH_DODGC_NETWORK
+	/* The 128 KB entity reserve is a permanent heap block a DoD listen map holds
+	 * its small lump in (avalanche). Once the text sits in the arena the reserve
+	 * goes back to the heap; the next map load takes it again if it is needed. */
+	if( gc_entities_static_block && gc_static_entities && mod->entities == gc_static_entities )
+	{
+		size_t n = Q_strlen( mod->entities ) + 1, pos = GC_MapArenaFind( n );
+		char *to;
+
+		if( pos != (size_t)-1 && ( to = (char *)GC_MapLoadBufferTailAlloc( pos, n )) != NULL )
+		{
+			memcpy( to, mod->entities, n );
+			mod->entities = to;
+			free( gc_static_entities );
+			gc_static_entities = NULL;
+			gc_entities_static_block = false;
+			gc_entities_arena_tail = true;
+			Con_Reportf( "Xash3D GameCube: budget moved entity text to map leftover (%s), entity reserve returned, heap free %s\n",
+				Q_memprint( n ), Q_memprint( GC_MemHeapFreeBytes()));
+			Mod_GCWorldCanaryCheck( "after entity text move" );
+			return;
+		}
+	}
+#endif
 	if( !gc_entities_malloc_block || mod->entities != (char *)gc_entities_malloc_block )
 	{
 		static const model_t *said;
@@ -9022,6 +9119,24 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 	}
 
 	numelems = lump.filelen / real_entrysize;
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+	/* DoD clipnodes end up normalized in gc_static_clipnodes (the pinned path in
+	 * Mod_LoadClipnodes), and a raw dclipnode_t is the same 8 bytes as the
+	 * mclipnode16_t it becomes, normalized element by element in place. Read
+	 * the lump straight into that table: the copy in the world-array spill
+	 * (253 KiB on dod_caen, 250 on charlie, 228 on avalanche) stayed used all
+	 * match and pushed the world DL tables and chunk cache (189 KiB) onto
+	 * the heap, which then ran at 4 KB with twelve bots. */
+	if( lumpnum == LUMP_CLIPNODES && real_entrysize == sizeof( mclipnode16_t )
+		&& numelems <= GC_STATIC_CLIPNODE_CAPACITY && Mod_GCClipnodesPinnedRoute())
+	{
+		lumpbuf = (byte *)gc_static_clipnodes;
+		scratch_backed = true;	/* never freed: the static table */
+		Con_Reportf( "Xash3D GameCube: clipnodes lump read into the static table %s\n",
+			Q_memprint( lump.filelen ));
+	}
+	else
+#endif
 	lumpbuf = (byte *)malloc( lump.filelen );
 	/* Tip-tight maps (dod_donner): markfaces ~31 KiB fails malloc after the
 	 * surface high-slot claim. Prefer spill before scratch/ARAM fallbacks.
@@ -9158,6 +9273,8 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 	*(byte **)((byte *)bmod + info->dataofs) = lumpbuf;
 	*(size_t *)((byte *)bmod + info->countofs) = numelems;
+	if( lumpnum == LUMP_CLIPNODES )
+		gc_clipnodes_reload_heap = scratch_backed ? NULL : lumpbuf;
 	Con_Reportf( "Xash3D GameCube: reloaded BSP lump %s (%s)%s from disc\n",
 		info->loadname, Q_memprint( lump.filelen ), scratch_backed ? " [scratch]" : "" );
 	return true;
@@ -9559,6 +9676,53 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 			mod->texinfo = (mtexinfo_t *)pinned;
 			if( texinfo_heap_owned )
 				gc_texinfo_malloc_block = pinned;
+		}
+	}
+
+	/* The faces lump may still live inside the staging buffer being released (dod_flash: 9801 faces,
+	 * clamped slot, so they stay a BSP alias instead of a copy). Clearing the pointer would leave the
+	 * surface load with no faces ("missing BSP faces ... before surface load"), and the tail-copy
+	 * restore below only exists when a copy was made. Move them out first; when no room can be found,
+	 * keep the staging buffer for the surface load instead of releasing it. */
+	{
+		const qboolean q2 = bmod->version == QBSP2_VERSION;
+		const void *faces = q2 ? (const void *)bmod->surfaces32 : (const void *)bmod->surfaces;
+
+		/* CapFaces lean / WorldDL never build the live surfaces, so nothing reads these faces afterwards. */
+		if( faces && !gc_capfaces_lean_surfaces && Mod_GCPointerInBuffer( faces, mod_base, bufferlen ))
+		{
+			const size_t bytes = bmod->numsurfaces * ( q2 ? sizeof( *bmod->surfaces32 ) : sizeof( *bmod->surfaces ));
+			void *copy = Mod_GCWorldArraySpillAlloc( bytes, "faces" );
+			qboolean from_spill = copy != NULL;
+
+			if( !copy )
+				copy = Mod_GCPreSurfaceTailAlloc( GC_MapLoadBufferTailHighwater(), bytes );
+			if( !copy )
+				copy = Mem_TryMalloc( mod->mempool, bytes );
+			if( !copy )
+			{
+				gc_retain_bsp_source_buffer = true;
+				gc_force_bsp_image_release = false;
+				gc_bsp_scratch_base = mod_base;
+				gc_bsp_scratch_size = GC_IsMapLoadBuffer( mod_base ) && GC_MapLoadBufferCapacity() > bufferlen
+					? GC_MapLoadBufferCapacity() : bufferlen;
+				Con_Reportf( S_WARN "Xash3D GameCube: faces (%s) still live in BSP staging and no copy fits; retaining staging for surfaces\n",
+					Q_memprint( bytes ));
+				return;
+			}
+			memcpy( copy, faces, bytes );
+			if( q2 )
+				bmod->surfaces32 = copy;
+			else
+			{
+				bmod->surfaces = copy;
+				if( from_spill )
+				{
+					gc_faces_tail_copy = copy;
+					gc_faces_source_alias = false;
+				}
+			}
+			Con_Reportf( "Xash3D GameCube: faces %s moved out of BSP staging before release\n", Q_memprint( bytes ));
 		}
 	}
 
@@ -10413,8 +10577,7 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 
 		/* Scratch aliases die when Flipper rearms BSP arena. Own compact pin
 		 * for New Game and CapFaces -gcmap/-gcworldrender (probe 013254). */
-		if( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcnewgame" )
-			|| Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcworldrender" ))
+		if( Mod_GCClipnodesPinnedRoute())
 		{
 			mclipnode16_t *owned;
 			if( !bmod->clipnodes )
@@ -10579,6 +10742,14 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				gc_clipnodes_malloc_block = owned;
 				for( h = 1; h < 4; h++ )
 					mod->hulls[h].clipnodes16 = owned;
+				/* The raw lump read from disc is no longer referenced: it stayed on the heap for the whole match. */
+				if( gc_clipnodes_reload_heap && bmod->clipnodes == gc_clipnodes_reload_heap && (void *)owned != gc_clipnodes_reload_heap )
+				{
+					free( gc_clipnodes_reload_heap );
+					bmod->clipnodes = NULL;
+					Con_Reportf( "Xash3D GameCube: freed raw clipnodes lump %s\n", Q_memprint( clip_sz ));
+				}
+				gc_clipnodes_reload_heap = NULL;
 				Con_Reportf( "Xash3D GameCube: owned compact clipnodes %s\n",
 					Q_memprint( clip_sz ));
 				return;
@@ -10593,6 +10764,34 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: compact clipnodes aliased from BSP scratch %s\n",
 					Q_memprint( clip_sz ));
 			}
+			else if( gc_clipnodes_reload_heap && bmod->clipnodes == gc_clipnodes_reload_heap
+				&& bmod->numclipnodes <= GC_STATIC_CLIPNODE_CAPACITY )
+			{
+				/* dod_caen: a 254 KB disc reload kept on the heap all match while the 256 KB BSS table sat idle.
+				 * Same normalized copy as the pinned path, then the heap block goes back. */
+				for( int i = 0; i < bmod->numclipnodes; i++ )
+				{
+					int c0 = (unsigned short)bmod->clipnodes[i].children[0];
+					int c1 = (unsigned short)bmod->clipnodes[i].children[1];
+
+					if( c0 >= bmod->numclipnodes )
+						c0 -= 65536;
+					if( c1 >= bmod->numclipnodes )
+						c1 -= 65536;
+					gc_static_clipnodes[i].planenum = bmod->clipnodes[i].planenum;
+					gc_static_clipnodes[i].children[0] = (short)c0;
+					gc_static_clipnodes[i].children[1] = (short)c1;
+				}
+				free( gc_clipnodes_reload_heap );
+				gc_clipnodes_reload_heap = NULL;
+				bmod->clipnodes = NULL;
+				mod->clipnodes16 = gc_static_clipnodes;
+				gc_clipnodes_malloc_block = gc_static_clipnodes;
+				gc_clipnodes_static_block = true;
+				gc_clipnodes_pool_block = false;
+				Con_Reportf( "Xash3D GameCube: compact clipnodes moved from heap lump to static table %s\n",
+					Q_memprint( clip_sz ));
+			}
 			else
 			{
 				gc_clipnodes_malloc_block = bmod->clipnodes;
@@ -10600,6 +10799,7 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: compact clipnodes aliased from heap lump %s\n",
 					Q_memprint( clip_sz ));
 			}
+			gc_clipnodes_reload_heap = NULL;
 			return;
 		}
 
