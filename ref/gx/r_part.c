@@ -71,14 +71,6 @@ void GAME_EXPORT CL_DrawParticles( double frametime, particle_t *cl_active_parti
 	// pglDepthMask( GL_FALSE );
 
 	int vis = GC_GetVisualQuality();
-#if XASH_GAMECUBE
-	/* -gccapture: a tracer must read in the film. The low-memory halving of
-	 * width and brightness left beach rounds under a pixel wide and dim, and a
-	 * capture frame is downscaled after, so draw them half again as wide. */
-	const qboolean capture = R_GXCaptureMode();
-	if( capture )
-		vis = 2;
-#endif
 	// Stable low-memory visual modes (G24c):
 	// Quality 0 (low-memory/smoke): 50% size, 50% brightness
 	// Quality 1 (medium):           75% size, full brightness
@@ -261,6 +253,14 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 	// pglDepthMask( GL_FALSE );
 
 	int vis = GC_GetVisualQuality();
+#if XASH_GAMECUBE
+	/* -gccapture: a tracer must read in the film. The low-memory halving of
+	 * width and brightness left beach rounds under a pixel wide and dim, and a
+	 * capture frame is downscaled after, so draw them half again as wide. */
+	const qboolean capture = R_GXCaptureMode();
+	if( capture )
+		vis = 2;
+#endif
 
 	float gravity = frametime * gp_movevars->gravity;
 	float scale = 1.0 - ( frametime * 0.9 );
