@@ -231,7 +231,7 @@ void Mod_GCUploadDeferredStudioSkins( void ); /* post-MAP_READY companion/view s
 //
 // mod_alias.c
 //
-void Mod_LoadAliasModel( model_t *mod, const void *buffer, qboolean *loaded );
+void Mod_LoadAliasModel( model_t *mod, const void *buffer, size_t buffersize, qboolean *loaded );
 
 //
 // mod_bmodel.c

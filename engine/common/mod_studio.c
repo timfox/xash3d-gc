@@ -1877,6 +1877,7 @@ static struct
 	const void   *hdr;
 	char         path[MAX_QPATH];
 	size_t       s0;      /* header + texture table + skin table, the file offset of the first pixels */
+	size_t       fsize;   /* whole file on disc: the pixels Mod_StudioValidTextures checks are there, not in memory */
 } gc_texstream;
 
 static void Mod_GCReleaseStudioTexBuf( void *ptr )
@@ -1968,6 +1969,7 @@ static qboolean Mod_GCStudioTexStreamHeader( file_t *f, const char *path, fs_off
 	gc_texstream.active = true;
 	gc_texstream.hdr = dst;
 	gc_texstream.s0 = s0;
+	gc_texstream.fsize = (size_t)sz;
 	Q_strncpy( gc_texstream.path, path, sizeof( gc_texstream.path ));
 	gc_studio_tex_scratch_busy = true;
 	if( size_out )
@@ -2440,6 +2442,51 @@ MAYBE_UNUSED static qboolean Mod_StudioTexSizes( studiohdr_t *thdr, size_t texsi
 
 /*
 =================
+Mod_StudioValidTextures
+
+=================
+*/
+MAYBE_UNUSED static qboolean Mod_StudioValidTextures( const studiohdr_t *phdr, size_t size )
+{
+	if( phdr->numtextures == 0 )
+		return true;
+
+	if( phdr->numtextures < 0 || phdr->textureindex < 0 )
+		return false;
+
+	if((uint64_t)phdr->textureindex + (uint64_t)phdr->numtextures * sizeof( mstudiotexture_t ) > size )
+		return false;
+
+	const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)phdr + phdr->textureindex );
+#if XASH_GAMECUBE
+	/* A streamed gc_studio companion is header-only in memory (its length is s0): its pixels stay in the file and
+	 * are read one texture at a time, so check them against the file size. */
+	const uint64_t pixel_limit = ( gc_texstream.active && (const void *)phdr == gc_texstream.hdr )
+		? (uint64_t)gc_texstream.fsize : (uint64_t)size;
+#else
+	const uint64_t pixel_limit = size;
+#endif
+
+	for( int i = 0; i < phdr->numtextures; i++ )
+	{
+		if( ptexture[i].width < 0 || ptexture[i].height < 0 || ptexture[i].index < 0 )
+			return false;
+
+#if XASH_GAMECUBE
+		/* Baked GX CMPR skins (STUDIO_NF_GC_CMPR) carry CMPR blocks, not palette indices plus a palette. */
+		if((uint64_t)ptexture[i].index + (uint64_t)Mod_GCStudioTexDataBytes( &ptexture[i] ) > pixel_limit )
+			return false;
+#else
+		if((uint64_t)ptexture[i].index + (uint64_t)ptexture[i].width * ptexture[i].height + 768 > pixel_limit )
+			return false;
+#endif
+	}
+
+	return true;
+}
+
+/*
+=================
 Mod_LoadStudioModel
 =================
 */
@@ -2541,6 +2588,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 
 		// NOTE: keep phdr->length + size1 + size2 from wrapping
 		if( thdr != NULL && Mod_StudioTexSizes( thdr, size2_len, &size1, &size2 ) &&
+			Mod_StudioValidTextures( thdr, size2_len ) &&
 			size1 + size2 <= SIZE_MAX - (size_t)phdr->length )
 		{
 			// TODO: Mod_StudioLoadTextures will crash if passed a merged studio model!
@@ -2563,7 +2611,9 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 			memcpy( out, in, size1 + size2 );	// copy textures + skinrefs
 			phdr->length += size1 + size2;
 		}
-		else Con_Printf( S_WARN "%s: %s missing textures file\n", __func__, mod->name );
+		else if( !buffer2 )
+			Con_Printf( S_WARN "%s: %s missing textures file\n", __func__, mod->name );
+		else Con_Printf( S_ERROR "%s: %s has invalid textures, ignoring it\n", __func__, Mod_StudioTexName( mod->name ));
 
 		if( buffer2 )
 #if XASH_GAMECUBE
@@ -2576,6 +2626,14 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 
 	if( !textures_loaded )
 	{
+#if !XASH_DEDICATED
+		if( !Host_IsDedicated( ) && !Mod_StudioValidTextures( phdr, phdr->length ))
+		{
+			Con_Printf( S_ERROR "%s: %s has invalid textures\n", __func__, mod->name );
+			return;
+		}
+#endif
+
 		size_t cache_length = phdr->length;
 
 		// NOTE: don't modify source buffer because it's used for CRC computing
