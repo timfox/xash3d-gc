@@ -96,7 +96,14 @@ static void CL_GameCubeApplySmokeClientBudgets( void )
 	 * pool, and the lean 16-24 starved the tracers. 256 particles are 14 Kb; the
 	 * capture has no HUD and frame rate matters less than what is drawn. */
 	if( Sys_CheckParm( "-gccapture" ))
-		particles = Q_max( particles, 256 );
+	{
+		/* The capture particle pool is GC_PARTICLES_CAPTURE (cl_efx.c); CL_InitParticles
+		 * takes the smaller of it and GI->max_particles, so a 256 cap here kept the pool
+		 * at 256 and the tracers starved. Temp ents: shell bursts, smoke, muzzle flashes
+		 * and gibs all want one; CL_GCEnsureTempEntPool sizes the real pool. */
+		particles = Q_max( particles, 512 );
+		tents = Q_max( tents, 64 );
+	}
 
 	if( GI )
 	{
