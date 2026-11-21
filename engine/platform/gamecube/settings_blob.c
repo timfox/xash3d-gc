@@ -1,7 +1,7 @@
 #include "settings_blob.h"
 #include <string.h>
 
-const char *const gc_settings_keys[] = { "name", "sensitivity", "volume", "MP3Volume", "gamma", "brightness" };
+const char *const gc_settings_keys[] = { "name", "sensitivity", "volume", "MP3Volume", "gamma", "brightness", "gc_ach" };
 const int gc_settings_key_count = (int)( sizeof( gc_settings_keys ) / sizeof( gc_settings_keys[0] ));
 
 static int KeyAllowed( const char *key, size_t len )
