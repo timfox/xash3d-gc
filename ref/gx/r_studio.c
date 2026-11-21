@@ -4304,8 +4304,10 @@ static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 	 * Listen WorldDL (-gclistenserver / GC_UseGxWorldDraw) must use the same
 	 * path — client StudioDrawModel skipped R_StudioSetupBones and left the
 	 * CapFaces Garand as screen wings (ava-play99-65..68). */
+	/* A film-tagged entity (film actor, dod-gc grunt) always takes this engine path: the client DLL's studio renderer, which
+	 * -gcfullphysics otherwise selects, drew none of them (the game logic those need runs only with -gcfullphysics). */
 	if(( gEngfuncs.Sys_CheckParm( "-gcnewgame" ) || GC_UseGxWorldDraw())
-		&& !gEngfuncs.Sys_CheckParm( "-gcfullphysics" ))
+		&& ( !gEngfuncs.Sys_CheckParm( "-gcfullphysics" ) || ( e && e->curstate.iuser4 == GC_FILM_ACTOR_TAG )))
 	{
 #if XASH_DODGC_NETWORK
 		/* DoD: the view model keeps its studio events, which is where retail
@@ -4390,6 +4392,15 @@ void R_DrawStudioModel( cl_entity_t *e )
 	}
 #endif
 	R_StudioSetupTimings();
+
+	if( e && e->curstate.iuser4 == GC_FILM_ACTOR_TAG )
+	{
+		static int entry_n;
+
+		if(( entry_n++ % 100 ) == 0 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: film-tag draw entry %d: ent %d origin %.0f %.0f %.0f seq %d model %s player %d movetype %d\n", entry_n,
+				e->index, e->origin[0], e->origin[1], e->origin[2], e->curstate.sequence, e->model ? e->model->name : "none", e->player, e->curstate.movetype );
+	}
 
 	if( e->player )
 	{
