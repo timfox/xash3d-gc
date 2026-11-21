@@ -12849,7 +12849,20 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 		return 0;
 	mod = e->model;
 	if( mod->type != mod_brush || mod->nummodelsurfaces <= 0 || !mod->surfaces )
+	{
+		/* -gccapture: no brush model ever reached the per-model line below (a beach's
+		 * sea, a func_water, never drew). Name the first few turned away here and why. */
+		static int early_logs;
+
+		if( R_GXCaptureMode() && early_logs < 8 )
+		{
+			early_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s not drawn: type=%d surfs=%d first=%d surfaces=%s\n",
+				mod->name, mod->type, mod->nummodelsurfaces, mod->firstmodelsurface,
+				mod->surfaces ? "set" : "NULL" );
+		}
 		return 0;
+	}
 	/* Submodels share world vertex/edge tables; mod->numvertexes may be 0. */
 	{
 		extern model_t *GC_GetWorldModel( void );
@@ -12859,6 +12872,18 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 		geom = WORLDMODEL;
 	if( !geom || !geom->vertexes || !geom->surfedges )
 		geom = mod;
+	if( R_GXCaptureMode())
+	{
+		static int geom_logs;
+
+		if( geom_logs < 4 )
+		{
+			geom_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s geom=%s verts=%s surfedges=%s numsurfedges=%d surfaces=%s\n",
+				mod->name, geom == mod ? "own" : "world", geom->vertexes ? "set" : "NULL",
+				geom->surfedges ? "set" : "NULL", geom->numsurfedges, geom->surfaces ? "set" : "NULL" );
+		}
+	}
 
 	/* Entity modelview: worldview * object */
 	Matrix4x4_CreateFromEntity( xash_obj, e->angles, e->origin, 1.0f );

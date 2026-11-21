@@ -435,6 +435,7 @@ static void CL_ClearTempEnts( void )
 	{
 		cl_sprite_muzzleflash[0] = cl_sprite_muzzleflash[1] = cl_sprite_muzzleflash[2] = NULL;
 		cl_sprite_ricochet = NULL;
+		cl_sprite_dot = NULL;
 	}
 
 	/* A spill pool (CL_GCEnsureTempEntPool) may already be rewound for the
@@ -516,6 +517,10 @@ static void CL_GCLoadEffectSprites( void )
 	}
 	if( !cl_sprite_ricochet )	/* TE_GUNSHOTDECAL bullet impacts */
 		cl_sprite_ricochet = CL_GCLoadEffectSprite( cl_default_sprites[5] );
+	/* The tracer dot (REF_DOT_SPRITE): CL_DrawTracers draws nothing without it, and only
+	 * CL_LoadClientSprites, which the lean route skips, loaded it. */
+	if( !cl_sprite_dot )
+		cl_sprite_dot = CL_GCLoadEffectSprite( cl_default_sprites[3] );
 	if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && fail_logs < 4 )
 	{
 		fail_logs++;
@@ -600,7 +605,7 @@ void CL_GCEnsureTempEntPool( void )
 	if( cl_tempents )
 	{
 		/* The pool outlives a changelevel; the sprites do not. */
-		if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet ) && host.realtime >= next_sprite_try )
+		if(( !cl_sprite_muzzleflash[0] || !cl_sprite_ricochet || !cl_sprite_dot ) && host.realtime >= next_sprite_try )
 		{
 			next_sprite_try = host.realtime + 5.0;
 			CL_GCLoadEffectSprites();
