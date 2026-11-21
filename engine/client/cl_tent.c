@@ -45,7 +45,15 @@ static model_t *CL_GCLoadEffectSprite( const char *name )
 
 	/* Leave room for HUD sheets that load mid-match (the 128x128
 	 * crosshair needs 32 KiB). */
-	if( GC_MemHeapFreeBytes() < 80 * 1024 )
+	if( CL_GCCaptureMode( ))
+	{
+		/* A capture has no HUD sheets to keep room for: the file and a margin. */
+		const fs_offset_t fsize = FS_FileSize( name, false );
+
+		if( fsize <= 0 || GC_MemHeapFreeBytes() < (size_t)fsize + 8 * 1024 )
+			return NULL;
+	}
+	else if( GC_MemHeapFreeBytes() < 80 * 1024 )
 		return NULL;
 	gc_sprite_effect_load = true;
 	mod = CL_LoadClientSprite( name );
@@ -98,6 +106,58 @@ static model_t *CL_GCTentModelHandle( int modelindex )
  * sprites failed the 80 KiB gate above for the whole map. Load the server's
  * precached sprites right after the map goes active instead, one per frame.
  */
+/*
+ * -gccapture: load the film's explosion and smoke sprites (names with xplode,
+ * explode, steam, smoke or fire). In a match they come late in the precache
+ * list (fireball 368, smoke 370 on dod_charlie), after the prewarm stopped,
+ * and by the shot the heap was down to 30 KiB, so every burst was "No
+ * Sprite". Called once with all = true when the temp entity pool is made
+ * (the heap still has ~150 KiB then), and from the prewarm one at a time.
+ * Returns the next index to try, or -1 when the list is done.
+ */
+static int CL_GCLoadFilmSprites( int from, qboolean all )
+{
+	extern size_t R_GCFxPixelsFree( void );
+	static const char *const film_sprites[] = { "xplode", "explode", "steam", "smoke", "fire" };
+	int i, k;
+
+	if( !SV_Active( ))
+		return -1;
+	for( i = from > 0 ? from : 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		const char *name = sv.model_precache[i];
+		fs_offset_t fsize;
+		model_t *mod;
+
+		if( cl.models[i] || !Q_stristr( name, ".spr" ))
+			continue;
+		for( k = 0; k < (int)ARRAYSIZE( film_sprites ); k++ )
+			if( Q_stristr( name, film_sprites[k] ))
+				break;
+		if( k == (int)ARRAYSIZE( film_sprites ))
+			continue;
+		/* The frames go to the effect block; the heap pays for the file
+		 * read and the headers, so the file size plus a margin. */
+		fsize = FS_FileSize( name, false );
+		if( fsize <= 0 || GC_MemHeapFreeBytes() < (size_t)fsize + 16 * 1024 || R_GCFxPixelsFree() < 4 * 1024 )
+		{
+			Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s (%ld bytes) not loaded (heap %s, effect block free %s)\n",
+				i, name, (long)fsize, Q_memprint( GC_MemHeapFreeBytes( )), Q_memprint( R_GCFxPixelsFree( )));
+			continue;
+		}
+		gc_sprite_effect_load = true;
+		mod = CL_LoadClientSprite( name );
+		gc_sprite_effect_load = false;
+		if( mod )
+			cl.models[i] = mod;
+		Con_Reportf( "Xash3D GameCube: capture effect sprite %d %s %s (heap %s)\n", i, name,
+			mod ? "loaded" : "failed", Q_memprint( GC_MemHeapFreeBytes( )));
+		if( !all )
+			return i + 1;
+	}
+	return -1;
+}
+
 static void CL_GCPrewarmEffectSprites( void )
 {
 	extern size_t R_GCFxPixelsFree( void );
@@ -105,12 +165,16 @@ static void CL_GCPrewarmEffectSprites( void )
 	static int next, loaded;
 	static size_t heap_taken;
 	static qboolean done;
+	static const void *film_world;
+	static int film_next;
+	static qboolean film_done;
 
 	if( !SV_Active() || cls.state != ca_active || !cl.worldmodel )
 		return;
 	if( world != (const void *)cl.worldmodel )
 	{
 		world = cl.worldmodel;
+		film_done = false;
 		next = 1;
 		loaded = 0;
 		heap_taken = 0;
@@ -118,6 +182,21 @@ static void CL_GCPrewarmEffectSprites( void )
 	}
 	if( done )
 		return;
+	/* -gccapture: the film's explosion and smoke sprites (see
+	 * CL_GCLoadFilmSprites), one a frame, if the pool did not get them. */
+	if( CL_GCCaptureMode() && !film_done )
+	{
+		if( film_world != (const void *)cl.worldmodel )
+		{
+			film_world = cl.worldmodel;
+			film_next = 1;
+		}
+		film_next = CL_GCLoadFilmSprites( film_next, false );
+		if( film_next < 0 )
+			film_done = true;
+		else
+			return;
+	}
 	for( ; next < MAX_MODELS; next++ )
 	{
 		const char *name = sv.model_precache[next];
@@ -322,7 +401,8 @@ CL_ClearTempEnts
  * below GI->max_tents). Linking GI->max_tents entries wrote free-list
  * pointers past the end of a 4-entry allocation. */
 static int cl_tempents_count;
-static qboolean gc_tempents_in_spill;
+static qboolean gc_tempents_in_spill;	/* not on the heap: world spill or map arena, dies with the map */
+static qboolean gc_tempents_in_arena;	/* the map arena: dropped before the arena is borrowed again */
 /* The lean emit (cl_frame.c) clears the scene after CL_EmitEntities has
  * linked the temp entities, so it links them again from this list. */
 #define GC_TENT_RELINK_MAX 96
@@ -364,6 +444,7 @@ static void CL_ClearTempEnts( void )
 		cl_tempents = NULL;
 		cl_tempents_count = 0;
 		gc_tempents_in_spill = false;
+		gc_tempents_in_arena = false;
 		cl_free_tents = cl_active_tents = NULL;
 		return;
 	}
@@ -465,9 +546,18 @@ void CL_GCDropSpillTempEnts( void )
 	cl_tempents = NULL;
 	cl_tempents_count = 0;
 	gc_tempents_in_spill = false;
+	gc_tempents_in_arena = false;
 	cl_free_tents = cl_active_tents = NULL;
 	gc_tent_linked_n = 0;
 	gc_tent_update_frame = -1;
+}
+
+/* The map arena is about to be borrowed for another map or released: a pool
+ * in it would be written over while the client still walks it. */
+static void CL_GCDropArenaTempEnts( void )
+{
+	if( cl_tempents && gc_tempents_in_arena )
+		CL_GCDropSpillTempEnts();
 }
 
 /*
@@ -489,19 +579,21 @@ void CL_GCEnsureTempEntPool( void )
 	extern void Mod_GCWorldArraySpillPinBase( const void *ptr, size_t bytes );
 	extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
 	static double next_try, next_sprite_try;
-	const int want = 16;
-	const size_t bytes = sizeof( TEMPENTITY ) * want;
+	/* -gccapture: shell bursts, smoke and tracers by the dozen. */
+	int want = CL_GCCaptureMode() ? 64 : 16;
+	size_t bytes = sizeof( TEMPENTITY ) * want;
 	const char *where = "heap";
 	int i;
 
 	/* A spill pool dies with its map: drop it once the spill was rewound. */
-	if( cl_tempents && gc_tempents_in_spill
+	if( cl_tempents && gc_tempents_in_spill && !gc_tempents_in_arena
 		&& !Mod_GCWorldArraySpillHolds( cl_tempents, sizeof( TEMPENTITY ) * cl_tempents_count ))
 	{
 		cl_tempents = NULL;
 		cl_tempents_count = 0;
 		cl_free_tents = cl_active_tents = NULL;
 		gc_tempents_in_spill = false;
+		gc_tempents_in_arena = false;
 	}
 	if( !cl.worldmodel )
 		return;
@@ -520,17 +612,67 @@ void CL_GCEnsureTempEntPool( void )
 	next_try = host.realtime + 5.0;
 	/* World spill first: 27 KiB of heap for the pool left the view model
 	 * and the crosshair without texture memory (dark rifle, crosshair OOM
-	 * on charlie). The heap only when it is plentiful. */
-	cl_tempents = Mod_GCWorldArraySpillTryAlloc( bytes, "client tempents" );
-	if( cl_tempents )
+	 * on charlie). The heap only when it is plentiful, and only for the
+	 * smallest pool.
+	 * Sixteen entries dropped shell casings, debris and smoke puffs in a
+	 * firefight (four bots firing fill it in half a second), so take 48 or
+	 * 32 when the spill left over after the map's own claims holds them and
+	 * still keeps GC_TENT_SPILL_KEEP free for what loads later: the prop
+	 * chain cache and the team body cores it leaves room for. With 64 KiB
+	 * kept, charlie's 48-entry pool cut its prop chain cache from 104 KB
+	 * to 18 KB (110 prop chain reads a frame instead of none), and 320 KiB
+	 * still let it grow there: charlie has 438 KiB free at this point and
+	 * its prop chains (221 KB) plus the body cores (210 KB) want 431 KB. */
+#define GC_TENT_SPILL_KEEP	( 512u * 1024u )
+#define GC_TENT_ARENA_KEEP	( 160u * 1024u )	/* = GC_DOD_ARENA_KEEP in sv_init.c */
 	{
-		memset( cl_tempents, 0, bytes );
-		Mod_GCWorldArraySpillPinBase( cl_tempents, bytes );
-		gc_tempents_in_spill = true;
-		where = "spill";
+		extern size_t Mod_GCWorldArraySpillFree( void );
+		static const int sizes[] = { 48, 32, 16 };
+		int si = 0;
+
+		if( want > 48 )
+			si = -1;	/* capture pool first */
+		for( ; si < 3 && !cl_tempents; si++ )
+		{
+			const int n = si < 0 ? want : sizes[si];
+			const size_t nb = sizeof( TEMPENTITY ) * n;
+
+			if( n > 16 && Mod_GCWorldArraySpillFree() < nb + GC_TENT_SPILL_KEEP )
+			{
+				/* The spill is short (caen: no prop chain cache at all): the map arena's free gap, while it keeps
+				 * GC_TENT_ARENA_KEEP for the body models and slices that load into it later. Dropped before the
+				 * arena is borrowed for the next map (CL_GCDropArenaTempEnts). */
+				const size_t at = GC_MapArenaLargestGap() >= nb + GC_TENT_ARENA_KEEP ? GC_MapArenaFind( nb ) : (size_t)-1;
+
+				cl_tempents = at == (size_t)-1 ? NULL : GC_MapLoadBufferTailAlloc( at, nb );
+				if( cl_tempents )
+				{
+					memset( cl_tempents, 0, nb );
+					gc_tempents_in_spill = gc_tempents_in_arena = true;
+					GC_SetMapArenaResetHook( CL_GCDropArenaTempEnts );
+					where = "map arena";
+					want = n;
+					bytes = nb;
+				}
+				continue;
+			}
+			cl_tempents = Mod_GCWorldArraySpillTryAlloc( nb, "client tempents" );
+			if( cl_tempents )
+			{
+				memset( cl_tempents, 0, nb );
+				Mod_GCWorldArraySpillPinBase( cl_tempents, nb );
+				gc_tempents_in_spill = true;
+				where = "spill";
+			}
+			else if( n == 16 && GC_MemHeapFreeBytes() > nb + 256 * 1024 )
+				cl_tempents = Mem_Calloc( cls.mempool, nb );
+			if( cl_tempents )
+			{
+				want = n;
+				bytes = nb;
+			}
+		}
 	}
-	else if( GC_MemHeapFreeBytes() > bytes + 256 * 1024 )
-		cl_tempents = Mem_Calloc( cls.mempool, bytes );
 	if( !cl_tempents )
 	{
 		static int fail_logs;
@@ -554,6 +696,8 @@ void CL_GCEnsureTempEntPool( void )
 	gc_tempents_lean_pool = true;
 	next_sprite_try = host.realtime + 5.0;
 	CL_GCLoadEffectSprites();
+	if( CL_GCCaptureMode( ))
+		CL_GCLoadFilmSprites( 1, true );
 	Con_Reportf( "Xash3D GameCube: client tempents %d in %s (%s), muzzle flash %s, heap %s\n",
 		want, where, Q_memprint( bytes ), cl_sprite_muzzleflash[0] ? "loaded" : "missing",
 		Q_memprint( GC_MemHeapFreeBytes( )));
@@ -574,6 +718,7 @@ void CL_FreeTempEnts( void )
 		Mem_Free( cl_tempents );
 	cl_tempents_count = 0;
 	gc_tempents_in_spill = false;
+	gc_tempents_in_arena = false;
 #else
 	if( cl_tempents )
 		Mem_Free( cl_tempents );
@@ -775,6 +920,47 @@ void CL_TempEntUpdate( void )
 #if XASH_GAMECUBE
 /*
 ==============
+CL_GCDrainLocalTempEnts
+
+Parse the temp entities the listen server handed this client directly
+(SV_GCQueueLocalTempEnt): each is svc_temp_entity, a size word, the payload.
+==============
+*/
+static void CL_GCDrainLocalTempEnts( void )
+{
+	extern int SV_GCTakeLocalTempEnts( byte *out, int size );
+	extern unsigned gc_local_tent_queued, gc_local_tent_dropped;
+	static byte data[8192];
+	static int logs;
+	static double next_log;
+	sizebuf_t buf;
+	int bytes = SV_GCTakeLocalTempEnts( data, sizeof( data ));
+	int parsed = 0;
+
+	if( bytes > 0 )
+	{
+		MSG_Init( &buf, "GCLocalTempEnts", data, bytes );
+		while( MSG_GetNumBytesLeft( &buf ) > 2 )
+		{
+			const int cmd = MSG_ReadByte( &buf );
+
+			if( cmd != svc_temp_entity )
+				break;
+			CL_ParseTempEntity( &buf, PROTO_CURRENT );
+			parsed++;
+		}
+	}
+	if(( parsed || gc_local_tent_dropped ) && logs < 40 && host.realtime >= next_log )
+	{
+		logs++;
+		next_log = host.realtime + 2.0;
+		Con_Reportf( "Xash3D GameCube: local temp entities parsed %d (queued %u, dropped %u in all)\n",
+			parsed, gc_local_tent_queued, gc_local_tent_dropped );
+	}
+}
+
+/*
+==============
 CL_GCRelinkTempEnts
 
 The lean emit clears the scene CL_EmitEntities filled. Link this frame's
@@ -791,6 +977,8 @@ int CL_GCRelinkTempEnts( void )
 	int i, ran = 0;
 
 	CL_GCEnsureTempEntPool();
+	if( cl_tempents )
+		CL_GCDrainLocalTempEnts();
 	/* gc_fxtest 1: a muzzle flash sprite 64 units in front of the view every
 	 * second, living a second, so a capture can prove the sprite path draws
 	 * without having to catch a 0.1 s flash. */
@@ -1645,7 +1833,15 @@ TEMPENTITY *R_DefaultSprite( const vec3_t pos, int spriteIndex, float framerate 
 
 	// don't spawn while paused
 	if( cl.time == cl.oldtime )
+	{
+#if XASH_GAMECUBE
+		static int paused_logs;
+
+		if( paused_logs++ < 4 )
+			Con_Reportf( "Xash3D GameCube: sprite %d refused, client time did not move (%.3f)\n", spriteIndex, cl.time );
+#endif
 		return NULL;
+	}
 
 	if(( psprite = CL_ModelHandle( spriteIndex )) == NULL || psprite->type != mod_sprite )
 	{
@@ -3561,6 +3757,45 @@ typedef enum
 	GC_LEAN_DECAL_KINDS
 } gc_lean_decal_kind_t;
 
+#if XASH_DODGC_NETWORK
+/* The DoD route draws decals as quads that darken the frame,
+ * frame * ( 1 - texel ) (R_GXDecalRingDraw): the GX effect textures carry no
+ * alpha, so a decal drawn "colour over the wall through its alpha" came out
+ * as an opaque black square. Turn colour-and-alpha pixels into how much of
+ * each channel to take away: alpha * ( 1 - colour ), black where the decal is
+ * clear. */
+static void CL_GCDecalPixelsToDarken( byte *rgba, size_t count )
+{
+	size_t i;
+
+	for( i = 0; i < count; i++, rgba += 4 )
+	{
+		const unsigned a = rgba[3];
+
+		rgba[0] = (byte)(( a * ( 255u - rgba[0] )) / 255u );
+		rgba[1] = (byte)(( a * ( 255u - rgba[1] )) / 255u );
+		rgba[2] = (byte)(( a * ( 255u - rgba[2] )) / 255u );
+		rgba[3] = 255;
+	}
+}
+
+/* A decal image as the loader returns it; false when its format is not one
+ * of the two the decal loader produces. */
+static qboolean CL_GCDecalImageToDarken( rgbdata_t *pic )
+{
+	if( !pic || !pic->buffer )
+		return false;
+	if( pic->type == PF_RGBA_32 )
+		CL_GCDecalPixelsToDarken( pic->buffer, (size_t)pic->width * pic->height );
+	else if( pic->type == PF_INDEXED_32 && pic->palette )
+		CL_GCDecalPixelsToDarken( pic->palette, 256 );
+	else
+		return false;
+	ClearBits( pic->flags, IMAGE_HAS_ALPHA | IMAGE_ONEBIT_ALPHA );
+	return true;
+}
+#endif
+
 static int CL_GCEnsureLeanDecalKind( gc_lean_decal_kind_t kind )
 {
 	static int tex[GC_LEAN_DECAL_KINDS];
@@ -3617,8 +3852,14 @@ static int CL_GCEnsureLeanDecalKind( gc_lean_decal_kind_t kind )
 		}
 	}
 
+#if XASH_DODGC_NETWORK
+	CL_GCDecalPixelsToDarken( dst, 16 * 16 );
+	tex[kind] = ref.dllFuncs.GL_CreateTexture( names[kind], 16, 16, dst,
+		TF_DECAL | TF_CLAMP | TF_NOMIPMAP );
+#else
 	tex[kind] = ref.dllFuncs.GL_CreateTexture( names[kind], 16, 16, dst,
 		TF_DECAL | TF_CLAMP | TF_NOMIPMAP | TF_HAS_ALPHA );
+#endif
 	if( tex[kind] > 0 )
 		Con_Reportf( "Xash3D GameCube: G295 lean %s decal tex=%d (embedded 16x16)\n",
 			names[kind] + 9, tex[kind] ); /* skip "#gc_lean_" */
@@ -3678,6 +3919,53 @@ int GAME_EXPORT CL_DecalIndex( int id )
 		 */
 		if( GC_MapLoadMemoryOpt() && host.draw_decals[id][0] == '{' )
 		{
+#if XASH_DODGC_NETWORK
+			/* DoD: retail decal art from decals.wad. The five bullet holes
+			 * are 16x16 (1152 bytes each) and load whenever 24 KB are free.
+			 * Scorch marks, blood and the large holes are up to 64x64: they
+			 * load while the heap has 96 KB free and the retail decals of
+			 * this session stay under GC_RETAIL_DECAL_PIXELS. Anything
+			 * larger, or past the budget, keeps the embedded stand-in. */
+#define GC_RETAIL_DECAL_PIXELS	( 6 * 64 * 64 )
+			{
+				static unsigned retail_pixels;
+				static int retail_servercount;
+				const qboolean shot = !Q_strnicmp( host.draw_decals[id], "{shot", 5 );
+
+				/* The budget is per map: decal textures go with the level. */
+				if( retail_servercount != cl.servercount )
+				{
+					retail_servercount = cl.servercount;
+					retail_pixels = 0;
+				}
+				if( GC_MemHeapFreeBytes() > ( shot ? 24u : 96u ) * 1024u )
+				{
+					rgbdata_t *pic = FS_LoadImage( host.draw_decals[id], NULL, 0 );
+					const unsigned px = pic ? (unsigned)pic->width * (unsigned)pic->height : 0;
+
+					if( pic && px > 0 && px <= 64u * 64u
+						&& ( shot || retail_pixels + px <= GC_RETAIL_DECAL_PIXELS )
+						&& CL_GCDecalImageToDarken( pic ))
+						gl_texturenum = ref.dllFuncs.GL_LoadTextureFromBuffer( host.draw_decals[id], pic,
+							TF_DECAL | TF_CLAMP | TF_NOMIPMAP, false );
+					if( pic )
+						FS_FreeImage( pic );
+					if( gl_texturenum > 0 )
+					{
+						static int logs;
+
+						if( !shot )
+							retail_pixels += px;
+						if( logs++ < 24 )
+							Con_Reportf( "Xash3D GameCube: retail decal %s tex=%d %u px (heap %s)\n",
+								host.draw_decals[id], gl_texturenum, px, Q_memprint( GC_MemHeapFreeBytes( )));
+						cl.decal_index[id] = gl_texturenum;
+						Image_ClearForceFlags();
+						return gl_texturenum;
+					}
+				}
+			}
+#endif
 			gl_texturenum = CL_GCEnsureLeanDecalForName( host.draw_decals[id] );
 			cl.decal_index[id] = gl_texturenum;
 			Image_ClearForceFlags();
