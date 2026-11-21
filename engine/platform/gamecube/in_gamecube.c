@@ -656,6 +656,16 @@ static u16 GC_ProbeSyntheticHeldButtons( void )
 		/* Replay-only TAS (-gctas): replace the hardcoded attack/jump/use burst. */
 		if( Sys_CheckParm( "-gctas" ))
 		{
+			extern qboolean GC_CapFacesJoinPending( void );
+
+			/* The DoD side and class overlay comes first: a script that started
+			 * at sign-on played its moves out to an observer at the menu and
+			 * was complete by the time the player spawned. */
+			if( GC_CapFacesJoinPending( ))
+			{
+				GC_TasResetPlayback();
+				return 0;
+			}
 			if( GC_TasTryLoad() || GC_TasComplete() )
 			{
 				unsigned short tas_held;

@@ -8013,6 +8013,14 @@ qboolean GC_CapFacesWantViewmodel( void )
 		&& gc_capfaces_class_picked
 		&& gc_capfaces_team_sel != 2;
 }
+/* The team/class overlay is up (or about to be): the human has not joined yet.
+ * Input replays (-gctas) wait for this, or their moves are spent at the menu. */
+qboolean GC_CapFacesJoinPending( void )
+{
+	return Sys_CheckParm( "-gcworldrender" )
+		&& Sys_CheckParm( "-gcplayerinput" )
+		&& !( gc_capfaces_team_picked && gc_capfaces_class_picked );
+}
 static convar_t *gc_quality;
 static double gc_last_present_time;
 static double gc_worst_frame_ms;
