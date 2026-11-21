@@ -1146,6 +1146,144 @@ static void R_GXStudioRestPoseFallback( mstudiobone_t *pbones )
 }
 #endif
 
+#if XASH_GAMECUBE
+/* Scripted film actors (dod-gc) cross-fade every change of what they play: a new
+ * sequence, the legs starting or stopping a gait under the rifle's aim, a death
+ * after a run. GoldSrc's own 0.2 s crossfade (below) only knows the whole-body
+ * sequence, so a man stopping a walk had his legs jump from the gait's stride to
+ * the standing aim's, and a man whose latch was lost in a crowd snapped outright.
+ * Each actor keeps here what it played on its last drawn frame (sequence, frame,
+ * aim blend, gait and gait frame); on a change the old pose, frozen where it was,
+ * eases into the new one over FILM_BLEND_TIME. The actor is tagged by the lean
+ * emitter (curstate.iuser4, cl_frame.c). */
+#define GC_FILM_ACTOR_TAG	0x46494C4D	/* 'FILM', dod-gc's DODGC_FILM_ACTOR_TAG */
+#define FILM_BLEND_TIME		0.3f
+#define FILM_LATCH_MAX		96
+
+typedef struct
+{
+	int	index;			/* entity index, 0 free */
+	int	drawn;			/* tr.realframecount of the last update */
+	int	seq, gait;		/* last drawn: sequence, gait (0 none) */
+	float	frame, gaitframe;	/* in frames */
+	byte	blend[2];
+	int	prevseq, prevgait;	/* before the change */
+	float	prevframe, prevgaitframe;
+	byte	prevblend[2];
+	float	changetime;		/* 0: nothing to fade */
+} film_latch_t;
+
+static film_latch_t film_latch[FILM_LATCH_MAX];
+static film_latch_t *g_film_latch;	/* the film actor being drawn, else NULL */
+static player_info_t *g_film_gait;	/* its gait record (R_StudioDrawModel), else NULL */
+
+static film_latch_t *R_GXFilmLatch( int index )
+{
+	film_latch_t *oldest = &film_latch[0];
+	int i;
+
+	for( i = 0; i < FILM_LATCH_MAX; i++ )
+	{
+		if( film_latch[i].index == index )
+			return &film_latch[i];
+		if( !film_latch[i].index || ( oldest->index && film_latch[i].drawn < oldest->drawn ))
+			oldest = &film_latch[i];
+	}
+	memset( oldest, 0, sizeof( *oldest ));
+	oldest->index = index;
+	oldest->drawn = -1;		/* new: the first update takes the pose as it is */
+	return oldest;
+}
+
+/* The legs (Bip01, the pelvis and everything under it but the spine) from a gait
+ * sequence, as the player gait copy below does. */
+static void R_GXFilmLegs( cl_entity_t *e, float pos[][3], vec4_t *q, int gait, float gaitframe )
+{
+	const mstudiobone_t *pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+	mstudioseqdesc_t *gd;
+	mstudioanim_t *panim;
+	qboolean copy_bones = true;
+	int i;
+
+	if( gait <= 0 || gait >= m_pStudioHeader->numseq )
+		return;
+	gd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + gait;
+	panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, gd );
+	R_StudioCalcRotations( e, pos2, q2, gd, panim, gaitframe );
+	for( i = 0; i < m_pStudioHeader->numbones; i++ )
+	{
+		if( !Q_strcmp( pbones[i].name, "Bip01 Spine" ))
+			copy_bones = false;
+		else if( pbones[i].parent >= 0 && !Q_strcmp( pbones[pbones[i].parent].name, "Bip01 Pelvis" ))
+			copy_bones = true;
+		if( !copy_bones )
+			continue;
+		VectorCopy( pos2[i], pos[i] );
+		Vector4Copy( q2[i], q[i] );
+	}
+}
+
+/* The film actor's pose so far (pos, q: its sequence at frame f) gets its gait's
+ * legs now, and the fade from what it played before. */
+static void R_GXFilmBlend( cl_entity_t *e, float pos[][3], vec4_t *q, float f )
+{
+	static vec3_t pos1b[MAXSTUDIOBONES];
+	static vec4_t q1b[MAXSTUDIOBONES];
+	film_latch_t *l = g_film_latch;
+	int gait = 0;
+	float gaitframe = 0.0f, dt;
+
+	if( g_film_gait && m_pPlayerInfo == g_film_gait && m_pPlayerInfo->gaitsequence > 0 )
+	{
+		/* m_pPlayerInfo is the actor's own gait record (R_StudioDrawModel):
+		 * the legs go on here, ahead of the fade, not after it */
+		gait = m_pPlayerInfo->gaitsequence;
+		gaitframe = m_pPlayerInfo->gaitframe;
+		R_GXFilmLegs( e, pos, q, gait, gaitframe );
+		m_pPlayerInfo->gaitsequence = 0;
+	}
+
+	if( l->drawn != tr.realframecount )
+	{
+		if( l->drawn != -1 && ( l->seq != e->curstate.sequence || l->gait != gait ))
+		{
+			l->prevseq = l->seq;
+			l->prevgait = l->gait;
+			l->prevframe = l->frame;
+			l->prevgaitframe = l->gaitframe;
+			l->prevblend[0] = l->blend[0];
+			l->prevblend[1] = l->blend[1];
+			l->changetime = (float)g_studio.time;
+		}
+		l->seq = e->curstate.sequence;
+		l->gait = gait;
+		l->frame = f;
+		l->gaitframe = gaitframe;
+		l->blend[0] = e->curstate.blending[0];
+		l->blend[1] = e->curstate.blending[1];
+		l->drawn = tr.realframecount;
+	}
+
+	dt = (float)g_studio.time - l->changetime;
+	if( l->changetime > 0.0f && dt >= 0.0f && dt < FILM_BLEND_TIME
+		&& l->prevseq >= 0 && l->prevseq < m_pStudioHeader->numseq )
+	{
+		mstudioseqdesc_t *pd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + l->prevseq;
+		mstudioanim_t *panim = gEngfuncs.R_StudioGetAnim( m_pStudioHeader, RI.currentmodel, pd );
+		float s = dt / FILM_BLEND_TIME;
+
+		if( pd->numblends == 9 || pd->numblends == 3 )
+			R_StudioCalcGridBlend( e, pos1b, q1b, pd, panim, l->prevframe, l->prevblend[0], l->prevblend[1] );
+		else
+			R_StudioCalcRotations( e, pos1b, q1b, pd, panim, l->prevframe );
+		if( l->prevgait )
+			R_GXFilmLegs( e, pos1b, q1b, l->prevgait, l->prevgaitframe );
+		s = s * s * ( 3.0f - 2.0f * s );	/* ease in and out */
+		R_StudioSlerpBones( m_pStudioHeader->numbones, q, pos, q1b, pos1b, 1.0f - s );
+	}
+}
+#endif
+
 /*
 ====================
 StudioSetupBones
@@ -1277,6 +1415,11 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		}
 	}
 
+#if XASH_GAMECUBE
+	if( g_film_latch )
+		R_GXFilmBlend( e, pos, q, f );
+	else
+#endif
 	if( g_studio.interpolate && e->latched.sequencetime && ( e->latched.sequencetime + 0.2f > g_studio.time ) && ( e->latched.prevsequence < m_pStudioHeader->numseq ))
 	{
 		// blend from last sequence
@@ -4057,6 +4200,9 @@ static int R_StudioDrawModel( int flags )
 	player_info_t *film_saved_pi = m_pPlayerInfo;
 	static player_info_t film_gait;
 
+	g_film_latch = RI.currententity->curstate.iuser4 == GC_FILM_ACTOR_TAG && RI.currententity->index > 0
+		? R_GXFilmLatch( RI.currententity->index ) : NULL;
+
 	/* The film actor sets its frame and blend every server frame with no
 	 * interpolation to do: the blend lerp's stale latched half (0, the grid's
 	 * top row) had every man looking up whatever the server sent. */
@@ -4080,6 +4226,7 @@ static int R_StudioDrawModel( int flags )
 			film_gait.gaitsequence = gs;
 			film_gait.gaitframe = RI.currententity->curstate.frame * ( gd->numframes > 1 ? gd->numframes - 1 : 0 ) / 256.0f;
 			m_pPlayerInfo = &film_gait;
+			g_film_gait = &film_gait;
 		}
 	}
 #endif
@@ -4089,6 +4236,8 @@ static int R_StudioDrawModel( int flags )
 		R_StudioSetupBones( RI.currententity );
 #if XASH_GAMECUBE
 	m_pPlayerInfo = film_saved_pi;
+	g_film_latch = NULL;
+	g_film_gait = NULL;
 #endif
 
 	R_StudioSaveBones();
