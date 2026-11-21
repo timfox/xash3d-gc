@@ -68,7 +68,7 @@ class StaticBrushTest(unittest.TestCase):
 	def test_anything_that_can_change_stays_an_entity(self):
 		got = self.pick([
 			{"classname": "func_wall", "model": "*1", "targetname": "gate"},
-			{"classname": "func_wall", "model": "*2", "rendermode": "4", "renderamt": "255"},
+			{"classname": "func_wall", "model": "*2", "rendermode": "4", "renderamt": "128"},
 			{"classname": "func_wall", "model": "*3", "origin": "0 0 16"},
 			{"classname": "func_door", "model": "*4"},
 			{"classname": "func_wall", "model": "*5", "renderfx": "14"},
@@ -83,6 +83,20 @@ class StaticBrushTest(unittest.TestCase):
 		ents = [{"classname": "func_wall", "model": f"*{i}"} for i in range(1, 6)]
 		got = self.pick(ents, {1: "{fence", 2: "!water", 3: "+0button", 4: "scroll_a", 5: "brick"})
 		self.assertEqual(got, [(5, True)])
+
+	def test_masked_walls_at_full_amount_are_static(self):
+		# Render mode 4, amount 255: the mask is cut out and nothing fades.
+		ents = [
+			{"classname": "func_wall", "model": "*1", "rendermode": "4", "renderamt": "255"},
+			{"classname": "func_illusionary", "model": "*2", "rendermode": "4", "renderamt": "255"},
+			{"classname": "func_wall", "model": "*3", "rendermode": "4"},
+			{"classname": "func_wall", "model": "*4", "rendermode": "5", "renderamt": "255"},
+			{"classname": "func_wall", "model": "*5", "rendermode": "2", "renderamt": "255"},
+			{"classname": "func_wall", "model": "*6", "rendermode": "4", "renderamt": "255", "targetname": "net"},
+			{"classname": "func_wall", "model": "*7", "rendermode": "4", "renderamt": "255"},
+		]
+		got = self.pick(ents, {1: "{tension6", 2: "{fence", 3: "{fence", 4: "{fence", 5: "glass", 6: "{fence", 7: "!water"})
+		self.assertEqual(got, [(1, True), (2, False)])
 
 	def test_list_file(self):
 		with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +113,32 @@ class StaticBrushTest(unittest.TestCase):
 		self.assertIn("#define GC_SB_MAX\t256", src)
 		self.assertEqual(self.bake.SB_MAX, 256)
 		self.assertEqual(self.bake.SB_MODEL_MAX, 1024)
+
+
+def load_pair_check():
+	"""world_dl_pair_ok from the disc builder, without importing the whole script."""
+	import ast
+
+	src = (ROOT / "scripts/build-gamecube-disc.py").read_text()
+	fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "world_dl_pair_ok")
+	scope = {"Path": Path}
+	exec(compile(ast.Module(body=[fn], type_ignores=[]), "build-gamecube-disc.py", "exec"), scope)
+	return scope["world_dl_pair_ok"]
+
+
+class StalePrebakeTest(unittest.TestCase):
+	def test_disc_builder_takes_only_a_pack_its_list_was_written_with(self):
+		ok = load_pair_check()
+		bake = load_bake()
+		with tempfile.TemporaryDirectory() as tmp:
+			wd = Path(tmp) / "wd_dod_test.gcd"
+			wd.write_bytes(b"x" * 1000)
+			self.assertFalse(ok(wd))  # no list at all: an old prebake
+			sb = Path(tmp) / "wd_dod_test_sb.gcd"
+			bake.write_static_brushes(sb, [(3, True)], 1000)
+			self.assertTrue(ok(wd))
+			bake.write_static_brushes(sb, [(3, True)], 2000)
+			self.assertFalse(ok(wd))  # list from another bake
 
 
 if __name__ == "__main__":

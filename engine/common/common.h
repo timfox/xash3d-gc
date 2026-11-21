@@ -433,7 +433,7 @@ void FS_Init( void );
 void FS_Shutdown( void );
 void *FS_GetNativeObject( const char *obj );
 int FS_Close( file_t *file );
-search_t *FS_Search( const char *pattern, int caseinsensitive, int gamedironly )
+search_t *FS_Search( const char *pattern, int caseinsensitive, int search_flags )
 	MALLOC_LIKE( _Mem_Free, 1 ) WARN_UNUSED_RESULT;
 file_t *FS_Open( const char *filepath, const char *mode, qboolean gamedironly )
 	MALLOC_LIKE( FS_Close, 1 ) WARN_UNUSED_RESULT;
@@ -782,6 +782,7 @@ qboolean CL_DisableVisibility( void );
 qboolean CL_IsRecordDemo( void );
 qboolean CL_IsPlaybackDemo( void );
 void CL_CineFrameTime( double *frametime );
+qboolean CL_CineActive( void );
 qboolean UI_CreditsActive( void );
 void *UI_GetMenuFactory( void );
 int CL_GetMaxClients( void );
@@ -794,6 +795,7 @@ static inline qboolean CL_DisableVisibility( void ) { return false; }
 static inline qboolean CL_IsRecordDemo( void ) { return false; }
 static inline qboolean CL_IsPlaybackDemo( void ) { return false; }
 static inline void CL_CineFrameTime( double *frametime ) { (void)frametime; }
+static inline qboolean CL_CineActive( void ) { return false; }
 static inline qboolean UI_CreditsActive( void ) { return false; }
 static inline void *UI_GetMenuFactory( void ) { return NULL; }
 static inline int CL_GetMaxClients( void ) { return SV_GetMaxClients(); }
