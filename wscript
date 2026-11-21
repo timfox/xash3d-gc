@@ -444,10 +444,12 @@ def configure(conf):
 	cxxflags = list(cflags) # optimization flags are common between C and C++ but we need a copy
 	if conf.env.DEST_OS == 'gamecube' and conf.env.COMPILER_CC in ('gcc', 'clang'):
 		# GameCube crash reports use the platform exception handler, not DWARF
-		# asynchronous unwinding. Keep C++ exception tables, but avoid retaining
-		# per-instruction C unwind metadata in the MEM1-resident executable.
-		cflags = [flag for flag in cflags if flag != '-fasynchronous-unwind-tables']
-		cflags += ['-fno-asynchronous-unwind-tables', '-fno-unwind-tables']
+		# unwinding, and every C++ module here (mainui, hlsdk) is built with
+		# -fno-exceptions with no try/catch, so nothing reads the unwind
+		# tables: keep them out of the MEM1-resident executable.
+		nounwind = ['-fno-asynchronous-unwind-tables', '-fno-unwind-tables']
+		cflags = [flag for flag in cflags if flag != '-fasynchronous-unwind-tables'] + nounwind
+		cxxflags = [flag for flag in cxxflags if flag != '-fasynchronous-unwind-tables'] + nounwind
 
 	# on the Switch, allow undefined symbols by default, which is needed for libsolder to work
 	# we'll specifically disallow them for the engine executable
@@ -628,10 +630,29 @@ def configure(conf):
 			# tables sized for a second player or for bots are cut to one
 			# (server client slots: 91 KB each).
 			conf.define('XASH_GC_LOSTCOAST', 1)
+			# The level has 85 map entities and a handful made in play. The
+			# edict tables (server edicts and baselines, client entities)
+			# are static data sized by these caps, and static data is heap
+			# here: at the stock 900 / 460 they held 1.8 MB, nearly all of
+			# it never touched (measured in Dolphin over the ride and the
+			# gate scene), while the heap could not find 8 KB to spawn the
+			# map's actors.
+			conf.define('DEFAULT_MAX_EDICTS', 256)
+			conf.define('GC_SP_EDICT_CAP', 256)
+			conf.define('GC_GCMAP_CLIENT_EDICTS', 256)
 		if conf.options.GAMEDIR == 'dod':
 			conf.define('XASH_DODGC_NETWORK', 1)
-			conf.define('DEFAULT_MAX_EDICTS', 460)
-			conf.define('GC_SP_EDICT_CAP', 460)
+			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
+			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
+			# screen) can be built with a bigger table: XASH_GC_MAX_EDICTS=560 costs about
+			# 0.8 KiB of edict + 0.3 KiB of baseline BSS and ~1.4 KiB of client entity per edict.
+			max_edicts = os.environ.get('XASH_GC_MAX_EDICTS', '460')
+			max_edicts = int(max_edicts) if max_edicts.isdigit() else 460
+			max_edicts = max(460, min(900, max_edicts))
+			conf.define('DEFAULT_MAX_EDICTS', max_edicts)
+			conf.define('GC_SP_EDICT_CAP', max_edicts)
+			if max_edicts != 460:
+				Logs.info('GameCube dod edicts: %d' % max_edicts)
 			# playermove_t array caps (two static copies, ~0.5 KiB per physent+visent+touch).
 			# Unset keeps the stock 600/64. dod-gc patches the SDK's pm_defs.h with the same
 			# numbers (scripts/integrate-dod-gameplay.py); both sides must agree.
@@ -660,6 +681,12 @@ def configure(conf):
 			Logs.info('GameCube slim client slots: table %s, default %s' % (max_slots, default_slots))
 		if os.environ.get('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_ENABLE_GCMAP_PROBES', 1)
+		# DoD view-model skin window as a 192 KiB static block (ref/gx/r_gx_skins.c). Off by default:
+		# it comes out of the heap a listen host is short of.
+		if os.environ.get('XASH_GC_SKIN_WINDOW_BSS', '').lower() in ('1', 'yes', 'true', 'on'):
+			conf.define('XASH_GC_SKIN_WINDOW_BSS', 1)
+			# Size of that block in KiB (default 192 for view models; 64 holds the two nearest 256 px bodies).
+			conf.define('GC_SKIN_WINDOW_KIB', int(os.environ.get('XASH_GC_SKIN_WINDOW_KIB', '192')))
 		# Broadband / eth2sp1: link -lbba and enable GC net headers when requested.
 		if os.environ.get('XASH_GAMECUBE_LINK_BBA', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_GAMECUBE_HAVE_LIBBBA', 1)

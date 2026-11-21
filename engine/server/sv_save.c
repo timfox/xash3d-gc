@@ -2098,6 +2098,15 @@ static int LoadGameState( char const *level, qboolean changelevel )
 	Cvar_SetValue( "sv_skyvec_y", header.skyVec_y );
 	Cvar_SetValue( "sv_skyvec_z", header.skyVec_z );
 
+#if XASH_GAMECUBE
+	/* A restored level never runs SV_LoadFromFile, which is where the
+	 * server packet ring is sized into this map's arena. Without this the
+	 * ring kept pointing into the previous map's released arena block: on
+	 * the c1a4k revisit the new world loaded over it, the client delta'd
+	 * against garbage ("46 should be 45") and then indexed entity
+	 * 0x03000000 in CL_ProcessPacket. */
+	SV_GCSizePacketEntities();
+#endif
 	// create entity list
 	CreateEntitiesInRestoreList( pSaveData, 0, true );
 

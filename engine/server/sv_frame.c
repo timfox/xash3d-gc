@@ -36,6 +36,24 @@ typedef struct
 /* Frame build list and packet history are sized per map from the World DL
  * route's free map-arena tail (sv_init.c). This static list is the fallback
  * when a map leaves no room for the full retail 256. */
+#if XASH_GAMECUBE
+/* Per-frame listen-server trace lines: the first 20 at each site and every 2000th after, so a long run stays under
+ * the host log cap (~5 MB) instead of 1 line in 6 being one of these. */
+static unsigned gc_log_n_83935;
+static unsigned gc_log_n_54873;
+static unsigned gc_log_n_13057;
+static unsigned gc_log_n_56299;
+static unsigned gc_log_n_6344;
+static unsigned gc_log_n_1895;
+static qboolean SV_GCLogSite( unsigned *n )
+{
+	if( !Sys_CheckParm( "-gclistenserver" ))
+		return false;
+	++*n;
+	return *n <= 20 || !( *n % 2000 );
+}
+#endif
+
 static entity_state_t sv_gc_frame_ents_static[128];
 entity_state_t *sv_gc_frame_scratch = sv_gc_frame_ents_static;
 int sv_gc_visible_cap = 128;
@@ -46,6 +64,38 @@ int sv_gc_visible_cap = 128;
 
 static int	c_fullsend;	// just a debug counter
 static int	c_notsend;
+#if XASH_GAMECUBE
+static int	c_gcswapped;
+
+/* The packet list is full and a non-player entity wants in: when it is nearer
+ * the viewer than the farthest non-player already listed, take that slot. */
+static qboolean SV_GCPacketReplaceFarthest( sv_ents_t *ents, const entity_state_t *state, const vec3_t view )
+{
+	float far2 = -1.0f, d2;
+	int i, far_i = -1;
+	vec3_t d;
+
+	for( i = 0; i < ents->num_entities; i++ )
+	{
+		const entity_state_t *o = &ents->entities[i];
+
+		if( o->number >= 1 && o->number <= svs.maxclients )
+			continue;	/* never a player */
+		VectorSubtract( o->origin, view, d );
+		d2 = DotProduct( d, d );
+		if( d2 > far2 )
+		{
+			far2 = d2;
+			far_i = i;
+		}
+	}
+	VectorSubtract( state->origin, view, d );
+	if( far_i < 0 || DotProduct( d, d ) >= far2 )
+		return false;
+	ents->entities[far_i] = *state;
+	return true;
+}
+#endif
 
 /*
 =======================
@@ -72,6 +122,17 @@ SV_AddEntitiesToPacket
 
 =============
 */
+#if XASH_GAMECUBE
+/* gc_full_pack 1 (debug, default 0, only from a test cfg): a listen-server boot override disc packs with the game's own AddToFullPack like
+ * the menu play route does, instead of the lean seats-plus-brushes emitter, so packet sizes can be measured on the route that ships. */
+static qboolean SV_GCFullPackTest( void )
+{
+	convar_t *cv = Cvar_FindVar( "gc_full_pack" );
+
+	return cv && cv->value != 0.0f;
+}
+#endif
+
 static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_frame_t *frame, sv_ents_t *ents, qboolean from_client )
 {
 	byte		*clientpvs = NULL;
@@ -115,7 +176,7 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 	if( ( Sys_CheckParm( "-gcnewgame" )
 			|| Sys_CheckParm( "-gclistenserver" )
 			|| ( Sys_CheckParm( "-gcmenuplaystart" ) && !GC_MenuRunsServer() ))
-		&& from_client )
+		&& from_client && !SV_GCFullPackTest() )
 	{
 		int		e;
 		int		player_e = NUM_FOR_EDICT( pClient );
@@ -343,6 +404,12 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 				// visibility list is full
 				// continue counting entities,
 				// so we know how many it's ovreflowed
+#if XASH_GAMECUBE
+				/* Stock HL priority: players are never dropped; of the rest the farthest
+				 * from the viewer goes first. The ring cannot grow mid-frame. */
+				if( !player && pViewEnt && SV_GCPacketReplaceFarthest( ents, state, pViewEnt->v.origin ))
+					c_gcswapped++;
+#endif
 				c_notsend++;
 			}
 		}
@@ -916,6 +983,9 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	frame_ents.entities = sv_gc_frame_scratch;
 #endif
 	frame_ents.num_entities = c_fullsend = c_notsend = 0;
+#if XASH_GAMECUBE
+	c_gcswapped = 0;
+#endif
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints
@@ -927,7 +997,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 
 		if( !cl->pViewEntity && cl->edict )
 			cl->pViewEntity = cl->edict;
-		if( Sys_CheckParm( "-gclistenserver" ))
+		if( SV_GCLogSite( &gc_log_n_83935 ))
 			Con_Reportf( "Xash3D GameCube: AddEntitiesToPacket begin view=%d client=%d\n",
 				view ? NUM_FOR_EDICT( view ) : -1,
 				cl->edict ? NUM_FOR_EDICT( cl->edict ) : -1 );
@@ -938,7 +1008,18 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 #endif
 #if XASH_GAMECUBE
 	GC_ProfMark( "sv send: add entities (AddToFullPack)" );
-	if( Sys_CheckParm( "-gclistenserver" ))
+	{
+		/* How many entities a frame of this match really carries: the local packet ring is sized for 256 (PR 297). */
+		static int max_ents, max_logs;
+
+		if( frame_ents.num_entities > max_ents )
+		{
+			max_ents = frame_ents.num_entities;
+			if( max_logs++ < 24 )
+				Con_Reportf( "Xash3D GameCube: packet entities per frame: new max %d (cap %d)\n", max_ents, sv_gc_visible_cap );
+		}
+	}
+	if( SV_GCLogSite( &gc_log_n_54873 ))
 		Con_Reportf( "Xash3D GameCube: AddEntitiesToPacket ready ents=%d\n",
 			frame_ents.num_entities );
 #endif
@@ -946,7 +1027,13 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	if( c_notsend != cl->ignored_ents )
 	{
 		if( c_notsend > 0 )
+		{
 			Con_Printf( S_ERROR "Too many entities in visible packet list. Ignored %d entities\n", c_notsend );
+#if XASH_GAMECUBE
+			Con_Reportf( "Xash3D GameCube: packet list overflow cap %d listed %d dropped %d (farthest non-players first, %d swapped in), players kept\n",
+				sv_gc_visible_cap, frame_ents.num_entities, c_notsend, c_gcswapped );
+#endif
+		}
 
 		cl->ignored_ents = c_notsend;
 	}
@@ -957,7 +1044,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 	// of an entity being included twice.
 	qsort( frame_ents.entities, frame_ents.num_entities, sizeof( frame_ents.entities[0] ), SV_EntityNumbers );
 #if XASH_GAMECUBE
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_13057 ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities sorted ents=%d frames=%p packet=%p num_pe=%d next=%d\n",
 			frame_ents.num_entities, (void *)cl->frames, (void *)svs.packet_entities,
 			svs.num_client_entities, svs.next_client_entities );
@@ -995,7 +1082,7 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 		frame->num_entities++;
 	}
 #if XASH_GAMECUBE
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_56299 ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities copied ents=%d next=%d\n",
 			frame->num_entities, svs.next_client_entities );
 #endif
@@ -1016,14 +1103,14 @@ static void SV_WriteEntitiesToClient( sv_client_t *cl, sizebuf_t *msg )
 		if( frames % 600 == 0 )
 			sv_gc_emit_delta = sv_gc_emit_new = sv_gc_emit_removed = sv_gc_emit_full = 0;
 	}
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_6344 ))
 		Con_Reportf( "Xash3D GameCube: EmitPacketEntities ready\n" );
 #endif
 	SV_EmitEvents( cl, frame, msg );
 	if( send_pings ) SV_EmitPings( msg );
 #if XASH_GAMECUBE
 	GC_ProfMark( "sv send: events+pings" );
-	if( Sys_CheckParm( "-gclistenserver" ))
+	if( SV_GCLogSite( &gc_log_n_1895 ))
 		Con_Reportf( "Xash3D GameCube: WriteEntities complete\n" );
 #endif
 }

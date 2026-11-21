@@ -1,0 +1,156 @@
+From 53646491a6de999f296853173abc513272c1015b Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 19:40:11 -0800
+Subject: [PATCH] Lost Coast: he turns before he walks, and his files need no
+ heap
+
+WalkTo turns him to within 60 degrees of where he is going before he
+sets off: at full speed while still turned away he slid sideways and
+backwards. Scene and talker files are read onto the stack
+(GC_GameFileRead) and the route search's arrays are on the stack too:
+the heap had no room left for either, and the intro stopped loading.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ dlls/lostcoast_npcs.cpp | 64 +++++++++++++++++++++++++++++++++--------
+ 1 file changed, 52 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 03862517..e7b8ab59 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -372,10 +372,33 @@ static float LC_Approach( float target, float value, float speed )
+ 	return target;
+ }
+ 
++// His text files (scenes, the talker) are read onto the stack on the
++// GameCube: the engine's file loader wants each whole from the heap, which
++// has no two kilobytes in one piece left when he spawns (the intro scene
++// stopped loading). Elsewhere they load the usual way.
++#define LC_TEXT_MAX	4096
++extern "C" int GC_GameFileRead( const char *path, void *dst, int max ) __attribute__(( weak ));
++
++static char *LC_ReadText( const char *file, char *buf, int *len )
++{
++	if( GC_GameFileRead )
++	{
++		*len = GC_GameFileRead( file, buf, LC_TEXT_MAX );
++		return *len > 0 ? buf : NULL;
++	}
++	return (char *)LOAD_FILE_FOR_ME( (char *)file, len );
++}
++
++static void LC_FreeText( char *d, const char *buf )
++{
++	if( d && d != buf )
++		FREE_FILE( d );
++}
++
+ static lc_scene_t *LC_LoadScene( const char *file )
+ {
+ 	int i, len = 0;
+-	char *data, *p, line[160];
++	char *data, *p, line[160], text[LC_TEXT_MAX];
+ 	lc_scene_t *sc;
+ 
+ 	for( i = 0; i < g_lcNumScenes; i++ )
+@@ -383,7 +406,7 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 			return &g_lcScenes[i];
+ 	if( g_lcNumScenes >= LC_MAX_SCENES )
+ 		return NULL;
+-	data = (char *)LOAD_FILE_FOR_ME( (char *)file, &len );
++	data = LC_ReadText( file, text, &len );
+ 	if( !data )
+ 	{
+ 		ALERT( at_console, "Lost Coast: scene %s missing\n", file );
+@@ -464,7 +487,7 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 		if( ev->type == LCE_SPEAK )
+ 			PRECACHE_SOUND( (char *)ev->arg );
+ 	}
+-	FREE_FILE( data );
++	LC_FreeText( data, text );
+ 	return sc;
+ }
+ 
+@@ -566,9 +589,11 @@ static int LC_NearestNode( const Vector &p )
+ // A* over the node graph (CAI_Pathfinder's job). Returns waypoint count.
+ static int LC_Route( const Vector &from, const Vector &to, Vector *out, int maxout )
+ {
+-	static float g[LC_MAX_NODES], f[LC_MAX_NODES];
+-	static short prev[LC_MAX_NODES];
+-	static char state[LC_MAX_NODES]; // 0 new, 1 open, 2 closed
++	// (on the stack, like the graph: static data is heap on the GameCube,
++	// and five kilobytes of it kept the map's actors from spawning)
++	float g[LC_MAX_NODES], f[LC_MAX_NODES];
++	short prev[LC_MAX_NODES];
++	char state[LC_MAX_NODES]; // 0 new, 1 open, 2 closed
+ 	byte graph[LC_GRAPH_MAX + 32] __attribute__(( aligned( 32 )));
+ 	int s, e, i, n = 0;
+ 	short path[LC_MAX_NODES];
+@@ -827,7 +852,8 @@ void CLCFisherman::Precache( void )
+ 	if( !FStringNull( m_iszTalker ))
+ 	{
+ 		int len = 0;
+-		char *d = (char *)LOAD_FILE_FOR_ME( (char *)STRING( m_iszTalker ), &len );
++		char text[LC_TEXT_MAX];
++		char *d = LC_ReadText( STRING( m_iszTalker ), text, &len );
+ 
+ 		if( d )
+ 		{
+@@ -847,7 +873,7 @@ void CLCFisherman::Precache( void )
+ 				if( strstr( word, "scripts/lc/" ))
+ 					LC_LoadScene( word );
+ 			}
+-			FREE_FILE( d );
++			LC_FreeText( d, text );
+ 		}
+ 	}
+ }
+@@ -1027,9 +1053,9 @@ void CLCFisherman::Concept( const char *concept )
+ {
+ 	// Pick one of the talker's scenes for this concept, at random.
+ 	int len = 0, n, count = 0;
+-	char *d, *p, word[64], pick[64];
++	char *d, *p, word[64], pick[64], text[LC_TEXT_MAX];
+ 
+-	if( FStringNull( m_iszTalker ) || !( d = (char *)LOAD_FILE_FOR_ME( (char *)STRING( m_iszTalker ), &len )))
++	if( FStringNull( m_iszTalker ) || !( d = LC_ReadText( STRING( m_iszTalker ), text, &len )))
+ 		return;
+ 	pick[0] = 0;
+ 	for( p = d; p < d + len; )
+@@ -1046,7 +1072,7 @@ void CLCFisherman::Concept( const char *concept )
+ 		}
+ 		p = eol + 1;
+ 	}
+-	FREE_FILE( d );
++	LC_FreeText( d, text );
+ 	if( pick[0] )
+ 	{
+ 		lc_scene_t *sc = LC_LoadScene( pick );
+@@ -1079,8 +1105,22 @@ BOOL CLCFisherman::WalkTo( const Vector &goal, float interval, float stopdist, B
+ 		return TRUE;
+ 	}
+ 	m_bMoving = TRUE;
++	{
++		// He turns to where he is going before he sets off: walking at
++		// full speed while still turned away slid him sideways and
++		// backwards (a half turn takes two seconds at his yaw speed).
++		float want = UTIL_VecToYaw( d ), err = want - pev->angles.y;
++
++		while( err > 180.0f ) err -= 360.0f;
++		while( err < -180.0f ) err += 360.0f;
++		FaceYaw( want, interval );
++		if( fabs( err ) > 60.0f )
++		{
++			SetSeq( "idle" );
++			return FALSE;
++		}
++	}
+ 	SetSeq( "walk" );
+-	FaceYaw( UTIL_VecToYaw( d ), interval );
+ 	step = speed * interval;
+ 	if( step > dist2 - stopdist )
+ 		step = dist2 - stopdist;
+-- 
+2.53.0
+
