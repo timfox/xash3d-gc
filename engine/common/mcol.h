@@ -5,7 +5,8 @@ Angled MOHAA detail costs too many clipnodes as BSP30 hull geometry, so the
 converter (timfox/mohaa-gc tools/mesh_collision.py) writes it to
 maps/<map>.mcol instead, and the engine sweeps player and monster boxes
 against these brushes the way Quake 3 does (CM_TraceThroughBrush): every
-plane is pushed out by the box, axial bevels are in the file, and hits stop
+plane is pushed out by the box, the brush bounds serve as its axial planes and
+bevels (so the file stores only angled planes), and hits stop
 MCOL_DIST_EPSILON short of the surface.
 
 MCol_TraceBox must match mesh_collision.trace_box(). No engine dependencies
@@ -17,7 +18,7 @@ on purpose, so tests/mcol_test.c can build it on the host.
 #include <stddef.h>
 #include <stdint.h>
 
-#define MCOL_VERSION		1
+#define MCOL_VERSION		2
 #define MCOL_DIST_EPSILON	0.03125f
 #define MCOL_MAX_STACK		128
 

@@ -70,12 +70,15 @@ class McolTests(unittest.TestCase):
         cases = {
             "truncated": data[:-4],
             "magic": b"XCOL" + data[4:],
-            "version": data[:4] + (2).to_bytes(4, "little") + data[8:],
+            "version": data[:4] + (1).to_bytes(4, "little") + data[8:],
         }
-        nplanes = int.from_bytes(data[8:12], "little")
-        nbrushes = int.from_bytes(data[12:16], "little")
+        # the ramp's one stored side (its slope; axial planes come from the bounds)
+        ramp = (FIX / "ramp.mcol").read_bytes()
+        nplanes = int.from_bytes(ramp[8:12], "little")
+        nbrushes = int.from_bytes(ramp[12:16], "little")
+        self.assertEqual(int.from_bytes(ramp[16:20], "little"), 1)
         side0 = 24 + 16 * nplanes + 32 * nbrushes
-        cases["side"] = data[:side0] + (nplanes).to_bytes(4, "little") + data[side0 + 4:]
+        cases["side"] = ramp[:side0] + (nplanes).to_bytes(4, "little") + ramp[side0 + 4:]
         with tempfile.TemporaryDirectory() as tmp:
             for name, blob in cases.items():
                 p = Path(tmp) / f"{name}.mcol"

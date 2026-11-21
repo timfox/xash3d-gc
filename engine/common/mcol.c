@@ -5,6 +5,8 @@ File layout, little-endian:
   header  char magic[4] "MCOL"; int32 version; int32 numplanes, numbrushes, numsides, numnodes
   planes  { float normal[3]; float dist; }
   brushes { int32 firstside; int32 numsides; float mins[3]; float maxs[3]; }
+          a brush is its six axial planes (its bounds, never stored) followed by
+          its non-axial sides
   sides   { int32 planenum; }
   nodes   { float mins[3]; float maxs[3]; int32 a; int32 b; }
 Node 0 is the root, and children always come after their parent.
@@ -110,14 +112,36 @@ static int MCol_Overlaps( const float *lo, const float *hi, const float *bmin, c
 static void MCol_TraceBrush( const mcol_t *m, const mcol_brush_t *br, const float *start, const float *mins, const float *maxs, const float *end, mcol_trace_t *tr )
 {
 	float enter = -1.0f, leave = 1.0f;
-	const float *clipn = NULL;
+	float clipn[3] = { 0.0f, 0.0f, 0.0f };
+	int clipped = 0;
 	int startout = 0, getsout = 0;
 	int i, k;
 
-	for( i = 0; i < br->numsides; i++ )
+	for( i = -6; i < br->numsides; i++ )
 	{
-		const mcol_plane_t *p = &m->planes[m->sides[br->firstside + i]];
+		mcol_plane_t axial;
+		const mcol_plane_t *p;
 		float off[3], dist, d1, d2, f;
+
+		if( i < 0 )
+		{
+			// the bounds: -x, +x, -y, +y, -z, +z, as mesh_collision.bound_planes()
+			int ax = ( i + 6 ) >> 1;
+
+			memset( &axial, 0, sizeof( axial ));
+			if(( i + 6 ) & 1 )
+			{
+				axial.normal[ax] = 1.0f;
+				axial.dist = br->maxs[ax];
+			}
+			else
+			{
+				axial.normal[ax] = -1.0f;
+				axial.dist = -br->mins[ax];
+			}
+			p = &axial;
+		}
+		else p = &m->planes[m->sides[br->firstside + i]];
 
 		for( k = 0; k < 3; k++ )
 			off[k] = p->normal[k] < 0.0f ? maxs[k] : mins[k];
@@ -148,7 +172,10 @@ static void MCol_TraceBrush( const mcol_t *m, const mcol_brush_t *br, const floa
 			if( f > enter )
 			{
 				enter = f;
-				clipn = p->normal;
+				clipn[0] = p->normal[0];
+				clipn[1] = p->normal[1];
+				clipn[2] = p->normal[2];
+				clipped = 1;
 			}
 		}
 		else
@@ -173,7 +200,7 @@ static void MCol_TraceBrush( const mcol_t *m, const mcol_brush_t *br, const floa
 		return;
 	}
 
-	if( enter < leave && enter > -1.0f && enter < tr->fraction && clipn )
+	if( enter < leave && enter > -1.0f && enter < tr->fraction && clipped )
 	{
 		tr->fraction = enter > 0.0f ? enter : 0.0f;
 		tr->normal[0] = clipn[0];
