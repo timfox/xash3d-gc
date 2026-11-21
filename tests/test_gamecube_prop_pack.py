@@ -274,6 +274,55 @@ class DropToFloorTests(unittest.TestCase):
 		props = self.props.static_props(ents)
 		self.assertEqual([p["drop"] for p in props], [True, False])
 
+	def test_env_model_is_posed_in_its_named_sequence(self):
+		import types
+
+		ents = [
+			{"classname": "env_model", "model": "models/tree.mdl",
+				"m_iszSequence_On": "tree_high_origin", "m_iszSequence_Off": "idle"},
+			{"classname": "env_model", "model": "models/tree.mdl", "spawnflags": "1",
+				"m_iszSequence_On": "tree_high_origin", "m_iszSequence_Off": "idle"},
+			{"classname": "env_model", "model": "models/tree.mdl", "sequence": "2"},
+			# only env_model has these keys
+			{"classname": "dod_object", "model": "models/tree.mdl", "m_iszSequence_On": "tree_high_origin"},
+		]
+		props = self.props.static_props(ents)
+		self.assertEqual([p["sequence_name"] for p in props], ["tree_high_origin", "idle", "", ""])
+		labels = ["idle", "tree_low_origin", "Tree_High_Origin"]
+		mdl = types.SimpleNamespace(sequence_index=lambda name: next(
+			(i for i, label in enumerate(labels) if label.lower() == name.lower()), -1))
+		self.assertEqual([self.props.prop_sequence(mdl, p) for p in props], [2, 0, 2, 0])
+		# a name the model lacks falls back to sequence 0, as the game does
+		self.assertEqual(self.props.prop_sequence(mdl, {"sequence_name": "gone", "sequence": 5}), 0)
+
+	def test_sequence_labels_are_read_from_the_model(self):
+		mdl = self.props.StudioModel.__new__(self.props.StudioModel)
+		size = self.props.SEQ_SZ
+		mdl.seqindex = 16
+		mdl.numseq = 2
+		mdl.data = (b"\0" * 16 + b"idle".ljust(size, b"\0") + b"tree_high_origin".ljust(size, b"\0"))
+		self.assertEqual(mdl.sequence_index("TREE_high_origin"), 1)
+		self.assertEqual(mdl.sequence_index("missing"), -1)
+
+	def test_motion_bone_is_held_on_the_axes_the_sequence_moves_along(self):
+		# One bone at z=-365, no animation data. A sequence whose motion type
+		# has the Z bit holds it at 0, as R_StudioCalcRotations does.
+		import struct
+		bp = self.props
+		mdl = bp.StudioModel.__new__(bp.StudioModel)
+		bone = bytearray(bp.BONE_SZ)
+		struct.pack_into("<i", bone, 32, -1)
+		struct.pack_into("<6f", bone, 64, 5.0, 6.0, -365.0, 0.0, 0.0, 0.0)
+		seqs = bytearray(bp.SEQ_SZ * 2)
+		struct.pack_into("<ii", seqs, bp.SEQ_SZ + 68, 4, 0)
+		mdl.data = bytes(bone) + bytes(seqs)
+		mdl.numbones, mdl.boneindex = 1, 0
+		mdl.numseq, mdl.seqindex = 2, bp.BONE_SZ
+		self.assertAlmostEqual(mdl.bone_matrices(0)[0][2][3], -365.0)
+		held = mdl.bone_matrices(1)[0]
+		self.assertAlmostEqual(held[2][3], 0.0)
+		self.assertAlmostEqual(held[0][3], 5.0)
+
 	def test_named_props_get_their_ordinal_in_lump_order(self):
 		ents = [
 			{"classname": "env_model", "model": "models/a.mdl"},
@@ -287,6 +336,18 @@ class DropToFloorTests(unittest.TestCase):
 		props = self.props.static_props(ents)
 		self.assertEqual([p["named"] for p in props], [0, 1, 2])
 		self.assertEqual([p["additive"] for p in props], [False, False, False])
+
+	def test_a_carried_dod_object_is_not_baked_into_the_pack(self):
+		# charlie's tnt satchels: a capture area wants the group, so the game spawns them; other groups stay decoration
+		ents = [
+			{"classname": "dod_capture_area", "area_object_group": "tnt"},
+			{"classname": "dod_object", "model": "models/b.mdl", "object_group": "tnt"},
+			{"classname": "dod_object", "model": "models/b.mdl", "object_group": "dev42"},
+			{"classname": "dod_object", "model": "models/b.mdl"},
+			{"classname": "env_model", "model": "models/a.mdl"},
+		]
+		props = self.props.static_props(ents)
+		self.assertEqual(len(props), 3)	# the tnt object is the only one left out
 
 	def test_footprint_light_ignores_a_dark_texel_under_the_origin(self):
 		light = self.props.FloorLight.__new__(self.props.FloorLight)
@@ -306,6 +367,29 @@ class DropToFloorTests(unittest.TestCase):
 		light = self.floor()
 		self.assertIsNone(light.drop((0.0, 0.0, -60.0)))
 		self.assertIsNone(light.drop((0.0, 0.0, 300.0)))
+
+	def test_spawn_drop_lifts_one_unit_first(self):
+		light = self.floor()
+		# half a unit inside the floor: the lift frees it and it lands on top
+		prop = {"origin": [0.0, 0.0, -40.5], "ent": 3}
+		self.assertAlmostEqual(self.props.drop_like_the_game(light, prop), -40.0, delta=0.01)
+		self.assertAlmostEqual(prop["origin"][2], -40.0, delta=0.01)
+		# deep inside solid, or nothing within reach: only the lift remains
+		for z in (-60.0, 300.0):
+			prop = {"origin": [0.0, 0.0, z], "ent": 3}
+			self.assertIsNone(self.props.drop_like_the_game(light, prop))
+			self.assertEqual(prop["origin"][2], z + 1.0)
+
+	def test_dod_object_falls_any_distance_and_is_not_a_spawn_drop(self):
+		ents = [
+			{"classname": "dod_object", "model": "models/a.mdl", "origin": "0 0 300", "spawnflags": "2"},
+			{"classname": "env_model", "model": "models/a.mdl", "origin": "0 0 300"},
+		]
+		props = self.props.static_props(ents)
+		self.assertEqual([(p["toss"], p["drop"]) for p in props], [(True, False), (False, False)])
+		light = self.floor()
+		self.assertAlmostEqual(self.props.fall_like_the_game(light, props[0]), -40.0, delta=0.01)
+		self.assertAlmostEqual(props[0]["origin"][2], -40.0, delta=0.01)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,335 @@
+From 87fc71aaa6319a7cf315d11a307a778988ea97f4 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 15:59:50 -0800
+Subject: [PATCH] Lost Coast: fisherman's gate scene (keys, opens the gate,
+ sits down)
+
+The scene the map starts at the gate plays from its trigger: he walks to
+the gate, plays OpenGate, walks back, sits and holds SitDown_PostIdle.
+Scenes gain 'sequence' events and movetos to a place ('@x,y,z,yaw').
+
+All scenes now share one pool of events, and the node arrays are cut to
+what the map uses: with ten scenes at forty events each the 8 KB node
+graph file no longer fit on the GameCube heap.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ dlls/lostcoast_npcs.cpp | 181 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 172 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 99427b37..bbcaeee8 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -296,13 +296,14 @@ void CLCSeagull::GullThink( void )
+ //  - looks at the player through Source's head/spine/body
+ //    pose parameters, baked as GoldSrc bone controllers 0..3
+ //=========================================================
+-#define LC_MAX_EVENTS	40
+-#define LC_MAX_SCENES	8
+-#define LC_MAX_NODES	512
+-#define LC_MAX_LINKS	1024
++#define LC_MAX_EVENTS	40	// in one scene
++#define LC_EVENT_POOL	144	// in all of them
++#define LC_MAX_SCENES	10
++#define LC_MAX_NODES	448	// the map has 438
++#define LC_MAX_LINKS	736	// and 724
+ #define LC_MAX_ROUTE	64
+ 
+-enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX };
++enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE };
+ 
+ typedef struct
+ {
+@@ -323,11 +324,16 @@ typedef struct
+ 	char		file[48];
+ 	int		n;
+ 	float		end;
+-	lc_event_t	ev[LC_MAX_EVENTS];
++	lc_event_t	*ev;	// in g_lcEvents
+ } lc_scene_t;
+ 
+ // One fisherman per map: keep the bulky data out of entity private memory.
+ static lc_scene_t	g_lcScenes[LC_MAX_SCENES];
++// The scenes share one run of events: forty to each scene was 13 KB for the
++// hundred or so the map uses, and with ten scenes the 8 KB node graph file
++// no longer found room on the GameCube heap (he walked in straight lines).
++static lc_event_t	g_lcEvents[LC_EVENT_POOL];
++static int		g_lcNumEvents;
+ static int		g_lcNumScenes;
+ static float		g_lcNodes[LC_MAX_NODES][3];
+ static unsigned short	g_lcLinks[LC_MAX_LINKS][2];
+@@ -364,6 +370,7 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 	sc = &g_lcScenes[g_lcNumScenes++];
+ 	memset( sc, 0, sizeof( *sc ));
+ 	strncpy( sc->file, file, sizeof( sc->file ) - 1 );
++	sc->ev = &g_lcEvents[g_lcNumEvents];
+ 	for( p = data; p < data + len; )
+ 	{
+ 		char kind[16], arg[64];
+@@ -388,9 +395,10 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 			sscanf( line, "%*s %f", &sc->end );
+ 			continue;
+ 		}
+-		if( sc->n >= LC_MAX_EVENTS )
++		if( sc->n >= LC_MAX_EVENTS || g_lcNumEvents >= LC_EVENT_POOL )
+ 			continue;
+ 		ev = &sc->ev[sc->n];
++		memset( ev, 0, sizeof( *ev ));
+ 		if( !strcmp( kind, "speak" ) && sscanf( line, "%*s %f %f %63s %f %f", &t0, &t1, arg, &a, &b ) >= 3 )
+ 			ev->type = LCE_SPEAK;
+ 		else if( !strcmp( kind, "lookat" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 2 )
+@@ -401,6 +409,8 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 			ev->type = LCE_MOVETO;
+ 		else if( !strcmp( kind, "flex" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 3 )
+ 			ev->type = LCE_FLEX; // the scene's facial track (brows, eyelids): a baked file
++		else if( !strcmp( kind, "sequence" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 3 )
++			ev->type = LCE_SEQUENCE; // a whole-body animation: "seq_Name" or "seq_Name>seq_PostIdle:seconds"
+ 		else if( !strcmp( kind, "gesture" ))
+ 		{
+ 			float tg[8];
+@@ -420,8 +430,11 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 		ev->t1 = t1;
+ 		ev->a = a;
+ 		ev->b = b;
+-		ev->arg = ( ev->type == LCE_SPEAK || ev->type == LCE_GESTURE || ev->type == LCE_FLEX ) ? STRING( ALLOC_STRING( arg )) : "";
++		// (a moveto keeps its target when it is a place, "@x,y,z,yaw"; "!player" needs none)
++		ev->arg = ( ev->type == LCE_SPEAK || ev->type == LCE_GESTURE || ev->type == LCE_FLEX || ev->type == LCE_SEQUENCE
++			|| ( ev->type == LCE_MOVETO && arg[0] == '@' )) ? STRING( ALLOC_STRING( arg )) : "";
+ 		sc->n++;
++		g_lcNumEvents++;
+ 		if( ev->type == LCE_SPEAK )
+ 			PRECACHE_SOUND( (char *)ev->arg );
+ 	}
+@@ -583,6 +596,7 @@ private:
+ 	Vector PlayerPos( void );
+ 	void StartScene( lc_scene_t *sc );
+ 	void PlayGesture( lc_event_t *ev, float sceneStart );
++	void PlaySequence( lc_event_t *ev, float sceneStart );
+ 	void RunScene( float interval );
+ 	void RunLead( float interval );
+ 	BOOL WalkTo( const Vector &goal, float interval, float stopdist, BOOL follow_z = TRUE );
+@@ -591,6 +605,16 @@ private:
+ 	void Concept( const char *concept );
+ 
+ 	int		m_state;
++	// The scene the map starts when the player reaches the gate (his keys,
++	// opening it, sitting down), and the trigger volume that starts it.
++	float		m_gate[6];
++	BOOL		m_bHaveGate, m_bGateDone;
++	string_t	m_iszGateScene;
++	// A whole-body sequence in flight: he stands where he is until it ends.
++	// m_pszPost: the idle that takes over and loops when it does.
++	float		m_flSeqEnd, m_flPostLen;
++	float		m_flGateTest;	// -lcgatetest: when the probe starts the gate scene
++	const char	*m_pszPost;
+ 	float		m_flLast;
+ 	lc_scene_t	*m_pScene;
+ 	float		m_flSceneStart;
+@@ -620,6 +644,17 @@ void CLCFisherman::KeyValue( KeyValueData *pkvd )
+ 			&m_trigger[2], &m_trigger[3], &m_trigger[4], &m_trigger[5] ) == 6;
+ 		pkvd->fHandled = TRUE;
+ 	}
++	else if( FStrEq( pkvd->szKeyName, "lc_gate_trigger" ))
++	{
++		m_bHaveGate = sscanf( pkvd->szValue, "%f %f %f %f %f %f", &m_gate[0], &m_gate[1],
++			&m_gate[2], &m_gate[3], &m_gate[4], &m_gate[5] ) == 6;
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_gate_scene" ))
++	{
++		m_iszGateScene = ALLOC_STRING( pkvd->szValue );
++		pkvd->fHandled = TRUE;
++	}
+ 	else if( FStrEq( pkvd->szKeyName, "lc_scene" ))
+ 	{
+ 		m_iszScene = ALLOC_STRING( pkvd->szValue );
+@@ -667,8 +702,15 @@ void CLCFisherman::KeyValue( KeyValueData *pkvd )
+ void CLCFisherman::Precache( void )
+ {
+ 	PRECACHE_MODEL( STRING( pev->model ));
++	// The node graph first: its file is 8 KB in one piece, and after the
++	// scenes have taken their strings the GameCube heap no longer has that
++	// (he then walked every route in a straight line).
++	if( !FStringNull( m_iszNodes ))
++		LC_LoadNodes( STRING( m_iszNodes ));
+ 	if( !FStringNull( m_iszScene ))
+ 		LC_LoadScene( STRING( m_iszScene ));
++	if( !FStringNull( m_iszGateScene ))
++		LC_LoadScene( STRING( m_iszGateScene ));
+ 	if( !FStringNull( m_iszTalker ))
+ 	{
+ 		int len = 0;
+@@ -724,6 +766,17 @@ void CLCFisherman::Spawn( void )
+ 	ResetSequenceInfo();
+ 	InitBoneControllers();
+ 	m_flTest = LC_BootSwitch( "lcscenetest" ) ? gpGlobals->time + 3.0f : 0.0f;
++	// A probe of the gate scene with nobody at the controls: he starts at
++	// the lead's goal and the scene starts by itself.
++	m_flGateTest = 0.0f;
++	if( LC_BootSwitch( "lcgatetest" ) && m_bHaveLead )
++	{
++		UTIL_SetOrigin( pev, m_vLeadGoal );
++		pev->angles.y = m_flLeadYaw;
++		m_flGateTest = gpGlobals->time + 3.0f;
++		m_flTest = 1.0e9f; // PlayerPos and the walk treat the player as present
++		m_state = FS_DONE;
++	}
+ 	SetThink( &CLCFisherman::FishThink );
+ 	pev->nextthink = gpGlobals->time + 0.1f;
+ 	m_flLast = gpGlobals->time;
+@@ -766,6 +819,8 @@ Vector CLCFisherman::PlayerPos( void )
+ #if XASH_GAMECUBE
+ extern "C" void GC_ActorPose( int ent, const char *name, float cycle ) __attribute__(( weak ));
+ extern "C" void GC_ActorFace( int ent, const char *track, float start, float end ) __attribute__(( weak ));
++// flags: 2 hold the last frame, 4 loop, 8 no fade in
++extern "C" void GC_ActorSequence( int ent, const char *name, float start, float end, int flags ) __attribute__(( weak ));
+ #endif
+ 
+ #if XASH_GAMECUBE
+@@ -788,6 +843,37 @@ void CLCFisherman::PlayGesture( lc_event_t *ev, float sceneStart )
+ #endif
+ }
+ 
++// "seq_Name" plays once; "seq_Name>seq_Idle:seconds" holds its last frame and
++// then loops the idle (a scripted_sequence with a post-idle: he sits down
++// and stays sitting).
++void CLCFisherman::PlaySequence( lc_event_t *ev, float sceneStart )
++{
++	char name[64];
++	const char *gt = strchr( ev->arg, '>' );
++	int n = gt ? (int)( gt - ev->arg ) : (int)strlen( ev->arg );
++
++	if( n > 63 )
++		n = 63;
++	memcpy( name, ev->arg, n );
++	name[n] = 0;
++	m_flSeqEnd = sceneStart + ev->t1;
++	m_pszPost = NULL;
++	if( gt )
++	{
++		const char *colon = strchr( gt, ':' );
++
++		m_pszPost = gt + 1;
++		m_flPostLen = colon ? atof( colon + 1 ) : 1.0f;
++		if( m_flPostLen < 0.1f )
++			m_flPostLen = 1.0f;
++	}
++#if XASH_GAMECUBE
++	if( GC_ActorSequence )
++		GC_ActorSequence( ENTINDEX( edict()), name, sceneStart + ev->t0, sceneStart + ev->t1, gt ? 2 : 0 );
++#endif
++	ALERT( at_console, "Lost Coast: fisherman sequence %s (%.1f s)\n", name, ev->t1 - ev->t0 );
++}
++
+ void CLCFisherman::StartScene( lc_scene_t *sc )
+ {
+ 	if( !sc )
+@@ -970,8 +1056,38 @@ void CLCFisherman::RunScene( float interval )
+ 				GC_ActorFace( ENTINDEX( edict()), ev->arg, m_flSceneStart + ev->t0, m_flSceneStart + ev->t1 );
+ #endif
+ 			break;
++		case LCE_SEQUENCE:
++			if( !ev->started )
++				PlaySequence( ev, m_flSceneStart );
++			break;
+ 		case LCE_MOVETO:
+ 			// walks on past the event's end until he gets there
++			if( ev->arg[0] == '@' )
++			{
++				// to a place the map names, then turned as it is turned;
++				// not while a sequence has him (he is opening the gate)
++				Vector to;
++				float yaw = 0.0f;
++
++				if( ev->started == 2 || gpGlobals->time < m_flSeqEnd
++					|| sscanf( ev->arg, "@%f,%f,%f,%f", &to.x, &to.y, &to.z, &yaw ) != 4 )
++					break;
++				if( WalkTo( to, interval, 8.0f, FALSE ))
++				{
++					float d = yaw - pev->angles.y;
++
++					while( d > 180.0f ) d -= 360.0f;
++					while( d < -180.0f ) d += 360.0f;
++					FaceYaw( yaw, interval );
++					if( fabs( d ) < 4.0f )
++						ev->started = 2;
++					else
++						moving = TRUE; // still turning: nothing else turns him
++				}
++				else
++					moving = TRUE;
++				break;
++			}
+ 			if(( pl || m_flTest != 0.0f ) && ev->started != 2 )
+ 			{
+ 				if( WalkTo( PlayerPos(), interval, ev->a, FALSE ))
+@@ -984,10 +1100,18 @@ void CLCFisherman::RunScene( float interval )
+ 		if( !ev->started )
+ 			ev->started = 1;
+ 	}
+-	if( m_bFace && ( pl || m_flTest != 0.0f ) && !moving )
++	if( m_bFace && ( pl || m_flTest != 0.0f ) && !moving && gpGlobals->time >= m_flSeqEnd )
+ 		FaceYaw( UTIL_VecToYaw( PlayerPos() - pev->origin ), interval );
+ 	if( !moving )
+ 		SetSeq( "idle" );
++	// (a scene is not over while a place it sends him to is still ahead, or
++	// while its last sequence has not begun)
++	for( int i = 0; i < sc->n && !moving; i++ )
++	{
++		if(( sc->ev[i].type == LCE_MOVETO && sc->ev[i].arg[0] == '@' && sc->ev[i].started != 2 )
++			|| ( sc->ev[i].type == LCE_SEQUENCE && !sc->ev[i].started ))
++			moving = TRUE;
++	}
+ 	if( t >= sc->end && !moving )
+ 	{
+ 		m_pScene = NULL;
+@@ -1078,6 +1202,45 @@ void CLCFisherman::FishThink( void )
+ 	StudioFrameAdvance();
+ 	pev->nextthink = gpGlobals->time + 0.1f;
+ 
++	// The idle that follows a sequence, looping, from where it ended.
++	if( m_pszPost && gpGlobals->time >= m_flSeqEnd )
++	{
++		char name[64];
++		const char *colon = strchr( m_pszPost, ':' );
++		int n = colon ? (int)( colon - m_pszPost ) : (int)strlen( m_pszPost );
++
++		if( n > 63 )
++			n = 63;
++		memcpy( name, m_pszPost, n );
++		name[n] = 0;
++#if XASH_GAMECUBE
++		if( GC_ActorSequence )
++			GC_ActorSequence( ENTINDEX( edict()), name, m_flSeqEnd, m_flSeqEnd + m_flPostLen, 4 | 8 );
++#endif
++		m_pszPost = NULL;
++		m_flSeqEnd = gpGlobals->time + 1.0e6f; // he stays put from here on
++	}
++	// The gate: the map's trigger there starts his keys scene and ends the lead.
++	if( m_bHaveGate && !m_bGateDone && !FStringNull( m_iszGateScene )
++		&& ( m_state == FS_LEAD || m_state == FS_DONE ) && !m_bRetrieving )
++	{
++		BOOL go = m_flGateTest > 0 && gpGlobals->time >= m_flGateTest;
++
++		if( pl )
++		{
++			const Vector &o = pl->pev->origin;
++
++			go |= o.x >= m_gate[0] && o.y >= m_gate[1] && o.z >= m_gate[2] - 36
++				&& o.x <= m_gate[3] && o.y <= m_gate[4] && o.z <= m_gate[5] + 36;
++		}
++		if( go )
++		{
++			m_bGateDone = TRUE;
++			m_bHaveLead = FALSE; // lead_to_gate,Deactivate
++			m_pScene = NULL;
++			StartScene( LC_LoadScene( STRING( m_iszGateScene )));
++		}
++	}
+ 	switch( m_state )
+ 	{
+ 	case FS_WAIT:
+-- 
+2.53.0
+
