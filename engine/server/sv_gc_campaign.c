@@ -245,41 +245,52 @@ static void SV_GCProbeCmdFrame( void )
  * the dod_live.bsp slot before it) inside the ISO in place; Dolphin serves the
  * image from the host file, so the next DVD read sees the new bytes.
  * Off by default: set cvar gc_livemap 1 (e.g. in the disc autoexec.cfg). */
-static void SV_GCLiveMapFrame( void )
+void SV_GCLiveMapFrame( void )
 {
-	static int last_serial = -1, frames;
-	static double next_poll;
+	static int last_serial = -1, armed = -1;
+	static unsigned tick;
+	static convar_t *gc_livemap;
 	char name[64];
 	int serial, n;
 	fs_offset_t len = 0;
 	byte *buf;
-
-	static convar_t *gc_livemap;
+	const char *p;
 
 	if( !gc_livemap )
 		gc_livemap = Cvar_Get( "gc_livemap", "0", FCVAR_SERVER, "poll livemap.txt on the disc and reload dod_live (mapbridge dev tool)" );
-	if( !gc_livemap->value || host.realtime < next_poll )
+	if( armed < 0 )
+	{
+		/* Latched once: dev discs carry livemap.txt starting with "L"; stock discs do not
+		 * have the file, so the poll never runs there (cvar gc_livemap 1 also arms it). */
+		buf = FS_LoadFile( "livemap.txt", &len, false );
+		armed = ( buf && len > 0 && buf[0] == 'L' ) ? 1 : 0;
+		if( buf )
+			Mem_Free( buf );
+		Con_Reportf( "Xash3D GameCube: livemap armed=%d (file %s)\n", armed, len > 0 ? "found" : "absent" );
+	}
+	if(( !armed && !gc_livemap->value ) || ( ++tick % 60 ) != 0 ) /* ~1 s of server frames; host.realtime does not advance reliably here */
 		return;
-	next_poll = host.realtime + ( last_serial < 0 ? 2.0 : 1.0 );
 	buf = FS_LoadFile( "livemap.txt", &len, false );
 	if( !buf )
 		return;
+	p = ( const char * )buf;
+	if( *p == 'L' )
+		p++;
 	name[0] = '\0';
-	n = sscanf(( const char * )buf, "%d %63s", &serial, name );
+	n = sscanf( p, "%d %63s", &serial, name );
 	Mem_Free( buf );
 	if( n != 2 || strchr( name, '/' ) || strchr( name, '\\' ))
 		return;
 	if( last_serial < 0 ) /* first poll: adopt the current serial, do not reload */
 	{
 		last_serial = serial;
-		Con_Printf( "Xash3D GameCube: livemap armed serial=%d map=%s\n", serial, name );
+		Con_Reportf( "Xash3D GameCube: livemap serial=%d map=%s\n", serial, name );
 		return;
 	}
 	if( serial == last_serial )
 		return;
 	last_serial = serial;
-	(void)frames;
-	Con_Printf( "Xash3D GameCube: livemap reload serial=%d map=%s\n", serial, name );
+	Con_Reportf( "Xash3D GameCube: livemap reload serial=%d map=%s\n", serial, name );
 	Cbuf_AddText( va( "map %s\n", name ));
 }
 
@@ -292,7 +303,6 @@ void SV_GCCampaignFrame( void )
 	edict_t *player, *trig;
 
 	SV_GCProbeCmdFrame();
-	SV_GCLiveMapFrame();
 
 	{
 		static unsigned calls;

@@ -662,6 +662,7 @@ void SV_QueueChangeLevel( const char *level, const char *landname );
 #if XASH_GAMECUBE
 void SV_GCCampaignScanEntities( const char *mapname, const char *entities );
 void SV_GCCampaignFrame( void );
+void SV_GCLiveMapFrame( void ); // dev: Maya bridge live-map poll (sv_gc_campaign.c)
 qboolean SV_GCAutoCampaignActive( void );
 #endif
 void SV_WriteEntityPatch( const char *filename );

@@ -720,6 +720,8 @@ void Host_ServerFrame( void )
 {
 #if XASH_GAMECUBE
 	GC_HeapCheckArmed( "server frame enter" );
+	if( svs.initialized && sv.state == ss_active )
+		SV_GCLiveMapFrame(); // runs before the DoD listen fast paths that return early
 #endif
 #if XASH_GAMECUBE
 	static int gc_fullphysics_log;
