@@ -1302,6 +1302,11 @@ static void R_StudioSetupBones( cl_entity_t *e )
 	int i;
 #if XASH_GAMECUBE
 	{
+		extern void Mod_GCAnimPackNewOwner( void );
+
+		Mod_GCAnimPackNewOwner( ); /* the animation blocks of earlier bone setups have been read */
+	}
+	{
 		static int setup_logs;
 		if( setup_logs < 4 && e && e == tr.viewent && e->model && e->model->name[0] )
 		{

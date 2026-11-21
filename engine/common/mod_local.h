@@ -222,6 +222,7 @@ byte *Mod_GCStudioArenaLoadFile( const char *path, fs_offset_t *length );
 byte *Mod_GCSeqGroupLoad( const char *path, cache_user_t *cu, fs_offset_t *length );
 void Mod_GCAnimPackReset( void ); /* mod_studio.c: split-model animation packs */
 void Mod_GCAnimPackSpillReset( void );
+void Mod_GCAnimPackNewOwner( void ); /* mod_studio.c: a bone setup starts; earlier ones' animation blocks may go */
 byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel ); /* mod_studio.c: streamed body meshes */
 byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size );
 void Mod_GCStudioBssTrimLast( void *ptr, size_t kept );
