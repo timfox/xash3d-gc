@@ -6774,8 +6774,26 @@ void SV_GCStaticWallsSelfTest( void )
 					if( a.startsolid || b.startsolid || a.allsolid || b.allsolid )
 						mv_startsolid++;
 					else if( mv_bad++ < 6 )
+					{
+						edict_t *we = NULL;
+						int j2;
+
 						Con_Reportf( S_ERROR "Xash3D GameCube: static wall SV_Move mismatch rec %d: frac %f/%f ent %d/%d\n",
 							i, a.fraction, b.fraction, a.ent ? NUM_FOR_EDICT( a.ent ) : -1, b.ent ? NUM_FOR_EDICT( b.ent ) : -1 );
+						for( j2 = 1; j2 < svgame.numEntities && !we; j2++ )
+						{
+							edict_t *e2 = SV_EdictNum( j2 );
+
+							if( !e2->free && e2->v.modelindex == mi && !Q_strcmp( SV_ClassName( e2 ), "func_wall" ))
+								we = e2;
+						}
+						if( we && mv_bad <= 2 )
+							Con_Reportf( "Xash3D GameCube:   rec %d model *%d edict %d solid %d movetype %d flags %x absmin %.0f %.0f %.0f absmax %.0f %.0f %.0f linked %d origin %.0f %.0f %.0f\n",
+								i, mi, NUM_FOR_EDICT( we ), we->v.solid, we->v.movetype, we->v.flags, we->v.absmin[0], we->v.absmin[1], we->v.absmin[2],
+								we->v.absmax[0], we->v.absmax[1], we->v.absmax[2], we->area.prev != NULL, we->v.origin[0], we->v.origin[1], we->v.origin[2] );
+						else if( !we && mv_bad <= 2 )
+							Con_Reportf( "Xash3D GameCube:   rec %d model *%d: no plain func_wall edict carries this model index\n", i, mi );
+					}
 				}
 			}
 		}
