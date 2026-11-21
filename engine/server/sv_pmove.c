@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "server.h"
 #include "const.h"
 #include "pm_local.h"
+#include "pm_layout.h"
 #include "event_flags.h"
 #include "studio.h"
 #if XASH_GAMECUBE
@@ -443,6 +444,21 @@ SV_InitClientMove
 */
 void SV_InitClientMove( void )
 {
+	/* The game DLL has its own copy of pm_defs.h: a DLL built with different XASH_GC_PM_MAX_PHYSENTS /
+	 * MAX_MOVEENTS has a different playermove_t, and PM_Init then crashes (PC 0 in PM_InitTextureTypes).
+	 * A DLL that publishes its layout in gc_pm_layout_dll is checked here, before PM_Init. */
+	{
+		const convar_t *dll = Cvar_FindVar( "gc_pm_layout_dll" );
+		char mine[64];
+
+		Q_snprintf( mine, sizeof( mine ), "%d,%d,%d", (int)sizeof( playermove_t ), MAX_PHYSENTS, MAX_MOVEENTS );
+		if( dll && dll->string && !PM_LayoutMatches( dll->string, (int)sizeof( playermove_t ), MAX_PHYSENTS, MAX_MOVEENTS ))
+			Host_Error( "playermove_t layout mismatch: the game DLL was built with (size,physents,moveents) = %s, the engine with %s. "
+				"Build both with the same XASH_GC_PM_MAX_PHYSENTS / XASH_GC_PM_MAX_MOVEENTS (256 and 32 through scripts/build-dodgc.sh, "
+				"or both stock 600 and 64) and rebuild the game archives.\n", dll->string, mine );
+		Cvar_FullSet( "gc_pm_layout", mine, FCVAR_READ_ONLY );
+	}
+
 	Pmove_Init ();
 
 	svgame.pmove->server = true;

@@ -557,6 +557,13 @@ This has to be done before the world logic, because
 player processing happens outside RunWorldFrame
 ================
 */
+#if XASH_GAMECUBE
+/* A player's shot (EF_MUZZLEFLASH) is gone before the listen client's next
+ * emit when the server runs several frames per render: keep a latch the lean
+ * player emit consumes (cl_frame.c), so third-person shoot poses can play. */
+byte sv_gc_muzzleflash[MAX_CLIENTS + 1];
+#endif
+
 static void SV_PrepWorldFrame( void )
 {
 	for( int i = 1; i < svgame.numEntities; i++ )
@@ -564,6 +571,10 @@ static void SV_PrepWorldFrame( void )
 		edict_t *ent = SV_EdictNum( i );
 		if( ent->free ) continue;
 
+#if XASH_GAMECUBE
+		if( i <= MAX_CLIENTS && FBitSet( ent->v.effects, EF_MUZZLEFLASH ))
+			sv_gc_muzzleflash[i] = 1;
+#endif
 		ClearBits( ent->v.effects, EF_MUZZLEFLASH|EF_NOINTERP );
 	}
 
@@ -789,6 +800,21 @@ void Host_ServerFrame( void )
 		SV_ReadPackets(); /* authentic HL1MP usercmd → PM_Move */
 		SV_UpdateMovevars( false );
 		/* Player motion ran in ReadPackets. Skip DoD entity-think storm. */
+		/* A film shot still needs the game's frame: its rules Think moves the
+		 * scripted actors and fires the shot's effects (StartFrame only, not
+		 * the entity walk). */
+		if( CL_CineActive() || Sys_CheckParm( "-gccapture" ))
+		{
+			static int gc_film_sf_log;
+
+			svgame.globals->time = sv.time;
+			svgame.dllFuncs.pfnStartFrame();
+			if( gc_film_sf_log < 3 )
+			{
+				gc_film_sf_log++;
+				Con_Reportf( "Xash3D GameCube: WorldDL listen StartFrame for film time=%.2f\n", sv.time );
+			}
+		}
 		sv.time += sv.frametime;
 		SV_SendClientMessagesBoundedGC();
 		/* Sparse crumbs only — dense OSReport after Flipper present hangs EXI. */
@@ -851,6 +877,9 @@ void Host_ServerFrame( void )
 
 	// let everything in the world think and move
 	if( !SV_RunGameFrame ()) return;
+#if XASH_GAMECUBE
+	SV_GCLazyLogicTick();
+#endif
 #if XASH_GAMECUBE
 	if( gc_fullphysics_trace )
 		Con_Reportf( "Xash3D GameCube: full server game frame ready\n" );

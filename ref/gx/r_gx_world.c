@@ -354,6 +354,19 @@ static qboolean r_gx_tex_band_logged;
 #define GC_GX_G36_DENSER_LIVE_BUDGET 32
 #endif
 
+/* -gccapture (engine CL_GCCaptureMode): an offline film capture. Frame rate
+ * matters less than what the shot shows, so every map face in view draws: no
+ * eye-PVS skips, no small or far face culls, and twice the face budgets. The
+ * primary frustum stays (faces off screen are not seen anyway). */
+qboolean R_GXCaptureMode( void )
+{
+	static int capture = -1;
+
+	if( capture < 0 )
+		capture = gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 1 : 0;
+	return capture != 0;
+}
+
 static int R_GXFrameFaceBudget( void )
 {
 	/* Cap only during the armed G36 window; denser AM gets a tighter band. */
@@ -369,6 +382,8 @@ static int R_GXFrameFaceBudget( void )
 		}
 		return GC_GX_G36_SAMPLE_FACE_BUDGET;
 	}
+	if( R_GXCaptureMode( ))
+		return GC_GX_FRAME_FACE_BUDGET * 2;
 	return GC_GX_FRAME_FACE_BUDGET;
 }
 
@@ -380,6 +395,8 @@ static int R_GXLiveFaceBudget( void )
 			return GC_GX_G36_DENSER_LIVE_BUDGET;
 		return GC_GX_G36_SAMPLE_LIVE_BUDGET;
 	}
+	if( R_GXCaptureMode( ))
+		return GC_GX_LIVE_FACE_BUDGET * 2;
 	return GC_GX_LIVE_FACE_BUDGET;
 }
 #ifndef GC_GX_FILL_FACE_BUDGET
@@ -531,7 +548,17 @@ static u16 R_GXSoftToRGB5A3PunchBlack( pixel_t soft )
 static void R_GXReserveHudPool( void )
 {
 	int i;
-	const size_t bytes = (size_t)GC_GX_TEX_MAX_DIM * (size_t)GC_GX_TEX_MAX_DIM * sizeof( u16 );
+	/* A DoD match draws only the retail HUD (ammo/health icons, shrunk to 64x64 on upload): slabs of 128x128 held
+	 * 96 KB of heap for it. 64x64 slabs are 24 KB; a bigger sprite grows its slot from the bounded on-demand
+	 * share (R_GXHudAllocBacking), as before. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Any DoD match (a world is loaded), not only -gclistenserver: a match started from the menu has no such
+	 * switch and held 98 KB here. The menu itself, with no world, keeps full slabs for its chrome. */
+	const size_t dim = ( WORLDMODEL || gEngfuncs.Sys_CheckParm( "-gclistenserver" )) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+#else
+	const size_t dim = gEngfuncs.Sys_CheckParm( "-gclistenserver" ) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+#endif
+	const size_t bytes = dim * dim * sizeof( u16 );
 
 	if( r_gx_hud_pool_ready )
 		return;
@@ -649,12 +676,22 @@ int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, c
 	return handle;
 }
 
+static qboolean R_GXHudHiArena( void );
+
 void R_GXHudHiSetTexnum( int handle, int texnum )
 {
 	if( !r_hudhi_ready || handle < 0 )
 		return;
 	GC_HudHiSetTexnum( &r_hudhi, handle, texnum );
 	r_hudhi_sheets++;
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Day of Defeat takes the cell arena from the heap. Taken at the first
+	 * HUD draw it came after a full server had spent the heap (caen with
+	 * twelve bots: 1 to 4 KB free), every cell was refused and the HUD was
+	 * drawn from the 32 px fallback copies. Take it with the first sheet,
+	 * while the HUD loads. */
+	(void)R_GXHudHiArena();
+#endif
 }
 
 void R_GXHudHiBeginFrame( void )
@@ -852,9 +889,14 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
  * Soft imagepool empties alone leave these memalign() blocks on the tip and the
  * first pfnAddCommand (19-byte BaseCmd name) then Sys_Errors.
  */
+static void R_GXCmprExtDrop( void );
+
 void R_GXReleaseHudPoolForMapLoad( void )
 {
 	int i;
+
+	/* The heap texture slots too: the next map's load needs the heap, and takes its own after it. */
+	R_GXCmprExtDrop();
 
 	/* Reserved slabs and on-demand HUD slots (boot arena or heap; free()
 	 * releases either) — all before the map load takes the arena back. */
@@ -1964,22 +2006,41 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
 	{
 		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+		const pixel_t *cmpr_pixels = img->pixels[0];
+		int cmpr_w = img->width, cmpr_h = img->height;
 
-		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
-			|| r_gx_native_bound_pixels != img->pixels[0] )
+		/* A body skin with its full texels in the ARAM skin stream (R_GXSkinAttachCmpr) draws them while they are in
+		 * the window, the resident low mip until then. The stream holds CMPR as a byte surface: height is doubled back. */
+		if( img->gc_skin_handle )
 		{
-			r_gx_native_bound_pixels = img->pixels[0];
+			int sw = 0, sh = 0;
+			qboolean salpha = false, promoted = false;
+			const void *sp = R_GXSkinGet( img, &sw, &sh, &salpha, &promoted );
+
+			if( sp )
+			{
+				cmpr_pixels = (const pixel_t *)sp;
+				cmpr_w = sw;
+				cmpr_h = sh * 2;
+			}
+			if( promoted )
+				r_gx_bound_texnum = 0;
+		}
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
+			|| r_gx_native_bound_pixels != cmpr_pixels )
+		{
+			r_gx_native_bound_pixels = cmpr_pixels;
 			/* Sprite frames are whole pictures: wrapped, the linear filter
 			 * pulled the opposite edge in as a thin line. */
 			const u8 wrap = Q_stristr( img->name, "sprites/" ) ? GX_CLAMP : GX_REPEAT;
 
-			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
+			GX_InitTexObj( &t->obj, (void *)cmpr_pixels, (u16)cmpr_w, (u16)cmpr_h,
 				GX_TF_CMPR, wrap, wrap, GX_FALSE );
 			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
 			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
 			t->texnum = texnum;
-			t->w = img->width;
-			t->h = img->height;
+			t->w = cmpr_w;
+			t->h = cmpr_h;
 			t->fmt = GX_TF_CMPR;
 			t->valid = true;
 			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
@@ -2392,6 +2453,17 @@ qboolean R_GCHotWindowIsDurable( void )
 	return r_gx_hot_is_durable && r_gx_hot.base != NULL && r_gx_hot.size > 0;
 }
 
+/* What a late taker of heap must leave behind. A match with twelve bots runs
+ * with under 20 KiB free; a HUD sheet or a hot window that takes the rest
+ * leaves nothing for the next message or sound. Below the floor the caller
+ * reuses or evicts what it already has. */
+#define GC_GX_LATE_HEAP_FLOOR ( 48u * 1024u )
+
+static qboolean R_GXLateHeapRoom( size_t need )
+{
+	return GC_MemHeapFreeBytes() >= need + GC_GX_LATE_HEAP_FLOOR;
+}
+
 void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 {
 	static qboolean alloc_failed;
@@ -2404,7 +2476,9 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 		want = 96u * 1024u;
 	want = ( want + 31u ) & ~31u;
 
-	if( r_gx_durable_hot && r_gx_durable_hot_size >= want )
+	/* A smaller window than asked is kept: growing it meant a free and a new
+	 * block on every world frame, and every chain in it streamed in again. */
+	if( r_gx_durable_hot )
 	{
 		/* This is called every world frame. Preserve queued/resident chains
 		 * until map loading switches the active window. */
@@ -2415,15 +2489,9 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 	/* Tip is gone after WorldDL+studios — don't memalign-spam every frame. */
 	if( alloc_failed )
 		return;
-	if( r_gx_durable_hot )
-	{
-		free( r_gx_durable_hot );
-		r_gx_durable_hot = NULL;
-		r_gx_durable_hot_size = 0;
-	}
 	for( try_sz = want; try_sz >= 32u * 1024u; try_sz = ( try_sz > 48u * 1024u ) ? ( try_sz - 16u * 1024u ) : 0 )
 	{
-		r_gx_durable_hot = (byte *)memalign( 32, try_sz );
+		r_gx_durable_hot = R_GXLateHeapRoom( try_sz ) ? (byte *)memalign( 32, try_sz ) : NULL;
 		if( r_gx_durable_hot )
 		{
 			r_gx_durable_hot_size = try_sz;
@@ -2695,16 +2763,32 @@ static qboolean r_gx_cmpr_use_big;
  * textures at 256x256); world textures keep to the near pool and hot window. */
 static qboolean r_gx_cmpr_big_for_props;
 
+/* More near slots in a heap block of their own (R_GXCmprExtAdopt): the last r_gx_cmpr_ext_n near slots. */
+static byte *r_gx_cmpr_ext_base;
+static int r_gx_cmpr_ext_n;
+
 static byte *R_GXCmprSlotPtr( int i )
 {
 	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	const int base_n = near_n - r_gx_cmpr_ext_n;
 
 	if( r_gx_cmpr_big_n && i >= r_gx_cmpr_nslots - r_gx_cmpr_big_n )
 		return r_gx_cmpr_big_base + (size_t)( i - ( r_gx_cmpr_nslots - r_gx_cmpr_big_n )) * r_gx_cmpr_big_cap;
-	if( i < near_n )
+	if( i < base_n )
 		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
-	return r_gx_cmpr_bounce + (size_t)near_n * r_gx_cmpr_bounce_cap
+	if( i < near_n )
+		return r_gx_cmpr_ext_base + (size_t)( i - base_n ) * r_gx_cmpr_bounce_cap;
+	return r_gx_cmpr_bounce + (size_t)base_n * r_gx_cmpr_bounce_cap
 		+ (size_t)( i - near_n ) * r_gx_cmpr_far_cap;
+}
+
+/* The heap block goes back whenever the slot layout is rebuilt. Callers have run GX_DrawDone. */
+static void R_GXCmprExtFree( void )
+{
+	if( r_gx_cmpr_ext_base )
+		free( r_gx_cmpr_ext_base );
+	r_gx_cmpr_ext_base = NULL;
+	r_gx_cmpr_ext_n = 0;
 }
 
 void R_GXCmprSetFar( qboolean far_pool )
@@ -2766,6 +2850,7 @@ static void R_GXCmprDropStaleAdopted( void )
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce: %d adopted slots belonged to the previous map, dropped\n",
 		r_gx_cmpr_nslots );
 	r_gx_cmpr_adopted = false;
+	R_GXCmprExtFree();
 	r_gx_cmpr_bounce = NULL;
 	r_gx_cmpr_nslots = 0;
 	r_gx_cmpr_bounce_cap = 0;
@@ -2832,6 +2917,12 @@ static byte *R_GXCmprBounce( void )
 	return r_gx_cmpr_bounce;
 }
 
+/* How many texture slots the cache has now. */
+int R_GXCmprSlotCount( void )
+{
+	return r_gx_cmpr_nslots;
+}
+
 /* Cumulative slot hits and misses, for the flythrough profile line. */
 void R_GXCmprStats( unsigned *hits, unsigned *misses )
 {
@@ -2852,6 +2943,7 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	if( nslots + far_n > GC_CMPR_SLOTS_MAX )
 		return;
 	GX_DrawDone();
+	R_GXCmprExtFree();
 	r_gx_cmpr_adopted = true;
 	r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
 	r_gx_cmpr_bounce = base;
@@ -2870,6 +2962,57 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u + %d x %u bytes = %u Kb (map arena)\n",
 		nslots, slot_bytes, far_n, far_bytes,
 		( nslots * slot_bytes + far_n * far_bytes ) / 1024u );
+}
+
+/* Give the heap slots back and keep the rest of the layout (before a map load). */
+static void R_GXCmprExtDrop( void )
+{
+	if( !r_gx_cmpr_ext_n )
+		return;
+	GX_DrawDone();
+	r_gx_cmpr_nslots -= r_gx_cmpr_ext_n;
+	R_GXCmprExtFree();
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+}
+
+/* After R_GXCmprBounceAdopt (and R_GXCmprBigAdopt): more near slots from the heap, up to want_near in all, while
+ * heap_floor bytes stay free. dod_avalanche gets 11 slots from its chunk cache's tail and binds 25 to 53 textures
+ * a frame: every bind was an ARAM read (3 to 6 ms a frame) while 500 KB of heap sat idle. Returns slots added. */
+int R_GXCmprExtAdopt( int want_near, size_t heap_floor )
+{
+	extern size_t GC_MemHeapFreeBytes( void );
+	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	const size_t heap = GC_MemHeapFreeBytes();
+	int n = want_near - near_n;
+	byte *mem;
+
+	if( !r_gx_cmpr_adopted || !r_gx_cmpr_bounce || r_gx_cmpr_ext_n || r_gx_cmpr_bounce_cap < 4096u
+		|| near_n < 1 || heap <= heap_floor )
+		return 0;
+	if( n > GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots )
+		n = GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots;
+	if( (size_t)n > ( heap - heap_floor ) / r_gx_cmpr_bounce_cap )
+		n = (int)(( heap - heap_floor ) / r_gx_cmpr_bounce_cap );
+	if( n < 4 )
+		return 0;
+	mem = (byte *)memalign( 32, (size_t)n * r_gx_cmpr_bounce_cap );
+	if( !mem )
+		return 0;
+	GX_DrawDone();
+	r_gx_cmpr_ext_base = mem;
+	r_gx_cmpr_ext_n = n;
+	r_gx_cmpr_nslots += n;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: %d more x %u bytes from the heap (%u Kb, heap was %u Kb), %d near slots\n",
+		n, r_gx_cmpr_bounce_cap, (unsigned)( (size_t)n * r_gx_cmpr_bounce_cap / 1024u ), (unsigned)( heap / 1024u ),
+		near_n + n );
+	return n;
 }
 
 /* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
@@ -2908,6 +3051,7 @@ void R_GXPreallocCmprBounce( void )
 /* r_gx_cmpr_clock at the start of the frame: a slot used after it is in
  * this frame's picture. */
 static unsigned r_gx_cmpr_frame_clock;
+static unsigned r_gx_cmpr_prev_frame_clock;	/* the same, one frame earlier */
 static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
@@ -2931,6 +3075,36 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 			return R_GXCmprSlotPtr( i );
 		}
 	}
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* A frame binds its textures in nearly the same order as the last one. With fewer slots than a view has
+	 * textures, least-recently-used then evicts exactly the texture needed next and every bind misses (avalanche:
+	 * 11 slots, 32 binds, 0 hits). Taking instead the slot whose texture comes up again last keeps all but one
+	 * slot hitting: first a slot the last frame did not use at all (oldest), then the one last frame used latest
+	 * that this frame has not reached, then the one this frame used latest. */
+	{
+		int cls = -1;
+
+		for( i = lo; i < hi; i++ )
+		{
+			const unsigned u = r_gx_cmpr_slot[i].used;
+			const int c = u <= r_gx_cmpr_prev_frame_clock ? 2 : u <= r_gx_cmpr_frame_clock ? 1 : 0;
+
+			if( !r_gx_cmpr_slot[i].valid )
+			{
+				pick = i;
+				break;
+			}
+			if( i == r_gx_cmpr_cur_slot && hi - lo > 1 )
+				continue;
+			if( pick < 0 || c > cls
+				|| ( c == cls && ( c == 2 ? u < r_gx_cmpr_slot[pick].used : u > r_gx_cmpr_slot[pick].used )))
+			{
+				pick = i;
+				cls = c;
+			}
+		}
+	}
+#else
 	for( i = lo; i < hi; i++ )
 	{
 		if( !r_gx_cmpr_slot[i].valid )
@@ -2941,6 +3115,7 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
 			pick = i;
 	}
+#endif
 	/* Every far slot is already in this frame's picture: taking one would
 	 * be taken back next frame. From inside the Lost Coast wreck the water
 	 * mirror, the far chunks and the far props want about 200 far chains
@@ -3247,7 +3422,8 @@ static u16 *R_GXHudAllocBacking( size_t need, size_t *heap_bytes )
 	u16 *neu = (u16 *)GC_BootArenaAlloc( need );
 
 	*heap_bytes = 0;
-	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET )
+	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET
+		&& R_GXLateHeapRoom( need ))
 	{
 		neu = (u16 *)memalign( 32, need );
 		if( neu )
@@ -5630,6 +5806,7 @@ static int R_GXDrawWorldLiveSurfaces( model_t *world, qboolean opaque_too )
 	int skip_frustum = 0;
 	int nsort = 0;
 	const qboolean newgame = gEngfuncs.Sys_CheckParm( "-gcnewgame" );
+	const qboolean capture = R_GXCaptureMode();
 	qboolean surfaces_live;
 	qboolean surfaces_pinned;
 	static qboolean live_logged;
@@ -5719,13 +5896,13 @@ static int R_GXDrawWorldLiveSurfaces( model_t *world, qboolean opaque_too )
 			/* Prefer closer / larger walls under the emit budget. */
 			{
 				int area = (int)surf->extents[0] * (int)surf->extents[1];
-				if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+				if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 				{
 					skip_area++;
 					continue;
 				}
 				/* G283: match cap path — far-small cull dropped tunnel walls. */
-				if( !newgame
+				if( !newgame && !capture
 					&& area > 0 && area < GC_GX_FAR_MIN_AREA
 					&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 				{
@@ -6078,6 +6255,15 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
 	return R_GXBindTexnum( texnum, false ) != NULL;
 }
 
+/* A packed world texture that carries a cut-out mask ('{' textures: fences,
+ * lattices, netting). */
+qboolean R_GXTexnumMasked( unsigned texnum )
+{
+	const image_t *img = R_GetTexture( texnum );
+
+	return img && img->gc_packed && img->gc_packed_alpha;
+}
+
 /* Harbor props (media/gp_d2_lostcoast.gcp). The mesh lives in ARAM.
  * A frame draws the instances nearest the eye, flat-shaded, so the
  * boats read as one surface under the tight bloom. */
@@ -6161,6 +6347,18 @@ static qboolean gc_prop_far_tried;
 static byte *gc_prop_cache;
 static u32 gc_prop_cache_size, gc_prop_cache_head;
 static qboolean gc_prop_cache_tried;
+/* Set when the cache is a heap block (a DoD map whose world-array spill had
+ * no room for it); every place that forgets the cache frees it first. */
+static byte *gc_prop_cache_heap;
+
+static void R_GXPropCacheHeapFree( void )
+{
+	if( !gc_prop_cache_heap )
+		return;
+	GX_DrawDone();	/* the GP may still be reading lists in it */
+	free( gc_prop_cache_heap );
+	gc_prop_cache_heap = NULL;
+}
 static int gc_prop_cache_generation = -1;
 static s32 gc_prop_cache_ofs[GC_PROP_MAX_MODELS];
 static u32 gc_prop_cache_used[GC_PROP_MAX_MODELS];
@@ -6172,6 +6370,15 @@ static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
 /* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
 static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+#define GC_PROP_HINGES	4
+
+static struct
+{
+	float	pivot[3];
+	int	inst;	/* + 1, 0 = free */
+	float	speed, drag, stop, start;	/* the swing: degrees a second at start, lost at drag a second, until stop degrees */
+} gc_prop_hinge[GC_PROP_HINGES];
+static int gc_prop_nhinge;
 /* Pack v7: per-face prop lighting. Every vertex carries an index into 256
  * octahedral directions (the table lostcoast-gc tools/bake_lostcoast_props.py
  * also builds), and every instance three display-space colours taken from
@@ -6318,6 +6525,7 @@ static void R_GXPropMapCheck( void )
 				|| Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark ))))
 		{
 			GX_DrawDone();
+			R_GXPropCacheHeapFree();
 			gc_prop_cache = NULL;
 			gc_prop_cache_size = gc_prop_cache_head = 0;
 			gc_prop_cache_tried = false;
@@ -6346,6 +6554,9 @@ static void R_GXPropMapCheck( void )
 	gc_prop_nmat = 0;
 	gc_prop_ninst = 0;
 	gc_prop_nmodels = 0;
+	gc_prop_nhinge = 0;
+	memset( gc_prop_hinge, 0, sizeof( gc_prop_hinge ));
+	R_GXPropCacheHeapFree();
 	gc_prop_cache = NULL;
 	gc_prop_cache_size = gc_prop_cache_head = 0;
 	gc_prop_cache_tried = false;
@@ -6598,6 +6809,20 @@ static qboolean R_GXPropPoolResident( u8 mat, int pool )
  * slots belong to the coast rocks in front of the eye. */
 static qboolean gc_prop_tex_nobig;
 
+/* Props draw from the shared world slot cache only when it is large. With
+ * the sixteen slots a DoD map gets from the tail of its chunk cache, forty
+ * prop materials a frame evicted the world's textures and each other (41
+ * re-reads a frame on dod_avalanche against 12 without them); there the
+ * props keep their own small slots. */
+static qboolean R_GXPropsShareSlots( void )
+{
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	return r_gx_cmpr_nslots >= 32;
+#else
+	return r_gx_cmpr_nslots > 8;
+#endif
+}
+
 static int R_GXPropBind( u8 mat )
 {
 	int s;
@@ -6620,7 +6845,7 @@ static int R_GXPropBind( u8 mat )
 	 * to 128x128 (one mip less for a far instance), shared with the world
 	 * textures. The private slots below hold a single 64x64 level, which
 	 * turned the village atlas into mush. */
-	if( r_gx_cmpr_nslots > 8 )
+	if( R_GXPropsShareSlots() )
 	{
 		/* A small or distant prop asks for the far pool's copy, one mip down
 		 * (64x64). When the full chain of the same material already sits in
@@ -6717,7 +6942,7 @@ static int R_GXPropBind( u8 mat )
 			R_GXCmprSetFar( true );
 	}
 	/* Only without the shared slot cache: its 96 KB went to far LODs. */
-	if( !gc_prop_texmem_tried && r_gx_cmpr_nslots <= 8 && GC_MapLoadBufferTailPeak() > 0 )
+	if( !gc_prop_texmem_tried && !R_GXPropsShareSlots() && GC_MapLoadBufferTailPeak() > 0 )
 	{
 		const u32 extra = (u32)( GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
 
@@ -6883,6 +7108,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 		if( gc_prop_cache )
 			GX_DrawDone();
 		gc_prop_cache_generation = generation;
+		R_GXPropCacheHeapFree();
 		gc_prop_cache = NULL;
 		gc_prop_cache_size = gc_prop_cache_head = 0;
 		gc_prop_cache_tried = false;
@@ -6945,6 +7171,28 @@ static byte *R_GXPropCacheGet( unsigned model )
 				gc_prop_cache_size = try_sz;
 				gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
 				gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
+			}
+			/* No room in the spill (dod_caen: 48 KB free against 106 KB of
+			 * chains, so every chain was read from ARAM each frame, 62
+			 * reads): take the whole cache from the heap when that leaves
+			 * it 320 KiB. The spill mark and generation still tell when
+			 * the map goes; the block is freed there. */
+			if( !gc_prop_cache && all >= 8u * 1024u )
+			{
+				extern size_t GC_MemHeapFreeBytes( void );
+				extern size_t Mod_GCWorldArraySpillUsed( void );
+
+				if( GC_MemHeapFreeBytes() >= (size_t)all + 320u * 1024u )
+					gc_prop_cache_heap = (byte *)memalign( 32, all );
+				if( gc_prop_cache_heap )
+				{
+					gc_prop_cache = gc_prop_cache_heap;
+					gc_prop_cache_size = all;
+					gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
+					gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb from heap (heap free %u Kb)\n",
+						all / 1024u, (unsigned)( GC_MemHeapFreeBytes() / 1024u ));
+				}
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb of %u Kb (spill, %u Kb free)\n",
 				gc_prop_cache_size / 1024u, all / 1024u, (unsigned)( room / 1024u ));
@@ -7389,12 +7637,89 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 	return drawn;
 }
 
+/* A placed prop turned about a vertical hinge the map names (phys_hinge:
+ * the two leaves of the harbor gate, which the fisherman unlocks). The
+ * props are static here, so the game code hands over the push (speed at
+ * the start, what the hinge takes off it each second, the angle at which
+ * it meets something, when) and the leaf
+ * is turned at draw time. Its box is grown to the circle it sweeps so
+ * culling stays right at any angle. */
+void GC_PropHinge( const float *pivot, float speed, float drag, float stop, float start )
+{
+	int i, h = -1;
+	gc_prop_inst_t *in;
+
+	if( gc_prop_state != 1 )
+		return;
+	for( i = 0; i < GC_PROP_HINGES; i++ )
+	{
+		if( gc_prop_hinge[i].inst && gc_prop_hinge[i].pivot[0] == pivot[0] && gc_prop_hinge[i].pivot[1] == pivot[1] )
+		{
+			h = i;
+			break;
+		}
+	}
+	if( h < 0 )
+	{
+		/* The leaf on this hinge: the smallest prop whose box reaches the
+		 * hinge line and is not on another hinge already. */
+		int best = -1;
+		float bestvol = 0.0f;
+
+		for( h = 0; h < GC_PROP_HINGES && gc_prop_hinge[h].inst; h++ );
+		if( h == GC_PROP_HINGES )
+			return;
+		for( i = 0; i < gc_prop_ninst; i++ )
+		{
+			float vol;
+			int k;
+
+			in = &gc_prop_inst[i];
+			if( pivot[0] < in->mins[0] - 4 || pivot[0] > in->maxs[0] + 4
+				|| pivot[1] < in->mins[1] - 4 || pivot[1] > in->maxs[1] + 4
+				|| pivot[2] < in->mins[2] - 16 || pivot[2] > in->maxs[2] + 16 )
+				continue;
+			for( k = 0; k < GC_PROP_HINGES; k++ )
+				if( gc_prop_hinge[k].inst == i + 1 )
+					break;
+			if( k < GC_PROP_HINGES )
+				continue;
+			vol = (float)( in->maxs[0] - in->mins[0] + 1 ) * (float)( in->maxs[1] - in->mins[1] + 1 )
+				* (float)( in->maxs[2] - in->mins[2] + 1 );
+			if( best < 0 || vol < bestvol )
+			{
+				best = i;
+				bestvol = vol;
+			}
+		}
+		if( best < 0 )
+			return;
+		in = &gc_prop_inst[best];
+		gc_prop_hinge[h].inst = best + 1;
+		gc_prop_nhinge++;
+		VectorCopy( pivot, gc_prop_hinge[h].pivot );
+		{
+			/* the far corner of the box from the hinge: the swept circle */
+			float fx = Q_max( pivot[0] - in->mins[0], in->maxs[0] - pivot[0] );
+			float fy = Q_max( pivot[1] - in->mins[1], in->maxs[1] - pivot[1] );
+			float r = sqrtf( fx * fx + fy * fy ) + 1.0f;
+
+			in->mins[0] = (s16)( pivot[0] - r ); in->maxs[0] = (s16)( pivot[0] + r );
+			in->mins[1] = (s16)( pivot[1] - r ); in->maxs[1] = (s16)( pivot[1] + r );
+		}
+	}
+	gc_prop_hinge[h].speed = speed;
+	gc_prop_hinge[h].drag = drag;
+	gc_prop_hinge[h].stop = stop;
+	gc_prop_hinge[h].start = start;
+}
+
 static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 {
 	float mid[3], org[3];
 	const float k = 6.2831853f / 65536.0f;
 	const float *eye = RI.rvp.vieworigin;
-	float dx, dy, dz, r2, d2, cover2;
+	float dx, dy, dz, r2, d2, cover2, hinge_turn = 0.0f;
 
 	/* Named map props (high byte of the model word: ordinal + 1) are drawn
 	 * while their edict is drawable, so the good/destroyed pairs that
@@ -7436,6 +7761,37 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	org[0] = (float)in->org[0];
 	org[1] = (float)in->org[1];
 	org[2] = (float)in->org[2];
+	if( gc_prop_nhinge )
+	{
+		int h;
+
+		for( h = 0; h < GC_PROP_HINGES; h++ )
+		{
+			if( gc_prop_hinge[h].inst == ( in - gc_prop_inst ) + 1 )
+			{
+				/* Pushed once and slowed by the hinge: the speed dies
+				 * away at drag a second, the angle is its integral. */
+				const float t = ( gp_cl ? (float)gp_cl->time : 0.0f ) - gc_prop_hinge[h].start;
+				const float kd = gc_prop_hinge[h].drag;
+				const float *pv = gc_prop_hinge[h].pivot;
+				float deg = 0.0f, c, s2, hx, hy;
+
+				if( t > 0.0f )
+					deg = kd > 0.001f ? gc_prop_hinge[h].speed * ( 1.0f - expf( -kd * t )) / kd : gc_prop_hinge[h].speed * t;
+				/* (what it meets stops it dead: an iron gate on a wall) */
+				if( gc_prop_hinge[h].stop > 0.0f )
+					deg = bound( -gc_prop_hinge[h].stop, deg, gc_prop_hinge[h].stop );
+				hinge_turn = deg * ( 3.14159265f / 180.0f );
+				c = cosf( hinge_turn );
+				s2 = sinf( hinge_turn );
+				hx = org[0] - pv[0];
+				hy = org[1] - pv[1];
+				org[0] = pv[0] + hx * c - hy * s2;
+				org[1] = pv[1] + hx * s2 + hy * c;
+				break;
+			}
+		}
+	}
 	{
 		int drawn;
 
@@ -7491,7 +7847,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 		}
 		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == ( in->model & 0xffu );
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
-			(float)in->ang[1] * k, (float)in->ang[2] * k,
+			(float)in->ang[1] * k + hinge_turn, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
 			 * (already resident) reads the same there, and the full
 			 * chains it asked for no longer compete for the cache. */
@@ -9555,6 +9911,7 @@ static void R_GXWaterMirrorPass( void )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	r_gx_cmpr_prev_frame_clock = r_gx_cmpr_frame_clock;
 	r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
 	/* Flythrough stage timing: where the frame goes, every 120 frames. */
 	static u64 st_acc[6], st_last;
@@ -9580,8 +9937,20 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GXPrefetchMapSkybox();
 	R_GXTrace( "durable hot window" );
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* After a level change the sheets stay registered and the arena was
+	 * released for the load: take it again with the first world frames,
+	 * not at the first HUD draw (asked once a second at most). */
+	if( r_hudhi_ready && r_hudhi_sheets > 0 )
+		(void)R_GXHudHiArena();
+#endif
 	R_GXTrace( "hot service" );
 	R_GXHotService();
+	{
+		extern void R_GXBloomGlowPrepass( void );
+
+		R_GXBloomGlowPrepass();
+	}
 	R_GXTrace( "mirror" );
 	R_GXWaterMirrorPass();
 	R_GXTrace( "3d state" );
@@ -9594,16 +9963,25 @@ static int R_GXDrawWorldDLFrame( void )
 	drawn = R_GXWorldDLDraw();
 	ST_MARK( 1 );
 	R_GXTrace( "worlddl done" );
-	/* Map fog stays on WorldDL only — re-arming Flipper fog across the
-	 * prop VAT change hangs Dolphin's GP after the first frame. */
+	/* The map's fog on the props too. It was held to the world after a GP
+	 * hang in an early Dolphin run; without it the refinery towers and the
+	 * village across the harbor stood crisp and white in front of hazed
+	 * cliffs, where retail's are blue-grey with distance. */
 	/* Opaque first, then the transparent sheet. The baked opaque water
 	 * that used to bury hulls is gone from the world DL, so props sort by
 	 * plain depth: world, props, then water blended over whatever is
 	 * submerged. Underwater veil last so it covers props too. */
-	R_GXTrace( "horizon" );
-	R_GXPropDrawHorizon( RI.rvp.vieworigin );
-	R_GXTrace( "props" );
-	R_GXPropDraw( RI.rvp.vieworigin );
+	{
+		extern void R_GXFogBegin( void );
+		extern void R_GXFogEnd( void );
+
+		R_GXFogBegin();
+		R_GXTrace( "horizon" );
+		R_GXPropDrawHorizon( RI.rvp.vieworigin );
+		R_GXTrace( "props" );
+		R_GXPropDraw( RI.rvp.vieworigin );
+		R_GXFogEnd();
+	}
 	R_GXTrace( "fisherman" );
 	R_GXFishermanWalkDraw( RI.rvp.vieworigin );
 	R_GXTrace( "canister" );
@@ -9753,6 +10131,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 	 * the probe/route helpers from each bounded face loop below. */
 	const int frame_budget = R_GXFrameFaceBudget();
 	const int live_budget = R_GXLiveFaceBudget();
+	const qboolean capture = R_GXCaptureMode();
 
 	/* Reserve HUD TEXMAP0 slabs before world uploads fill MEM1. */
 	R_GXReserveHudPool();
@@ -10333,7 +10712,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				if( want_live_overlap && GC_CapFaceIsLive( slot ))
 					continue;
 				/* Lean / pack: drop faces outside eye PVS (cluster of centroid). */
-				if( !GC_CapFaceInPVS( slot ))
+				if( !capture && !GC_CapFaceInPVS( slot ))
 				{
 					pvs_skips++;
 					continue;
@@ -10376,7 +10755,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				}
 				}
 				area = (int)surf->extents[0] * (int)surf->extents[1];
-				if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+				if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 				{
 					r_gx_face_skips++;
 					r_gx_face_skip_area++;
@@ -10387,7 +10766,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				/* G281: skip far-small cull on New Game — tunnel walls along
 				 * the look path were dropped while dump eye was distant.
 				 * Solo -gcworldrender CapFaces use the same dump eye. */
-				if( !newgame_probe && !gEngfuncs.Sys_CheckParm( "-gcworldrender" )
+				if( !newgame_probe && !capture && !gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 					&& area > 0 && area < GC_GX_FAR_MIN_AREA
 					&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 				{
@@ -10837,7 +11216,7 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 			msurface_t *surf = &draw[slot];
 			vec3_t bmins, bmaxs;
 
-			if( !GC_CapFaceInPVS( slot ))
+			if( !capture && !GC_CapFaceInPVS( slot ))
 			{
 				pvs_skips++;
 				continue;
@@ -10871,13 +11250,13 @@ static int R_GXDrawNewGameCapFacesImpl( void )
 				}
 			}
 			area = (int)surf->extents[0] * (int)surf->extents[1];
-			if( area > 0 && area < GC_GX_MIN_FACE_AREA )
+			if( !capture && area > 0 && area < GC_GX_MIN_FACE_AREA )
 			{
 				r_gx_face_skips++;
 				r_gx_face_skip_area++;
 				continue;
 			}
-			if( area > 0 && area < GC_GX_FAR_MIN_AREA
+			if( !capture && area > 0 && area < GC_GX_FAR_MIN_AREA
 				&& fabsf( dot ) > GC_GX_FAR_FACE_DIST )
 			{
 				r_gx_face_skips++;
@@ -11223,12 +11602,27 @@ static void R_GXEnsureTriApiLayout( void )
 		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
-		else if( vid.rendermode == kRenderTransTexture
-			|| vid.rendermode == kRenderTransAlpha
-			|| vid.rendermode == kRenderTransColor )
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+		/* The same choice as R_GXEffectsTriBegin, darken included. This
+		 * relayout runs at the first emit after the world or a model changed
+		 * the vertex layout, after TriBegin chose the blend: without the
+		 * darken case here every bullet hole (always the first effect batch
+		 * after the world) was drawn with plain alpha blending, its
+		 * darkening map opaque: a black square with a grey star. */
+		{
+			extern qboolean r_gx_effects_darken;
+
+			r_gx_effects_mode = vid.rendermode | ( r_gx_effects_darken ? 0x100 : 0 );
+			if( r_gx_effects_darken ) /* frame * ( 1 - texel * vertex colour ) */
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_ZERO, GX_BL_INVSRCCLR, GX_LO_NOOP );
+			else if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
+			else if( vid.rendermode == kRenderTransTexture
+				|| vid.rendermode == kRenderTransAlpha
+				|| vid.rendermode == kRenderTransColor )
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+			else
+				r_gx_effects_mode = -1;	/* blend left as it was: let TriBegin set it */
+		}
 	}
 	/* Other draws may have loaded TEXMAP0 too: rebind on the next emit. */
 	r_gx_studio_bound_tex = 0;
@@ -11391,8 +11785,14 @@ void R_GXStudioBindTexnum( unsigned texnum )
 
 		r_gx_studio_bound_tex = texnum;
 		r_gx_studio_pending_tex = texnum;
-		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE. */
-		if( r_gx_studio_viewmodel )
+		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE.
+		 * Only while the view model is being drawn: the flag stays set
+		 * after R_GXStudioEnd, and the effects drawn next (bullet holes,
+		 * sprites, particles) bind through here too. Every bind after the
+		 * first of a batch then switched blending off and depth writes on,
+		 * so a bullet hole's darkening map was painted opaque on the wall:
+		 * a black square with a pale star. */
+		if( r_gx_studio_viewmodel && r_gx_studio_active )
 		{
 			image_t *vim = R_GetTexture( texnum );
 			const qboolean hands_ate = ( vim && vim->gc_gx_native_alpha
@@ -12211,8 +12611,9 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 
 	psurf = &geom->surfaces[mod->firstmodelsurface];
 	{
-	int skip_plane = 0, skip_sky = 0, skip_edges = 0, emit_zero = 0, skip_frustum = 0;
+	int skip_plane = 0, skip_sky = 0, skip_edges = 0, emit_zero = 0, skip_frustum = 0, skip_alpha = 0;
 	const qboolean unrotated = !e->angles[0] && !e->angles[1] && !e->angles[2];
+	const qboolean see_through = e->curstate.rendermode == kRenderTransAlpha;
 
 	int nsort = 0;
 	/* The sort table is the real bound. 256 cut large DoD props (bunkers,
@@ -12260,6 +12661,22 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 				continue;
 			}
 		}
+		/* A see-through brush (rendermode 4, camouflage netting) whose
+		 * masked '{' texture has no alpha here drew as a solid grey sheet
+		 * hanging in the air (dod_charlie *114 over the trenches). Leave
+		 * such a face out rather than draw it solid. */
+		if( see_through && psurf->texinfo && psurf->texinfo->texture
+			&& psurf->texinfo->texture->name[0] == '{' )
+		{
+			const texture_t *mt = psurf->texinfo->texture;
+			const image_t *img = mt->gl_texturenum > 0 ? R_GetTexture( (unsigned)mt->gl_texturenum ) : NULL;
+
+			if( !img || !img->gc_packed_alpha )
+			{
+				skip_alpha++;
+				continue;
+			}
+		}
 		/* No CPU backface — cabin walls face inward; angles break modelorg. */
 		if( !R_GXFaceSortPush( &nsort, psurf, i ))
 			break;
@@ -12272,6 +12689,37 @@ int R_GXDrawBrushModel( cl_entity_t *e )
 		if( got <= 0 )
 			emit_zero++;
 		drawn += got;
+	}
+	if( skip_alpha )
+	{
+		static int alpha_logs;
+
+		if( alpha_logs < 6 )
+		{
+			alpha_logs++;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: brush %s rendermode 4: %d masked face(s) without alpha left out\n",
+				mod->name, skip_alpha );
+		}
+	}
+	/* -gccapture: once per brush model, what reached the Flipper and what
+	 * was left out (settles whether a netting sheet or a flag pole goes
+	 * through here at all). */
+	if( R_GXCaptureMode())
+	{
+		static const model_t *seen[96];
+		static int nseen;
+		int si;
+
+		for( si = 0; si < nseen && seen[si] != mod; si++ )
+			;
+		if( si == nseen && nseen < 96 )
+		{
+			seen[nseen++] = mod;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s rm=%d surfs=%d sorted=%d drawn=%d plane=%d sky=%d edges=%d emit0=%d frustum=%d alpha=%d geom=%s org=%.0f %.0f %.0f\n",
+				mod->name, e->curstate.rendermode, mod->nummodelsurfaces, nsort, drawn,
+				skip_plane, skip_sky, skip_edges, emit_zero, skip_frustum, skip_alpha,
+				geom == mod ? "own" : "world", e->origin[0], e->origin[1], e->origin[2] );
+		}
 	}
 	{
 		static int tram_logs;

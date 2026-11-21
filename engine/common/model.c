@@ -1246,6 +1246,21 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 	}
 	*length = 0;
 
+	/* The mirror exists but could not be read into memory: the retail file is 3-5x bigger and fails the same way
+	 * (zalec: v_bren 525 KB after the 125 KB mirror). The slot path loads the weapon when it is equipped. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	if( FS_FileExists( mirror, false )) /* every DoD match: one started from the menu has no -gclistenserver */
+#else
+	if( Sys_CheckParm( "-gclistenserver" ) && FS_FileExists( mirror, false ))
+#endif
+	{
+		static int skip_logs;
+
+		if( skip_logs++ < 8 )
+			Con_Reportf( "Xash3D GameCube: no retail fallback for '%s' (gc_studio mirror exists), loads when used\n", model_path );
+		return NULL;
+	}
+
 	buf = FS_LoadFileMalloc( model_path, length, false );
 	if( buf && *length >= (fs_offset_t)sizeof( studiohdr_t ))
 	{
@@ -1643,6 +1658,41 @@ void Mod_GCPromoteMapModels( void )
 	 * stay in the 184 KiB studio BSS. */
 	FS_ClearFindMissCache();
 	Image_GCPurgeDecodeScratch();
+	/* The team body cores (models/player/<team>/<team>.mdl, ~79 KB each) first, while the spill and heap are still one
+	 * piece: loaded lazily on first draw they hit "spill alloc miss" + a malloc that fails on a fragmented heap that
+	 * reports 300 KB free (caen: brit-inf, zalec: us-para), and that side's bots have no body. */
+	{
+		int n_pre = 0, n_player = 0;
+
+		for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+		{
+			n_pre++;
+			if( Q_stristr( sv.model_precache[i], "models/player" ))
+			{
+				n_player++;
+				Con_Reportf( "Xash3D GameCube: precache list has %s (index %d)\n", sv.model_precache[i], i );
+			}
+		}
+		Con_Reportf( "Xash3D GameCube: early body promote: %d precached models, %d player\n", n_pre, n_player );
+	}
+	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		const char *name = sv.model_precache[i];
+		qboolean is_view = false;
+
+		if( !name || !Q_stristr( name, "models/player/" ) || !Q_stristr( name, ".mdl" ))
+			continue;
+		if( !Mod_GCStudioNameAllowed( name, &is_view ))
+			continue;
+		tried++;
+		if( Mod_GCPromoteStudioPath( name ))
+		{
+			ok++;
+			Con_Reportf( "Xash3D GameCube: early player body promote '%s' ok (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+		}
+		else
+			Con_Reportf( S_WARN "Xash3D GameCube: early player body promote '%s' FAILED (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+	}
 	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
 	{
 		const char *name = sv.model_precache[i];
@@ -1664,6 +1714,10 @@ void Mod_GCPromoteMapModels( void )
 			if( mod && mod->cache.data )
 				Mod_GCAttachStudioSkins( mod );
 		}
+	}
+	{
+		extern void SV_GCStaticWallsSelfTest( void );
+		SV_GCStaticWallsSelfTest();
 	}
 	Mod_GCRebindPromotedStudios();
 	Con_Reportf( "Xash3D GameCube: mapmodel studios promote ok=%d/%d budget=%s tip=%s\n",
@@ -1718,11 +1772,16 @@ static qboolean Mod_GCMapNeedsStudio( const char *path )
 		}
 		return false;
 	}
-	/* Lost Coast: a viewmodel no map entity names (the grenades the HL1 game
-	 * code precaches with every weapon) waits until it is held, like the ones
-	 * above. Preloading v_grenade took 133 KB of the studio arena at spawn,
-	 * room the prop chain cache needs in the harbor. */
-	if( Sys_CheckParm( "-gccapfacessmoke" ) && !Q_strnicmp( path, "models/v_", 9 ))
+	/* A viewmodel no map entity names waits until it is held, like the ones
+	 * above. Lost Coast: preloading v_grenade took 133 KB of the studio arena
+	 * at spawn, room the prop chain cache needs in the harbor. DoD: the game
+	 * precaches its whole gun table (18 viewmodels, 30-120 KB each plus a
+	 * 30-86 KB *t skin scratch), and on dod_avalanche that ran the heap from
+	 * 96 KB to 2.4 KB during entity spawn, so the grenade world models, later
+	 * entities and listenserver.cfg failed to load (ceres 59f4f145). Only the
+	 * held gun is ever drawn, and it loads on demand (V_SetupViewModel and the
+	 * lean listen route in cl_frame.c). */
+	if( !Q_strnicmp( path, "models/v_", 9 ))
 		return false;
 	return true;	/* unknown model: keep the old behaviour */
 }
@@ -2653,7 +2712,7 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		Mod_LoadSpriteModel( mod, buf, length, &loaded );
 		break;
 	case LittleLong( IDALIASHEADER ):
-		Mod_LoadAliasModel( mod, buf, &loaded );
+		Mod_LoadAliasModel( mod, buf, length, &loaded );
 		break;
 	case LittleLong( Q1BSP_VERSION ):
 	case LittleLong( HLBSP_VERSION ):
@@ -3072,6 +3131,9 @@ void Mod_GCReleaseStudioArena( void )
 	gc_seqgroup_slot[0].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	gc_seqgroup_slot[1].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	Con_Reportf( "Xash3D GameCube: studio arena released models=%d bytes=%u\n", freed, (uint)before );
+#if XASH_DODGC_NETWORK
+	GC_PrefetchReleaseForMatch();
+#endif
 	GC_AramReport( "studio-release" );
 }
 
