@@ -1,0 +1,53 @@
+name: DoD DOL build
+# Link the Day of Defeat GameCube DOL (timfox/dod-gc main) against this engine revision, so an
+# engine change that breaks the game build fails here instead of after it merges.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: dod-dol-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-dol:
+    runs-on: ubuntu-24.04
+    container: devkitpro/devkitppc:latest
+    timeout-minutes: 45
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITPPC: /opt/devkitpro/devkitPPC
+      XASH_GAMECUBE_OGC_STACK: libogc
+      XASH_GAMECUBE_LINK_BBA: '0'
+      DODGC_SKIP_SUBMODULES: 3rdparty/dolphin
+      # The engine under test is a PR head, not the tip of master.
+      DODGC_ALLOW_STALE_ENGINE: '1'
+      ENGINE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Host tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git python3 ca-certificates make >/dev/null
+      - name: Check out dod-gc
+        run: |
+          git config --global --add safe.directory '*'
+          git clone --depth 1 https://github.com/timfox/dod-gc.git dod-gc
+      - name: Fetch this engine revision and the pinned SDK
+        working-directory: dod-gc
+        run: |
+          bash scripts/fetch-sources.sh
+          # A fork PR head is only reachable through the pull refs.
+          git -C .deps/xash3d-gc fetch -q origin "$ENGINE_SHA" || git -C .deps/xash3d-gc fetch -q origin "+refs/pull/*/head:refs/remotes/origin/pr/*"
+          git -C .deps/xash3d-gc checkout -q --detach "$ENGINE_SHA"
+          paths=$(git -C .deps/xash3d-gc config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}' | grep -vxF "$DODGC_SKIP_SUBMODULES")
+          git -C .deps/xash3d-gc submodule update --init --recursive --jobs 8 -- $paths
+      - name: Build dodgc.dol
+        working-directory: dod-gc
+        run: |
+          export DODGC_CONTENT_DOD="$PWD/.ci-content/dod" DODGC_CONTENT_VALVE="$PWD/.ci-content/valve"
+          mkdir -p "$DODGC_CONTENT_DOD"
+          echo 'game "Day of Defeat"' > "$DODGC_CONTENT_DOD/liblist.gam"
+          bash scripts/build-dodgc.sh --dol-only
+          ls -l out/dodgc.dol

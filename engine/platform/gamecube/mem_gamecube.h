@@ -87,6 +87,9 @@ size_t GC_MapLoadBufferTailPeak( void );
 const byte *GC_MapLoadBufferBase( void );
 size_t GC_MapArenaFind( size_t bytes );
 size_t GC_MapArenaLargestGap( void );
+/* Called before the arena is borrowed for another map or released: a
+ * post-load claim that outlives its map (client temp entities) drops itself. */
+void GC_SetMapArenaResetHook( void (*hook)( void ));
 /* Only lowers the mark (spilled/abandoned tail residents). Never raises it. */
 void GC_MapLoadBufferLowerTailHighwater( size_t highwater );
 /* ARAM manager (aram_core.c). Session blocks last the boot and come from the
@@ -126,6 +129,7 @@ void GC_AramCopy( unsigned int aram, void *buf, unsigned int len, qboolean write
 void GC_PrefetchMenuIdle( void );
 /* Reuse the session-owned ARAM window without allocating another block. */
 void GC_PrefetchResetForMenu( void );
+void GC_PrefetchReleaseForMatch( void );
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries );
 qboolean GC_PrefetchRead( const char *path, void *buffer, unsigned int size );
 qboolean GC_PrefetchContains( const char *path, unsigned int size );
@@ -226,6 +230,7 @@ static inline void GC_MapLoadBufferWorldSettled( qboolean settled ) { (void)sett
 static inline const byte *GC_MapLoadBufferBase( void ) { return NULL; }
 static inline size_t GC_MapArenaFind( size_t bytes ) { (void)bytes; return (size_t)-1; }
 static inline size_t GC_MapArenaLargestGap( void ) { return 0; }
+static inline void GC_SetMapArenaResetHook( void (*hook)( void )) { (void)hook; }
 static inline void GC_MapLoadBufferLowerTailHighwater( size_t highwater ) { (void)highwater; }
 static inline void GC_BeginMapLoadMemoryOpt( void ) { }
 static inline void GC_EndMapLoadMemoryOpt( void ) { }
@@ -233,6 +238,7 @@ static inline void GC_ClearMapLoadMemoryOpt( void ) { }
 static inline qboolean GC_MapLoadMemoryOpt( void ) { return false; }
 static inline void GC_PrefetchMenuIdle( void ) { }
 static inline void GC_PrefetchResetForMenu( void ) { }
+static inline void GC_PrefetchReleaseForMatch( void ) { }
 static inline void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )
 {
 	if( used ) *used = 0; if( capacity ) *capacity = 0; if( entries ) *entries = 0;
