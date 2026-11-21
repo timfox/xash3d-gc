@@ -20,6 +20,7 @@ GNU General Public License for more details.
 #include "enginefeatures.h"
 #include "studio.h"
 #include "world.h"
+#include "mcol.h"
 #if XASH_GAMECUBE
 #include "platform/platform.h"
 #endif
@@ -49,6 +50,103 @@ static const vec3_t pm_hullmaxs[MAX_MAP_HULLS] =
 {   0,   0,   0 },
 {  32,  32,  32 },
 };
+
+/*
+===============================================================================
+
+	WORLD BRUSH MESH (maps/<map>.mcol)
+
+	Converted MOHAA maps keep angled detail out of the clipnode hulls and ship
+	it as convex brushes instead (see mcol.h). Box traces against the world
+	sweep these too; point traces don't, the drawn detail already has hull 0.
+
+===============================================================================
+*/
+static struct
+{
+	string	name;	// world the cache belongs to
+	byte	*buf;
+	mcol_t	mesh;
+	qboolean	ok;
+} pm_worldmesh;
+
+const mcol_t *PM_WorldMesh( const struct model_s *world )
+{
+	if( !world || !world->name[0] || world->type != mod_brush )
+		return NULL;
+
+	if( Q_stricmp( pm_worldmesh.name, world->name ))
+	{
+		string path;
+		fs_offset_t len = 0;
+
+		if( pm_worldmesh.buf )
+			Mem_Free( pm_worldmesh.buf );
+		memset( &pm_worldmesh, 0, sizeof( pm_worldmesh ));
+		Q_strncpy( pm_worldmesh.name, world->name, sizeof( pm_worldmesh.name ));
+		Q_strncpy( path, world->name, sizeof( path ));
+		COM_ReplaceExtension( path, ".mcol", sizeof( path ));
+
+		pm_worldmesh.buf = FS_LoadFile( path, &len, false );
+		if( pm_worldmesh.buf )
+		{
+			if( MCol_Parse( &pm_worldmesh.mesh, pm_worldmesh.buf, (size_t)len ))
+			{
+				pm_worldmesh.ok = true;
+				Con_Reportf( "%s: %s, %d brushes, %d nodes, %li bytes\n", __func__, path,
+					pm_worldmesh.mesh.numbrushes, pm_worldmesh.mesh.numnodes, (long)len );
+			}
+			else
+			{
+				Con_Printf( S_WARN "%s: %s is malformed, ignored\n", __func__, path );
+				Mem_Free( pm_worldmesh.buf );
+				pm_worldmesh.buf = NULL;
+			}
+		}
+	}
+
+	return pm_worldmesh.ok ? &pm_worldmesh.mesh : NULL;
+}
+
+/*
+==================
+PM_ClipToWorldMesh
+
+Merges the world mesh sweep into a world hull trace, before endpos and
+plane.dist are derived from the fraction. Like Quake 3's pmove, a box that
+starts slightly inside a brush but moves out of it isn't held: only allsolid
+counts as stuck, so prediction rounding can't pin the player.
+==================
+*/
+void PM_ClipToWorldMesh( const struct model_s *world, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, pmtrace_t *trace )
+{
+	const mcol_t *mesh;
+	mcol_trace_t tr;
+
+	if( VectorIsNull( mins ) && VectorIsNull( maxs ))
+		return;
+	if( trace->allsolid || !( mesh = PM_WorldMesh( world )))
+		return;
+
+	MCol_TraceBox( mesh, start, mins, maxs, end, &tr );
+
+	if( tr.allsolid )
+	{
+		trace->allsolid = true;
+		trace->startsolid = true;
+		trace->fraction = 0.0f;
+		VectorCopy( start, trace->endpos );
+		return;
+	}
+
+	if( tr.fraction < trace->fraction )
+	{
+		trace->fraction = tr.fraction;
+		VectorCopy( tr.normal, trace->plane.normal );
+		VectorLerp( start, tr.fraction, end, trace->endpos );
+		trace->plane.dist = DotProduct( trace->endpos, trace->plane.normal );
+	}
+}
 
 void Pmove_Init( void )
 {
@@ -586,6 +684,9 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 			trace_bbox.hitgroup = Mod_HitgroupForStudioHull( last_hitgroup );
 		}
 
+		if( i == 0 && pe->model )
+			PM_ClipToWorldMesh( pe->model, start, host.player_mins[pmove->usehull], host.player_maxs[pmove->usehull], end, &trace_bbox );
+
 		if( trace_bbox.allsolid )
 			trace_bbox.startsolid = true;
 
@@ -724,6 +825,16 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 		{
 			if( PM_HullPointContents( hull, hull->firstclipnode, pos_l ) == CONTENTS_SOLID )
 				return i;
+
+			if( i == 0 && pe->model )
+			{
+				pmtrace_t	trace;
+
+				PM_InitPMTrace( &trace, pos );
+				PM_ClipToWorldMesh( pe->model, pos, host.player_mins[pmove->usehull], host.player_maxs[pmove->usehull], pos, &trace );
+				if( trace.allsolid )
+					return i;
+			}
 		}
 		else
 		{

@@ -973,6 +973,10 @@ void SV_ClipMoveToEntity( edict_t *ent, const vec3_t start, vec3_t mins, vec3_t 
 		trace->hitgroup = Mod_HitgroupForStudioHull( last_hitgroup );
 	}
 
+	// converted maps sweep boxes against the world's angled detail brushes too
+	if( model && model == sv.worldmodel )
+		PM_ClipToWorldMesh( model, start, mins, maxs, end, (pmtrace_t *)trace );
+
 	if( trace->fraction != 1.0f )
 	{
 		// compute endpos (generic case)
