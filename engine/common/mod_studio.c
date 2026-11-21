@@ -690,6 +690,8 @@ typedef struct
 	unsigned off, len;      /* in the pool, len rounded to 32 */
 	unsigned frame;
 	unsigned ret_len;       /* what Fetch reports for it (the raw block; len also covers an in-place decode margin) */
+	unsigned owner;         /* the bone setup that fetched an animation block (Mod_GCAnimPackNewOwner) */
+	qboolean mesh;          /* a body mesh blob: Flipper reads its display lists until the frame is drawn */
 } gc_animent_t;
 
 static gc_animpack_t gc_animpack[GC_ANIMPACK_MAX];
@@ -699,6 +701,27 @@ static unsigned gc_animpool_size;
 static unsigned gc_animpool_cursor, gc_animpack_clock;
 static qboolean gc_animpool_failed, gc_animpool_in_spill;
 static unsigned gc_animpack_fetch_len; /* bytes of the block the last Fetch returned */
+static unsigned gc_animpack_owner = 1; /* the bone setup running now */
+
+/* A new bone setup starts (r_studio.c R_StudioSetupBones). An animation block is
+ * read by the CPU into bone matrices while its bone setup runs, and never after,
+ * so once the next one starts its room can go to another block. A body mesh blob
+ * stays pinned for the whole frame: Flipper reads its display lists when the
+ * frame is drawn. Before this, animation blocks stayed pinned for the frame too,
+ * and a crowd of film actors each playing its own moves filled the ring; body
+ * meshes fetched after that drew nothing, leaving helmets and gear floating
+ * (ceres ep02 part 1 v2, shot s123). */
+void Mod_GCAnimPackNewOwner( void )
+{
+	if( ++gc_animpack_owner == 0 )
+		gc_animpack_owner = 1;
+}
+
+/* An entry whose room cannot be handed to another block now. */
+static qboolean Mod_GCAnimEntPinned( const gc_animent_t *e, unsigned frame )
+{
+	return e->pack && e->frame == frame && ( e->mesh || e->owner == gc_animpack_owner );
+}
 
 /* The pool is in the studio arena: every arena reset drops it. */
 void Mod_GCAnimPackReset( void )
@@ -1013,7 +1036,7 @@ static int gc_animspare_next;
 static byte gc_animspare_big[GC_ANIMPACK_SPARE_BIG] __attribute__((aligned( 32 )));
 static const char *gc_animpack_miss;   /* why the last fetch missed, for the bind pose warning */
 
-static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
+static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 {
 	byte dirbuf[64] __attribute__((aligned( 32 )));
 	const unsigned frame = host.framecount;
@@ -1026,6 +1049,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( gc_animent[i].pack == pk && gc_animent[i].seq == seq )
 		{
 			gc_animent[i].frame = frame;
+			gc_animent[i].owner = gc_animpack_owner;
 			gc_animpack_fetch_len = gc_animent[i].ret_len;
 			return gc_animpool + gc_animent[i].off;
 		}
@@ -1079,7 +1103,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		}
 		for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
 		{
-			if( gc_animent[i].pack && gc_animent[i].frame == frame
+			if( Mod_GCAnimEntPinned( &gc_animent[i], frame )
 				&& gc_animent[i].off < start + need && gc_animent[i].off + gc_animent[i].len > start )
 			{
 				pinned = i;
@@ -1105,7 +1129,7 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 			if( slot < 0 )
 				slot = i;
 		}
-		else if( gc_animent[i].frame != frame
+		else if( !Mod_GCAnimEntPinned( &gc_animent[i], frame )
 			&& ( oldest < 0 || gc_animent[i].frame < gc_animent[oldest].frame ))
 			oldest = i;
 	}
@@ -1140,14 +1164,18 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	gc_animent[slot].off = start;
 	gc_animent[slot].len = need;
 	gc_animent[slot].frame = frame;
+	gc_animent[slot].owner = gc_animpack_owner;
+	gc_animent[slot].mesh = mesh;
 	gc_animent[slot].ret_len = lz4 ? ( raw_len + 31u ) & ~31u : need;
 	gc_animpool_cursor = start + need;
 	gc_animpack_fetch_len = gc_animent[slot].ret_len;
 	return gc_animpool + start;
 
 spare:
-	/* Not kept in the ring: fetched again next frame, when there may be room. */
-	if( need > GC_ANIMPACK_SPARE_BIG )
+	/* Not kept in the ring: fetched again next frame, when there may be room. A
+	 * mesh blob never goes to a spare: the next fetch would overwrite it before
+	 * Flipper reads its display lists. */
+	if( mesh || need > GC_ANIMPACK_SPARE_BIG )
 		return NULL;
 	{
 		byte *buf;
@@ -1210,7 +1238,7 @@ static void *Mod_GCAnimPackGet( studiohdr_t *phdr, mstudioseqdesc_t *pseqdesc )
 	gc_animpack_miss = NULL;
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
-		anim = Mod_GCAnimPackFetch( pk, (int)( pseqdesc - (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex )));
+		anim = Mod_GCAnimPackFetch( pk, (int)( pseqdesc - (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex )), false );
 	if( anim )
 		return anim;
 	if( warned++ < 8 )
@@ -1340,9 +1368,10 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 	if( g <= 0 )
 		return NULL;
 	group = (const mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex ) + g;
+	gc_animpack_miss = NULL;
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
-		blob = Mod_GCAnimPackFetch( pk, entry );
+		blob = Mod_GCAnimPackFetch( pk, entry, true );
 	if( blob )
 	{
 		/* A blob starts with "GCMB" and every offset the model uses must
@@ -1371,9 +1400,16 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 			Con_Reportf( "Xash3D GameCube: mesh pack '%s' model '%s' entry %d at %p len %u verts %d norms %d meshes %d\n",
 				group->name, pmodel->name, entry, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
 	}
-	if( !blob && warned++ < 8 )
-		Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame\n",
-			group->name, pmodel->name );
+	if( !blob )
+	{
+		static unsigned drops;
+
+		/* Every drop is a soldier missing his body in that frame: the first few, then every 64th, so a
+		 * capture log shows a crowd that keeps losing bodies (film tools: capture log check). */
+		if( warned++ < 8 || ( ++drops & 63 ) == 0 )
+			Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame (%s; %u dropped so far)\n",
+				group->name, pmodel->name, gc_animpack_miss ? gc_animpack_miss : "pack not open", drops );
+	}
 	return (byte *)blob;
 }
 #endif // XASH_GAMECUBE

@@ -1713,33 +1713,52 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 			noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
 		/* A scripted cast of 24 asked for every class's gun at once: a 198 KB
 		 * read failed in the file pool and every later shot's cast file with it
-		 * (ceres short-charlie-a). Film actors load at most two guns per map
-		 * (256 KB or less each); past that an actor carries a gun only if a player's
-		 * already brought it in. */
+		 * (ceres short-charlie-a). That cap was two guns per map, which left every
+		 * German, BAR and .30 cal actor empty-handed (ceres ep02 part 1: only the
+		 * Garand and Thompson loaded). Now film actors load guns of 128 KB or less
+		 * up to a byte budget per map (-gcfilmgunkb, default 512: the seven DoD guns
+		 * of one map's two teams, about 440 KB on dod_avalanche), one per frame so
+		 * the file pool never takes two reads at once. */
 		if( film && !noload )
 		{
-			static int film_spawn = -1, film_loads;
+			static int film_spawn = -1;
+			static long film_bytes, film_budget = -1;
+			static double film_last;
 			static int film_logs;
 			const fs_offset_t size = FS_FileSize( wpath, false );
 
+			if( film_budget < 0 )
+			{
+				char kb[16];
+
+				film_budget = ( Sys_GetParmFromCmdLine( "-gcfilmgunkb", kb ) && Q_atoi( kb ) > 0 ? Q_atoi( kb ) : 512 ) * 1024L;
+			}
 			if( film_spawn != svs.spawncount )
 			{
 				film_spawn = svs.spawncount;
-				film_loads = 0;
+				film_bytes = 0;
+				film_last = -1.0;
 			}
-			if( film_loads >= 2 || size <= 0 || size > 262144 )
+			if( size <= 0 || size > 131072 || film_bytes + size > film_budget )
 			{
-				if( film_logs < 8 && fails[wk] < 3 )
+				if( film_logs < 16 && fails[wk] < 3 )
 				{
 					film_logs++;
-					Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) not loaded: %d of 2 loads used\n",
-						wpath, (long)size, film_loads );
+					Con_Reportf( S_WARN "Xash3D GameCube: film actor weapon %s (%ld bytes) not loaded: %ld of %ld KB used\n",
+						wpath, (long)size, film_bytes / 1024, film_budget / 1024 );
 				}
 				fails[wk] = 3;
 				return 0;
 			}
+			if( film_last == host.realtime )
+				return 0;	/* one gun read per frame */
 			if( fails[wk] < 3 && host.realtime >= next_try[wk] )
-				film_loads++;
+			{
+				film_bytes += (long)size;
+				film_last = host.realtime;
+				Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) loading, %ld of %ld KB used\n",
+					wpath, (long)size, film_bytes / 1024, film_budget / 1024 );
+			}
 		}
 		if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
 		{
