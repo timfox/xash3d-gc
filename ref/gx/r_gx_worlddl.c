@@ -288,6 +288,29 @@ static u16 gc_wd_lm_slot_seq[GC_WD_LM_SLOTS_MAX];
 #define GC_WD_LM_TOUCH( i ) ((void)0)
 #endif
 static u32 gc_wd_pf_lm_refused;
+/* A second chunk of lightmap slots from the heap, added during play when pages are refused and the heap has
+ * room (R_GXWorldDLLmExtGrow), given back when the heap is tight. Slots past gc_wd_lm_nslots - gc_wd_lm_ext_n
+ * live in it. A later map of a match loads with less heap and its store falls short (a return to dod_avalanche
+ * got the 32 BSS pages and drew 183 to 244 leaves a frame without their lightmap); this chunk is how it
+ * gets them back once the match settles. */
+static byte *gc_wd_lm_ext;
+static int gc_wd_lm_ext_n;
+
+static inline byte *R_GXWdLmSlotPtr( int i )
+{
+	const int base_n = gc_wd_lm_nslots - gc_wd_lm_ext_n;
+
+	if( i < base_n )
+		return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
+	return gc_wd_lm_ext + (u32)( i - base_n ) * gc_wd_lm_page_bytes;
+}
+
+static inline int R_GXWdLmSlotOf( const byte *page )
+{
+	if( gc_wd_lm_ext_n && page >= gc_wd_lm_ext && page < gc_wd_lm_ext + (u32)gc_wd_lm_ext_n * gc_wd_lm_page_bytes )
+		return gc_wd_lm_nslots - gc_wd_lm_ext_n + (int)(( page - gc_wd_lm_ext ) / gc_wd_lm_page_bytes );
+	return (int)(( page - gc_wd_lm_store ) / gc_wd_lm_page_bytes );
+}
 static int gc_wd_lm_binds;
 static int gc_wd_chunk_lm;	/* current chunk uses TEXMAP2 lightmap */
 static GXTexObj gc_wd_lm_obj;
@@ -449,8 +472,12 @@ static void R_GXWorldDLLmDropStore( void )
 {
 	int i;
 
-	if( gc_wd_lm_in_arena )
+	if( gc_wd_lm_in_arena || gc_wd_lm_ext )
 		GX_DrawDone();	/* no list may still read the block */
+	if( gc_wd_lm_ext )
+		free( gc_wd_lm_ext );
+	gc_wd_lm_ext = NULL;
+	gc_wd_lm_ext_n = 0;
 	gc_wd_lm_in_arena = false;
 	gc_wd_lm_store = gc_wd_lm_bss;
 	gc_wd_lm_nslots = GC_WD_LM_SLOTS;
@@ -459,6 +486,102 @@ static void R_GXWorldDLLmDropStore( void )
 		gc_wd_lm_slot_page[i] = -1;
 		gc_wd_lm_slot_frame[i] = -1000;
 	}
+}
+
+static int gc_wd_state;	/* defined below: 0 untried, 1 ready, -1 absent */
+
+/* Lightmap pages a frame that found no slot, averaged over the last GC_WD_LM_RATE_FRAMES frames (x16). */
+#define GC_WD_LM_RATE_FRAMES 64
+static u32 gc_wd_lm_rate_mark, gc_wd_lm_rate_x16;
+static int gc_wd_lm_rate_frame;
+
+static void R_GXWorldDLLmRateTick( void )
+{
+	if( gc_wd_frame - gc_wd_lm_rate_frame < GC_WD_LM_RATE_FRAMES )
+		return;
+	gc_wd_lm_rate_x16 = ( gc_wd_lm_refused - gc_wd_lm_rate_mark ) * 16u / (u32)( gc_wd_frame - gc_wd_lm_rate_frame );
+	gc_wd_lm_rate_mark = gc_wd_lm_refused;
+	gc_wd_lm_rate_frame = gc_wd_frame;
+}
+
+/* Refused lightmap pages a frame lately, x16 (16 = one leaf a frame drawn without its lightmap). */
+u32 R_GXWorldDLLmRefusedRateX16( void )
+{
+	return gc_wd_state == 1 && gc_wd_lm_stream ? gc_wd_lm_rate_x16 : 0;
+}
+
+/* Bytes the lightmap store's second chunk would take at most now, 0 when it cannot have one (full, or has one). */
+size_t R_GXWorldDLLmExtWant( void )
+{
+#if GC_WD_LM_SLOTS_MAX > GC_WD_LM_SLOTS
+	int n;
+
+	if( gc_wd_state != 1 || !gc_wd_lm_stream || gc_wd_lm_ext )
+		return 0;
+	n = GC_WD_LM_SLOTS_MAX - gc_wd_lm_nslots;
+	if( n > (int)( GC_WD_LM_HEAP_BYTES / gc_wd_lm_page_bytes ))
+		n = (int)( GC_WD_LM_HEAP_BYTES / gc_wd_lm_page_bytes );
+	if( n < 16 )
+		return 0;
+	return (size_t)n * gc_wd_lm_page_bytes;
+#else
+	return 0;
+#endif
+}
+
+/* Add the second chunk, at most max_bytes (at the start of a world pass, after GX_DrawDone). The heap has no
+ * long runs, so it takes the largest of max, half and a quarter that is there. Returns bytes taken. */
+size_t R_GXWorldDLLmExtGrow( size_t max_bytes )
+{
+	size_t bytes = R_GXWorldDLLmExtWant();
+	int i, n;
+
+	if( bytes > max_bytes )
+		bytes = max_bytes - max_bytes % gc_wd_lm_page_bytes;
+	while( bytes >= 16u * gc_wd_lm_page_bytes )
+	{
+		gc_wd_lm_ext = (byte *)memalign( 32, bytes );
+		if( gc_wd_lm_ext )
+			break;
+		bytes = ( bytes / 2u ) - ( bytes / 2u ) % gc_wd_lm_page_bytes;
+	}
+	if( !gc_wd_lm_ext )
+		return 0;
+	n = (int)( bytes / gc_wd_lm_page_bytes );
+	for( i = gc_wd_lm_nslots; i < gc_wd_lm_nslots + n; i++ )
+	{
+		gc_wd_lm_slot_page[i] = -1;
+		gc_wd_lm_slot_frame[i] = -1000;
+	}
+	gc_wd_lm_ext_n = n;
+	gc_wd_lm_nslots += n;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: lightmap store: %d more slots from the heap (%u Kb), %d in all, %.1f pages a frame were refused\n",
+		n, (unsigned)( bytes / 1024u ), gc_wd_lm_nslots, (float)gc_wd_lm_rate_x16 / 16.0f );
+	return bytes;
+}
+
+/* Give the second chunk back (the heap is tight). Returns bytes freed. */
+size_t R_GXWorldDLLmExtShrink( void )
+{
+	const size_t bytes = (size_t)gc_wd_lm_ext_n * gc_wd_lm_page_bytes;
+	int i;
+
+	if( !gc_wd_lm_ext )
+		return 0;
+	GX_DrawDone();
+	for( i = gc_wd_lm_nslots - gc_wd_lm_ext_n; i < gc_wd_lm_nslots; i++ )
+	{
+		gc_wd_lm_slot_page[i] = -1;
+		gc_wd_lm_slot_frame[i] = -1000;
+	}
+	gc_wd_lm_nslots -= gc_wd_lm_ext_n;
+	gc_wd_lm_ext_n = 0;
+	free( gc_wd_lm_ext );
+	gc_wd_lm_ext = NULL;
+	GX_InvalidateTexAll();
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: lightmap store: heap tight, %u Kb of slots go back, %d left\n",
+		(unsigned)( bytes / 1024u ), gc_wd_lm_nslots );
+	return bytes;
 }
 
 static byte *R_GXWorldDLLmPage( u32 page )
@@ -485,7 +608,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	{
 		gc_wd_lm_slot_frame[i] = gc_wd_frame;
 		GC_WD_LM_TOUCH( i );
-		return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
+		return R_GXWdLmSlotPtr( i );
 	}
 	/* A wide view asks for more pages than there are slots (500 chunks in
 	 * the Lost Coast harbor, 192 slots). Once the cache is full for this
@@ -501,7 +624,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 			gc_wd_lm_slot_frame[i] = gc_wd_frame;
 			GC_WD_LM_TOUCH( i );
 			hint[page & ( GC_WD_LM_HINT - 1u )] = (u16)i;
-			return gc_wd_lm_store + (u32)i * gc_wd_lm_page_bytes;
+			return R_GXWdLmSlotPtr( i );
 		}
 		/* A page used by the previous world pass stays: with the water
 		 * mirror there are two passes a frame, and when the two together
@@ -544,7 +667,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 		full_frame = gc_wd_frame;
 		return NULL;
 	}
-	if( !R_GXWorldDLLmFetch( page, gc_wd_lm_store + (u32)victim * gc_wd_lm_page_bytes ))
+	if( !R_GXWorldDLLmFetch( page, R_GXWdLmSlotPtr( victim ) ))
 		return NULL;
 	if( gc_wd_lm_slot_page[victim] >= 0 )
 		GX_InvalidateTexAll();
@@ -554,7 +677,7 @@ static byte *R_GXWorldDLLmPage( u32 page )
 	gc_wd_lm_miss++;
 	gc_wd_lm_miss_total++;
 	hint[page & ( GC_WD_LM_HINT - 1u )] = (u16)victim;
-	return gc_wd_lm_store + (u32)victim * gc_wd_lm_page_bytes;
+	return R_GXWdLmSlotPtr( victim );
 }
 
 /* Diffuse × lightmap page (TEXMAP2), or diffuse × vertex colour when no page. */
@@ -972,6 +1095,7 @@ static qboolean R_GXWorldDLFetch( u32 file_ofs, void *dst, u32 len )
 
 static void R_GXWorldDLUnload( void )
 {
+	GC_MemPressureReset();	/* the next map's loads move the heap a long way */
 	if( gc_wd_file )
 		gEngfuncs.fsapi->Close( gc_wd_file );
 	gc_wd_file = NULL;
@@ -3457,7 +3581,7 @@ static void R_GXWorldDLDeferBlendLayer( const u16 *idx, int k0, int k1, u32 mat,
 			gc_wd_chunk_lm = 0;
 			if( lm > 0 )
 			{
-				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * gc_wd_lm_page_bytes,
+				GX_InitTexObj( &gc_wd_lm_obj, R_GXWdLmSlotPtr( lm - 1 ),
 					32, 32, gc_wd_lm_fmt, GX_CLAMP, GX_CLAMP, GX_FALSE );
 				GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
 				GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
@@ -3549,7 +3673,7 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 			gc_wd_chunk_lm = 0;
 			if( lm > 0 )
 			{
-				GX_InitTexObj( &gc_wd_lm_obj, gc_wd_lm_store + (u32)( lm - 1 ) * gc_wd_lm_page_bytes,
+				GX_InitTexObj( &gc_wd_lm_obj, R_GXWdLmSlotPtr( lm - 1 ),
 					32, 32, gc_wd_lm_fmt, GX_CLAMP, GX_CLAMP, GX_FALSE );
 				GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
 				GX_LoadTexObj( &gc_wd_lm_obj, GX_TEXMAP2 );
@@ -3854,6 +3978,7 @@ int R_GXWorldDLDraw( void )
 	if( gc_wd_frame > 0 )
 		GX_DrawDone();
 	gc_wd_frame++;
+	R_GXWorldDLLmRateTick();
 	if( gc_wd_file && ( gc_wd_frame & 127 ) == 0 )
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL disc totals reads=%u bytes=%u frame=%d\n",
 			gc_wd_disc_reads, gc_wd_disc_bytes, gc_wd_frame );
@@ -4199,7 +4324,7 @@ int R_GXWorldDLDraw( void )
 					WD_PF( 3, lm_page = R_GXWorldDLLmPage( lm_ofs - 1u ));
 					if( lm_page )
 					{
-						lm_slot = (int)(( lm_page - gc_wd_lm_store ) / gc_wd_lm_page_bytes ) + 1;
+						lm_slot = R_GXWdLmSlotOf( lm_page ) + 1;
 						GX_InitTexObj( &gc_wd_lm_obj, lm_page, 32, 32, gc_wd_lm_fmt,
 							GX_CLAMP, GX_CLAMP, GX_FALSE );
 						GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
@@ -4243,7 +4368,7 @@ int R_GXWorldDLDraw( void )
 					lm_slot = 0;
 					if( pg )
 					{
-						lm_slot = (int)(( pg - gc_wd_lm_store ) / gc_wd_lm_page_bytes ) + 1;
+						lm_slot = R_GXWdLmSlotOf( pg ) + 1;
 						GX_InitTexObj( &gc_wd_lm_obj, pg, 32, 32, gc_wd_lm_fmt,
 							GX_CLAMP, GX_CLAMP, GX_FALSE );
 						GX_InitTexObjFilterMode( &gc_wd_lm_obj, GX_LINEAR, GX_LINEAR );
@@ -4438,9 +4563,10 @@ int R_GXWorldDLDraw( void )
 			(float)ticks_to_microsecs( gc_wd_pf[3] ) * k, gc_wd_pf_cnt[3] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[4] ) * k, gc_wd_pf_cnt[4] / 120u,
 			(float)ticks_to_microsecs( gc_wd_pf[5] ) * k );
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: lightmap pages per frame refused=%.1f of %d slots%s\n",
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: lightmap pages per frame refused=%.1f of %d slots%s, %d in play chunk; heap %u Kb%s\n",
 			(float)( gc_wd_lm_refused - gc_wd_pf_lm_refused ) / 120.0f, gc_wd_lm_nslots,
-			gc_wd_lm_heap ? " (heap)" : gc_wd_lm_in_arena ? " (map arena)" : " (BSS)" );
+			gc_wd_lm_heap ? " (heap)" : gc_wd_lm_in_arena ? " (map arena)" : " (BSS)", gc_wd_lm_ext_n,
+			(unsigned)( GC_MemHeapFreeBytes() / 1024u ), GC_MemPressureTight() ? " tight" : "" );
 		gc_wd_pf_lm_refused = gc_wd_lm_refused;
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f lm_miss/call=%.1f\n",
 			(float)ticks_to_microsecs( gc_wd_pf[9] ) * k,
