@@ -1836,6 +1836,15 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			need / 1024u, gc_wd_cache_size / 1024u, nslots >= 8 ? nslots : 0, slot_bytes,
 			nslots >= 8 ? big_n : 0, big_bytes );
 	}
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	{
+		/* Whatever the arena or the cache tail gave: fill up to 48 near slots from the heap, keeping 512 KiB
+		 * of it for the match (bots, HUD, props and sounds took about 260 KB on avalanche with 4 bots). */
+		extern int R_GXCmprExtAdopt( int want_near, size_t heap_floor );
+
+		(void)R_GXCmprExtAdopt( 48, 512u * 1024u );
+	}
+#endif
 	gc_wd_pvs_cluster = -2;
 	gc_wd_pvs_blk_id = -1;
 	/* The tail of the chunk cache is the overflow bounce. A frustum chunk
