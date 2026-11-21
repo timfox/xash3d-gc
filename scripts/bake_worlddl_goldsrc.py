@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import struct
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,7 +32,23 @@ LM_FRAC = 8
 WD_VERSION = 2
 # Header flags: GoldSrc lightmaps are applied at x1 (Lost Coast pages use x2).
 WD_FLAG_LIGHT_X1 = 0x0001
-LM_PAGES_MAX = 512
+# Lightmap pages are LZ4 blocks (see pack_lm_pages_lz4). Opt in with DODGC_WD_LZ4=1 or bake_worlddl_goldsrc.py --lz4.
+WD_FLAG_LM_LZ4 = 0x0010
+# The PVS rows are a random-access LZ4 region of PVS_BLOCK-byte blocks (pack_blocks_lz4); row offsets stay raw offsets.
+WD_FLAG_PVS_LZ4 = 0x0020
+PVS_BLOCK = 4096
+LM_PAGES_MAX = 1024
+# CMPR pages are a quarter of the size, and a cell there owns whole 4x4 blocks, so a page holds at most 63
+# one-luxel faces: with one page a leaf the crowded leaves had faces left with no cell at all (flat grey).
+# dod_caen alone has more than 2000 lit leaves.  4096 CMPR pages are the bytes of the 1024 RGB565 pages before
+# (2 MB of the ARAM stream at most), and the runtime's page hint (GC_WD_LM_HINT) is exact to 4096.
+LM_PAGES_MAX_CMPR = 4096
+# A crowded leaf takes up to this many pages; a batch names its page in the low bits of its pad word.
+LM_CHUNK_PAGES = 4
+WD_FLAG_LM_MULTI = 0x0040
+# Lightmap pages are 32x32 CMPR (512 bytes) instead of RGB565 (2048): four times the pages resident in the same memory.
+WD_FLAG_LM_CMPR = 0x0080
+LM_CMPR_BYTES = 512
 MAT_F_WATER = 0x01
 MAT_F_NOLIGHT = 0x02
 TEX_SPECIAL = 1
@@ -83,40 +102,52 @@ class LmPage:
 		self.used = False
 		self.failed = False
 
-	def _try(self, w: int, h: int):
-		x, y, rh = self.x, self.y, self.row_h
-		if x + w > 32:
-			x = 0
-			y += rh
-			rh = 0
-		if y + h > 32:
-			return None
-		self.x, self.y, self.row_h = x + w, y, max(rh, h)
-		return (x, y, w, h)
+	def pack(self, dims):
+		"""Cells for faces (retail lw, lh each) on this one page; see lm_pack_pages."""
+		return [c[1] if c else None for c in lm_pack_pages(dims, 1)]
 
-	def alloc(self, w: int, h: int):
-		if self.failed:
-			return None
-		side = max(2, min(16, max(w, h)))
-		for sz in (side, 8, 4, 2):
-			if sz > side:
-				continue
-			rect = self._try(sz, sz)
-			if rect:
-				self.used = True
-				return rect
-		self.failed = True
-		return None
-
-	def blit(self, rect, samples) -> None:
+	def blit(self, rect, samples, align: int = 1) -> None:
+		"""Resample the face lightmap into its cell: corner luxels stay on the
+		cell's corner texels (cell_st), box-filtered when the cell is smaller."""
 		x, y, w, h = rect
 		lh = len(samples)
 		lw = len(samples[0]) if lh else 1
+
+		def taps(n_dst: int, n_src: int, i: int):
+			if n_dst == 1:
+				return [(j, 1.0 / n_src) for j in range(n_src)]
+			c = i * (n_src - 1) / (n_dst - 1)
+			r = max(0.5, (n_src - 1) / (n_dst - 1) * 0.5)
+			out = []
+			for j in range(n_src):
+				wgt = max(0.0, 1.0 - abs(j - c) / (2.0 * r)) if r > 0.5 else max(0.0, 1.0 - abs(j - c))
+				if wgt > 0.0:
+					out.append((j, wgt))
+			tot = sum(wg for _j, wg in out)
+			return [(j, wg / tot) for j, wg in out]
+
+		xt = [taps(w, lw, px) for px in range(w)]
+		yt = [taps(h, lh, py) for py in range(h)]
 		for py in range(h):
 			for px in range(w):
-				sx = min(lw - 1, px * lw // w)
-				sy = min(lh - 1, py * lh // h)
-				self.pix[y + py][x + px] = samples[sy][sx]
+				acc = [0.0, 0.0, 0.0]
+				for sy, wy in yt[py]:
+					row = samples[sy]
+					for sx, wx in xt[px]:
+						c = row[sx]
+						wgt = wx * wy
+						acc[0] += c[0] * wgt
+						acc[1] += c[1] * wgt
+						acc[2] += c[2] * wgt
+				self.pix[y + py][x + px] = tuple(int(max(0, min(255, round(v)))) for v in acc)
+		# the cell owns its blocks: repeat its edge into the rest of them
+		if align > 1:
+			x1 = min(32, -(-(x + w) // align) * align)
+			y1 = min(32, -(-(y + h) // align) * align)
+			for py in range(y, y1):
+				for px in range(x, x1):
+					if px >= x + w or py >= y + h:
+						self.pix[py][px] = self.pix[min(py, y + h - 1)][min(px, x + w - 1)]
 
 
 def rgb565_page(pix) -> bytes:
@@ -129,6 +160,149 @@ def rgb565_page(pix) -> bytes:
 					r, g, b = pix[ty + y][tx + x]
 					out += struct.pack(">H", ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
 	return bytes(out)
+
+
+def _c565(c) -> int:
+	return ((c[0] >> 3) << 11) | ((c[1] >> 2) << 5) | (c[2] >> 3)
+
+
+def _c888(v: int):
+	r, g, b = (v >> 11) & 31, (v >> 5) & 63, v & 31
+	return ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+
+
+def cmpr_block(px) -> bytes:
+	"""One 4x4 block (16 RGB tuples, row order) as a GX CMPR block: two RGB565 end colours and 2 bits a texel.
+	Lightmaps are smooth, so the ends are the block's darkest and brightest texel by luma; the two middle
+	colours are the hardware's 5/8 and 3/8 blends."""
+	lum = [c[0] * 2 + c[1] * 5 + c[2] for c in px]
+	hi = _c565(px[max(range(16), key=lambda i: lum[i])])
+	lo = _c565(px[min(range(16), key=lambda i: lum[i])])
+	if hi == lo:
+		# c0 <= c1 is the three-colour mode; every texel takes colour 0
+		return struct.pack(">HHI", hi, lo, 0)
+	c0, c1 = max(hi, lo), min(hi, lo)
+	a, b = _c888(c0), _c888(c1)
+	pal = (a, b, tuple((5 * a[k] + 3 * b[k]) >> 3 for k in range(3)), tuple((3 * a[k] + 5 * b[k]) >> 3 for k in range(3)))
+	bits = 0
+	for c in px:
+		best = min(range(4), key=lambda i: sum((c[k] - pal[i][k]) ** 2 for k in range(3)))
+		bits = (bits << 2) | best
+	return struct.pack(">HHI", c0, c1, bits)
+
+
+def cmpr_page(pix) -> bytes:
+	"""32x32 CMPR: 8x8 tiles in row order, each four 4x4 blocks (top left, top right, bottom left, bottom right)."""
+	out = bytearray()
+	for ty in range(0, 32, 8):
+		for tx in range(0, 32, 8):
+			for by, bx in ((0, 0), (0, 4), (4, 0), (4, 4)):
+				out += cmpr_block([pix[ty + by + y][tx + bx + x] for y in range(4) for x in range(4)])
+	return bytes(out)
+
+
+def cmpr_page_decode(data: bytes):
+	"""Texels of a cmpr_page, as the hardware shows them (tests, and judging the loss)."""
+	pix = [[(0, 0, 0)] * 32 for _ in range(32)]
+	o = 0
+	for ty in range(0, 32, 8):
+		for tx in range(0, 32, 8):
+			for by, bx in ((0, 0), (0, 4), (4, 0), (4, 4)):
+				c0, c1, bits = struct.unpack_from(">HHI", data, o)
+				o += 8
+				a, b = _c888(c0), _c888(c1)
+				if c0 > c1:
+					pal = (a, b, tuple((5 * a[k] + 3 * b[k]) >> 3 for k in range(3)), tuple((3 * a[k] + 5 * b[k]) >> 3 for k in range(3)))
+				else:
+					pal = (a, b, tuple((a[k] + b[k]) >> 1 for k in range(3)), (0, 0, 0))
+				for i in range(16):
+					pix[ty + by + i // 4][tx + bx + i % 4] = pal[(bits >> (30 - 2 * i)) & 3]
+	return pix
+
+
+def lm_cell_sizes(dims, k: int):
+	"""Cell sizes of faces (retail lw, lh) at k sixteenths of retail size, never under 2x2."""
+	return [(max(2, min(30, -(-lw * k // 16))), max(2, min(30, -(-lh * k // 16)))) for lw, lh in dims]
+
+
+def lm_shelf_pages(sizes, npages: int, align: int = 1):
+	"""Shelf-pack sizes into npages 32x32 pages, tallest first, each page keeping the grey 2x2 at (0,0).
+	Returns (page, rect) per size, or None when they do not all fit.  With align 4 (CMPR pages) every cell
+	starts on a 4x4 block and owns the blocks it touches, so one face's light never shares a block's two
+	end colours with its neighbour's."""
+	def up(v: int) -> int:
+		return -(-v // align) * align
+
+	first = up(2)
+	order = sorted(range(len(sizes)), key=lambda i: (-up(sizes[i][1]), -up(sizes[i][0])))
+	out = [None] * len(sizes)
+	pg, x, y, rh = 0, first, 0, first
+	for i in order:
+		w, h = sizes[i]
+		aw, ah = up(w), up(h)
+		if aw > 32 - first or ah > 32:
+			return None
+		while True:
+			if x + aw > 32:
+				x = 0
+				y += rh
+				rh = 0
+			if y + ah <= 32:
+				break
+			pg, x, y, rh = pg + 1, first, 0, first
+			if pg >= npages:
+				return None
+		out[i] = (pg, (x, y, w, h))
+		x += aw
+		rh = max(rh, ah)
+	return out
+
+
+def lm_pages_needed(dims, align: int = 1) -> int:
+	"""Pages a chunk needs to give every lit face its retail lightmap size (capped at LM_CHUNK_PAGES)."""
+	if not dims:
+		return 0
+	sizes = lm_cell_sizes(dims, 16)
+	for n in range(1, LM_CHUNK_PAGES + 1):
+		if lm_shelf_pages(sizes, n, align):
+			return n
+	return LM_CHUNK_PAGES
+
+
+def lm_grant_pages(needs, budget: int) -> dict:
+	"""Pages per chunk from a map-wide budget.  needs is [(chunk, pages wanted)] in order of priority.
+	Every chunk gets its first page before any gets a second, every second before any third: a crowded
+	leaf late in the order is not left with faces that have no cell while a large one takes four pages."""
+	grant: dict = {}
+	for level in range(1, LM_CHUNK_PAGES + 1):
+		for cl, need in needs:
+			if budget < 1:
+				return grant
+			if need >= level and grant.get(cl, 0) == level - 1:
+				grant[cl] = level
+				budget -= 1
+	return grant
+
+
+def lm_pack_pages(dims, npages: int, align: int = 1):
+	"""(page, rect) for every lit face of a chunk in npages pages.  All faces scale by the largest common
+	factor that fits; past 2x2 the smallest faces drop to one averaged luxel; None entries only when even
+	that does not fit."""
+	if not dims or npages < 1:
+		return [None] * len(dims)
+	for k in range(16, 0, -1):
+		cells = lm_shelf_pages(lm_cell_sizes(dims, k), npages, align)
+		if cells:
+			return cells
+	by_area = sorted(range(len(dims)), key=lambda i: -(dims[i][0] * dims[i][1]))
+	for keep in range(len(dims) - 1, -1, -1):
+		sizes = [(1, 1)] * len(dims)
+		for i in by_area[:keep]:
+			sizes[i] = (2, 2)
+		cells = lm_shelf_pages(sizes, npages, align)
+		if cells:
+			return cells
+	return [None] * len(dims)
 
 
 def cell_st(cell, u: float, v: float, lw: int, lh: int) -> tuple[float, float]:
@@ -145,13 +319,14 @@ GREY_UV = (1.0 / 32.0, 1.0 / 32.0)
 class Chunk:
 	def __init__(self) -> None:
 		self.pos: dict[tuple[int, int, int], int] = {}
-		self.batches: dict[int, bytearray] = {}
+		self.batches: dict[tuple[int, int], bytearray] = {}	# (material, lightmap page of the chunk)
 		self.mins = [32767, 32767, 32767]
 		self.maxs = [-32768, -32768, -32768]
 		self.tris = 0
-		self.lm = LmPage()
+		self.lm_pages: list[LmPage] = []
 		self.lm_keep = False
 		self.lm_index = 0
+		self.pending: list = []
 
 	def pos_index(self, p) -> int:
 		key = (
@@ -167,11 +342,11 @@ class Chunk:
 				self.maxs[a] = max(self.maxs[a], key[a])
 		return idx
 
-	def emit(self, mat: int, prim: int, verts: list) -> None:
+	def emit(self, mat: int, prim: int, verts: list, page: int = 0) -> None:
 		"""verts: (pos, rgba, nrm, s, t, lm_u, lm_v) - file version 2 layout:
 		POS idx16, NRM s8x3 (6 fraction bits), CLR0 RGBA8, TEX0 s16 ST,
 		TEX1 u8 lightmap ST (8 fraction bits)."""
-		dl = self.batches.setdefault(mat, bytearray())
+		dl = self.batches.setdefault((mat, page), bytearray())
 		dl += struct.pack(">BH", prim | GX_VTXFMT, len(verts))
 		for p, c, nrm, s, t, lu, lv in verts:
 			dl += struct.pack(
@@ -197,7 +372,7 @@ class Chunk:
 		for i, m in enumerate(mats):
 			dl = bytearray(self.batches[m])
 			pad32(dl)
-			struct.pack_into(">HHII", out, 16 + 12 * i, m, 0, len(out), len(dl))
+			struct.pack_into(">HHII", out, 16 + 12 * i, m[0], m[1], len(out), len(dl))
 			out += dl
 		# Page index + 1 (0: no page, vertex colour lights the chunk).
 		struct.pack_into(">HHII", out, 0, len(self.pos), len(mats), pos_ofs,
@@ -489,7 +664,52 @@ def write_static_brushes(out_path: Path, statics: list[tuple[int, bool]], wd_byt
 	out_path.write_bytes(body)
 
 
-def bake(map_bsp: Path, out_path: Path) -> None:
+LM_PAGE_BYTES = 2048
+
+
+def pack_blocks_lz4(data: bytes, block: int) -> bytes:
+	"""Random-access LZ4 region: data cut into `block`-byte blocks, each LZ4-compressed when that is smaller.
+
+	Layout: u32 n_blocks, u32 offset[n_blocks + 1] (bytes from the region start; a blob start is 32-aligned and its low
+	5 bits hold the zero padding bytes AFTER the LZ4 stream; the last offset is the region size), padded to 32; then
+	the blobs, each padded to 32. A block stored raw has no padding count and a size of its raw length rounded up to
+	32 (a compressed block is always smaller than that). The last block may be short. The engine stages a blob and
+	decodes it into a cache buffer (in-place decode of an exact-fit buffer is impossible)."""
+	import gc_lz4
+	n = (len(data) + block - 1) // block
+	blobs = []	# (stored bytes incl. padding, padding count)
+	for i in range(n):
+		raw = bytes(data[i * block:(i + 1) * block])
+		rawsz = (len(raw) + 31) & ~31
+		cand = gc_lz4.compress(raw)
+		size = (len(cand) + 31) & ~31
+		best = (cand + bytes(size - len(cand)), size - len(cand)) if size < rawsz else (raw + bytes(rawsz - len(raw)), 0)
+		blobs.append(best)
+	head_len = (4 + 4 * (n + 1) + 31) & ~31
+	region = bytearray(struct.pack(">I", n))
+	ofs = head_len
+	offs = []
+	for blob, pad in blobs:
+		offs.append(ofs | pad)
+		ofs += len(blob)
+	offs.append(ofs)
+	region += b"".join(struct.pack(">I", o) for o in offs)
+	region += bytes(head_len - len(region))
+	for blob, _pad in blobs:
+		region += blob
+	return bytes(region)
+
+
+def pack_lm_pages_lz4(lm_pages: bytes, page_bytes: int = LM_PAGE_BYTES) -> bytes:
+	"""Lightmap region with every 2 KiB page LZ4-compressed (header flag WD_FLAG_LM_LZ4); see pack_blocks_lz4.
+	Pages compress about 3.5:1 (1 MiB of pages per map -> about 290 KiB)."""
+	return pack_blocks_lz4(lm_pages, page_bytes)
+
+
+LF_BLOCK = 1024
+
+
+def bake(map_bsp: Path, out_path: Path, lz4: bool = False, lm_cmpr: bool | None = None) -> None:
 	bsp = Bsp(map_bsp)
 	stem = map_bsp.stem
 	mat_index: dict[str, int] = {}
@@ -567,30 +787,66 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		nrm = (-pl[0], -pl[1], -pl[2]) if f[1] else (pl[0], pl[1], pl[2])
 		for cluster in clusters:
 			chunk = chunks.setdefault(cluster, Chunk())
-			cell = None
 			lw = lh = 1
 			bmins = (0, 0)
+			samples = None
 			if not water and not (flags & TEX_SPECIAL) and f[6] >= 0 and bsp.lighting:
 				bmins, (lw, lh) = face_extents(ti0, ti1, pts)
 				samples = face_lightmap(bsp, f[6], lw, lh)
-				if samples:
-					cell = chunk.lm.alloc(lw, lh)
-					if cell:
-						chunk.lm.blit(cell, samples)
 			verts = []
 			for p, (s, t) in zip(pts, sts):
 				col = (96, 132, 140) if water else light_at(bsp, f, ti0, ti1, flags, pts, p)
-				if cell:
-					u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
-					v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
-					lu, lv = cell_st(cell, u, v, lw, lh)
-				else:
-					lu, lv = GREY_UV
-				verts.append((p, col, nrm, s, t, lu, lv))
-			chunk.emit(mat, GX_DRAW_TRIFAN, verts)
+				u = (ti0[0] * p[0] + ti0[1] * p[1] + ti0[2] * p[2] + ti0[3]) / 16.0 - bmins[0]
+				v = (ti1[0] * p[0] + ti1[1] * p[1] + ti1[2] * p[2] + ti1[3]) / 16.0 - bmins[1]
+				verts.append((p, col, nrm, s, t, u, v))
+			chunk.pending.append((mat, verts, lw, lh, samples))
 		n_faces += 1
 		if is_static:
 			n_static_faces += 1
+
+	# Lightmap cells are packed per chunk once all of its faces are known.  A chunk takes as many pages as
+	# its faces need at retail size (up to LM_CHUNK_PAGES), largest chunks first while the page budget lasts;
+	# after that one page each, and past the budget none (vertex colour lights the chunk).
+	if lm_cmpr is None:
+		lm_cmpr = os.environ.get("DODGC_WD_LM_RGB565", "") != "1"
+	lm_align = 4 if lm_cmpr else 1
+	n_lm_soft = n_lm_flat = 0
+	lit_of: dict[int, list[int]] = {}
+	spans = []
+	for cl, chunk in chunks.items():
+		lit_of[cl] = [i for i, rec in enumerate(chunk.pending) if rec[4]]
+		if not lit_of[cl]:
+			continue
+		lo = [min(v[0][a] for rec in chunk.pending for v in rec[1]) for a in range(3)]
+		hi = [max(v[0][a] for rec in chunk.pending for v in rec[1]) for a in range(3)]
+		spans.append((max(hi[a] - lo[a] for a in range(3)), cl))
+	spans.sort(reverse=True)
+	needs = []
+	for _span, cl in spans:
+		dims = [(chunks[cl].pending[i][2], chunks[cl].pending[i][3]) for i in lit_of[cl]]
+		needs.append((cl, max(1, lm_pages_needed(dims, lm_align))))
+	lm_grant = lm_grant_pages(needs, LM_PAGES_MAX_CMPR if lm_cmpr else LM_PAGES_MAX)
+	for cl, chunk in chunks.items():
+		lit = lit_of[cl]
+		npages = lm_grant.get(cl, 0)
+		placed = lm_pack_pages([(chunk.pending[i][2], chunk.pending[i][3]) for i in lit], npages, lm_align)
+		cells = dict(zip(lit, placed))
+		chunk.lm_pages = [LmPage() for _ in range(max((c[0] for c in placed if c), default=-1) + 1)]
+		chunk.lm_keep = bool(chunk.lm_pages)
+		for i, (mat, verts, lw, lh, samples) in enumerate(chunk.pending):
+			page, cell = cells.get(i) or (0, None)
+			if cell:
+				chunk.lm_pages[page].blit(cell, samples, lm_align)
+				if cell[2] < min(lw, 30) or cell[3] < min(lh, 30):
+					n_lm_soft += 1
+			elif samples and npages:
+				n_lm_flat += 1
+			out = []
+			for p, col, nrm, s, t, u, v in verts:
+				lu, lv = cell_st(cell, u, v, lw, lh) if cell else GREY_UV
+				out.append((p, col, nrm, s, t, lu, lv))
+			chunk.emit(mat, GX_DRAW_TRIFAN, out, page)
+		chunk.pending = []
 
 	# BSP tree for point-in-leaf → cluster (child encoding matches lostcoast)
 	plane_remap: dict[int, int] = {}
@@ -640,20 +896,17 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		pvs_blob += bsp.vis[visofs:pos]
 
 	order = sorted(chunks)
-	# Lightmap pages: largest chunks first, up to the page budget.  The pages
-	# are a stream after the chunks; the runtime fetches one when its chunk
-	# is drawn (MEM1 page cache, ref/gx/r_gx_worlddl.c GC_WD_LM_SLOTS).
-	ranked = sorted(
-		((max(ch.maxs[a] - ch.mins[a] for a in range(3)), cl) for cl, ch in chunks.items() if ch.pos and ch.lm.used),
-		reverse=True,
-	)
+	# Lightmap pages are a stream after the chunks, a chunk's pages in a row; the runtime fetches one when a
+	# batch on it is drawn (MEM1 page cache, ref/gx/r_gx_worlddl.c GC_WD_LM_SLOTS).
+	lm_page_bytes = LM_CMPR_BYTES if lm_cmpr else LM_PAGE_BYTES
 	lm_pages = bytearray()
-	for _span, cl in ranked[:LM_PAGES_MAX]:
-		chunks[cl].lm_keep = True
+	lm_multi = 0
 	for cl in order:
 		if chunks[cl].lm_keep:
-			chunks[cl].lm_index = len(lm_pages) // 2048
-			lm_pages += rgb565_page(chunks[cl].lm.pix)
+			chunks[cl].lm_index = len(lm_pages) // lm_page_bytes
+			for pg in chunks[cl].lm_pages:
+				lm_pages += cmpr_page(pg.pix) if lm_cmpr else rgb565_page(pg.pix)
+			lm_multi += len(chunks[cl].lm_pages) > 1
 	chunk_blobs = [chunks[c].encode() for c in order]
 	mats_blob = b"".join(struct.pack(">IIBBH", h, 0, tid, fl, 0) for h, tid, fl in mat_recs)
 	body = bytearray(64)
@@ -668,6 +921,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	pad32(body)
 	ofs_chunkdir = len(body)
 	run = 0
+	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
 	for cl, blob in zip(order, chunk_blobs):
 		ch = chunks[cl]
 		body += struct.pack(">II3h3hHH", run, len(blob), *ch.mins, *ch.maxs, cl, 0)
@@ -677,13 +931,18 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	body += pvs_dir
 	pad32(body)
 	ofs_pvs = len(body)
-	body += pvs_blob
+	if lz4 and pvs_blob:
+		# whole blocks only: the engine decodes every block to PVS_BLOCK bytes
+		pvs_blob += bytes(-len(pvs_blob) % PVS_BLOCK)
+		body += pack_blocks_lz4(bytes(pvs_blob), PVS_BLOCK)
+	else:
+		body += pvs_blob
 	pad32(body)
 	ofs_chunks = len(body)
 	for blob in chunk_blobs:
 		body += blob
 	pad32(body)
-	body += lm_pages
+	body += pack_lm_pages_lz4(lm_pages, lm_page_bytes) if lz4 and lm_pages else lm_pages
 	max_chunk = max((len(b) for b in chunk_blobs), default=0)
 	struct.pack_into(
 		">4sHH13I",
@@ -691,7 +950,7 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 		0,
 		b"GCwd",
 		WD_VERSION,
-		WD_FLAG_LIGHT_X1,
+		WD_FLAG_LIGHT_X1 | (WD_FLAG_LM_MULTI if lm_multi else 0) | (WD_FLAG_LM_CMPR if lm_cmpr and lm_pages else 0) | (WD_FLAG_LM_LZ4 if lz4 and lm_pages else 0) | (WD_FLAG_PVS_LZ4 if lz4 and pvs_blob else 0),
 		bsp.numclusters,
 		len(order),
 		len(mat_recs),
@@ -719,7 +978,8 @@ def bake(map_bsp: Path, out_path: Path) -> None:
 	print(f"  clusters={bsp.numclusters} chunks={len(order)} batches={batches} mats={len(mat_recs)}")
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)}")
 	print(f"  MEM1 resident={ofs_pvsdir // 1024} KB  ARAM chunks={run // 1024} KB (max {max_chunk // 1024} KB)")
-	print(f"  lightmap pages={len(lm_pages) // 2048} ({len(lm_pages) // 1024} KB)")
+	print(f"  lightmap pages={len(lm_pages) // lm_page_bytes} ({len(lm_pages) // 1024} KB, {'CMPR' if lm_cmpr else 'RGB565'}), {lm_multi} chunks with more than one")
+	print(f"  lightmap cells: {n_lm_soft} faces below retail size, {n_lm_flat} flat grey (no room)")
 	print(f"  wrote {out_path} ({len(body) // 1024} KB)")
 
 
@@ -728,7 +988,7 @@ LF_FLAG_TILED = 2
 LF_NO_LIGHT = 0xFFFFFF
 
 
-def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
+def bake_lightfaces(map_bsp: Path, out_path: Path, lz4: bool = False) -> None:
 	"""media/wd_<map>_lf.gcd: what GoldSrc's light point needs from each face
 	when the world is drawn from the world DL and no msurface table exists
 	(runtime ref/common/ref_light.c).  Header (32 bytes, big-endian):
@@ -763,13 +1023,29 @@ def bake_lightfaces(map_bsp: Path, out_path: Path) -> None:
 		ext = [(bmaxs[j] - bmins[j]) * 16 for j in range(2)]
 		lo = lightofs if 0 <= lightofs < len(bsp.lighting) else LF_NO_LIGHT
 		recs += struct.pack(">8f4iI4s", *vecs0, *vecs1, *tmins, *ext, (flags << 24) | (lo & LF_NO_LIGHT), styles)
-	body = bytearray(32)
-	body += recs
-	pad32(body)
-	lit_ofs = len(body)
-	body += bsp.lighting
-	pad32(body)
-	struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
+	lz4 = lz4 or os.environ.get("DODGC_WD_LZ4", "") == "1"
+	if lz4:
+		# Version 3: the records stay raw, the lighting lump is a random-access LZ4 region (pack_blocks_lz4,
+		# LF_BLOCK-byte blocks). The light-point walk reads the faces of every node along a ray (about 25 record
+		# blocks a frame): LZ4 records thrashed the 1-block cache at 0.5 ms a frame (Dolphin counters), so only the
+		# lighting is packed. Header: "GClf", 3, faces, record offset (32), lighting region offset, lighting raw bytes,
+		# file size, block size. (Version 2 packed the records too; the engine still reads it.)
+		lit_region = pack_blocks_lz4(bytes(bsp.lighting), LF_BLOCK) if bsp.lighting else b""
+		body = bytearray(32)
+		body += recs
+		pad32(body)
+		lit_ofs = len(body)
+		body += lit_region
+		pad32(body)
+		struct.pack_into(">4s7I", body, 0, b"GClf", 3, len(bsp.faces), 32, lit_ofs, len(bsp.lighting), len(body), LF_BLOCK)
+	else:
+		body = bytearray(32)
+		body += recs
+		pad32(body)
+		lit_ofs = len(body)
+		body += bsp.lighting
+		pad32(body)
+		struct.pack_into(">4s5I", body, 0, b"GClf", 1, len(bsp.faces), 32, lit_ofs, len(bsp.lighting))
 	out_path.parent.mkdir(parents=True, exist_ok=True)
 	out_path.write_bytes(body)
 	print(f"  light faces: {len(bsp.faces)} faces, lighting {len(bsp.lighting) // 1024} KB, wrote {out_path} ({len(body) // 1024} KB)")
@@ -784,10 +1060,11 @@ def main() -> int:
 		default=None,
 		help="Output .gcd path (default: content/dod/media/wd_<map>.gcd)",
 	)
+	ap.add_argument("--lz4", action="store_true", help="LZ4-compress each lightmap page (also DODGC_WD_LZ4=1)")
 	args = ap.parse_args()
 	out = args.out or (ROOT / "content/dod/media" / f"wd_{args.map.stem}.gcd")
-	bake(args.map, out)
-	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"))
+	bake(args.map, out, lz4=args.lz4)
+	bake_lightfaces(args.map, out.with_name(out.stem + "_lf.gcd"), lz4=args.lz4)
 	return 0
 
 

@@ -283,6 +283,8 @@ static int SV_GCPrivateOverflowPinsMapArena(void) { return entity_reserved; }
 static int R_GCReleaseMapLoadStaticArena(void *p) {
     assert(p == arena); release_calls++; return 1;
 }
+static int reset_hook_calls;
+static void GC_RunMapArenaResetHook(void) { reset_hook_calls++; }
 #define Con_Reportf(...) ((void)0)
 '''
         fixture += "void GC_DiscardMapLoadBuffer( void )" + function
@@ -297,6 +299,8 @@ int main(void) {
     gc_mapload_buf_in_use = 0;
     GC_DiscardMapLoadBuffer();
     assert(gc_mapload_buf == NULL && gc_mapload_buf_size == 0 && release_calls == 1);
+    /* Claims that outlive their map (client temp entities) drop only on a real release. */
+    assert(reset_hook_calls == 1);
     return 0;
 }
 '''

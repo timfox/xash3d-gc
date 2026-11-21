@@ -81,6 +81,10 @@ static mleaf_t *gc_leafs_prealloc;
  * video and the main menu, which never use them. */
 static byte *gc_static_nodes;
 static void *gc_clipnodes_malloc_block;
+/* The raw clipnodes lump when Mod_GCReloadStdBspLump read it from disc into
+ * a plain malloc block (not scratch or spill): Mod_LoadClipnodes moves it into
+ * gc_static_clipnodes and frees it instead of keeping 254 KB of heap (caen). */
+static void *gc_clipnodes_reload_heap;
 static qboolean gc_clipnodes_pool_block;
 #if XASH_GAMECUBE
 /* Compact hull 1–3 clipnodes: campaign peak is c5a1 / rocket_frenzy ~32.3k
@@ -91,6 +95,13 @@ static qboolean gc_clipnodes_pool_block;
 #define GC_STATIC_HULL0_CAPACITY    16384
 static mclipnode16_t gc_static_clipnodes[GC_STATIC_CLIPNODE_CAPACITY]
 	__attribute__((aligned( 32 )));
+/* The routes whose Mod_LoadClipnodes owns a normalized copy (the pinned path):
+ * on DoD that copy is gc_static_clipnodes itself. */
+static qboolean Mod_GCClipnodesPinnedRoute( void )
+{
+	return Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcnewgame" )
+		|| Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcworldrender" );
+}
 /* Hull 0 as BSS (like clipnodes): heap memalign of even 26 KiB fails under
  * c4a3 smoke fragmentation (free≈50 Kb, probe 20261105-065947) after the
  * durable surfedges tail copy. 128 KiB fixed cost; never tip-fatal. */
@@ -8543,6 +8554,7 @@ void Mod_GameCubeFreeMallocSurfaces( model_t *mod )
 		gc_clipnodes_pool_block = false;
 		gc_clipnodes_static_block = false;
 		gc_clipnodes_scratch_block = false;
+		gc_clipnodes_reload_heap = NULL;
 		gc_submodels_malloc_block = NULL;
 		gc_entities_malloc_block = NULL;
 		gc_planes_arena_tail = false;
@@ -9107,6 +9119,24 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 	}
 
 	numelems = lump.filelen / real_entrysize;
+#if XASH_GAMECUBE && XASH_DODGC_NETWORK
+	/* DoD clipnodes end up normalized in gc_static_clipnodes (the pinned path in
+	 * Mod_LoadClipnodes), and a raw dclipnode_t is the same 8 bytes as the
+	 * mclipnode16_t it becomes, normalized element by element in place. Read
+	 * the lump straight into that table: the copy in the world-array spill
+	 * (253 KiB on dod_caen, 250 on charlie, 228 on avalanche) stayed used all
+	 * match and pushed the world DL tables and chunk cache (189 KiB) onto
+	 * the heap, which then ran at 4 KB with twelve bots. */
+	if( lumpnum == LUMP_CLIPNODES && real_entrysize == sizeof( mclipnode16_t )
+		&& numelems <= GC_STATIC_CLIPNODE_CAPACITY && Mod_GCClipnodesPinnedRoute())
+	{
+		lumpbuf = (byte *)gc_static_clipnodes;
+		scratch_backed = true;	/* never freed: the static table */
+		Con_Reportf( "Xash3D GameCube: clipnodes lump read into the static table %s\n",
+			Q_memprint( lump.filelen ));
+	}
+	else
+#endif
 	lumpbuf = (byte *)malloc( lump.filelen );
 	/* Tip-tight maps (dod_donner): markfaces ~31 KiB fails malloc after the
 	 * surface high-slot claim. Prefer spill before scratch/ARAM fallbacks.
@@ -9243,6 +9273,8 @@ static qboolean Mod_GCReloadStdBspLump( model_t *mod, dbspmodel_t *bmod, int lum
 
 	*(byte **)((byte *)bmod + info->dataofs) = lumpbuf;
 	*(size_t *)((byte *)bmod + info->countofs) = numelems;
+	if( lumpnum == LUMP_CLIPNODES )
+		gc_clipnodes_reload_heap = scratch_backed ? NULL : lumpbuf;
 	Con_Reportf( "Xash3D GameCube: reloaded BSP lump %s (%s)%s from disc\n",
 		info->loadname, Q_memprint( lump.filelen ), scratch_backed ? " [scratch]" : "" );
 	return true;
@@ -10545,8 +10577,7 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 
 		/* Scratch aliases die when Flipper rearms BSP arena. Own compact pin
 		 * for New Game and CapFaces -gcmap/-gcworldrender (probe 013254). */
-		if( Sys_CheckParm( "-gcfullphysics" ) || Sys_CheckParm( "-gcnewgame" )
-			|| Sys_CheckParm( "-gcmap" ) || Sys_CheckParm( "-gcworldrender" ))
+		if( Mod_GCClipnodesPinnedRoute())
 		{
 			mclipnode16_t *owned;
 			if( !bmod->clipnodes )
@@ -10711,6 +10742,14 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				gc_clipnodes_malloc_block = owned;
 				for( h = 1; h < 4; h++ )
 					mod->hulls[h].clipnodes16 = owned;
+				/* The raw lump read from disc is no longer referenced: it stayed on the heap for the whole match. */
+				if( gc_clipnodes_reload_heap && bmod->clipnodes == gc_clipnodes_reload_heap && (void *)owned != gc_clipnodes_reload_heap )
+				{
+					free( gc_clipnodes_reload_heap );
+					bmod->clipnodes = NULL;
+					Con_Reportf( "Xash3D GameCube: freed raw clipnodes lump %s\n", Q_memprint( clip_sz ));
+				}
+				gc_clipnodes_reload_heap = NULL;
 				Con_Reportf( "Xash3D GameCube: owned compact clipnodes %s\n",
 					Q_memprint( clip_sz ));
 				return;
@@ -10725,6 +10764,34 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: compact clipnodes aliased from BSP scratch %s\n",
 					Q_memprint( clip_sz ));
 			}
+			else if( gc_clipnodes_reload_heap && bmod->clipnodes == gc_clipnodes_reload_heap
+				&& bmod->numclipnodes <= GC_STATIC_CLIPNODE_CAPACITY )
+			{
+				/* dod_caen: a 254 KB disc reload kept on the heap all match while the 256 KB BSS table sat idle.
+				 * Same normalized copy as the pinned path, then the heap block goes back. */
+				for( int i = 0; i < bmod->numclipnodes; i++ )
+				{
+					int c0 = (unsigned short)bmod->clipnodes[i].children[0];
+					int c1 = (unsigned short)bmod->clipnodes[i].children[1];
+
+					if( c0 >= bmod->numclipnodes )
+						c0 -= 65536;
+					if( c1 >= bmod->numclipnodes )
+						c1 -= 65536;
+					gc_static_clipnodes[i].planenum = bmod->clipnodes[i].planenum;
+					gc_static_clipnodes[i].children[0] = (short)c0;
+					gc_static_clipnodes[i].children[1] = (short)c1;
+				}
+				free( gc_clipnodes_reload_heap );
+				gc_clipnodes_reload_heap = NULL;
+				bmod->clipnodes = NULL;
+				mod->clipnodes16 = gc_static_clipnodes;
+				gc_clipnodes_malloc_block = gc_static_clipnodes;
+				gc_clipnodes_static_block = true;
+				gc_clipnodes_pool_block = false;
+				Con_Reportf( "Xash3D GameCube: compact clipnodes moved from heap lump to static table %s\n",
+					Q_memprint( clip_sz ));
+			}
 			else
 			{
 				gc_clipnodes_malloc_block = bmod->clipnodes;
@@ -10732,6 +10799,7 @@ static void Mod_LoadClipnodes( model_t *mod, dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: compact clipnodes aliased from heap lump %s\n",
 					Q_memprint( clip_sz ));
 			}
+			gc_clipnodes_reload_heap = NULL;
 			return;
 		}
 

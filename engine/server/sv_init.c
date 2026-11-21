@@ -107,6 +107,12 @@ int SV_GCEntityCount( void )
 /* Room left in the map arena for what loads there after the rings: the
  * player body models (us-inf.mdl 86 KB, p_ models) take overflow slices. */
 #define GC_DOD_ARENA_KEEP ( 160u * 1024u )
+/* Never given up to the rings: the held view model's streamed skin window
+ * (v_garand 65.6 KB) loads into the arena after them. With the last reserve
+ * level at 0, caen's rings took the whole 177 KB gap and the player's rifle
+ * and hands drew magenta ("streamed skins ... no window", ceres GPU run on
+ * master 4e591475c0). */
+#define GC_DOD_VM_SKIN_KEEP ( 80u * 1024u )
 static entity_state_t *sv_gc_local_ring;
 static int sv_gc_local_ring_entries;
 
@@ -155,59 +161,71 @@ void SV_GCSizePacketEntities( void )
 	sv_gc_local_ring = NULL;
 	sv_gc_local_ring_entries = 0;
 	{
-		/* What a frame can carry on the listen route (SV_AddEntitiesToPacket, -gclistenserver): every spawned seat plus the lean brush
-		 * budget (4), nothing else, so lean_bound is a hard per-frame bound (13 players + 4 = 17 measured on charlie, spawn, bluff,
-		 * radio tent and spectator views). The ring holds the current and the reference frame of each client that takes frames (bots
-		 * take none): the host and 2 LAN peers is 3 x 2 x bound = 120 entries at the bound, and the static ring has 128. Charlie got
-		 * 144 entries (239 KB of arena) before; a longer LAN party falls back to full updates (not an error), and the overflow guard
-		 * still never drops a player. */
-		const int lean_bound = svs.maxclients + 4;
-		const int want = ( 3 * 2 * lean_bound + 7 ) & ~7;
-
-		if( want <= 128 )
-		{
-			/* The static 128-entry tables hold the host and two LAN peers at the bound: no arena ring, the whole 239 KB stays a post-load gap. */
-			svs.packet_entities = gc_singleplayer_packet_entities;
-			svs.num_client_entities = (int)( sizeof( gc_singleplayer_packet_entities ) / sizeof( gc_singleplayer_packet_entities[0] ));
-			sv_gc_frame_scratch = fallback_scratch;
-			sv_gc_visible_cap = 128;
-			Con_Reportf( "Xash3D GameCube: packet entities map=%s per-frame bound %d (%d seats + 4 brushes), 3 clients need %d entries: static tables (128), no arena ring, arena_tail_left=%s\n",
-				sv.name, lean_bound, svs.maxclients, want, Q_memprint( GC_MapArenaLargestGap()));
-			return;
-		}
-	}
-	{
-		const size_t gap = GC_MapArenaLargestGap();
-		const size_t each = sizeof( entity_state_t ) * 5;
+		/* Per frame cap C: the retail 256 visible-entity limit. The real play route (menu start, the game's own AddToFullPack) put 111 entities
+		 * in one frame on dod_caen, 89 on charlie and 62 on avalanche (release pass, 4 bots); the lean boot-override route carries only seats + 4
+		 * brushes (17), which is not what ships. Each ring (server, local client) holds E entries, i.e. E / peak frames, up to 256 when the
+		 * arena allows: the largest arena gap after leaving room for the entity text to move off the heap and for the body models
+		 * (GC_DOD_ARENA_KEEP); when that leaves less than E_MIN, the text reservation and then the keep-out are given up before
+		 * the ring is, because the static 128 tables overflow at 111+ entities (149 "Ignored" lines on caen). */
 		extern size_t Mod_GCWorldEntityTextHeapBytes( void );
-		/* Leave room for the entity text to move off the heap at MAP_READY: with the ring at
-		 * 256 the gap was 161 KB and the 180 KB text stayed on the heap (charlie, ceres). */
-		const size_t text = Mod_GCWorldEntityTextHeapBytes();
-		const size_t need = GC_DOD_ARENA_KEEP + ( text + 1023u ) / 1024u * 1024u;
-		int count = gap > need ? (int)(( gap - need ) / each ) : 0;
+		const size_t gap = GC_MapArenaLargestGap();
+		const size_t es = sizeof( entity_state_t );
+		const size_t text = ( Mod_GCWorldEntityTextHeapBytes() + 1023u ) / 1024u * 1024u;
+		/* Levels: [0] keep the body room and the entity text move, [1] give up the text, [2] half the body room,
+		 * [3] only the view model skin window, [4] the same with the frame list in the static 128-entry BSS table
+		 * (per-frame cap 128: caen's peak is 111-121) so the whole arena claim is the two rings. */
+		const size_t reserve[5] = { GC_DOD_ARENA_KEEP + text, GC_DOD_ARENA_KEEP, GC_DOD_ARENA_KEEP / 2,
+			GC_DOD_VM_SKIN_KEEP, GC_DOD_VM_SKIN_KEEP };
+		const int E_MIN = 128;
+		int level;
 
-		count = Q_min( count, visible ) & ~7;
-		if( count > 128 )
+		for( level = 0; level < 5; level++ )
 		{
-			const size_t bytes = each * (size_t)count;
-			const size_t at = GC_MapArenaFind( bytes );
-			entity_state_t *block = at == (size_t)-1 ? NULL
-				: (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+			const qboolean static_scratch = level == 4;
+			const int cap = static_scratch ? 128 : visible;
+			/* E_MAX: one visible cap per ring, i.e. two frames at caen's 111 peak, ~3 at charlie's 89. A listen
+			 * server's client acks the previous frame, so deltas need only the last two; a missed delta base is a
+			 * full update, not a lost entity. 2 x visible took 472 + 472 entries (408 KB) on charlie and left the
+			 * world texture slots no arena room. */
+			const int E_MAX = visible;
+			const size_t scratch = static_scratch ? 0 : es * (size_t)cap;
+			const size_t need = reserve[level] + scratch;
+			int E = gap > need ? (int)(( gap - need ) / ( 2 * es )) : 0;
+			size_t bytes, at;
+			entity_state_t *block;
 
-			if( block )
+			E = Q_min( E, E_MAX ) & ~7;
+			if( E < E_MIN )
+				continue;
+			bytes = scratch + es * 2 * (size_t)E;
+			at = GC_MapArenaFind( bytes );
+			block = at == (size_t)-1 ? NULL : (entity_state_t *)GC_MapLoadBufferTailAlloc( at, bytes );
+			if( !block )
+				continue;
+			memset( block, 0, bytes );
+			svs.packet_entities = block;
+			svs.num_client_entities = E;
+			sv_gc_frame_scratch = static_scratch ? fallback_scratch : block + E;
+			sv_gc_visible_cap = cap;
+			sv_gc_local_ring = static_scratch ? block + E : block + E + cap;
+			sv_gc_local_ring_entries = E;
+			Con_Reportf( "Xash3D GameCube: %spacket entities map=%s per-frame cap %d%s, rings %d + %d entries, bytes=%s arena_tail_left=%s reserve level %d (text %s)\n",
+				level ? "Warning: reduced reserve " : "", sv.name, cap, static_scratch ? " (static list)" : "", E, E,
+				Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), level, Q_memprint( text ));
+			/* Levels 3 and 4 kept only the skin window's room: claim it now, or the studio region's overflow slices
+			 * (weapon models precached for every bot, sleeve view models) take it before a weapon's skins stream
+			 * (ceres caen, master 63fccf66e0: 76.9 KB left after the rings, then 211 "no window" lines). */
+			if( level >= 3 )
 			{
-				memset( block, 0, bytes );
-				svs.packet_entities = block;
-				svs.num_client_entities = count * 2;
-				sv_gc_frame_scratch = block + count * 2;
-				sv_gc_visible_cap = count;
-				sv_gc_local_ring = block + count * 3;
-				sv_gc_local_ring_entries = count * 2;
-				Con_Reportf( "Xash3D GameCube: %spacket entities map=%s visible=%d of %d, server and client 2 frames each, bytes=%s arena_tail_left=%s entity_text_reserved=%s\n",
-					count < visible ? "Warning: REDUCED " : "", sv.name, count, visible,
-					Q_memprint( bytes ), Q_memprint( GC_MapArenaLargestGap()), Q_memprint( text ));
-				return;
+				extern void Mod_GCSetSkinWindow( byte *window, size_t size );
+				const size_t wat = GC_MapArenaFind( GC_DOD_VM_SKIN_KEEP );
+				byte *win = wat == (size_t)-1 ? NULL : (byte *)GC_MapLoadBufferTailAlloc( wat, GC_DOD_VM_SKIN_KEEP );
+
+				Mod_GCSetSkinWindow( win, GC_DOD_VM_SKIN_KEEP );
+				Con_Reportf( "Xash3D GameCube: view model skin window %s (%s)\n", win ? "claimed" : "NOT claimed",
+					Q_memprint( GC_DOD_VM_SKIN_KEEP ));
 			}
+			return;
 		}
 	}
 	if( false )

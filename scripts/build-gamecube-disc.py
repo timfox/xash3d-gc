@@ -2171,6 +2171,22 @@ def build_loading_spans(source: Path, output: Path) -> list[tuple[str, Path]]:
 	return [("media/gc_loading.spn", out)]
 
 
+def world_dl_pair_ok(wd: Path) -> bool:
+	"""True when wd_<map>_sb.gcd sits next to this world DL and was written with
+	it: the runtime (model.c GC_StaticBrushes) ignores the static brush list
+	when its recorded pack size differs, and the server then sends every brush
+	entity as a packet entity (a stale 1.3 MB prebaked dod_avalanche pack
+	against a 2.88 MB fresh bake left objects missing)."""
+	sb = wd.with_name(wd.stem + "_sb.gcd")
+	try:
+		head = sb.read_bytes()[:12]
+	except OSError:
+		return False
+	if len(head) < 12 or head[:4] != b"GCsb" or int.from_bytes(head[4:6], "big") != 1:
+		return False
+	return int.from_bytes(head[8:12], "big") == wd.stat().st_size
+
+
 def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	"""media/wd_<map>.gcd for a GoldSrc map: the whole BSP as GX display lists
 	per PVS cluster (scripts/bake_worlddl_goldsrc.py, runtime
@@ -2183,8 +2199,29 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 	stamp = cache / f"wd_{bsp.stem.lower()}.stamp"
 	lf = cache / f"wd_{bsp.stem.lower()}_lf.gcd"
 	sb = cache / f"wd_{bsp.stem.lower()}_sb.gcd"
-	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb2"
+	key = f"{st.st_size}:{int(st.st_mtime)}:wd2-lm-x1-lf1-sb2-lmpack5-lmcmpr"
+	if os.environ.get("DODGC_WD_LZ4", "") == "1":
+		key += ":lz4lm1lf3pvs1"
+	def _pad_slots() -> None:
+		# Dev "live map" discs (tools/mapbridge): keep wd/lf/sb at fixed sizes so the host can rewrite them in the ISO
+		# in place.  GC_SLOT_PAD="dod_live:wd=1048576:lf=1048576:sb=65536".  The sb header records the wd size, so it
+		# is rewritten to the padded wd size (the runtime ignores a static-brush list whose recorded size differs).
+		for spec in os.environ.get("GC_SLOT_PAD", "").split(","):
+			parts = spec.split(":")
+			if parts[0].lower() != bsp.stem.lower():
+				continue
+			want = dict(kv.partition("=")[::2] for kv in parts[1:])
+			for kind, target in (("wd", out), ("lf", lf), ("sb", sb)):
+				if kind in want and target.is_file() and target.stat().st_size < int(want[kind]):
+					with open(target, "ab") as fh:
+						fh.truncate(int(want[kind]))
+			if "wd" in want and sb.is_file():
+				with open(sb, "r+b") as fh:
+					fh.seek(8)
+					fh.write(struct.pack(">I", out.stat().st_size))
+
 	if out.is_file() and lf.is_file() and sb.is_file() and stamp.is_file() and stamp.read_text() == key:
+		_pad_slots()
 		return out
 	sys.path.insert(0, str(Path(__file__).resolve().parent))
 	try:
@@ -2197,6 +2234,7 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 		print(f"  world DL: bake failed for {bsp.name}: {error}")
 		return None
 	stamp.write_text(key)
+	_pad_slots()
 	return out
 
 
@@ -2677,6 +2715,7 @@ def lean_studio_tex_companion_bytes(src: Path, max_edge: int = 64) -> bytes | No
 
 STUDIO_NF_MASKED = 0x40
 STUDIO_NF_GC_CMPR = 1 << 28  # keep equal to STUDIO_NF_GC_CMPR in engine/studio.h
+STUDIO_NF_GC_CMPR_STREAM = 1 << 27  # keep equal to STUDIO_NF_GC_CMPR_STREAM in engine/studio.h
 
 
 def gc_cmpr_skin_edge(size: int, cap: int) -> int:
@@ -2688,7 +2727,9 @@ def gc_cmpr_skin_edge(size: int, cap: int) -> int:
 	return edge
 
 
-def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int | None = None) -> bytes | None:
+def gc_cmpr_skin_companion_bytes(
+	src: Path, max_edge: int = 128, part_edge: int | None = None, stream_edge: int | None = None
+) -> bytes | None:
 	"""A gc_studio/<stem>t.mdl whose skins are already GX CMPR.
 
 	Same layout as lean_studio_tex_companion_bytes (header, texture structs,
@@ -2697,6 +2738,11 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int 
 	aligned in the file. The engine copies them into the skin window as they
 	are (R_GCBakedCmprSkin): no palette decode and no encode at load.
 	Colour-remap textures (DM_Base, remap*) stay palettised.
+	stream_edge, when set (GC_PLAYER_SKIN_STREAM=256), bakes a skin whose edge would be stream_edge on both sides as
+	STUDIO_NF_GC_CMPR_STREAM: stream_edge x stream_edge CMPR texels followed by a half-size CMPR low mip. The header
+	keeps stream_edge as the texture size (the studio UV scale is 1/width); the engine keeps the low mip resident and
+	streams the full texels from ARAM where a skin window exists (R_GXSkinAttachCmpr), so a build without one draws a
+	plain 128 px skin.
 	part_edge, when set, caps the small parts (faces, hats, helmets, hair) at
 	that edge: they are a few dozen pixels on screen, and at full size a
 	team's six faces overflowed the studio skin window (ceres: Axis faces
@@ -2780,6 +2826,17 @@ def gc_cmpr_skin_companion_bytes(src: Path, max_edge: int = 128, part_edge: int 
 			return None
 		# Chrome/additive are dropped as in the palettised companion.
 		keep = (flags & STUDIO_NF_MASKED) | STUDIO_NF_GC_CMPR
+		if stream_edge and (nw, nh) == (stream_edge, stream_edge):
+			lw, lh = nw // 2, nh // 2
+			lrgb = np.asarray(Image.fromarray(np.ascontiguousarray(rgb), "RGB").resize((lw, lh), Image.Resampling.LANCZOS))
+			lopaque = np.asarray(
+				Image.fromarray(opaque.astype(np.uint8) * 255, "L").resize((lw, lh), Image.Resampling.NEAREST)
+			) >= 128
+			low = gx_cmpr_encode_blocks(np.ascontiguousarray(lrgb), np.ascontiguousarray(lopaque))
+			if len(low) != lw * lh // 2:
+				return None
+			blob += low
+			keep |= STUDIO_NF_GC_CMPR_STREAM
 		struct.pack_into("<iiii", out, dst + 64, keep, nw, nh, len(out))
 		out += blob
 
@@ -3080,7 +3137,9 @@ def compress_animpack(payload: bytes) -> bytes:
 # bytes but one model per body part is drawn: their meshes go to a pack the
 # engine keeps in ARAM (Mod_GCStudioMeshBase), so both team cores fit MEM1.
 GC_PLAYER_MESH_PATH = "models/player/mesh_%s.gcm"
-GC_PLAYER_SKIN_EDGE = 128  # longest edge of a baked player skin
+# Longest edge of a baked player skin: 128 by default; GC_PLAYER_SKIN_EDGE=256 keeps the retail 256 px body skins
+# (CMPR 32 KiB each instead of 8; they stream through the 192 KiB skin window, so more of them cycle through it).
+GC_PLAYER_SKIN_EDGE = int(os.environ.get("GC_PLAYER_SKIN_EDGE", "") or 128)
 GC_PLAYER_PART_EDGE = 64  # faces, hats, helmets, hair
 GC_SKIN_PART_PREFIXES = (b"face", b"k43_face", b"hat", b"helmet", b"hair", b"head")
 
@@ -3190,8 +3249,12 @@ def inject_gc_player_models(archive: "zipfile.ZipFile", data: Path, splitter=Non
 		kind = "palettised"
 		if tex_src is not None:
 			# Native first: 128 px CMPR is 8 KB a skin, less than 64 px palettised.
+			stream = int(os.environ.get("GC_PLAYER_SKIN_STREAM", "") or 0)
 			tex_payload = gc_cmpr_skin_companion_bytes(
-				tex_src, max_edge=GC_PLAYER_SKIN_EDGE, part_edge=GC_PLAYER_PART_EDGE
+				tex_src,
+				max_edge=stream or GC_PLAYER_SKIN_EDGE,
+				part_edge=GC_PLAYER_PART_EDGE,
+				stream_edge=stream or None,
 			)
 			if tex_payload:
 				kind = f"GX CMPR up to {GC_PLAYER_SKIN_EDGE} px"
@@ -4173,18 +4236,25 @@ def stage_smoke_data(
 		name = f"wd_{stem}.gcd"
 		dest = media_out / name
 		src = None
+		stale = None
 		repo_root = Path(__file__).resolve().parents[3]  # .../dod-gc
 		for cand in (
 			source / "media" / name,
 			repo_root / "content" / "dod" / "media" / name,
 		):
 			if cand.is_file():
-				src = cand
-				break
+				if world_dl_pair_ok(cand):
+					src = cand
+					break
+				print(f"  world DL: ignoring {cand} (no matching static brush list; stale prebake)")
+				stale = stale or cand
 		if src is None:
 			bsp = source / "maps" / f"{stem}.bsp"
 			if bsp.is_file():
 				src = bake_world_dl(bsp, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache")
+		if src is None and stale is not None:
+			print(f"  world DL: WARNING: no fresh bake for {stem}; staging stale {stale} (brush entities go out as packet entities)")
+			src = stale
 		if src is None:
 			print(f"  world DL: no {name} (CapFaces/live BSP fallback)")
 			continue
@@ -4589,7 +4659,16 @@ def stage_sd_card(
 	return valve
 
 
+def apply_wd_lz4_default() -> None:
+	"""The world DL packs (lightmap pages, light-face pack, PVS rows) are LZ4-packed unless DODGC_WD_LZ4=0.
+
+	Measured on charlie in Dolphin (docs/map-budget-audit.md): about 2.0 MiB less ARAM per map and no change in world
+	draw time or heap; the engine still loads files baked without the flag. The baker used on its own stays opt-in."""
+	os.environ.setdefault("DODGC_WD_LZ4", "1")
+
+
 def main() -> None:
+	apply_wd_lz4_default()
 	print(GC_BUILD_BANNER)
 	print("Xash3D GameCube: content build begins")
 	script_dir = Path(__file__).resolve().parent

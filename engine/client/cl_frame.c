@@ -1713,33 +1713,52 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 			noload = Sys_CheckParm( "-gcnopweaponload" ) ? 1 : 0;
 		/* A scripted cast of 24 asked for every class's gun at once: a 198 KB
 		 * read failed in the file pool and every later shot's cast file with it
-		 * (ceres short-charlie-a). Film actors load at most two guns per map
-		 * (256 KB or less each); past that an actor carries a gun only if a player's
-		 * already brought it in. */
+		 * (ceres short-charlie-a). That cap was two guns per map, which left every
+		 * German, BAR and .30 cal actor empty-handed (ceres ep02 part 1: only the
+		 * Garand and Thompson loaded). Now film actors load guns of 128 KB or less
+		 * up to a byte budget per map (-gcfilmgunkb, default 512: the seven DoD guns
+		 * of one map's two teams, about 440 KB on dod_avalanche), one per frame so
+		 * the file pool never takes two reads at once. */
 		if( film && !noload )
 		{
-			static int film_spawn = -1, film_loads;
+			static int film_spawn = -1;
+			static long film_bytes, film_budget = -1;
+			static double film_last;
 			static int film_logs;
 			const fs_offset_t size = FS_FileSize( wpath, false );
 
+			if( film_budget < 0 )
+			{
+				char kb[16];
+
+				film_budget = ( Sys_GetParmFromCmdLine( "-gcfilmgunkb", kb ) && Q_atoi( kb ) > 0 ? Q_atoi( kb ) : 512 ) * 1024L;
+			}
 			if( film_spawn != svs.spawncount )
 			{
 				film_spawn = svs.spawncount;
-				film_loads = 0;
+				film_bytes = 0;
+				film_last = -1.0;
 			}
-			if( film_loads >= 2 || size <= 0 || size > 262144 )
+			if( size <= 0 || size > 131072 || film_bytes + size > film_budget )
 			{
-				if( film_logs < 8 && fails[wk] < 3 )
+				if( film_logs < 16 && fails[wk] < 3 )
 				{
 					film_logs++;
-					Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) not loaded: %d of 2 loads used\n",
-						wpath, (long)size, film_loads );
+					Con_Reportf( S_WARN "Xash3D GameCube: film actor weapon %s (%ld bytes) not loaded: %ld of %ld KB used\n",
+						wpath, (long)size, film_bytes / 1024, film_budget / 1024 );
 				}
 				fails[wk] = 3;
 				return 0;
 			}
+			if( film_last == host.realtime )
+				return 0;	/* one gun read per frame */
 			if( fails[wk] < 3 && host.realtime >= next_try[wk] )
-				film_loads++;
+			{
+				film_bytes += (long)size;
+				film_last = host.realtime;
+				Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) loading, %ld of %ld KB used\n",
+					wpath, (long)size, film_bytes / 1024, film_budget / 1024 );
+			}
 		}
 		if( !noload && fails[wk] < 3 && host.realtime >= next_try[wk] )
 		{
@@ -1862,7 +1881,7 @@ typedef struct
 	float	changetime;
 } gc_seqlatch_t;
 
-static gc_seqlatch_t gc_seqlatch[40];
+static gc_seqlatch_t gc_seqlatch[GC_LEAN_STUDIO_MAX + 24];	/* every studio slot: a crowd evicting latches lost its fades */
 
 static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 {
@@ -1906,6 +1925,64 @@ static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 		ent->latched.sequencetime = l->changetime;
 		ent->latched.prevframe = l->prevframe * ( sd->numframes - 1 ) / 256.0f;
 	}
+}
+
+/* The same for movement. A walking monster (MOVETYPE_STEP) moves and turns
+ * when it thinks, ten times a second, and the renderer carries it from the
+ * step before to this one (R_StudioLerpMovement) between its animtimes. The
+ * lean emitter latched "before" to "now" every frame, so nothing was carried:
+ * the Lost Coast fisherman walked and turned in ten jumps a second. Few
+ * things walk at once on this route, and static data is heap here: four. */
+typedef struct
+{
+	int	index;
+	float	animtime, prevanimtime;
+	vec3_t	origin, prevorigin;
+	vec3_t	angles, prevangles;
+} gc_movelatch_t;
+
+static gc_movelatch_t gc_movelatch[4];
+
+static void GC_LeanMoveLatch( cl_entity_t *ent )
+{
+	gc_movelatch_t *l = NULL, *spare = &gc_movelatch[0];
+	int i;
+
+	if( ent->index <= 0 || ent->curstate.movetype != MOVETYPE_STEP || ent->curstate.animtime <= 0.0f )
+		return;
+	for( i = 0; i < (int)ARRAYSIZE( gc_movelatch ); i++ )
+	{
+		if( gc_movelatch[i].index == ent->index )
+		{
+			l = &gc_movelatch[i];
+			break;
+		}
+		if( !gc_movelatch[i].index || gc_movelatch[i].animtime < spare->animtime )
+			spare = &gc_movelatch[i];
+	}
+	if( !l || ent->curstate.animtime < l->animtime || ent->curstate.animtime > l->animtime + 1.0f )
+	{
+		/* new here, a new level, or back after a pause: nothing to carry */
+		l = l ? l : spare;
+		l->index = ent->index;
+		l->animtime = l->prevanimtime = ent->curstate.animtime;
+		VectorCopy( ent->origin, l->origin );
+		VectorCopy( ent->origin, l->prevorigin );
+		VectorCopy( ent->angles, l->angles );
+		VectorCopy( ent->angles, l->prevangles );
+	}
+	else if( ent->curstate.animtime != l->animtime )
+	{
+		l->prevanimtime = l->animtime;
+		VectorCopy( l->origin, l->prevorigin );
+		VectorCopy( l->angles, l->prevangles );
+		l->animtime = ent->curstate.animtime;
+		VectorCopy( ent->origin, l->origin );
+		VectorCopy( ent->angles, l->angles );
+	}
+	ent->latched.prevanimtime = l->prevanimtime;
+	VectorCopy( l->prevorigin, ent->latched.prevorigin );
+	VectorCopy( l->prevangles, ent->latched.prevangles );
 }
 
 /*
@@ -1962,6 +2039,8 @@ static cl_entity_t *CL_GCLeanWallPool( void )
 	return pool;
 }
 
+extern byte sv_gc_muzzleflash[MAX_CLIENTS + 1];
+
 void CL_GameCubeLeanEmitBrushEntities( void )
 {
 	static int log_n;
@@ -1990,9 +2069,15 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 	const float studio_max_dist = CL_GCCaptureMode() ? 32000.0f : ( Sys_CheckParm( "-gcfullphysics" )
 		|| Sys_CheckParm( "-gcworldrender" )) ? 12000.0f : 1600.0f;
 
+/* Spill left for the world DL (its tables, ~55 KiB on dod_charlie, and the
+ * smallest chunk cache) when capture mode takes big blocks before it loads. */
+#ifndef GC_CAPTURE_WORLD_SPILL_KEEP
+#define GC_CAPTURE_WORLD_SPILL_KEEP	( 224u * 1024u )
+#endif
 	if( CL_GCCaptureMode( ))
 	{
 		extern size_t GC_MemHeapFreeBytes( void );
+		extern size_t Mod_GCWorldArraySpillFreeLasting( void );
 		extern void *Mod_GCWorldArraySpillTryAlloc( size_t bytes, const char *what );
 		extern qboolean Mod_GCWorldArraySpillHolds( const void *ptr, size_t bytes );
 		const size_t big_bytes = sizeof( cl_entity_t ) * ( GC_LEAN_STUDIO_MAX + GC_LEAN_BRUSH_MAX );
@@ -2013,13 +2098,18 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			const char *where = "spill";
 
 			big_tried_spawn = svs.spawncount;
-			lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
+			/* The world DL loads its tables and chunk cache from the spill on
+			 * the first frame drawn, after this. Taking the slots first left it
+			 * "no spill for tables" and capture runs drew no world at all (sky,
+			 * actors and smoke only). Leave it room, else use the heap. */
+			if( Mod_GCWorldArraySpillFreeLasting() >= big_bytes + GC_CAPTURE_WORLD_SPILL_KEEP )
+				lean_studio_big = Mod_GCWorldArraySpillTryAlloc( big_bytes, "capture studio slots" );
 			if( lean_studio_big )
 			{
 				memset( lean_studio_big, 0, big_bytes );
 				big_in_spill = true;
 			}
-			else if( GC_MemHeapFreeBytes() > big_bytes + 512 * 1024 )
+			else if( GC_MemHeapFreeBytes() > big_bytes + 192 * 1024 )
 			{
 				lean_studio_big = Mem_Calloc( host.mempool, big_bytes );
 				where = "heap";
@@ -2079,7 +2169,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		 * size), and leave out what is behind it: nearest-first gave every
 		 * slot to the beach obstacles in front of a shot looking up at the
 		 * bluff, and the radio tent's column still missed out. */
-		vec3_t feet[64];
+		/* Every map prop, not the first 64 in edict order: dod_charlie has
+		 * more than that before its control points. Static: 3 KB. */
+		static vec3_t feet[256];
 		int n_feet = 0;
 
 		AngleVectors( refState.viewangles, fwd, NULL, NULL );
@@ -2125,13 +2217,31 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				float score = VectorLength( delta ) / ( radius + 16.0f );
 				int f;
 
+				/* The prop's origin need not touch the brush: the control-point
+				 * flag's origin sits about 26 units above its pole's foot, and
+				 * the pole is sunk into the top of the column (dod_charlie cp3
+				 * on func_wall *178). So: over the box's footprint (8 units of
+				 * slack), and between its bottom and 64 units over its top. */
 				for( f = 0; f < n_feet; f++ )
 				{
-					if( feet[f][0] >= ed->v.absmin[0] && feet[f][0] <= ed->v.absmax[0]
-						&& feet[f][1] >= ed->v.absmin[1] && feet[f][1] <= ed->v.absmax[1]
-						&& feet[f][2] >= ed->v.absmin[2] && feet[f][2] <= ed->v.absmax[2] + 8.0f )
+					if( feet[f][0] >= ed->v.absmin[0] - 8.0f && feet[f][0] <= ed->v.absmax[0] + 8.0f
+						&& feet[f][1] >= ed->v.absmin[1] - 8.0f && feet[f][1] <= ed->v.absmax[1] + 8.0f
+						&& feet[f][2] >= ed->v.absmin[2] && feet[f][2] <= ed->v.absmax[2] + 64.0f )
 					{
+						static const model_t *told[32];
+						static int ntold;
+						int ti;
+
 						score = 0.0f;
+						for( ti = 0; ti < ntold && told[ti] != mod; ti++ )
+							;
+						if( ti == ntold && ntold < (int)ARRAYSIZE( told ))
+						{
+							told[ntold++] = mod;
+							Con_Reportf( "Xash3D GameCube: capture prop support %s rm=%d amt=%.0f top=%.0f prop feet=%.0f %.0f %.0f\n",
+								mod->name, ed->v.rendermode, ed->v.renderamt, ed->v.absmax[2],
+								feet[f][0], feet[f][1], feet[f][2] );
+						}
 						break;
 					}
 				}
@@ -2222,11 +2332,33 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 		VectorCopy( ent->origin, ent->latched.prevorigin );
 		VectorCopy( ent->angles, ent->latched.prevangles );
 
-		if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 		{
-			added++;
-			if( FBitSet( ent->curstate.effects, EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_LIGHT ))
-				CL_AddEntityEffects( ent );
+			const qboolean took = ref.dllFuncs.R_AddEntity( ent, ET_NORMAL );
+
+			/* -gccapture: each brush model handed to the renderer, once
+			 * (settles whether a support brush reaches the draw list). */
+			if( capture_brush_pick )
+			{
+				static const model_t *handed[96];
+				static int nhanded;
+				int hi;
+
+				for( hi = 0; hi < nhanded && handed[hi] != mod; hi++ )
+					;
+				if( hi == nhanded && nhanded < (int)ARRAYSIZE( handed ))
+				{
+					handed[nhanded++] = mod;
+					Con_Reportf( "Xash3D GameCube: capture emit brush %s e=%d took=%d rm=%d amt=%d dist=%.0f slot=%d of %d\n",
+						mod->name, e, took ? 1 : 0, ent->curstate.rendermode, ent->curstate.renderamt, dist,
+						added, budget );
+				}
+			}
+			if( took )
+			{
+				added++;
+				if( FBitSet( ent->curstate.effects, EF_BRIGHTLIGHT | EF_DIMLIGHT | EF_LIGHT ))
+					CL_AddEntityEffects( ent );
+			}
 		}
 	}
 
@@ -2701,12 +2833,19 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->curstate.controller[1] = ed->v.controller[1];
 			ent->curstate.controller[2] = ed->v.controller[2];
 			ent->curstate.controller[3] = ed->v.controller[3];
+			/* And the blends: a player model's aim grid (torso yaw, pitch). Left at 0
+			 * the grid's corner had every scripted film actor looking up. */
+			ent->curstate.blending[0] = ed->v.blending[0];
+			ent->curstate.blending[1] = ed->v.blending[1];
 			ent->curstate.body = ed->v.body;
 			ent->curstate.skin = ed->v.skin;
 			ent->curstate.scale = ed->v.scale > 0.0f ? ed->v.scale : 1.0f;
 			ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
 			/* A scripted film actor carries its class's p_ weapon like a player; the
 			 * renderer merges it onto the hand bones (R_StudioDrawModel). */
+			/* The renderer cross-fades a film actor's every change of sequence and gait
+			 * (r_studio.c R_GXFilmBlend); it knows one by this tag. */
+			ent->curstate.iuser4 = ed->v.iuser4 == GC_FILM_ACTOR_TAG ? GC_FILM_ACTOR_TAG : 0;
 			if( ed->v.iuser4 == GC_FILM_ACTOR_TAG && ed->v.weaponmodel )
 			{
 				static int film_wlogs;
@@ -2786,6 +2925,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->latched.prevanimtime = ent->curstate.animtime;
 			memcpy( ent->latched.prevcontroller, ent->curstate.controller, sizeof( ent->latched.prevcontroller ));
 			GC_LeanSeqLatch( ent, ed, mod );
+			GC_LeanMoveLatch( ent );
 			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			{
 				studios++;
@@ -2947,6 +3087,15 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					float speed = sqrtf( ed->v.velocity[0] * ed->v.velocity[0] + ed->v.velocity[1] * ed->v.velocity[1] );
 					int idle = CL_GCLeanFindSeq( bh, "idle" );
 					int gait;
+					/* One-shots on top of the aim/gait choice below: a shot (shoot
+					 * pose of the carried weapon, torso only) and whole-body poses
+					 * (stance change, jump, swim). anim clocks are per slot. */
+					static float shoot_base[MAX_CLIENTS + 1], shoot_until[MAX_CLIENTS + 1];
+					static float body_base[MAX_CLIENTS + 1], body_until[MAX_CLIENTS + 1], air_since[MAX_CLIENTS + 1];
+					static int body_hold[MAX_CLIENTS + 1], prev_prone[MAX_CLIENTS + 1];
+					qboolean shooting = false;
+					int body_seq = -1;
+					float body_t = 0.0f;
 
 					if( speed > 150.0f )
 						gait = CL_GCLeanFindSeq( bh, "run" );
@@ -2999,6 +3148,74 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							if( dgait <= 0 )
 								dgait = CL_GCLeanFindSeq( bh, "standing_idle" );
 						}
+						/* Sprinting: the carried weapon's sprint aim pose. */
+						if( tok && !prone && !FBitSet( ed->v.flags, FL_DUCKING ) && speed > 200.0f )
+						{
+							int sa;
+
+							Q_snprintf( label, sizeof( label ), "sprint_%s_aim", tok );
+							sa = CL_GCLeanFindSeq( bh, label );
+							if( sa >= 0 )
+								aim = sa;
+						}
+						/* A shot: the weapon sets EF_MUZZLEFLASH, which the server
+						 * clears at the start of its next frame. Play the shoot pose
+						 * of this stance for a third of a second. */
+						if( FBitSet( ed->v.effects, EF_MUZZLEFLASH ) || sv_gc_muzzleflash[e] )
+						{
+							sv_gc_muzzleflash[e] = 0;
+							shoot_base[e] = (float)cl.time;
+							shoot_until[e] = (float)cl.time + 0.35f;
+						}
+						if( tok && !dead && cl.time < shoot_until[e] )
+						{
+							int ss;
+
+							Q_snprintf( label, sizeof( label ), "%s_%s_shoot",
+								prone ? "prone" : FBitSet( ed->v.flags, FL_DUCKING ) ? "crouch" : "stand", tok );
+							ss = CL_GCLeanFindSeq( bh, label );
+							if( ss >= 0 )
+							{
+								aim = ss;
+								shooting = true;
+							}
+						}
+						/* Whole-body poses, in priority order: a stance change,
+						 * swimming, jumping. They replace torso and legs. */
+						if( prone != prev_prone[e] && !dead )
+						{
+							const int ts = CL_GCLeanFindSeq( bh, prone ? "get_down" : "get_up" );
+
+							prev_prone[e] = prone;
+							if( ts > 0 )
+							{
+								body_hold[e] = ts;
+								body_base[e] = (float)cl.time;
+								body_until[e] = (float)cl.time + 0.9f;
+							}
+						}
+						if( cl.time < body_until[e] && body_hold[e] > 0 )
+						{
+							body_seq = body_hold[e];
+							body_t = body_base[e];
+						}
+						else if( ed->v.waterlevel > 1 )
+						{
+							body_seq = CL_GCLeanFindSeq( bh, speed > 10.0f ? "swim" : "swim_idle" );
+							body_t = 0.0f;
+						}
+						else
+						{
+							if( FBitSet( ed->v.flags, FL_ONGROUND ))
+								air_since[e] = 0.0f;
+							else if( air_since[e] <= 0.0f )
+								air_since[e] = (float)cl.time;
+							if( air_since[e] > 0.0f && cl.time - air_since[e] > 0.2f )
+							{
+								body_seq = CL_GCLeanFindSeq( bh, "jump" );
+								body_t = air_since[e];
+							}
+						}
 						if( aim >= 0 )
 							idle = aim;
 						if( dgait >= 0 )
@@ -3029,6 +3246,42 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 							ent->curstate.sequence = idle;
 						if( ed->v.gaitsequence == 0 && gait >= 0 )
 							ent->curstate.gaitsequence = gait;
+						if( shooting )
+							ent->curstate.animtime = shoot_base[e];
+						if( body_seq >= 0 )
+						{
+							/* No legs overlay on a whole-body pose, so the renderer
+							 * keeps the root yaw-only and the pose plays as authored. */
+							ent->curstate.sequence = body_seq;
+							ent->curstate.gaitsequence = 0;
+							if( body_t > 0.0f )
+								ent->curstate.animtime = body_t;
+						}
+						{
+							/* Which sequences the game actually plays: the first time each one is chosen,
+							 * and every shot latch (EF_MUZZLEFLASH seen). */
+							static byte an_seen[512];
+							static int an_shots;
+							const mstudioseqdesc_t *asd = (const mstudioseqdesc_t *)((const byte *)bh + bh->seqindex );
+							const int qs = ent->curstate.sequence, qg = ent->curstate.gaitsequence;
+							int k;
+
+							for( k = 0; k < 2; k++ )
+							{
+								const int q = k ? qg : qs;
+
+								if( q > 0 && q < bh->numseq && q < 512 && !an_seen[q] )
+								{
+									an_seen[q] = 1;
+									Con_Reportf( "Xash3D GameCube: lean anim new seq %d '%s' (p%d t=%.1f speed %.0f)\n", q, asd[q].label, e, cl.time, speed );
+								}
+							}
+							if( shooting && an_shots < 8 && ent->curstate.animtime == shoot_base[e] && cl.time - shoot_base[e] < 0.1f )
+							{
+								an_shots++;
+								Con_Reportf( "Xash3D GameCube: lean anim shot p%d t=%.1f '%s'\n", e, cl.time, asd[qs].label );
+							}
+						}
 					}
 					if( seq_logs < 6 )
 					{
@@ -3605,3 +3858,13 @@ qboolean CL_GetMovieSpatialization( rawchan_t *ch )
 
 	return true;
 }
+
+#if XASH_GAMECUBE
+/* The name the (listen) server precached at this model index, or NULL: cl_game.c has no view of server_t. */
+const char *CL_GCServerModelName( int modelindex )
+{
+	if( modelindex <= 0 || modelindex >= MAX_MODELS || !SV_Active() || !sv.model_precache[modelindex][0] )
+		return NULL;
+	return sv.model_precache[modelindex];
+}
+#endif

@@ -1256,10 +1256,46 @@ qboolean GC_MapLoadBufferIsWorldSettled( void )
 	return gc_mapload_world_settled;
 }
 
+#define GC_MAPLOAD_RESET_HOOKS 4
+static void (*gc_mapload_reset_hooks[GC_MAPLOAD_RESET_HOOKS])( void );
+
+/* Several owners (client temp entities, the view model skin window) may hold
+ * post-load claims at once; registering the same hook twice keeps one entry. */
+void GC_SetMapArenaResetHook( void (*hook)( void ))
+{
+	int i, free_slot = -1;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		if( gc_mapload_reset_hooks[i] == hook )
+			return;
+		if( !gc_mapload_reset_hooks[i] && free_slot < 0 )
+			free_slot = i;
+	}
+	if( free_slot >= 0 )
+		gc_mapload_reset_hooks[free_slot] = hook;
+}
+
+/* Run once and forget: each owner registers again with its next claim. */
+static void GC_RunMapArenaResetHook( void )
+{
+	int i;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		void (*hook)( void ) = gc_mapload_reset_hooks[i];
+
+		gc_mapload_reset_hooks[i] = NULL;
+		if( hook )
+			hook();
+	}
+}
+
 void *GC_BorrowMapLoadBuffer( size_t size )
 {
 	if( size == 0 )
 		return NULL;
+	GC_RunMapArenaResetHook();
 	gc_mapload_world_settled = false;
 	/* Entity private objects may still point into this map's arena. */
 	if( SV_GCPrivateOverflowPinsMapArena() )
@@ -1396,11 +1432,16 @@ static size_t gc_texreg_live;
  * return the size a map load may use. */
 size_t GC_TexRegionNoteArena( byte *base, size_t capacity )
 {
+	/* Blocks are carved down from the top in 32-byte multiples behind a 32-byte header, so their data is
+	 * 32-aligned only when the top is: an arena ending 8 past a boundary put a carried rifle's CMPR skin at
+	 * +8, GX drew it as 16-bit texels (striped red, white and green guns). */
+	const uintptr_t top = ((uintptr_t)base + capacity ) & ~(uintptr_t)31u;
+
 	gc_texreg_base = base;
-	gc_texreg_cap = capacity;
-	if( gc_texreg_bytes > capacity )
+	gc_texreg_cap = top > (uintptr_t)base ? (size_t)( top - (uintptr_t)base ) : 0;
+	if( gc_texreg_bytes > gc_texreg_cap )
 		gc_texreg_bytes = 0;
-	return capacity - gc_texreg_bytes;
+	return gc_texreg_cap - gc_texreg_bytes;
 }
 
 qboolean GC_TexRegionOwns( const void *p )
@@ -1670,6 +1711,7 @@ void GC_DiscardMapLoadBuffer( void )
 	if( gc_mapload_buf_in_use )
 		return;
 
+	GC_RunMapArenaResetHook();
 	if( gc_mapload_buf )
 	{
 		if( R_GCReleaseMapLoadStaticArena( gc_mapload_buf ))

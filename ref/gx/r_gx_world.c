@@ -551,7 +551,13 @@ static void R_GXReserveHudPool( void )
 	/* A DoD match draws only the retail HUD (ammo/health icons, shrunk to 64x64 on upload): slabs of 128x128 held
 	 * 96 KB of heap for it. 64x64 slabs are 24 KB; a bigger sprite grows its slot from the bounded on-demand
 	 * share (R_GXHudAllocBacking), as before. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Any DoD match (a world is loaded), not only -gclistenserver: a match started from the menu has no such
+	 * switch and held 98 KB here. The menu itself, with no world, keeps full slabs for its chrome. */
+	const size_t dim = ( WORLDMODEL || gEngfuncs.Sys_CheckParm( "-gclistenserver" )) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+#else
 	const size_t dim = gEngfuncs.Sys_CheckParm( "-gclistenserver" ) ? 64u : (size_t)GC_GX_TEX_MAX_DIM;
+#endif
 	const size_t bytes = dim * dim * sizeof( u16 );
 
 	if( r_gx_hud_pool_ready )
@@ -670,12 +676,22 @@ int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, c
 	return handle;
 }
 
+static qboolean R_GXHudHiArena( void );
+
 void R_GXHudHiSetTexnum( int handle, int texnum )
 {
 	if( !r_hudhi_ready || handle < 0 )
 		return;
 	GC_HudHiSetTexnum( &r_hudhi, handle, texnum );
 	r_hudhi_sheets++;
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Day of Defeat takes the cell arena from the heap. Taken at the first
+	 * HUD draw it came after a full server had spent the heap (caen with
+	 * twelve bots: 1 to 4 KB free), every cell was refused and the HUD was
+	 * drawn from the 32 px fallback copies. Take it with the first sheet,
+	 * while the HUD loads. */
+	(void)R_GXHudHiArena();
+#endif
 }
 
 void R_GXHudHiBeginFrame( void )
@@ -873,9 +889,14 @@ static gc_gx_tex_t *R_GXHudHiBind( int texnum, float *s1, float *t1, float *s2, 
  * Soft imagepool empties alone leave these memalign() blocks on the tip and the
  * first pfnAddCommand (19-byte BaseCmd name) then Sys_Errors.
  */
+static void R_GXCmprExtDrop( void );
+
 void R_GXReleaseHudPoolForMapLoad( void )
 {
 	int i;
+
+	/* The heap texture slots too: the next map's load needs the heap, and takes its own after it. */
+	R_GXCmprExtDrop();
 
 	/* Reserved slabs and on-demand HUD slots (boot arena or heap; free()
 	 * releases either) — all before the map load takes the arena back. */
@@ -1985,22 +2006,41 @@ static gc_gx_tex_t *R_GXNativeTexture( image_t *img, unsigned texnum )
 	if( img->gc_gx_cmpr && img->pixels[0] && !((uintptr_t)img->pixels[0] & 31 ))
 	{
 		const qboolean alpha = img->gc_gx_native_alpha ? true : false;
+		const pixel_t *cmpr_pixels = img->pixels[0];
+		int cmpr_w = img->width, cmpr_h = img->height;
 
-		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
-			|| r_gx_native_bound_pixels != img->pixels[0] )
+		/* A body skin with its full texels in the ARAM skin stream (R_GXSkinAttachCmpr) draws them while they are in
+		 * the window, the resident low mip until then. The stream holds CMPR as a byte surface: height is doubled back. */
+		if( img->gc_skin_handle )
 		{
-			r_gx_native_bound_pixels = img->pixels[0];
+			int sw = 0, sh = 0;
+			qboolean salpha = false, promoted = false;
+			const void *sp = R_GXSkinGet( img, &sw, &sh, &salpha, &promoted );
+
+			if( sp )
+			{
+				cmpr_pixels = (const pixel_t *)sp;
+				cmpr_w = sw;
+				cmpr_h = sh * 2;
+			}
+			if( promoted )
+				r_gx_bound_texnum = 0;
+		}
+		if( r_gx_bound_texnum != texnum || r_gx_bound_fmt != GX_TF_CMPR
+			|| r_gx_native_bound_pixels != cmpr_pixels )
+		{
+			r_gx_native_bound_pixels = cmpr_pixels;
 			/* Sprite frames are whole pictures: wrapped, the linear filter
 			 * pulled the opposite edge in as a thin line. */
 			const u8 wrap = Q_stristr( img->name, "sprites/" ) ? GX_CLAMP : GX_REPEAT;
 
-			GX_InitTexObj( &t->obj, img->pixels[0], (u16)img->width, (u16)img->height,
+			GX_InitTexObj( &t->obj, (void *)cmpr_pixels, (u16)cmpr_w, (u16)cmpr_h,
 				GX_TF_CMPR, wrap, wrap, GX_FALSE );
 			/* Cut-outs sample NEAREST under the alpha test, like RGB5A3 skins. */
 			GX_InitTexObjFilterMode( &t->obj, alpha ? GX_NEAR : GX_LINEAR, alpha ? GX_NEAR : GX_LINEAR );
 			t->texnum = texnum;
-			t->w = img->width;
-			t->h = img->height;
+			t->w = cmpr_w;
+			t->h = cmpr_h;
 			t->fmt = GX_TF_CMPR;
 			t->valid = true;
 			GX_LoadTexObj( &t->obj, GX_TEXMAP0 );
@@ -2413,6 +2453,17 @@ qboolean R_GCHotWindowIsDurable( void )
 	return r_gx_hot_is_durable && r_gx_hot.base != NULL && r_gx_hot.size > 0;
 }
 
+/* What a late taker of heap must leave behind. A match with twelve bots runs
+ * with under 20 KiB free; a HUD sheet or a hot window that takes the rest
+ * leaves nothing for the next message or sound. Below the floor the caller
+ * reuses or evicts what it already has. */
+#define GC_GX_LATE_HEAP_FLOOR ( 48u * 1024u )
+
+static qboolean R_GXLateHeapRoom( size_t need )
+{
+	return GC_MemHeapFreeBytes() >= need + GC_GX_LATE_HEAP_FLOOR;
+}
+
 void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 {
 	static qboolean alloc_failed;
@@ -2425,7 +2476,9 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 		want = 96u * 1024u;
 	want = ( want + 31u ) & ~31u;
 
-	if( r_gx_durable_hot && r_gx_durable_hot_size >= want )
+	/* A smaller window than asked is kept: growing it meant a free and a new
+	 * block on every world frame, and every chain in it streamed in again. */
+	if( r_gx_durable_hot )
 	{
 		/* This is called every world frame. Preserve queued/resident chains
 		 * until map loading switches the active window. */
@@ -2436,15 +2489,9 @@ void R_GCEnsureDurableHotWindow( unsigned prefer_bytes )
 	/* Tip is gone after WorldDL+studios — don't memalign-spam every frame. */
 	if( alloc_failed )
 		return;
-	if( r_gx_durable_hot )
-	{
-		free( r_gx_durable_hot );
-		r_gx_durable_hot = NULL;
-		r_gx_durable_hot_size = 0;
-	}
 	for( try_sz = want; try_sz >= 32u * 1024u; try_sz = ( try_sz > 48u * 1024u ) ? ( try_sz - 16u * 1024u ) : 0 )
 	{
-		r_gx_durable_hot = (byte *)memalign( 32, try_sz );
+		r_gx_durable_hot = R_GXLateHeapRoom( try_sz ) ? (byte *)memalign( 32, try_sz ) : NULL;
 		if( r_gx_durable_hot )
 		{
 			r_gx_durable_hot_size = try_sz;
@@ -2716,16 +2763,43 @@ static qboolean r_gx_cmpr_use_big;
  * textures at 256x256); world textures keep to the near pool and hot window. */
 static qboolean r_gx_cmpr_big_for_props;
 
+/* More near slots in heap blocks of their own (R_GXCmprExtAdopt): the last r_gx_cmpr_ext_n near slots.
+ * The blocks are GC_CMPR_EXT_CHUNK slots each: dod_avalanche had 795 KB of heap free and no 256 KiB run in it. */
+#define GC_CMPR_EXT_CHUNK  8
+#define GC_CMPR_EXT_CHUNKS 8
+static byte *r_gx_cmpr_ext_base[GC_CMPR_EXT_CHUNKS];
+static int r_gx_cmpr_ext_n;
+/* No arena or cache-tail slots at all (dod_caen, a second visit to dod_avalanche): every slot is a heap one. */
+static qboolean r_gx_cmpr_ext_only;
+
 static byte *R_GXCmprSlotPtr( int i )
 {
 	const int near_n = r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	const int base_n = near_n - r_gx_cmpr_ext_n;
 
 	if( r_gx_cmpr_big_n && i >= r_gx_cmpr_nslots - r_gx_cmpr_big_n )
 		return r_gx_cmpr_big_base + (size_t)( i - ( r_gx_cmpr_nslots - r_gx_cmpr_big_n )) * r_gx_cmpr_big_cap;
-	if( i < near_n )
+	if( i < base_n )
 		return r_gx_cmpr_bounce + (size_t)i * r_gx_cmpr_bounce_cap;
-	return r_gx_cmpr_bounce + (size_t)near_n * r_gx_cmpr_bounce_cap
+	if( i < near_n )
+		return r_gx_cmpr_ext_base[( i - base_n ) / GC_CMPR_EXT_CHUNK]
+			+ (size_t)(( i - base_n ) % GC_CMPR_EXT_CHUNK ) * r_gx_cmpr_bounce_cap;
+	return r_gx_cmpr_bounce + (size_t)base_n * r_gx_cmpr_bounce_cap
 		+ (size_t)( i - near_n ) * r_gx_cmpr_far_cap;
+}
+
+/* The heap block goes back whenever the slot layout is rebuilt. Callers have run GX_DrawDone. */
+static void R_GXCmprExtFree( void )
+{
+	int i;
+
+	for( i = 0; i < GC_CMPR_EXT_CHUNKS; i++ )
+	{
+		if( r_gx_cmpr_ext_base[i] )
+			free( r_gx_cmpr_ext_base[i] );
+		r_gx_cmpr_ext_base[i] = NULL;
+	}
+	r_gx_cmpr_ext_n = 0;
 }
 
 void R_GXCmprSetFar( qboolean far_pool )
@@ -2787,6 +2861,8 @@ static void R_GXCmprDropStaleAdopted( void )
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce: %d adopted slots belonged to the previous map, dropped\n",
 		r_gx_cmpr_nslots );
 	r_gx_cmpr_adopted = false;
+	r_gx_cmpr_ext_only = false;
+	R_GXCmprExtFree();
 	r_gx_cmpr_bounce = NULL;
 	r_gx_cmpr_nslots = 0;
 	r_gx_cmpr_bounce_cap = 0;
@@ -2879,6 +2955,8 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	if( nslots + far_n > GC_CMPR_SLOTS_MAX )
 		return;
 	GX_DrawDone();
+	R_GXCmprExtFree();
+	r_gx_cmpr_ext_only = false;
 	r_gx_cmpr_adopted = true;
 	r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
 	r_gx_cmpr_bounce = base;
@@ -2897,6 +2975,111 @@ void R_GXCmprBounceAdopt( byte *base, int nslots, unsigned slot_bytes, int far_n
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR ARAM bounce adopted %d x %u + %d x %u bytes = %u Kb (map arena)\n",
 		nslots, slot_bytes, far_n, far_bytes,
 		( nslots * slot_bytes + far_n * far_bytes ) / 1024u );
+}
+
+/* Give the heap slots back and keep the rest of the layout (before a map load). */
+static void R_GXCmprExtDrop( void )
+{
+	if( !r_gx_cmpr_ext_n )
+		return;
+	GX_DrawDone();
+	r_gx_cmpr_nslots -= r_gx_cmpr_ext_n;
+	R_GXCmprExtFree();
+	if( r_gx_cmpr_ext_only )
+	{
+		/* r_gx_cmpr_bounce pointed into the first block: nothing is left, the next bind starts over */
+		r_gx_cmpr_ext_only = false;
+		r_gx_cmpr_adopted = false;
+		r_gx_cmpr_bounce = NULL;
+		r_gx_cmpr_nslots = 0;
+		r_gx_cmpr_bounce_cap = 0;
+	}
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+}
+
+/* After R_GXCmprBounceAdopt (and R_GXCmprBigAdopt): more near slots from the heap, up to want_near in all, while
+ * heap_floor bytes stay free. dod_avalanche gets 11 slots from its chunk cache's tail and binds 25 to 53 textures
+ * a frame: every bind was an ARAM read (3 to 6 ms a frame) while 500 KB of heap sat idle. A map that adopted
+ * nothing (slot_bytes says how large a slot is then) gets all its slots this way. Returns slots added. */
+int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor )
+{
+	extern size_t GC_MemHeapFreeBytes( void );
+	const size_t heap = GC_MemHeapFreeBytes();
+	qboolean only = false;
+	int near_n, n, got = 0, c;
+
+	R_GXCmprDropStaleAdopted();
+	if( r_gx_cmpr_ext_n )
+		return 0;
+	if( !r_gx_cmpr_bounce && !r_gx_cmpr_nslots && slot_bytes >= 4096u && !( slot_bytes & 31u ))
+		only = true;
+	else if( !r_gx_cmpr_adopted || !r_gx_cmpr_bounce || r_gx_cmpr_bounce_cap < 4096u )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: none from the heap (%d slots of %u bytes not adopted)\n",
+			r_gx_cmpr_nslots, r_gx_cmpr_bounce_cap );
+		return 0;
+	}
+	else
+		slot_bytes = r_gx_cmpr_bounce_cap;
+	near_n = only ? 0 : r_gx_cmpr_nslots - r_gx_cmpr_far_n - r_gx_cmpr_big_n;
+	n = want_near - near_n;
+	if( n > GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots )
+		n = GC_CMPR_SLOTS_MAX - r_gx_cmpr_nslots;
+	if( n > GC_CMPR_EXT_CHUNK * GC_CMPR_EXT_CHUNKS )
+		n = GC_CMPR_EXT_CHUNK * GC_CMPR_EXT_CHUNKS;
+	if( heap <= heap_floor )
+		n = 0;
+	else if( (size_t)n > ( heap - heap_floor ) / slot_bytes )
+		n = (int)(( heap - heap_floor ) / slot_bytes );
+	/* whole blocks, so that slot i is always in block i / GC_CMPR_EXT_CHUNK */
+	for( c = 0; c < GC_CMPR_EXT_CHUNKS && n - got >= GC_CMPR_EXT_CHUNK; c++ )
+	{
+		r_gx_cmpr_ext_base[c] = (byte *)memalign( 32, (size_t)GC_CMPR_EXT_CHUNK * slot_bytes );
+		if( !r_gx_cmpr_ext_base[c] )
+			break;
+		got += GC_CMPR_EXT_CHUNK;
+	}
+	/* and what is left of the request in a last, shorter one */
+	if( c < GC_CMPR_EXT_CHUNKS && n - got >= 2 && n - got < GC_CMPR_EXT_CHUNK )
+	{
+		r_gx_cmpr_ext_base[c] = (byte *)memalign( 32, (size_t)( n - got ) * slot_bytes );
+		if( r_gx_cmpr_ext_base[c] )
+			got = n;
+	}
+	if( !got )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: none from the heap (%d near slots, wanted %d more x %u bytes, heap %u Kb, floor %u Kb)\n",
+			near_n, n, slot_bytes, (unsigned)( heap / 1024u ), (unsigned)( heap_floor / 1024u ));
+		return 0;
+	}
+	GX_DrawDone();
+	if( only )
+	{
+		r_gx_cmpr_ext_only = true;
+		r_gx_cmpr_adopted = true;
+		r_gx_cmpr_adopt_gen = Mod_GCWorldArraySpillGeneration();
+		r_gx_cmpr_bounce = r_gx_cmpr_ext_base[0];	/* never indexed: there are no base slots */
+		r_gx_cmpr_bounce_cap = slot_bytes;
+		r_gx_cmpr_far_n = 0;
+		r_gx_cmpr_far_cap = 0;
+		r_gx_cmpr_want_far = false;
+		r_gx_cmpr_big_n = 0;
+		r_gx_cmpr_big_cap = 0;
+		r_gx_cmpr_big_base = NULL;
+	}
+	r_gx_cmpr_ext_n = got;
+	r_gx_cmpr_nslots += got;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: %d more x %u bytes from the heap (%u Kb, heap was %u Kb), %d near slots\n",
+		got, slot_bytes, (unsigned)( (size_t)got * slot_bytes / 1024u ), (unsigned)( heap / 1024u ),
+		near_n + got );
+	return got;
 }
 
 /* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
@@ -2935,6 +3118,7 @@ void R_GXPreallocCmprBounce( void )
 /* r_gx_cmpr_clock at the start of the frame: a slot used after it is in
  * this frame's picture. */
 static unsigned r_gx_cmpr_frame_clock;
+static unsigned r_gx_cmpr_prev_frame_clock;	/* the same, one frame earlier */
 static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int *slot_out )
 {
 	extern void GC_AramTransfer( unsigned int aram, void *buf, unsigned int len, qboolean write );
@@ -2958,6 +3142,36 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 			return R_GXCmprSlotPtr( i );
 		}
 	}
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* A frame binds its textures in nearly the same order as the last one. With fewer slots than a view has
+	 * textures, least-recently-used then evicts exactly the texture needed next and every bind misses (avalanche:
+	 * 11 slots, 32 binds, 0 hits). Taking instead the slot whose texture comes up again last keeps all but one
+	 * slot hitting: first a slot the last frame did not use at all (oldest), then the one last frame used latest
+	 * that this frame has not reached, then the one this frame used latest. */
+	{
+		int cls = -1;
+
+		for( i = lo; i < hi; i++ )
+		{
+			const unsigned u = r_gx_cmpr_slot[i].used;
+			const int c = u <= r_gx_cmpr_prev_frame_clock ? 2 : u <= r_gx_cmpr_frame_clock ? 1 : 0;
+
+			if( !r_gx_cmpr_slot[i].valid )
+			{
+				pick = i;
+				break;
+			}
+			if( i == r_gx_cmpr_cur_slot && hi - lo > 1 )
+				continue;
+			if( pick < 0 || c > cls
+				|| ( c == cls && ( c == 2 ? u < r_gx_cmpr_slot[pick].used : u > r_gx_cmpr_slot[pick].used )))
+			{
+				pick = i;
+				cls = c;
+			}
+		}
+	}
+#else
 	for( i = lo; i < hi; i++ )
 	{
 		if( !r_gx_cmpr_slot[i].valid )
@@ -2968,6 +3182,7 @@ static byte *R_GXCmprSlotFor( unsigned aram, unsigned skip, unsigned bytes, int 
 		if( pick < 0 || r_gx_cmpr_slot[i].used < r_gx_cmpr_slot[pick].used )
 			pick = i;
 	}
+#endif
 	/* Every far slot is already in this frame's picture: taking one would
 	 * be taken back next frame. From inside the Lost Coast wreck the water
 	 * mirror, the far chunks and the far props want about 200 far chains
@@ -3274,7 +3489,8 @@ static u16 *R_GXHudAllocBacking( size_t need, size_t *heap_bytes )
 	u16 *neu = (u16 *)GC_BootArenaAlloc( need );
 
 	*heap_bytes = 0;
-	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET )
+	if( !neu && r_gx_hud_ondemand_heap + need <= GC_GX_TEX_HUD_HEAP_BUDGET
+		&& R_GXLateHeapRoom( need ))
 	{
 		neu = (u16 *)memalign( 32, need );
 		if( neu )
@@ -3432,8 +3648,51 @@ static int R_GXHudPickSlot( const image_t *img, size_t need )
 	return -1;
 }
 
+/* The missing-texture checker (pink/black, 4-texel cells): an 8x8 RGB565 GX texture built here, so a stub never depends on the
+ * generic texture upload.  RGB565 is stored in 4x4-texel tiles, row-major: tiles 0..3 = black, pink, pink, black. */
+static u16 r_gx_checker_pix[64] __attribute__(( aligned( 32 )));
+static gc_gx_tex_t r_gx_checker;
+
+static gc_gx_tex_t *R_GXBindChecker( void )
+{
+	if( !r_gx_checker.valid )
+	{
+		int tile, i;
+
+		for( tile = 0; tile < 4; tile++ )
+			for( i = 0; i < 16; i++ )
+				r_gx_checker_pix[tile * 16 + i] = (( tile == 1 || tile == 2 ) ? 0xF81F : 0x0000 );
+		DCFlushRange( r_gx_checker_pix, sizeof( r_gx_checker_pix ));
+		GX_InitTexObj( &r_gx_checker.obj, r_gx_checker_pix, 8, 8, GX_TF_RGB565, GX_REPEAT, GX_REPEAT, GX_FALSE );
+		GX_InitTexObjFilterMode( &r_gx_checker.obj, GX_NEAR, GX_NEAR );
+		r_gx_checker.fmt = GX_TF_RGB565;
+		r_gx_checker.w = r_gx_checker.h = 8;
+		r_gx_checker.tiled = r_gx_checker_pix;
+		r_gx_checker.valid = true;
+	}
+	GX_LoadTexObj( &r_gx_checker.obj, GX_TEXMAP0 );
+	r_gx_bound_texnum = 0xFFFFFFF0u;	/* never equals a real texnum: the next bind reloads its own object */
+	return &r_gx_checker;
+}
+
+qboolean R_GXWorldDLBindChecker( void )
+{
+	return R_GXBindChecker() != NULL;
+}
+
 static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 {
+	/* The engine's "*default" texture (what every stub points at) is the checker. */
+	/* The engine's "*default" texture (what every stub points at) is the checker.  Matched by name: the image can exist
+	 * without tr.defaultTexture ever being set in this renderer. */
+	if( texnum && texnum < (unsigned)MAX_TEXTURES && !hud_bind )
+	{
+		const image_t *dimg = R_GetTexture( texnum );
+
+		if( dimg && !Q_strcmp( dimg->name, REF_DEFAULT_TEXTURE ))
+			return R_GXBindChecker();
+	}
+
 	image_t *img;
 	int i, slot, victim, src_w, src_h, dst_w, dst_h;
 	int x, y, step_x, step_y;
@@ -6106,6 +6365,15 @@ qboolean R_GXWorldDLBindTex( unsigned texnum )
 	return R_GXBindTexnum( texnum, false ) != NULL;
 }
 
+/* A packed world texture that carries a cut-out mask ('{' textures: fences,
+ * lattices, netting). */
+qboolean R_GXTexnumMasked( unsigned texnum )
+{
+	const image_t *img = R_GetTexture( texnum );
+
+	return img && img->gc_packed && img->gc_packed_alpha;
+}
+
 /* Harbor props (media/gp_d2_lostcoast.gcp). The mesh lives in ARAM.
  * A frame draws the instances nearest the eye, flat-shaded, so the
  * boats read as one surface under the tight bloom. */
@@ -6189,6 +6457,18 @@ static qboolean gc_prop_far_tried;
 static byte *gc_prop_cache;
 static u32 gc_prop_cache_size, gc_prop_cache_head;
 static qboolean gc_prop_cache_tried;
+/* Set when the cache is a heap block (a DoD map whose world-array spill had
+ * no room for it); every place that forgets the cache frees it first. */
+static byte *gc_prop_cache_heap;
+
+static void R_GXPropCacheHeapFree( void )
+{
+	if( !gc_prop_cache_heap )
+		return;
+	GX_DrawDone();	/* the GP may still be reading lists in it */
+	free( gc_prop_cache_heap );
+	gc_prop_cache_heap = NULL;
+}
 static int gc_prop_cache_generation = -1;
 static s32 gc_prop_cache_ofs[GC_PROP_MAX_MODELS];
 static u32 gc_prop_cache_used[GC_PROP_MAX_MODELS];
@@ -6355,6 +6635,7 @@ static void R_GXPropMapCheck( void )
 				|| Mod_GCWorldArraySpillUsed() < gc_prop_spill_mark ))))
 		{
 			GX_DrawDone();
+			R_GXPropCacheHeapFree();
 			gc_prop_cache = NULL;
 			gc_prop_cache_size = gc_prop_cache_head = 0;
 			gc_prop_cache_tried = false;
@@ -6385,6 +6666,7 @@ static void R_GXPropMapCheck( void )
 	gc_prop_nmodels = 0;
 	gc_prop_nhinge = 0;
 	memset( gc_prop_hinge, 0, sizeof( gc_prop_hinge ));
+	R_GXPropCacheHeapFree();
 	gc_prop_cache = NULL;
 	gc_prop_cache_size = gc_prop_cache_head = 0;
 	gc_prop_cache_tried = false;
@@ -6936,6 +7218,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 		if( gc_prop_cache )
 			GX_DrawDone();
 		gc_prop_cache_generation = generation;
+		R_GXPropCacheHeapFree();
 		gc_prop_cache = NULL;
 		gc_prop_cache_size = gc_prop_cache_head = 0;
 		gc_prop_cache_tried = false;
@@ -6998,6 +7281,28 @@ static byte *R_GXPropCacheGet( unsigned model )
 				gc_prop_cache_size = try_sz;
 				gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
 				gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
+			}
+			/* No room in the spill (dod_caen: 48 KB free against 106 KB of
+			 * chains, so every chain was read from ARAM each frame, 62
+			 * reads): take the whole cache from the heap when that leaves
+			 * it 320 KiB. The spill mark and generation still tell when
+			 * the map goes; the block is freed there. */
+			if( !gc_prop_cache && all >= 8u * 1024u )
+			{
+				extern size_t GC_MemHeapFreeBytes( void );
+				extern size_t Mod_GCWorldArraySpillUsed( void );
+
+				if( GC_MemHeapFreeBytes() >= (size_t)all + 320u * 1024u )
+					gc_prop_cache_heap = (byte *)memalign( 32, all );
+				if( gc_prop_cache_heap )
+				{
+					gc_prop_cache = gc_prop_cache_heap;
+					gc_prop_cache_size = all;
+					gc_prop_spill_mark = Mod_GCWorldArraySpillUsed();
+					gc_prop_spill_gen = Mod_GCWorldArraySpillGeneration();
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb from heap (heap free %u Kb)\n",
+						all / 1024u, (unsigned)( GC_MemHeapFreeBytes() / 1024u ));
+				}
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop chain cache %u Kb of %u Kb (spill, %u Kb free)\n",
 				gc_prop_cache_size / 1024u, all / 1024u, (unsigned)( room / 1024u ));
@@ -9716,6 +10021,7 @@ static void R_GXWaterMirrorPass( void )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	r_gx_cmpr_prev_frame_clock = r_gx_cmpr_frame_clock;
 	r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
 	/* Flythrough stage timing: where the frame goes, every 120 frames. */
 	static u64 st_acc[6], st_last;
@@ -9741,6 +10047,13 @@ static int R_GXDrawWorldDLFrame( void )
 	R_GXPrefetchMapSkybox();
 	R_GXTrace( "durable hot window" );
 	R_GCEnsureDurableHotWindow( 96u * 1024u );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* After a level change the sheets stay registered and the arena was
+	 * released for the load: take it again with the first world frames,
+	 * not at the first HUD draw (asked once a second at most). */
+	if( r_hudhi_ready && r_hudhi_sheets > 0 )
+		(void)R_GXHudHiArena();
+#endif
 	R_GXTrace( "hot service" );
 	R_GXHotService();
 	{
@@ -11399,12 +11712,27 @@ static void R_GXEnsureTriApiLayout( void )
 		GX_SetTevOp( GX_TEVSTAGE0, GX_MODULATE );
 		GX_SetCullMode( GX_CULL_NONE );
 		GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_FALSE );
-		if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
-		else if( vid.rendermode == kRenderTransTexture
-			|| vid.rendermode == kRenderTransAlpha
-			|| vid.rendermode == kRenderTransColor )
-			GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+		/* The same choice as R_GXEffectsTriBegin, darken included. This
+		 * relayout runs at the first emit after the world or a model changed
+		 * the vertex layout, after TriBegin chose the blend: without the
+		 * darken case here every bullet hole (always the first effect batch
+		 * after the world) was drawn with plain alpha blending, its
+		 * darkening map opaque: a black square with a grey star. */
+		{
+			extern qboolean r_gx_effects_darken;
+
+			r_gx_effects_mode = vid.rendermode | ( r_gx_effects_darken ? 0x100 : 0 );
+			if( r_gx_effects_darken ) /* frame * ( 1 - texel * vertex colour ) */
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_ZERO, GX_BL_INVSRCCLR, GX_LO_NOOP );
+			else if( vid.rendermode == kRenderTransAdd || vid.rendermode == kRenderGlow )
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP );
+			else if( vid.rendermode == kRenderTransTexture
+				|| vid.rendermode == kRenderTransAlpha
+				|| vid.rendermode == kRenderTransColor )
+				GX_SetBlendMode( GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP );
+			else
+				r_gx_effects_mode = -1;	/* blend left as it was: let TriBegin set it */
+		}
 	}
 	/* Other draws may have loaded TEXMAP0 too: rebind on the next emit. */
 	r_gx_studio_bound_tex = 0;
@@ -11567,8 +11895,14 @@ void R_GXStudioBindTexnum( unsigned texnum )
 
 		r_gx_studio_bound_tex = texnum;
 		r_gx_studio_pending_tex = texnum;
-		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE. */
-		if( r_gx_studio_viewmodel )
+		/* Viewmodel: gun skins stay opaque RGB565. Hands RGB5A3 need ATE.
+		 * Only while the view model is being drawn: the flag stays set
+		 * after R_GXStudioEnd, and the effects drawn next (bullet holes,
+		 * sprites, particles) bind through here too. Every bind after the
+		 * first of a batch then switched blending off and depth writes on,
+		 * so a bullet hole's darkening map was painted opaque on the wall:
+		 * a black square with a pale star. */
+		if( r_gx_studio_viewmodel && r_gx_studio_active )
 		{
 			image_t *vim = R_GetTexture( texnum );
 			const qboolean hands_ate = ( vim && vim->gc_gx_native_alpha

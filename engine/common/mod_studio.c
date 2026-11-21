@@ -690,6 +690,8 @@ typedef struct
 	unsigned off, len;      /* in the pool, len rounded to 32 */
 	unsigned frame;
 	unsigned ret_len;       /* what Fetch reports for it (the raw block; len also covers an in-place decode margin) */
+	unsigned owner;         /* the bone setup that fetched an animation block (Mod_GCAnimPackNewOwner) */
+	qboolean mesh;          /* a body mesh blob: Flipper reads its display lists until the frame is drawn */
 } gc_animent_t;
 
 static gc_animpack_t gc_animpack[GC_ANIMPACK_MAX];
@@ -699,6 +701,27 @@ static unsigned gc_animpool_size;
 static unsigned gc_animpool_cursor, gc_animpack_clock;
 static qboolean gc_animpool_failed, gc_animpool_in_spill;
 static unsigned gc_animpack_fetch_len; /* bytes of the block the last Fetch returned */
+static unsigned gc_animpack_owner = 1; /* the bone setup running now */
+
+/* A new bone setup starts (r_studio.c R_StudioSetupBones). An animation block is
+ * read by the CPU into bone matrices while its bone setup runs, and never after,
+ * so once the next one starts its room can go to another block. A body mesh blob
+ * stays pinned for the whole frame: Flipper reads its display lists when the
+ * frame is drawn. Before this, animation blocks stayed pinned for the frame too,
+ * and a crowd of film actors each playing its own moves filled the ring; body
+ * meshes fetched after that drew nothing, leaving helmets and gear floating
+ * (ceres ep02 part 1 v2, shot s123). */
+void Mod_GCAnimPackNewOwner( void )
+{
+	if( ++gc_animpack_owner == 0 )
+		gc_animpack_owner = 1;
+}
+
+/* An entry whose room cannot be handed to another block now. */
+static qboolean Mod_GCAnimEntPinned( const gc_animent_t *e, unsigned frame )
+{
+	return e->pack && e->frame == frame && ( e->mesh || e->owner == gc_animpack_owner );
+}
 
 /* The pool is in the studio arena: every arena reset drops it. */
 void Mod_GCAnimPackReset( void )
@@ -924,7 +947,7 @@ static qboolean Mod_GCAnimPackRead( gc_animpack_t *pk, unsigned off, byte *dst, 
 /* LZ4 block decoder. Written for an in-place decode (the compressed bytes sit at the end of the output buffer with
  * (compressed >> 8) + 32 bytes of margin, so the write pointer never passes the read pointer): literals are copied
  * forward a byte at a time, matches are copied forward (overlap is legal). Every length is checked. */
-static qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend )
+qboolean Mod_GCLZ4Decode( const byte *ip, const byte *iend, byte *op, byte *oend )
 {
 	const byte *obase = op;
 
@@ -999,7 +1022,21 @@ static void Mod_GCAnimUnpack( byte *buf, unsigned len )
 	}
 }
 
-static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
+/* Where a sequence goes when the ring has no room left this frame (every
+ * block in its way handed out this frame, or no free entry): a small block
+ * decodes into one of two spares instead of the whole body playing its bind
+ * pose. Two, because one model's bones take its sequence and its gait (or a
+ * blend) at once. Any block that fits; bigger ones still miss. */
+#define GC_ANIMPACK_SPARE ( 8u * 1024u )
+static byte gc_animspare[2][GC_ANIMPACK_SPARE] __attribute__((aligned( 32 )));
+static int gc_animspare_next;
+/* And one for an aim grid (stand/crouch_rifle_aim, about 19 KiB): a film actor
+ * plays one over a small gait sequence, so one big block at a time is enough. */
+#define GC_ANIMPACK_SPARE_BIG ( 20u * 1024u )
+static byte gc_animspare_big[GC_ANIMPACK_SPARE_BIG] __attribute__((aligned( 32 )));
+static const char *gc_animpack_miss;   /* why the last fetch missed, for the bind pose warning */
+
+static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq, qboolean mesh )
 {
 	byte dirbuf[64] __attribute__((aligned( 32 )));
 	const unsigned frame = host.framecount;
@@ -1012,17 +1049,21 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( gc_animent[i].pack == pk && gc_animent[i].seq == seq )
 		{
 			gc_animent[i].frame = frame;
+			gc_animent[i].owner = gc_animpack_owner;
 			gc_animpack_fetch_len = gc_animent[i].ret_len;
 			return gc_animpool + gc_animent[i].off;
 		}
 	}
+	gc_animpack_miss = "no such sequence or no pool";
 	if( seq < 0 || (unsigned)seq >= pk->numseq || !Mod_GCAnimPoolReady( ))
 		return NULL;
 
 	/* Directory entry: 8 bytes at 32 + 8 * seq, never across a 32-byte block. */
 	diroff = GC_ANIMPACK_HDR + 8u * (unsigned)seq;
+	gc_animpack_miss = "directory unreadable";
 	if( !Mod_GCAnimPackRead( pk, diroff & ~31u, dirbuf, 32 ))
 		return NULL;
+	gc_animpack_miss = "bad directory entry or too big for the pool";
 	off = ((unsigned *)( dirbuf + ( diroff & 31u )))[0];
 	size = ((unsigned *)( dirbuf + ( diroff & 31u )))[1];
 	if( pk->version >= 2 && ( size & 0x80000000u ))
@@ -1054,12 +1095,15 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 		if( start + need > gc_animpool_size )
 		{
 			if( wraps++ )
-				return NULL;
+			{
+				gc_animpack_miss = "ring full this frame";
+				goto spare;
+			}
 			start = 0;
 		}
 		for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
 		{
-			if( gc_animent[i].pack && gc_animent[i].frame == frame
+			if( Mod_GCAnimEntPinned( &gc_animent[i], frame )
 				&& gc_animent[i].off < start + need && gc_animent[i].off + gc_animent[i].len > start )
 			{
 				pinned = i;
@@ -1070,7 +1114,10 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 			break;
 		start = gc_animent[pinned].off + gc_animent[pinned].len;
 		if( ++tries > GC_ANIMPACK_ENTRIES )
-			return NULL;
+		{
+			gc_animpack_miss = "ring fragmented this frame";
+			goto spare;
+		}
 	}
 	for( i = 0; i < GC_ANIMPACK_ENTRIES; i++ )
 	{
@@ -1082,14 +1129,17 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 			if( slot < 0 )
 				slot = i;
 		}
-		else if( gc_animent[i].frame != frame
+		else if( !Mod_GCAnimEntPinned( &gc_animent[i], frame )
 			&& ( oldest < 0 || gc_animent[i].frame < gc_animent[oldest].frame ))
 			oldest = i;
 	}
 	if( slot < 0 )
 		slot = oldest;
 	if( slot < 0 )
-		return NULL;
+	{
+		gc_animpack_miss = "every ring entry handed out this frame";
+		goto spare;
+	}
 	if( lz4 )
 	{
 		const unsigned cn = ( comp_len + 31u ) & ~31u;
@@ -1114,10 +1164,56 @@ static void *Mod_GCAnimPackFetch( gc_animpack_t *pk, int seq )
 	gc_animent[slot].off = start;
 	gc_animent[slot].len = need;
 	gc_animent[slot].frame = frame;
+	gc_animent[slot].owner = gc_animpack_owner;
+	gc_animent[slot].mesh = mesh;
 	gc_animent[slot].ret_len = lz4 ? ( raw_len + 31u ) & ~31u : need;
 	gc_animpool_cursor = start + need;
 	gc_animpack_fetch_len = gc_animent[slot].ret_len;
 	return gc_animpool + start;
+
+spare:
+	/* Not kept in the ring: fetched again next frame, when there may be room. A
+	 * mesh blob never goes to a spare: the next fetch would overwrite it before
+	 * Flipper reads its display lists. */
+	if( mesh || need > GC_ANIMPACK_SPARE_BIG )
+		return NULL;
+	{
+		byte *buf;
+
+		if( need > GC_ANIMPACK_SPARE )
+			buf = gc_animspare_big;
+		else
+		{
+			buf = gc_animspare[gc_animspare_next];
+			gc_animspare_next ^= 1;
+		}
+		if( lz4 )
+		{
+			const unsigned cn = ( comp_len + 31u ) & ~31u;
+			byte *cdst = buf + need - cn;
+
+			if( cn > need || !Mod_GCAnimPackRead( pk, off, cdst, cn )
+				|| !Mod_GCLZ4Decode( cdst + 4, cdst + comp_len, buf, buf + raw_len ))
+				return NULL;
+			Mod_GCAnimUnpack( buf, raw_len );
+			memset( buf + raw_len, 0, (( raw_len + 31u ) & ~31u ) - raw_len );
+			gc_animpack_fetch_len = ( raw_len + 31u ) & ~31u;
+		}
+		else
+		{
+			if( !Mod_GCAnimPackRead( pk, off, buf, need ))
+				return NULL;
+			gc_animpack_fetch_len = need;
+		}
+		{
+			static int spare_logs;
+
+			if( spare_logs++ < 8 )
+				Con_Reportf( "Xash3D GameCube: animpack '%s' sequence %d from a spare (%s, %u bytes)\n",
+					pk->name, seq, gc_animpack_miss, need );
+		}
+		return buf;
+	}
 }
 
 /* Animation for a sequence of a split model, or NULL when the model's group
@@ -1139,14 +1235,15 @@ static void *Mod_GCAnimPackGet( studiohdr_t *phdr, mstudioseqdesc_t *pseqdesc )
 	if( Q_stricmp( ext, "gca" ))
 		return NULL;
 
+	gc_animpack_miss = NULL;
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
-		anim = Mod_GCAnimPackFetch( pk, (int)( pseqdesc - (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex )));
+		anim = Mod_GCAnimPackFetch( pk, (int)( pseqdesc - (mstudioseqdesc_t *)((byte *)phdr + phdr->seqindex )), false );
 	if( anim )
 		return anim;
 	if( warned++ < 8 )
-		Con_Reportf( S_WARN "Xash3D GameCube: animpack '%s' sequence '%s' unavailable, bind pose\n",
-			group->name, pseqdesc->label );
+		Con_Reportf( S_WARN "Xash3D GameCube: animpack '%s' sequence '%s' unavailable (%s), bind pose\n",
+			group->name, pseqdesc->label, gc_animpack_miss ? gc_animpack_miss : "pack not open" );
 	if( (size_t)pseqdesc->numblends * phdr->numbones * sizeof( mstudioanim_t ) > sizeof( bindpose ))
 		Host_Error( "%s: no animation for %s\n", __func__, pseqdesc->label );
 	return (void *)bindpose;
@@ -1271,9 +1368,10 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 	if( g <= 0 )
 		return NULL;
 	group = (const mstudioseqgroup_t *)((byte *)phdr + phdr->seqgroupindex ) + g;
+	gc_animpack_miss = NULL;
 	pk = Mod_GCAnimPackOpen( group->name );
 	if( pk )
-		blob = Mod_GCAnimPackFetch( pk, entry );
+		blob = Mod_GCAnimPackFetch( pk, entry, true );
 	if( blob )
 	{
 		/* A blob starts with "GCMB" and every offset the model uses must
@@ -1302,9 +1400,16 @@ byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel )
 			Con_Reportf( "Xash3D GameCube: mesh pack '%s' model '%s' entry %d at %p len %u verts %d norms %d meshes %d\n",
 				group->name, pmodel->name, entry, blob, len, pmodel->numverts, pmodel->numnorms, pmodel->nummesh );
 	}
-	if( !blob && warned++ < 8 )
-		Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame\n",
-			group->name, pmodel->name );
+	if( !blob )
+	{
+		static unsigned drops;
+
+		/* Every drop is a soldier missing his body in that frame: the first few, then every 64th, so a
+		 * capture log shows a crowd that keeps losing bodies (film tools: capture log check). */
+		if( warned++ < 8 || ( ++drops & 63 ) == 0 )
+			Con_Reportf( S_WARN "Xash3D GameCube: mesh pack '%s' model '%s' unavailable this frame (%s; %u dropped so far)\n",
+				group->name, pmodel->name, gc_animpack_miss ? gc_animpack_miss : "pack not open", drops );
+	}
 	return (byte *)blob;
 }
 #endif // XASH_GAMECUBE
@@ -1808,6 +1913,7 @@ static struct
 	const void   *hdr;
 	char         path[MAX_QPATH];
 	size_t       s0;      /* header + texture table + skin table, the file offset of the first pixels */
+	size_t       fsize;   /* whole file on disc: the pixels Mod_StudioValidTextures checks are there, not in memory */
 } gc_texstream;
 
 static void Mod_GCReleaseStudioTexBuf( void *ptr )
@@ -1836,10 +1942,28 @@ static void Mod_GCReleaseStudioTexBuf( void *ptr )
 static qboolean Mod_GCDeferVmSkins( const model_t *mod )
 {
 #if XASH_DODGC_NETWORK
-	return Sys_CheckParm( "-gclistenserver" ) && Q_stristr( mod->name, "models/v_" ) != NULL;
+	/* Every DoD match, not only -gclistenserver: a match started from the menu has no such switch. */
+	return Q_stristr( mod->name, "models/v_" ) != NULL;
 #else
 	return false;
 #endif
+}
+
+/* Bytes of one texture's pixel data in a gc_studio companion: palette indices plus the 768 byte palette, or for a baked
+ * CMPR skin (STUDIO_NF_GC_CMPR) the CMPR blocks, with the half-size low mip behind them for a streamed one. */
+static size_t Mod_GCStudioTexDataBytes( const mstudiotexture_t *t )
+{
+	const size_t w = (size_t)t->width, h = (size_t)t->height;
+
+	if( FBitSet( t->flags, STUDIO_NF_GC_CMPR ))
+	{
+		size_t bytes = (( w + 7u ) / 8u ) * (( h + 7u ) / 8u ) * 32u;
+
+		if( FBitSet( t->flags, STUDIO_NF_GC_CMPR_STREAM ))
+			bytes += (( ( w >> 1 ) + 7u ) / 8u ) * (( ( h >> 1 ) + 7u ) / 8u ) * 32u;
+		return bytes;
+	}
+	return w * h + 768u;
 }
 
 /* Read just the header, texture table and skin table of a big gc_studio companion into the 16 KB scratch and
@@ -1881,6 +2005,7 @@ static qboolean Mod_GCStudioTexStreamHeader( file_t *f, const char *path, fs_off
 	gc_texstream.active = true;
 	gc_texstream.hdr = dst;
 	gc_texstream.s0 = s0;
+	gc_texstream.fsize = (size_t)sz;
 	Q_strncpy( gc_texstream.path, path, sizeof( gc_texstream.path ));
 	gc_studio_tex_scratch_busy = true;
 	if( size_out )
@@ -1986,6 +2111,27 @@ static void *Mod_GCLoadStudioTexFile( const char *modname, fs_offset_t *size_out
 #endif
 
 #if XASH_GAMECUBE
+/* A window set aside for streamed skins on a map whose arena is too tight to
+ * stage one when a weapon is picked up (caen: the studio region's overflow
+ * slices and the packet rings took it, and the rifle drew magenta). Claimed
+ * by SV_GCSizePacketEntities from the map arena; gone with the arena. */
+static byte *gc_skin_window;
+static size_t gc_skin_window_size;
+
+static void Mod_GCDropSkinWindow( void )
+{
+	gc_skin_window = NULL;
+	gc_skin_window_size = 0;
+}
+
+void Mod_GCSetSkinWindow( byte *window, size_t size )
+{
+	gc_skin_window = window;
+	gc_skin_window_size = window ? size : 0;
+	if( window )
+		GC_SetMapArenaResetHook( Mod_GCDropSkinWindow );
+}
+
 /* Upload the textures of a companion header. A streamed one (Mod_GCStudioTexStreamHeader) has no pixels in memory:
  * each texture's pixels are read from the file into one reusable window together with a copy of the header and table
  * (the loader finds the pixels at header + index), the loader is pointed at that single texture, and the resulting
@@ -2010,7 +2156,7 @@ static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
 	table = (mstudiotexture_t *)((byte *)hdr + hdr->textureindex );
 	for( i = 0; i < hdr->numtextures; i++ )
 	{
-		const size_t pix = (size_t)table[i].width * (size_t)table[i].height + 768u;
+		const size_t pix = Mod_GCStudioTexDataBytes( &table[i] );
 
 		if( table[i].width <= 0 || table[i].height <= 0 || pix > 1024u * 1024u )
 			return;
@@ -2018,7 +2164,13 @@ static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
 	}
 	win_size = ( s0 + maxpix + 31u ) & ~31u;
 	f = FS_Open( gc_texstream.path, "rb", false );
-	win = Mod_GCStudioArenaStage( win_size, &prev );
+	if( gc_skin_window && win_size <= gc_skin_window_size )
+	{
+		in_arena = false;
+		win = gc_skin_window;
+	}
+	else
+		win = Mod_GCStudioArenaStage( win_size, &prev );
 	if( !win )
 	{
 		in_arena = false;
@@ -2038,7 +2190,7 @@ static void Mod_GCStudioLoadTextures( model_t *mod, studiohdr_t *hdr )
 	wtex = (mstudiotexture_t *)( win + hdr->textureindex );
 	for( i = 0; i < hdr->numtextures; i++ )
 	{
-		const size_t pix = (size_t)table[i].width * (size_t)table[i].height + 768u;
+		const size_t pix = Mod_GCStudioTexDataBytes( &table[i] );
 
 		if( FS_Seek( f, table[i].index, SEEK_SET ) != 0 || FS_Read( f, win + s0, pix ) != (fs_offset_t)pix )
 		{
@@ -2326,6 +2478,51 @@ MAYBE_UNUSED static qboolean Mod_StudioTexSizes( studiohdr_t *thdr, size_t texsi
 
 /*
 =================
+Mod_StudioValidTextures
+
+=================
+*/
+MAYBE_UNUSED static qboolean Mod_StudioValidTextures( const studiohdr_t *phdr, size_t size )
+{
+	if( phdr->numtextures == 0 )
+		return true;
+
+	if( phdr->numtextures < 0 || phdr->textureindex < 0 )
+		return false;
+
+	if((uint64_t)phdr->textureindex + (uint64_t)phdr->numtextures * sizeof( mstudiotexture_t ) > size )
+		return false;
+
+	const mstudiotexture_t *ptexture = (const mstudiotexture_t *)((const byte *)phdr + phdr->textureindex );
+#if XASH_GAMECUBE
+	/* A streamed gc_studio companion is header-only in memory (its length is s0): its pixels stay in the file and
+	 * are read one texture at a time, so check them against the file size. */
+	const uint64_t pixel_limit = ( gc_texstream.active && (const void *)phdr == gc_texstream.hdr )
+		? (uint64_t)gc_texstream.fsize : (uint64_t)size;
+#else
+	const uint64_t pixel_limit = size;
+#endif
+
+	for( int i = 0; i < phdr->numtextures; i++ )
+	{
+		if( ptexture[i].width < 0 || ptexture[i].height < 0 || ptexture[i].index < 0 )
+			return false;
+
+#if XASH_GAMECUBE
+		/* Baked GX CMPR skins (STUDIO_NF_GC_CMPR) carry CMPR blocks, not palette indices plus a palette. */
+		if((uint64_t)ptexture[i].index + (uint64_t)Mod_GCStudioTexDataBytes( &ptexture[i] ) > pixel_limit )
+			return false;
+#else
+		if((uint64_t)ptexture[i].index + (uint64_t)ptexture[i].width * ptexture[i].height + 768 > pixel_limit )
+			return false;
+#endif
+	}
+
+	return true;
+}
+
+/*
+=================
 Mod_LoadStudioModel
 =================
 */
@@ -2427,6 +2624,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 
 		// NOTE: keep phdr->length + size1 + size2 from wrapping
 		if( thdr != NULL && Mod_StudioTexSizes( thdr, size2_len, &size1, &size2 ) &&
+			Mod_StudioValidTextures( thdr, size2_len ) &&
 			size1 + size2 <= SIZE_MAX - (size_t)phdr->length )
 		{
 			// TODO: Mod_StudioLoadTextures will crash if passed a merged studio model!
@@ -2449,7 +2647,9 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 			memcpy( out, in, size1 + size2 );	// copy textures + skinrefs
 			phdr->length += size1 + size2;
 		}
-		else Con_Printf( S_WARN "%s: %s missing textures file\n", __func__, mod->name );
+		else if( !buffer2 )
+			Con_Printf( S_WARN "%s: %s missing textures file\n", __func__, mod->name );
+		else Con_Printf( S_ERROR "%s: %s has invalid textures, ignoring it\n", __func__, Mod_StudioTexName( mod->name ));
 
 		if( buffer2 )
 #if XASH_GAMECUBE
@@ -2462,6 +2662,14 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 
 	if( !textures_loaded )
 	{
+#if !XASH_DEDICATED
+		if( !Host_IsDedicated( ) && !Mod_StudioValidTextures( phdr, phdr->length ))
+		{
+			Con_Printf( S_ERROR "%s: %s has invalid textures\n", __func__, mod->name );
+			return;
+		}
+#endif
+
 		size_t cache_length = phdr->length;
 
 		// NOTE: don't modify source buffer because it's used for CRC computing
@@ -2521,6 +2729,24 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 
 						if( slot )
 							mod->cache.data = slot;
+					}
+					/* Same for a mesh read into the world-array spill (the DoD
+					 * team bodies, map props): grow it in place by the few KB
+					 * of texture headers, before the skins can take the spill
+					 * tip. The calloc below used to run first and put a second
+					 * copy of the whole mesh on the heap while the spill copy
+					 * stayed pinned: 80 and 88 KB of heap for axis-inf and
+					 * brit-inf on dod_caen, with their spill reserve idle. */
+					else if( Mod_GCIsWorldArraySpillCache( buffer ) && mesh <= buffersize )
+					{
+						byte *slot = (byte *)Mod_GCWorldArraySpillTryGrow(
+							buffer, buffersize, merged, "mapmodel-tmerge" );
+
+						if( slot )
+						{
+							Mod_GCWorldArraySpillPinBase( slot, merged );
+							mod->cache.data = slot;
+						}
 					}
 					Image_GCPurgeDecodeScratch();
 					Mod_GCForceVmChromakeyMasks( thdr );
@@ -2644,8 +2870,11 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				/* A DoD view model read into its studio-region slice stays there. The heap copy below succeeded or
 				 * failed with the heap's state at that moment (caen: v_stick's 57 KB copy fit by 1.3 KB, five such
 				 * copies took 76 KB before the entities spawned, and the entity gate then skipped all 289 func_walls
-				 * at 14 KB free). The slice is pinned either way, so the copy only cost MEM1. */
-				else if( Sys_CheckParm( "-gclistenserver" ) && Q_stristr( mod->name, "/v_" )
+				 * at 14 KB free). The slice is pinned either way, so the copy only cost MEM1.
+				 * A match started from the menu (Create Game) has no -gclistenserver, and there every weapon the
+				 * bots carried took the copy: caen with 12 bots lost 271 KB (v_crowbar, v_mp40, v_enfield) and
+				 * ran at 91 KB free. The route does not matter, only where the file was read. */
+				else if( Q_stristr( mod->name, "/v_" )
 					&& Mod_GCIsStudioBssCache( buffer ) && mesh <= buffersize )
 				{
 					mod->cache.data = NULL; /* taken below, as BSS-resident (G289) */

@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 2420 (batch8 common materials); DumpFrames slower than realtime.
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-560}"
+# Full reel ends ~frame 6900 (batch69 platinum/moss/opal/volcanic); DumpFrames slower than realtime.
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-2300}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -70,8 +70,9 @@ WriteToConsole = True
 WriteToFile = True
 EOF
 
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
-pkill -f dolphin-emu 2>/dev/null || true
+# Stop a prior Material Lab Flatpak dump only (never film / xash-gc-dolphin)
+pkill -f 'org.DolphinEmu.dolphin-emu.*gx-tev-material-lab' 2>/dev/null || true
+pkill -f 'dolphin-emu -e /tmp/gx-tev-material-lab.dol' 2>/dev/null || true
 sleep 1
 
 echo "==> Flatpak Dolphin OpenGL dump (${TIMEOUT_SEC}s)"
@@ -84,10 +85,11 @@ DPID=$!
 # Wait for frames, then stop
 for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
-	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
+	# Dolphin nests under DumpPath/Frames/ on some builds
+	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l || true)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through oled/anodized/frost/holo (~2700 frames)
-	if (( n > 2850 )); then
+	# Full reel through platinum/moss/opal/volcanic (~6900 frames)
+	if (( n > 6900 )); then
 		break
 	fi
 done
@@ -96,9 +98,11 @@ kill "$DPID" 2>/dev/null || true
 sleep 1
 kill -9 "$DPID" 2>/dev/null || true
 wait "$DPID" 2>/dev/null || true
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
+# Only stop our Flatpak Material Lab dump — do not touch xash-gc-dolphin / film
+pkill -f 'org.DolphinEmu.dolphin-emu.*gx-tev-material-lab' 2>/dev/null || true
+pkill -f 'dolphin-emu -e /tmp/gx-tev-material-lab.dol' 2>/dev/null || true
 
-mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' | sort -V)
+mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | sort -V || true)
 echo "==> captured ${#FRAMES[@]} frames"
 if ((${#FRAMES[@]} == 0)); then
 	echo "error: no frames" >&2
@@ -170,7 +174,62 @@ pick 2680 "$OUT_DIR/shots/tungsten-foam.png"
 pick 2750 "$OUT_DIR/shots/algae-glass.png"
 pick 2820 "$OUT_DIR/shots/obsidian-wool.png"
 pick 2890 "$OUT_DIR/shots/topaz-dust.png"
-pick 2960 "$OUT_DIR/shots/rust-hero-end.png"
-pick 2680 "$OUT_DIR/shots/rust-hero-end.png"
+pick 2960 "$OUT_DIR/shots/palladium-foil.png"
+pick 3030 "$OUT_DIR/shots/mycelium-tile.png"
+pick 3100 "$OUT_DIR/shots/sapphire-wool.png"
+pick 3170 "$OUT_DIR/shots/malachite-dust.png"
+pick 3240 "$OUT_DIR/shots/osmium-mesh.png"
+pick 3310 "$OUT_DIR/shots/coral-foam.png"
+pick 3380 "$OUT_DIR/shots/emerald-tile.png"
+pick 3450 "$OUT_DIR/shots/ash-wool.png"
+pick 3520 "$OUT_DIR/shots/niobium-foil.png"
+pick 3590 "$OUT_DIR/shots/lichen-foam.png"
+pick 3660 "$OUT_DIR/shots/amethyst-wool.png"
+pick 3730 "$OUT_DIR/shots/basalt-dust.png"
+pick 3800 "$OUT_DIR/shots/rhenium-mesh.png"
+pick 3870 "$OUT_DIR/shots/kelp-tile.png"
+pick 3940 "$OUT_DIR/shots/citrine-wool.png"
+pick 4010 "$OUT_DIR/shots/slate-foam.png"
+pick 4080 "$OUT_DIR/shots/tantalum-foil.png"
+pick 4150 "$OUT_DIR/shots/seaweed-foam.png"
+pick 4220 "$OUT_DIR/shots/tourmaline-wool.png"
+pick 4290 "$OUT_DIR/shots/pumice-dust.png"
+pick 4360 "$OUT_DIR/shots/molybdenum-mesh.png"
+pick 4430 "$OUT_DIR/shots/fern-foam.png"
+pick 4500 "$OUT_DIR/shots/spinel-tile.png"
+pick 4570 "$OUT_DIR/shots/charcoal-wool.png"
+pick 4640 "$OUT_DIR/shots/hafnium-foil.png"
+pick 4710 "$OUT_DIR/shots/driftwood-tile.png"
+pick 4780 "$OUT_DIR/shots/aquamarine-wool.png"
+pick 4850 "$OUT_DIR/shots/scoria-dust.png"
+pick 4920 "$OUT_DIR/shots/vanadium-foil.png"
+pick 4990 "$OUT_DIR/shots/sedge-foam.png"
+pick 5060 "$OUT_DIR/shots/peridot-wool.png"
+pick 5130 "$OUT_DIR/shots/cinder-dust.png"
+pick 5200 "$OUT_DIR/shots/zirconium-mesh.png"
+pick 5270 "$OUT_DIR/shots/mangrove-tile.png"
+pick 5340 "$OUT_DIR/shots/lapis-wool.png"
+pick 5410 "$OUT_DIR/shots/tuff-dust.png"
+pick 5480 "$OUT_DIR/shots/niobium-mesh.png"
+pick 5550 "$OUT_DIR/shots/reed-foam.png"
+pick 5620 "$OUT_DIR/shots/topaz-wool.png"
+pick 5690 "$OUT_DIR/shots/clinker-dust.png"
+pick 5760 "$OUT_DIR/shots/tungsten-foil.png"
+pick 5830 "$OUT_DIR/shots/seagrass-tile.png"
+pick 5900 "$OUT_DIR/shots/jade-wool.png"
+pick 5970 "$OUT_DIR/shots/pumice-foam.png"
+pick 6040 "$OUT_DIR/shots/rhenium-foil.png"
+pick 6110 "$OUT_DIR/shots/willow-foam.png"
+pick 6180 "$OUT_DIR/shots/garnet-wool.png"
+pick 6250 "$OUT_DIR/shots/ash-tile.png"
+pick 6320 "$OUT_DIR/shots/osmium-foil.png"
+pick 6390 "$OUT_DIR/shots/lichen-tile.png"
+pick 6460 "$OUT_DIR/shots/citrine-foam.png"
+pick 6530 "$OUT_DIR/shots/basalt-wool.png"
+pick 6600 "$OUT_DIR/shots/platinum-foil.png"
+pick 6670 "$OUT_DIR/shots/moss-tile.png"
+pick 6740 "$OUT_DIR/shots/opal-wool.png"
+pick 6810 "$OUT_DIR/shots/volcanic-dust.png"
+pick 6880 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"

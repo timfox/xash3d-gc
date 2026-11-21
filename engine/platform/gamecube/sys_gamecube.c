@@ -265,12 +265,66 @@ platform_orientation_t Platform_GetDisplayOrientation( void )
 	return ORIENTATION_UNKNOWN;
 }
 
+#if defined( __has_include )
+#if __has_include( <tuxedo/ppc/exception.h> )
+#define GC_HAVE_PANIC_FN 1
+#endif
+#endif
+#if defined( GC_HAVE_PANIC_FN )
+#include <tuxedo/ppc/exception.h>
+#include <tuxedo/ppc/context.h>
+
+/* A guest exception used to end in libogc's "press RESET" screen with nothing in the log (the Dolphin host log just stops). Print what
+ * the panic handler knows first: the exception number, pc, lr, the fault address (DAR/DSISR for a data fault) and a walk of the stack, so
+ * the crash can be resolved against the ELF (addr2line) without a debugger. */
+static PPCExcptPanicFn gc_prev_panic;
+
+static void GCube_PanicReport( unsigned exid, PPCContext *ctx )
+{
+	u32 dar, dsisr, sp;
+	int i;
+
+	__asm__ volatile( "mfdsisr %0" : "=r"( dsisr ));
+	__asm__ volatile( "mfdar %0" : "=r"( dar ));
+	SYS_Report( "Xash3D GameCube: PANIC exception %u pc=%08x lr=%08x ctr=%08x msr=%08x dar=%08x dsisr=%08x\n",
+		exid, ctx->pc, ctx->lr, ctx->ctr, ctx->msr, dar, dsisr );
+	SYS_Report( "Xash3D GameCube: PANIC r0-r7 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[0], ctx->gpr[1], ctx->gpr[2], ctx->gpr[3],
+		ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], ctx->gpr[7] );
+	SYS_Report( "Xash3D GameCube: PANIC r8-r15 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[8], ctx->gpr[9], ctx->gpr[10], ctx->gpr[11],
+		ctx->gpr[12], ctx->gpr[13], ctx->gpr[14], ctx->gpr[15] );
+	SYS_Report( "Xash3D GameCube: PANIC r16-r23 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[16], ctx->gpr[17], ctx->gpr[18], ctx->gpr[19],
+		ctx->gpr[20], ctx->gpr[21], ctx->gpr[22], ctx->gpr[23] );
+	SYS_Report( "Xash3D GameCube: PANIC r24-r31 %08x %08x %08x %08x %08x %08x %08x %08x\n", ctx->gpr[24], ctx->gpr[25], ctx->gpr[26], ctx->gpr[27],
+		ctx->gpr[28], ctx->gpr[29], ctx->gpr[30], ctx->gpr[31] );
+	sp = ctx->gpr[1];
+	for( i = 0; i < 32 && sp >= 0x80000000u && sp < 0x81800000u && !( sp & 3 ); i++ )
+	{
+		const u32 back = *(const u32 *)sp;
+		const u32 lr = *(const u32 *)( sp + 4 );
+
+		SYS_Report( "Xash3D GameCube: PANIC frame %d sp=%08x lr=%08x\n", i, sp, lr );
+		if( back <= sp || back >= 0x81800000u )
+			break;
+		sp = back;
+	}
+	if( gc_prev_panic )
+		gc_prev_panic( exid, ctx );
+	for( ;; )
+		;
+}
+#endif
+
+
 
 
 void GCube_EarlyInit( void )
 {
 #if XASH_GAMECUBE
 	/* Probe scripts match this marker as the guest bootstrap heartbeat. */
+#if defined( GC_HAVE_PANIC_FN )
+	gc_prev_panic = PPCExcptCurPanicFn;
+	PPCExcptCurPanicFn = GCube_PanicReport;
+#endif
 	SYS_Report( "Xash3D GameCube: bootstrap\n" );
 #if defined(XASH_GAMECUBE_LIBOGC2) && XASH_GAMECUBE_LIBOGC2
 #if defined(XASH_GAMECUBE_LIBDVM) && XASH_GAMECUBE_LIBDVM
@@ -1663,7 +1717,10 @@ static void GCube_LoadDiscBootOverrides( void )
 			if( ch == '\0' || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' )
 			{
 				gc_capture_configured = true;
-				SYS_Report( "Xash3D GameCube: disc boot override gccapture\n" );
+				/* Film footage never wants the lean HUD (HP, team, ammo over the
+				 * camera player's frames): capture implies nohud. */
+				gc_nohud_configured = true;
+				SYS_Report( "Xash3D GameCube: disc boot override gccapture (and nohud)\n" );
 				continue;
 			}
 		}
