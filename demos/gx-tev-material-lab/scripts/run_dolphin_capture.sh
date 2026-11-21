@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 4100 (batch59 rhenium/kelp/citrine/slate); DumpFrames slower than realtime.
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-1400}"
+# Full reel ends ~frame 4380 (batch60 tantalum/seaweed/tourmaline/pumice); DumpFrames slower than realtime.
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-1500}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -88,8 +88,8 @@ for i in $(seq 1 "$TIMEOUT_SEC"); do
 	# Dolphin nests under DumpPath/Frames/ on some builds
 	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l || true)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through rhenium/kelp/citrine/slate (~4100 frames)
-	if (( n > 4100 )); then
+	# Full reel through tantalum/seaweed/tourmaline/pumice (~4380 frames)
+	if (( n > 4380 )); then
 		break
 	fi
 done
@@ -190,6 +190,10 @@ pick 3800 "$OUT_DIR/shots/rhenium-mesh.png"
 pick 3870 "$OUT_DIR/shots/kelp-tile.png"
 pick 3940 "$OUT_DIR/shots/citrine-wool.png"
 pick 4010 "$OUT_DIR/shots/slate-foam.png"
-pick 4080 "$OUT_DIR/shots/rust-hero-end.png"
+pick 4080 "$OUT_DIR/shots/tantalum-foil.png"
+pick 4150 "$OUT_DIR/shots/seaweed-foam.png"
+pick 4220 "$OUT_DIR/shots/tourmaline-wool.png"
+pick 4290 "$OUT_DIR/shots/pumice-dust.png"
+pick 4360 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"
