@@ -305,6 +305,76 @@ def lm_pack_pages(dims, npages: int, align: int = 1):
 	return [None] * len(dims)
 
 
+LM_SHARE_SPAN = 8	# a chunk's pages are its first page plus the 3-bit page number of a batch
+LM_SHARE_FRESH_Y = 20	# a chunk that does not fit what is left of a page this far down starts a new one
+
+
+class LmSharedPacker:
+	"""Shelf packer over one run of pages for the whole map: chunks are placed in stream order and a chunk
+	starts where the one before it stopped, so neighbouring leaves share a page.  One page a leaf left the
+	pages 12 percent full at the median (dod_charlie: 2091 pages, 388 pages' worth of luxels) and a beach
+	view asked for about 1000 of them, four times what the page store holds."""
+
+	def __init__(self, align: int = 1) -> None:
+		self.align = align
+		self.first = -(-2 // align) * align	# the grey 2x2 at (0,0) of every page
+		self.pg, self.x, self.y, self.rh = 0, self.first, 0, self.first
+		self.used = False	# a cell is on page self.pg
+
+	def _up(self, v: int) -> int:
+		return -(-v // self.align) * self.align
+
+	def _run(self, sizes, state):
+		"""Place sizes (None = no cell) from state; returns (cells, state) with cells as (page, rect)."""
+		pg, x, y, rh = state
+		order = sorted((i for i, sz in enumerate(sizes) if sz), key=lambda i: (-self._up(sizes[i][1]), -self._up(sizes[i][0])))
+		out = [None] * len(sizes)
+		for i in order:
+			w, h = sizes[i]
+			aw, ah = self._up(w), self._up(h)
+			if aw > 32 - self.first or ah > 32:
+				continue
+			while True:
+				if x + aw > 32:
+					x = 0
+					y += rh
+					rh = 0
+				if y + ah <= 32:
+					break
+				pg, x, y, rh = pg + 1, self.first, 0, self.first
+			out[i] = (pg, (x, y, w, h))
+			x += aw
+			rh = max(rh, ah)
+		return out, (pg, x, y, rh)
+
+	def place(self, sizes):
+		"""Cells for one chunk: (first page, [(page - first page, rect) or None per size]).  The pages of a
+		chunk stay within LM_SHARE_SPAN of its first."""
+		if not any(sizes):
+			return 0, [None] * len(sizes)
+		state = (self.pg, self.x, self.y, self.rh)
+		fresh = (self.pg + 1, self.first, 0, self.first) if self.used else state
+		cells, end = self._run(sizes, state)
+		pages = sorted({c[0] for c in cells if c})
+		if pages and self.used and (pages[-1] - pages[0] >= LM_SHARE_SPAN
+				or (pages[-1] > self.pg and self.y + self.rh >= LM_SHARE_FRESH_Y)):
+			# straddling the end of a nearly full page would cost the chunk a second page (and batch) for
+			# a few luxels of room; and a span past the batch field cannot be addressed at all
+			cells, end = self._run(sizes, fresh)
+			pages = sorted({c[0] for c in cells if c})
+		if not pages:
+			return 0, [None] * len(sizes)
+		if pages[-1] - pages[0] >= LM_SHARE_SPAN:
+			# more than a chunk is ever granted (LM_CHUNK_PAGES); drop what lies past the span
+			cells = [c if c and c[0] - pages[0] < LM_SHARE_SPAN else None for c in cells]
+		self.pg, self.x, self.y, self.rh = end
+		self.used = True
+		return pages[0], [(c[0] - pages[0], c[1]) if c else None for c in cells]
+
+	def npages(self) -> int:
+		return self.pg + 1 if self.used else 0
+
+
 def cell_st(cell, u: float, v: float, lw: int, lh: int) -> tuple[float, float]:
 	"""Page UV (0..1) of luxel coordinate (u, v) of an lw x lh face lightmap."""
 	x, y, w, h = cell
@@ -325,6 +395,7 @@ class Chunk:
 		self.tris = 0
 		self.lm_pages: list[LmPage] = []
 		self.lm_keep = False
+		self.lm_shared = False	# lm_pages is a view of the map's shared pages from lm_index on
 		self.lm_index = 0
 		self.pending: list = []
 
@@ -826,13 +897,26 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False, lm_cmpr: bool | None 
 		dims = [(chunks[cl].pending[i][2], chunks[cl].pending[i][3]) for i in lit_of[cl]]
 		needs.append((cl, max(1, lm_pages_needed(dims, lm_align))))
 	lm_grant = lm_grant_pages(needs, LM_PAGES_MAX_CMPR if lm_cmpr else LM_PAGES_MAX)
-	for cl, chunk in chunks.items():
+	# CMPR pages are shared: the cell sizes come from the chunk's own grant as before, their places from one
+	# packer that runs through the chunks in stream order.
+	lm_share = LmSharedPacker(lm_align) if lm_cmpr and os.environ.get("DODGC_WD_LM_SHARE", "") != "0" else None
+	lm_shared_pages: list[LmPage] = []
+	for cl in sorted(chunks):
+		chunk = chunks[cl]
 		lit = lit_of[cl]
 		npages = lm_grant.get(cl, 0)
 		placed = lm_pack_pages([(chunk.pending[i][2], chunk.pending[i][3]) for i in lit], npages, lm_align)
+		if lm_share:
+			chunk.lm_index, placed = lm_share.place([(c[1][2], c[1][3]) if c else None for c in placed])
+			while len(lm_shared_pages) < lm_share.npages():
+				lm_shared_pages.append(LmPage())
+			chunk.lm_pages = lm_shared_pages[chunk.lm_index:]	# page n of the chunk is chunk.lm_pages[n]
+			chunk.lm_keep = any(placed)
+			chunk.lm_shared = True
+		else:
+			chunk.lm_pages = [LmPage() for _ in range(max((c[0] for c in placed if c), default=-1) + 1)]
+			chunk.lm_keep = bool(chunk.lm_pages)
 		cells = dict(zip(lit, placed))
-		chunk.lm_pages = [LmPage() for _ in range(max((c[0] for c in placed if c), default=-1) + 1)]
-		chunk.lm_keep = bool(chunk.lm_pages)
 		for i, (mat, verts, lw, lh, samples) in enumerate(chunk.pending):
 			page, cell = cells.get(i) or (0, None)
 			if cell:
@@ -901,8 +985,12 @@ def bake(map_bsp: Path, out_path: Path, lz4: bool = False, lm_cmpr: bool | None 
 	lm_page_bytes = LM_CMPR_BYTES if lm_cmpr else LM_PAGE_BYTES
 	lm_pages = bytearray()
 	lm_multi = 0
+	for pg in lm_shared_pages:
+		lm_pages += cmpr_page(pg.pix)
 	for cl in order:
-		if chunks[cl].lm_keep:
+		if chunks[cl].lm_keep and chunks[cl].lm_shared:
+			lm_multi += any(page for _mat, page in chunks[cl].batches)
+		elif chunks[cl].lm_keep:
 			chunks[cl].lm_index = len(lm_pages) // lm_page_bytes
 			for pg in chunks[cl].lm_pages:
 				lm_pages += cmpr_page(pg.pix) if lm_cmpr else rgb565_page(pg.pix)
