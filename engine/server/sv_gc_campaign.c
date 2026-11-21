@@ -239,6 +239,50 @@ static void SV_GCProbeCmdFrame( void )
 	Con_Printf( "Xash3D GameCube: probecmd done\n" );
 }
 
+/* Live-map bridge (tools/mapbridge in dod-gc). If the disc carries a fixed-size
+ * slot file "livemap.txt" ("<serial> <mapname>"), poll it about once a second and
+ * run "map <mapname>" when the serial changes. The host rewrites the slot (and
+ * the dod_live.bsp slot before it) inside the ISO in place; Dolphin serves the
+ * image from the host file, so the next DVD read sees the new bytes.
+ * Off by default: set cvar gc_livemap 1 (e.g. in the disc autoexec.cfg). */
+static void SV_GCLiveMapFrame( void )
+{
+	static int last_serial = -1, frames;
+	static double next_poll;
+	char name[64];
+	int serial, n;
+	fs_offset_t len = 0;
+	byte *buf;
+
+	static convar_t *gc_livemap;
+
+	if( !gc_livemap )
+		gc_livemap = Cvar_Get( "gc_livemap", "0", FCVAR_SERVER, "poll livemap.txt on the disc and reload dod_live (mapbridge dev tool)" );
+	if( !gc_livemap->value || host.realtime < next_poll )
+		return;
+	next_poll = host.realtime + ( last_serial < 0 ? 2.0 : 1.0 );
+	buf = FS_LoadFile( "livemap.txt", &len, false );
+	if( !buf )
+		return;
+	name[0] = '\0';
+	n = sscanf(( const char * )buf, "%d %63s", &serial, name );
+	Mem_Free( buf );
+	if( n != 2 || strchr( name, '/' ) || strchr( name, '\\' ))
+		return;
+	if( last_serial < 0 ) /* first poll: adopt the current serial, do not reload */
+	{
+		last_serial = serial;
+		Con_Printf( "Xash3D GameCube: livemap armed serial=%d map=%s\n", serial, name );
+		return;
+	}
+	if( serial == last_serial )
+		return;
+	last_serial = serial;
+	(void)frames;
+	Con_Printf( "Xash3D GameCube: livemap reload serial=%d map=%s\n", serial, name );
+	Cbuf_AddText( va( "map %s\n", name ));
+}
+
 /* Once per server frame while a map is running. */
 void SV_GCCampaignFrame( void )
 {
@@ -248,6 +292,7 @@ void SV_GCCampaignFrame( void )
 	edict_t *player, *trig;
 
 	SV_GCProbeCmdFrame();
+	SV_GCLiveMapFrame();
 
 	{
 		static unsigned calls;
