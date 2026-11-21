@@ -162,5 +162,76 @@ class LmGrantTest(unittest.TestCase):
 		self.assertGreaterEqual(bake.lm_pages_needed(dims, 4), 2)
 
 
+class LmSharedPackerTest(unittest.TestCase):
+	"""Chunks of a map share one run of pages (LmSharedPacker)."""
+
+	def place_all(self, chunks, align=4):
+		pk = bake.LmSharedPacker(align)
+		out = [pk.place(sizes) for sizes in chunks]
+		return pk, out
+
+	def owned(self, rect, align=4):
+		x, y, w, h = rect
+		return (x, y, -(-w // align) * align, -(-h // align) * align)
+
+	def test_neighbouring_chunks_share_a_page(self):
+		pk, out = self.place_all([[(6, 6), (4, 4)], [(8, 5)], [(3, 3), (3, 3), (7, 2)]])
+		self.assertEqual(pk.npages(), 1)
+		self.assertEqual([first for first, _cells in out], [0, 0, 0])
+
+	def test_no_cell_overlaps_another_or_the_grey_corner_across_chunks(self):
+		import random
+		rnd = random.Random(7)
+		chunks = [[(rnd.randint(2, 18), rnd.randint(2, 18)) for _ in range(rnd.randint(1, 9))] for _ in range(120)]
+		pk, out = self.place_all(chunks)
+		by_page = {}
+		for (first, cells), sizes in zip(out, chunks):
+			self.assertEqual(len(cells), len(sizes))
+			for cell, size in zip(cells, sizes):
+				self.assertIsNotNone(cell)
+				delta, rect = cell
+				self.assertTrue(0 <= delta < bake.LM_SHARE_SPAN)
+				self.assertEqual((rect[2], rect[3]), size)
+				self.assertEqual((rect[0] % 4, rect[1] % 4), (0, 0))
+				o = self.owned(rect)
+				self.assertTrue(o[0] + o[2] <= 32 and o[1] + o[3] <= 32)
+				self.assertFalse(overlaps(o, (0, 0, 4, 4)), "cell over the grey corner block")
+				by_page.setdefault(first + delta, []).append(o)
+		self.assertEqual(max(by_page) + 1, pk.npages())
+		for rects in by_page.values():
+			for i, a in enumerate(rects):
+				for b in rects[i + 1:]:
+					self.assertFalse(overlaps(a, b))
+
+	def test_far_fewer_pages_than_one_a_chunk(self):
+		# a hundred leaves of three small faces: a page each before, a handful shared
+		pk, out = self.place_all([[(5, 4), (3, 3), (6, 2)]] * 100)
+		self.assertLess(pk.npages(), 20)
+		self.assertTrue(all(cell for _first, cells in out for cell in cells))
+
+	def test_a_chunk_starts_a_new_page_instead_of_straddling_a_nearly_full_one(self):
+		pk = bake.LmSharedPacker(4)
+		pk.place([(28, 24)])
+		first, cells = pk.place([(12, 12), (12, 12)])
+		self.assertEqual(first, 1)
+		self.assertEqual({c[0] for c in cells}, {0})
+
+	def test_chunk_without_cells_takes_nothing(self):
+		pk = bake.LmSharedPacker(4)
+		self.assertEqual(pk.place([None, None]), (0, [None, None]))
+		self.assertEqual(pk.npages(), 0)
+		first, cells = pk.place([None, (4, 4)])
+		self.assertEqual(first, 0)
+		self.assertIsNone(cells[0])
+		self.assertEqual(cells[1][0], 0)
+
+	def test_a_full_size_chunk_stays_within_the_span(self):
+		pk = bake.LmSharedPacker(4)
+		pk.place([(10, 10)])
+		first, cells = pk.place([(28, 28)] * 4)
+		self.assertTrue(all(c and c[0] < bake.LM_SHARE_SPAN for c in cells))
+		self.assertEqual(len({c[0] for c in cells}), 4)
+
+
 if __name__ == "__main__":
 	unittest.main()
