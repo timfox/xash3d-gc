@@ -24,6 +24,7 @@ on purpose, so tests/mcol_test.c can build it on the host.
 #define MCOL_DIST_EPSILON	0.03125f
 #define MCOL_TOUCH_TOLERANCE	MCOL_DIST_EPSILON	// a start less than this inside one plane only touches it
 #define MCOL_TOUCH_SLACK	( 1.0f / 1024.0f )
+#define MCOL_TIE_FRACTION	1e-5f	// hits this close together count as one; the upward-facing normal wins
 #define MCOL_MAX_STACK		128
 #define MCOL_TERRAIN_SAMPLES	9
 #define MCOL_TERRAIN_DEPTH	16.0f

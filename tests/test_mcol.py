@@ -60,6 +60,14 @@ class McolTests(unittest.TestCase):
         self.assertEqual((down[0], down[1], down[2]), (0.0, (0.0, 0.0, 1.0), 0))
         self.assertEqual(deep[2], 1)
 
+    def test_crease_reports_the_ground(self):
+        # floor at z 0 and a 75-degree face out of it at x 64 (mesh_collision test_crease_reports_the_ground):
+        # a box resting in the crease touches both, and the ground check must see the floor
+        (down,) = self.trace(FIX / "crease.mcol", f"47.97602 0 {36 + EPS} 47.97602 0 {34 + EPS} {PLAYER}")
+        self.assertLess(down[0], 0.01)
+        self.assertEqual(down[1], (0.0, 0.0, 1.0))
+        self.assertEqual(down[2:], (0, 0))
+
     def test_ramp_is_exact(self):
         (drop,) = self.trace(FIX / "ramp.mcol", f"128 0 400 128 0 0 {PLAYER}")
         # the box spans x 112..144, so the ramp's highest point under it carries the feet at 144

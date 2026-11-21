@@ -298,12 +298,31 @@ static void MCol_TraceBrush( const mcol_t *m, mcol_work_t *w, const float *bmins
 		return;
 	}
 
-	if( enter < leave && enter > -1.0f && enter < tr->fraction && clipped )
+	if( enter < leave && enter > -1.0f && clipped )
 	{
-		tr->fraction = enter > 0.0f ? enter : 0.0f;
-		tr->normal[0] = clipn[0];
-		tr->normal[1] = clipn[1];
-		tr->normal[2] = clipn[2];
+		const float f = enter > 0.0f ? enter : 0.0f;
+
+		// two surfaces met at once (a box in the crease of walkable ground and a steep
+		// face): report the more upward-facing one, or the ground check sees only the
+		// face, never lands, and the box wedges there (m6l1a terrain under a rock)
+		if( tr->fraction < 1.0f && fabsf( f - tr->fraction ) <= MCOL_TIE_FRACTION )
+		{
+			if( clipn[2] > tr->normal[2] )
+			{
+				tr->normal[0] = clipn[0];
+				tr->normal[1] = clipn[1];
+				tr->normal[2] = clipn[2];
+			}
+			if( f < tr->fraction )
+				tr->fraction = f;
+		}
+		else if( f < tr->fraction )
+		{
+			tr->fraction = f;
+			tr->normal[0] = clipn[0];
+			tr->normal[1] = clipn[1];
+			tr->normal[2] = clipn[2];
+		}
 	}
 }
 
