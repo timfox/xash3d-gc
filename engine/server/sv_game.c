@@ -2520,7 +2520,11 @@ static qboolean SV_GCLazyLogicCvar( void )
 static qboolean SV_GCLazyEligibleClass( const char *classname )
 {
 	return !Q_strcmp( classname, "trigger_relay" ) || !Q_strcmp( classname, "trigger_changetarget" )
-		|| !Q_strcmp( classname, "info_target" ) || !Q_strcmp( classname, "ambient_generic" );
+		|| !Q_strcmp( classname, "info_target" ) || !Q_strcmp( classname, "ambient_generic" )
+		/* Named effects: explosion sprites, shakes and shooters that a relay or a mortar chain triggers. Their Spawn
+		 * precaches its model late (SV_ModelIndex sends it to the client), and they cost an edict only while they play.
+		 * Lights stay out: a named light's Spawn sets its starting light style, which has to happen at load. */
+		|| !Q_strcmp( classname, "env_sprite" ) || !Q_strcmp( classname, "env_shake" ) || !Q_strcmp( classname, "env_shooter" );
 }
 
 /* The targetname inside one entity block of the lump (text positioned just after its '{'). */
@@ -2545,6 +2549,11 @@ static qboolean SV_GCLazyBlockTargetname( const char *text, char *out, size_t si
 }
 
 typedef struct { const char *name; } sv_lazy_ctx_t;
+
+/* Spawned lazily, by class (the report and the tick print them). */
+static int gc_lazy_class_spawned[7];
+static const char *const gc_lazy_class_names[7] = { "trigger_relay", "trigger_changetarget", "info_target", "ambient_generic",
+	"env_sprite", "env_shake", "env_shooter" };
 
 static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
 {
@@ -2571,6 +2580,17 @@ static int SV_GCLazySpawn( void *ctx, uint32_t ofs, uint32_t len )
 		return -1;
 	}
 	LazyLogic_NoteEdict( ofs, NUM_FOR_EDICT( ent ));
+	{
+		const char *cn = SV_ClassName( ent );
+		int ci;
+
+		for( ci = 0; cn && ci < 7; ci++ )
+			if( !Q_strcmp( cn, gc_lazy_class_names[ci] ))
+			{
+				gc_lazy_class_spawned[ci]++;
+				break;
+			}
+	}
 	r = svgame.dllFuncs.pfnSpawn( ent );
 	if( r == -1 && !FBitSet( ent->v.flags, FL_KILLME ))
 	{
@@ -2598,8 +2618,10 @@ static void SV_GCLazyReport( const char *stage, qboolean detail )
 
 	if( !LazyLogic_Total())
 		return;
-	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, game time %.1f\n",
-		stage, LazyLogic_Total(), LazyLogic_Spawned(), LazyLogic_Pending(), LazyLogic_Failed(), sv.time );
+	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, game time %.1f; spawned by class: relay %d changetarget %d info_target %d ambient %d sprite %d shake %d shooter %d\n",
+		stage, LazyLogic_Total(), LazyLogic_Spawned(), LazyLogic_Pending(), LazyLogic_Failed(), sv.time,
+		gc_lazy_class_spawned[0], gc_lazy_class_spawned[1], gc_lazy_class_spawned[2], gc_lazy_class_spawned[3],
+		gc_lazy_class_spawned[4], gc_lazy_class_spawned[5], gc_lazy_class_spawned[6] );
 	for( i = 0; detail && base && LazyLogic_Entry( i, &ofs, &len, &spawned, &edict ); i++ )
 	{
 		char key[64], value[128], cls[48] = "?", tn[48] = "?";
@@ -7783,6 +7805,7 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 	/* The table is per map load (changelevel, restart, save load all come through here): say how the previous one ended. */
 	SV_GCLazyReport( "previous map table", SV_GCLazyLogAll());
 	LazyLogic_Reset();
+	memset( gc_lazy_class_spawned, 0, sizeof( gc_lazy_class_spawned ));
 	gc_lazy_logs = gc_lazy_fail_logs = gc_lazy_fail_seen = 0;
 	gc_lazy_active = SV_GCLazyLogicCvar() && Sys_CheckParm( "-gcworldrender" );
 #endif
