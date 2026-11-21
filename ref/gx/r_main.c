@@ -942,7 +942,9 @@ static void R_DrawEntitiesOnList( void )
 			|| gEngfuncs.Sys_CheckParm( "-gcworldrender" ));
 	int lean_brushes = 0;
 	int lean_studios = 0;
-	const int lean_max_brushes = gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 48 : 6;
+	/* -gccapture films the map: every brush in view draws (a capture has no frame rate to keep). */
+	const int lean_max_brushes = gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 256
+		: gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 48 : 6;
 	const int lean_max_studios = (int)GC_EntCap( &gc_max_studios, gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 24 : 1 );
 
 	if( GC_UseGxWorldDraw() && gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
@@ -1008,14 +1010,16 @@ static void R_DrawEntitiesOnList( void )
 #if XASH_GAMECUBE
 			/* Lean: brush ents only (tram/doors). Studios deferred — MEM1 /
 			 * TriAPI hangs on early frames (20260807-162747). */
+			/* Cull first, then count: brush ents out of view used to take cap slots, and on a
+			 * 49-brush beach the sea (func_water, listed last) was the one cut in every shot. */
+			if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
+				break;
 			if( lean_ents )
 			{
 				if( lean_brushes >= lean_max_brushes )
 					break;
 				lean_brushes++;
 			}
-			if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
-				break;
 #endif
 			R_DrawBrushModel( RI.currententity );
 			break;
