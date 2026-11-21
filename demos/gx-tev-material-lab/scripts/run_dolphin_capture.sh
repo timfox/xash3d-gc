@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOL_SRC="$ROOT/gx-tev-material-lab.dol"
 OUT_DIR="${1:-/tmp/gx-tev-material-lab-cap}"
-# Full reel ends ~frame 2420 (batch8 common materials); DumpFrames slower than realtime.
-TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-560}"
+# Full reel ends ~frame 3540 (batch57 osmium/coral/emerald/ash); DumpFrames slower than realtime.
+TIMEOUT_SEC="${DOLPHIN_TIMEOUT:-720}"
 
 if [[ ! -f "$DOL_SRC" ]]; then
 	echo "error: missing $DOL_SRC (run make first)" >&2
@@ -70,8 +70,9 @@ WriteToConsole = True
 WriteToFile = True
 EOF
 
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
-pkill -f dolphin-emu 2>/dev/null || true
+# Stop a prior Material Lab Flatpak dump only (never film / xash-gc-dolphin)
+pkill -f 'org.DolphinEmu.dolphin-emu.*gx-tev-material-lab' 2>/dev/null || true
+pkill -f 'dolphin-emu -e /tmp/gx-tev-material-lab.dol' 2>/dev/null || true
 sleep 1
 
 echo "==> Flatpak Dolphin OpenGL dump (${TIMEOUT_SEC}s)"
@@ -84,10 +85,11 @@ DPID=$!
 # Wait for frames, then stop
 for i in $(seq 1 "$TIMEOUT_SEC"); do
 	sleep 1
-	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l)
+	# Dolphin nests under DumpPath/Frames/ on some builds
+	n=$(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | wc -l || true)
 	echo "  t=${i}s frames=${n}"
-	# Full reel through oled/anodized/frost/holo (~2700 frames)
-	if (( n > 2850 )); then
+	# Full reel through osmium/coral/emerald/ash (~3540 frames)
+	if (( n > 3750 )); then
 		break
 	fi
 done
@@ -96,9 +98,11 @@ kill "$DPID" 2>/dev/null || true
 sleep 1
 kill -9 "$DPID" 2>/dev/null || true
 wait "$DPID" 2>/dev/null || true
-pkill -f 'org.DolphinEmu.dolphin-emu' 2>/dev/null || true
+# Only stop our Flatpak Material Lab dump — do not touch xash-gc-dolphin / film
+pkill -f 'org.DolphinEmu.dolphin-emu.*gx-tev-material-lab' 2>/dev/null || true
+pkill -f 'dolphin-emu -e /tmp/gx-tev-material-lab.dol' 2>/dev/null || true
 
-mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' | sort -V)
+mapfile -t FRAMES < <(find "$OUT_DIR/frames" -name 'framedump_*.png' 2>/dev/null | sort -V || true)
 echo "==> captured ${#FRAMES[@]} frames"
 if ((${#FRAMES[@]} == 0)); then
 	echo "error: no frames" >&2
@@ -174,8 +178,10 @@ pick 2960 "$OUT_DIR/shots/palladium-foil.png"
 pick 3030 "$OUT_DIR/shots/mycelium-tile.png"
 pick 3100 "$OUT_DIR/shots/sapphire-wool.png"
 pick 3170 "$OUT_DIR/shots/malachite-dust.png"
-pick 3240 "$OUT_DIR/shots/rust-hero-end.png"
-pick 2960 "$OUT_DIR/shots/rust-hero-end.png"
-pick 2680 "$OUT_DIR/shots/rust-hero-end.png"
+pick 3240 "$OUT_DIR/shots/osmium-mesh.png"
+pick 3310 "$OUT_DIR/shots/coral-foam.png"
+pick 3380 "$OUT_DIR/shots/emerald-tile.png"
+pick 3450 "$OUT_DIR/shots/ash-wool.png"
+pick 3520 "$OUT_DIR/shots/rust-hero-end.png"
 echo "==> proof: $OUT_DIR/shots/full-frame.png"
 ls -la "$OUT_DIR/shots"
