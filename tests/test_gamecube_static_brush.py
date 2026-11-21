@@ -98,6 +98,18 @@ class StaticBrushTest(unittest.TestCase):
 		got = self.pick(ents, {1: "{tension6", 2: "{fence", 3: "{fence", 4: "{fence", 5: "glass", 6: "{fence", 7: "!water"})
 		self.assertEqual(got, [(1, True), (2, False)])
 
+	def test_still_func_water_bakes_but_stays_out_of_the_static_list(self):
+		ents = [
+			{"classname": "func_water", "model": "*1", "WaveHeight": "3.2", "skin": "-3"},
+			{"classname": "func_water", "model": "*2", "targetname": "flood"},
+			{"classname": "func_water", "model": "*3", "origin": "0 0 -40"},
+			{"classname": "func_water", "model": "*4", "rendermode": "2", "renderamt": "120"},
+			{"classname": "func_wall", "model": "*5"},
+		]
+		bsp = FakeBsp(ents, {1: "k_water2b", 2: "k_water2b", 3: "k_water2b", 4: "k_water2b", 5: "wall"})
+		self.assertEqual(self.bake.static_water(bsp), [1])
+		self.assertEqual(self.bake.static_brushes(bsp), [(5, True)])
+
 	def test_list_file(self):
 		with tempfile.TemporaryDirectory() as tmp:
 			out = Path(tmp) / "wd_x_sb.gcd"
