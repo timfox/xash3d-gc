@@ -6699,7 +6699,9 @@ void SV_GCStaticWallsSelfTest( void )
 		}
 		if( !ed )
 		{
-			noedict++;
+			if( noedict++ < 6 )
+				Con_Reportf( "Xash3D GameCube: static wall record %d (model *%d, origin %.0f %.0f %.0f) has no edict (the parity budget skipped its func_wall)\n",
+					i, mi, ( amin[0] + amax[0] ) * 0.5f, ( amin[1] + amax[1] ) * 0.5f, ( amin[2] + amax[2] ) * 0.5f );
 			continue;
 		}
 		for( k = 0; k < 96; k++ )
