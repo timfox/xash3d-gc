@@ -1862,7 +1862,7 @@ typedef struct
 	float	changetime;
 } gc_seqlatch_t;
 
-static gc_seqlatch_t gc_seqlatch[40];
+static gc_seqlatch_t gc_seqlatch[GC_LEAN_STUDIO_MAX + 24];	/* every studio slot: a crowd evicting latches lost its fades */
 
 static void GC_LeanSeqLatch( cl_entity_t *ent, const edict_t *ed, model_t *mod )
 {
@@ -2824,6 +2824,9 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			ent->curstate.framerate = ed->v.framerate != 0.0f ? ed->v.framerate : 1.0f;
 			/* A scripted film actor carries its class's p_ weapon like a player; the
 			 * renderer merges it onto the hand bones (R_StudioDrawModel). */
+			/* The renderer cross-fades a film actor's every change of sequence and gait
+			 * (r_studio.c R_GXFilmBlend); it knows one by this tag. */
+			ent->curstate.iuser4 = ed->v.iuser4 == GC_FILM_ACTOR_TAG ? GC_FILM_ACTOR_TAG : 0;
 			if( ed->v.iuser4 == GC_FILM_ACTOR_TAG && ed->v.weaponmodel )
 			{
 				static int film_wlogs;
