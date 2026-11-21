@@ -13,7 +13,7 @@ typedef struct
 } lazy_entry_t;
 
 static lazy_entry_t lazy_tab[LAZY_LOGIC_MAX];
-static int lazy_count, lazy_pending, lazy_spawned, lazy_failed;
+static int lazy_count, lazy_pending, lazy_spawned, lazy_failed, lazy_dropped;
 
 uint32_t LazyLogic_Hash( const char *name )
 {
@@ -27,12 +27,17 @@ uint32_t LazyLogic_Hash( const char *name )
 void LazyLogic_Reset( void )
 {
 	memset( lazy_tab, 0, sizeof( lazy_tab ));
-	lazy_count = lazy_pending = lazy_spawned = lazy_failed = 0;
+	lazy_count = lazy_pending = lazy_spawned = lazy_failed = lazy_dropped = 0;
 }
 
 int LazyLogic_Add( uint32_t name_hash, uint32_t ofs, uint32_t len )
 {
-	if( lazy_count >= LAZY_LOGIC_MAX || !name_hash || !len )
+	if( lazy_count >= LAZY_LOGIC_MAX )
+	{
+		lazy_dropped++;
+		return -1;
+	}
+	if( !name_hash || !len )
 		return -1;
 	lazy_tab[lazy_count].hash = name_hash;
 	lazy_tab[lazy_count].ofs = ofs;
@@ -46,6 +51,7 @@ int LazyLogic_Pending( void ) { return lazy_pending; }
 int LazyLogic_Total( void ) { return lazy_count; }
 int LazyLogic_Spawned( void ) { return lazy_spawned; }
 int LazyLogic_Failed( void ) { return lazy_failed; }
+int LazyLogic_Dropped( void ) { return lazy_dropped; }
 
 void LazyLogic_NoteEdict( uint32_t ofs, int edict )
 {

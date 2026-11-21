@@ -2618,8 +2618,8 @@ static void SV_GCLazyReport( const char *stage, qboolean detail )
 
 	if( !LazyLogic_Total())
 		return;
-	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, game time %.1f; spawned by class: relay %d changetarget %d info_target %d ambient %d sprite %d shake %d shooter %d\n",
-		stage, LazyLogic_Total(), LazyLogic_Spawned(), LazyLogic_Pending(), LazyLogic_Failed(), sv.time,
+	Con_Reportf( "Xash3D GameCube: lazy logic %s: %d deferred, %d spawned, %d pending, %d spawn failures, %d dropped (table full), game time %.1f; spawned by class: relay %d changetarget %d info_target %d ambient %d sprite %d shake %d shooter %d\n",
+		stage, LazyLogic_Total(), LazyLogic_Spawned(), LazyLogic_Pending(), LazyLogic_Failed(), LazyLogic_Dropped(), sv.time,
 		gc_lazy_class_spawned[0], gc_lazy_class_spawned[1], gc_lazy_class_spawned[2], gc_lazy_class_spawned[3],
 		gc_lazy_class_spawned[4], gc_lazy_class_spawned[5], gc_lazy_class_spawned[6] );
 	for( i = 0; detail && base && LazyLogic_Entry( i, &ofs, &len, &spawned, &edict ); i++ )

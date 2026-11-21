@@ -136,9 +136,11 @@ class LazyLogic(unittest.TestCase):
 
     def test_table_limit(self):
         L = self.L
-        for i in range(192):
+        L.LazyLogic_Dropped.restype = ctypes.c_int
+        for i in range(256):
             self.assertGreaterEqual(L.LazyLogic_Add(5, i, 1), 0)
         self.assertEqual(L.LazyLogic_Add(5, 999, 1), -1)
+        self.assertEqual(L.LazyLogic_Dropped(), 1, "a full table drops, and says so")
 
     def test_engine_hooks_are_wired_and_default_off(self):
         src = (ROOT / "engine/server/sv_game.c").read_text()
