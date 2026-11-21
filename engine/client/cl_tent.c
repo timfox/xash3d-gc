@@ -624,6 +624,7 @@ void CL_GCEnsureTempEntPool( void )
 	 * still let it grow there: charlie has 438 KiB free at this point and
 	 * its prop chains (221 KB) plus the body cores (210 KB) want 431 KB. */
 #define GC_TENT_SPILL_KEEP	( 512u * 1024u )
+#define GC_TENT_CAPTURE_HEAP_KEEP	( 320u * 1024u )
 #define GC_TENT_ARENA_KEEP	( 160u * 1024u )	/* = GC_DOD_ARENA_KEEP in sv_init.c */
 	{
 		extern size_t Mod_GCWorldArraySpillFree( void );
@@ -653,6 +654,18 @@ void CL_GCEnsureTempEntPool( void )
 					where = "map arena";
 					want = n;
 					bytes = nb;
+				}
+				/* A capture has no HUD or view model to feed, and 16 entries dropped most of a
+				 * beach shot's bursts, smoke and gibs ("Overflow" a dozen times a shot): take 32
+				 * from the heap while it keeps GC_TENT_CAPTURE_HEAP_KEEP for the rest. */
+				else if( n == 32 && CL_GCCaptureMode() && GC_MemHeapFreeBytes() > nb + GC_TENT_CAPTURE_HEAP_KEEP )
+				{
+					cl_tempents = Mem_Calloc( cls.mempool, nb );
+					if( cl_tempents )
+					{
+						want = n;
+						bytes = nb;
+					}
 				}
 				continue;
 			}
