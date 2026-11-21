@@ -231,6 +231,33 @@ lives in ARAM too and is the next candidate after this.
   after load 301-309 KB. No still captured; the explosions need a fired mortar chain, which a headless minute does not reach.
 - Not done: static records for the unnamed decoration (caen glows) and unnamed lights; a captured still of a lazy sprite playing.
 
+## 4j. Fixed-camera frame time on charlie (GPU-queue Dolphin, 2026-11-21)
+
+Method: a film plan (`cine/bench.cam`: six held views at charlie spawn points, 6 s each, game time locked at 30 fps by `cine_fps 30`),
+so every run renders the same 1081 frames from the same eyes; 4 bots; profile blocks every 64 frames compared by block index.
+`xash-gc-dolphin -v OGL` on a private Xvfb under the queue/lock protocol (one 220 s run per configuration).
+
+| config | world DL pack | light-face pack (ARAM) | `render: GX world faces` mean / median (ms) | heap min |
+|---|---|---|---|---|
+| A: LZ4 off, lazy off | 2652 KiB | 1989216 B | 41.0 / 41.0 | 257 KB |
+| B: LZ4 on, lazy off | 1484 KiB | 1482208 B | 40.0 / 40.2 | 257 KB |
+| C: LZ4 on, lazy on | 1484 KiB | 1482208 B | 42.6 / 44.3 | 257 KB |
+
+- Paired by block (38 blocks): LZ4 on minus off **-1.0 ms** (stdev 1.9); lazy on minus off **+2.5 ms** (stdev 1.8). Entity emit
+  0.05 vs 0.06 ms, server think 0.12 vs 0.13 ms, bots 0.43 vs 0.44 ms. So LZ4 costs nothing visible; the lazy cvar shows a
+  +2.5 ms world-face difference that the lazy logic cannot cause by design (it changes entities, not world drawing) and that is the
+  size of this method's run-to-run spread; a repeat of B and C would settle it. The stage includes GPU-wait time, so host load
+  moves it.
+- Caveats found while measuring: (1) the disc builder stages a previously baked `out/media/wd_<map>.gcd` ahead of the cache, so a
+  "LZ4 off" disc built after an "on" one silently keeps LZ4 (my first A was contaminated and rerun after clearing those files);
+  (2) a headless `-v Null` pass of the same plan was dropped: its B and C discs picked up the raw file and its block times varied
+  from 35 to 138 ms between runs.
+- Only charlie was measured; the plan file for another map needs its own `cine/<name>.cam` and `film-<map>.cfg`
+  (`scripts/build-lean-iso.sh --film DIR`).
+- Reinvesting the freed ARAM as detail without more MEM1 is not possible: every texture, skin or chain that is drawn must sit in MEM1
+  (the prop chain cache and the falaise 222 > 180 KiB case are MEM1-spill limits, and the 256 px skins above cost 64 KiB of window).
+  ARAM only holds what streams in, so the freed megabytes can hold more streamed content but not a bigger MEM1 working set.
+
 ## 5. Ranked next steps (not done)
 
 1. **Rebake and measure.** Nothing here has run on a disc image or in Dolphin. Build a disc with `DODGC_WD_LZ4=1`,
