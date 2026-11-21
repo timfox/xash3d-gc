@@ -6677,6 +6677,7 @@ void SV_GCStaticWallsSelfTest( void )
 	static const float hulls[3][6] = {
 		{ 0, 0, 0, 0, 0, 0 }, { -16, -16, -36, 16, 16, 36 }, { -16, -16, -18, 16, 16, 18 } };
 	int i, k, tests = 0, bad = 0, noedict = 0, n = SV_GCStaticWallCount();
+	byte gc_sw_noedict[256] = { 0 };
 
 	if( SV_GCStaticWallsMode() != 2 || n <= 0 )
 		return;
@@ -6699,6 +6700,8 @@ void SV_GCStaticWallsSelfTest( void )
 		}
 		if( !ed )
 		{
+			if( i < 256 )
+				gc_sw_noedict[i] = 1;
 			if( noedict++ < 6 )
 				Con_Reportf( "Xash3D GameCube: static wall record %d (model *%d, origin %.0f %.0f %.0f) has no edict (the parity budget skipped its func_wall)\n",
 					i, mi, ( amin[0] + amax[0] ) * 0.5f, ( amin[1] + amax[1] ) * 0.5f, ( amin[2] + amax[2] ) * 0.5f );
@@ -6737,11 +6740,20 @@ void SV_GCStaticWallsSelfTest( void )
 		extern qboolean gc_static_walls_disable;
 		int mv_tests = 0, mv_bad = 0, mv_world = 0, mv_startsolid = 0;
 
+		/* A record without an edict is collision the edict-only trace lacks by construction: leave those out of this
+		 * comparison and do not start rays around them (caen records 102/103 sit next to record 6; rays sampled around
+		 * record 6 that hit record 103 were reported as record 6 mismatches). */
+		for( i = 0; i < n && i < 256; i++ )
+			if( gc_sw_noedict[i] )
+				SV_GCStaticWallSetSkip( i, true );
+
 		for( i = 0; i < n; i++ )
 		{
 			vec3_t amin, amax;
 			int mi, hk;
 
+			if( i < 256 && gc_sw_noedict[i] )
+				continue;
 			SV_GCStaticWallBounds( i, amin, amax, &mi );
 			for( k = 0; k < 120; k++ )
 			{
@@ -6810,6 +6822,8 @@ void SV_GCStaticWallsSelfTest( void )
 				}
 			}
 		}
+		for( i = 0; i < n && i < 256; i++ )
+			SV_GCStaticWallSetSkip( i, false );
 		Con_Reportf( "Xash3D GameCube: static wall SV_Move test: %d traces, %d mismatches (+%d start-solid order cases), %d hits reported as the world edict\n",
 			mv_tests, mv_bad, mv_startsolid, mv_world );
 	}
