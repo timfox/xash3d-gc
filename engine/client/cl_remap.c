@@ -21,7 +21,12 @@ GNU General Public License for more details.
 
 #if XASH_GAMECUBE
 extern int GC_MapLoadMemoryOpt( void );
+/* (the client entity table's size: cl_game.c, cl_parse.c) */
+#ifdef GC_GCMAP_CLIENT_EDICTS
+#define GC_GCMAP_STATIC_CLIENT_EDICTS GC_GCMAP_CLIENT_EDICTS
+#else
 #define GC_GCMAP_STATIC_CLIENT_EDICTS 460
+#endif
 extern remap_info_t *gc_gcmap_bootstrap_remap_info[GC_GCMAP_STATIC_CLIENT_EDICTS + 1];
 #endif
 #include "studio.h"

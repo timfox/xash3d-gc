@@ -111,6 +111,12 @@ typedef struct engine_studio_api_s
 	void		( *StudioSetRenderamt )( int iRenderamt );
 	void		( *StudioSetCullState )( int iCull );
 	void		( *StudioRenderShadow )( int iSprite, float *p1, float *p2, float *p3, float *p4 );
+
+	// GameCube extension, appended so a DLL built without it is unaffected and NULL on every other build:
+	// the animation of a sequence of a split model (animation packs, .gca), streamed from ARAM through the
+	// engine's pack ring. The client DLL's own StudioGetAnim calls this instead of LoadCacheFile for a
+	// sequence group whose file is a pack (a 3.5 MB read that cannot fit MEM1).
+	void		*( *GCGetAnim )( void *phdr, void *submodel, void *pseqdesc );   // studiohdr_t *, model_t *, mstudioseqdesc_t *
 } engine_studio_api_t;
 
 typedef struct server_studio_api_s

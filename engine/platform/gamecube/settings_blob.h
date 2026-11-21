@@ -12,7 +12,7 @@ caller). A blob that fails any check is rejected as a whole: a damaged save neve
 
 #define GC_SETTINGS_MAGIC   0x53444F44u	/* "DODS" little endian */
 #define GC_SETTINGS_VERSION 1
-#define GC_SETTINGS_MAX_VAL 63
+#define GC_SETTINGS_MAX_VAL 255	/* gc_ach carries the 96-byte achievement blob as 192 hex characters */
 #define GC_SETTINGS_MAX_BLOB 1024
 
 typedef struct
