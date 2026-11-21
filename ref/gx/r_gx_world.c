@@ -2767,6 +2767,8 @@ static qboolean r_gx_cmpr_big_for_props;
  * The blocks are GC_CMPR_EXT_CHUNK slots each: dod_avalanche had 795 KB of heap free and no 256 KiB run in it. */
 #define GC_CMPR_EXT_CHUNK  8
 #define GC_CMPR_EXT_CHUNKS 8
+#define GC_CMPR_EXT_FLOOR_MIN  ( 224u * 1024u )	/* heap a later map of the match keeps free at the least */
+#define GC_CMPR_EXT_TRIM_BYTES ( 128u * 1024u )	/* heap below which heap slots go back during play */
 static byte *r_gx_cmpr_ext_base[GC_CMPR_EXT_CHUNKS];
 static int r_gx_cmpr_ext_n;
 /* No arena or cache-tail slots at all (dod_caen, a second visit to dod_avalanche): every slot is a heap one. */
@@ -3008,10 +3010,23 @@ int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor )
 {
 	extern size_t GC_MemHeapFreeBytes( void );
 	const size_t heap = GC_MemHeapFreeBytes();
+	static size_t heap_best;	/* most heap any map had here */
 	qboolean only = false;
 	int near_n, n, got = 0, c;
 
 	R_GXCmprDropStaleAdopted();
+	/* The floor is for what a match still takes from the heap (bots, HUD, sounds: 135 to 360 KB). A later map
+	 * of the same match finds that already taken (dod_avalanche: 751 KB the first time, 495 KB on a return
+	 * visit, and 10 KB more used from there), so what is gone since the best map comes off the floor.
+	 * R_GXCmprExtTrim hands slots back if the heap runs low all the same. */
+	if( heap > heap_best )
+		heap_best = heap;
+	else
+	{
+		const size_t gone = heap_best - heap;
+
+		heap_floor = heap_floor > gone + GC_CMPR_EXT_FLOOR_MIN ? heap_floor - gone : GC_CMPR_EXT_FLOOR_MIN;
+	}
 	if( r_gx_cmpr_ext_n )
 		return 0;
 	if( !r_gx_cmpr_bounce && !r_gx_cmpr_nslots && slot_bytes >= 4096u && !( slot_bytes & 31u ))
@@ -3080,6 +3095,36 @@ int R_GXCmprExtAdopt( int want_near, unsigned slot_bytes, size_t heap_floor )
 		got, slot_bytes, (unsigned)( (size_t)got * slot_bytes / 1024u ), (unsigned)( heap / 1024u ),
 		near_n + got );
 	return got;
+}
+
+/* Once a frame: with less than GC_CMPR_EXT_TRIM_BYTES of heap left, the last block of heap slots goes back
+ * (dod_caen with 12 bots ran down to 165 KB with 16 heap slots). Textures reload into the slots that stay. */
+static void R_GXCmprExtTrim( void )
+{
+	extern size_t GC_MemHeapFreeBytes( void );
+	static unsigned tick;
+	int c, n;
+
+	if( !r_gx_cmpr_ext_n || ( ++tick & 15u ) || GC_MemHeapFreeBytes() >= GC_CMPR_EXT_TRIM_BYTES )
+		return;
+	c = ( r_gx_cmpr_ext_n - 1 ) / GC_CMPR_EXT_CHUNK;
+	n = r_gx_cmpr_ext_n - c * GC_CMPR_EXT_CHUNK;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: CMPR slots: heap down to %u Kb, %d of %d heap slots go back\n",
+		(unsigned)( GC_MemHeapFreeBytes() / 1024u ), n, r_gx_cmpr_ext_n );
+	if( !c )
+	{
+		R_GXCmprExtDrop();
+		return;
+	}
+	GX_DrawDone();
+	free( r_gx_cmpr_ext_base[c] );
+	r_gx_cmpr_ext_base[c] = NULL;
+	r_gx_cmpr_ext_n -= n;
+	r_gx_cmpr_nslots -= n;
+	R_GXCmprSlotsReset();
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
 }
 
 /* After R_GXCmprBounceAdopt: add big_n whole-chain slots of big_cap bytes. */
@@ -10021,6 +10066,7 @@ static void R_GXWaterMirrorPass( void )
 static int R_GXDrawWorldDLFrame( void )
 {
 	int drawn;
+	R_GXCmprExtTrim();
 	r_gx_cmpr_prev_frame_clock = r_gx_cmpr_frame_clock;
 	r_gx_cmpr_frame_clock = r_gx_cmpr_clock;
 	/* Flythrough stage timing: where the frame goes, every 120 frames. */

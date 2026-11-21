@@ -1715,22 +1715,27 @@ static void R_GXWorldDLLoad( const char *mapbase )
 		if( !gc_wd_lm_heap && !gc_wd_lm_in_arena )
 		{
 			extern size_t GC_MemHeapFreeBytes( void );
-			static const u32 tries[] = { 2u * GC_WD_LM_HEAP_BYTES, GC_WD_LM_HEAP_BYTES, 80u * 1024u, 48u * 1024u };
+			/* 640 KiB stays for what the map still loads from the heap (prop chain cache, view model skins,
+			 * sounds). A later map of the same match finds most of that already loaded: a return to
+			 * dod_avalanche had 507 KB free, every try failed, the store fell to the 32 pages in BSS and
+			 * 183 to 244 leaves a frame drew without their lightmap. The last tries keep less. */
+			static const u32 tries[][2] = {
+				{ 2u * GC_WD_LM_HEAP_BYTES, 640u * 1024u }, { GC_WD_LM_HEAP_BYTES, 640u * 1024u },
+				{ GC_WD_LM_HEAP_BYTES, 320u * 1024u }, { 80u * 1024u, 256u * 1024u }, { 48u * 1024u, 256u * 1024u },
+			};
 			unsigned t;
 
-			/* 640 KiB stays for what the map still loads from the heap
-			 * (prop chain cache, view model skins, sounds). */
 			for( t = 0; t < sizeof( tries ) / sizeof( tries[0] ) && !gc_wd_lm_heap; t++ )
 			{
-				const size_t bytes = (size_t)tries[t];
+				const size_t bytes = (size_t)tries[t][0];
 
-				if( GC_MemHeapFreeBytes() < bytes + 640u * 1024u )
+				if( GC_MemHeapFreeBytes() < bytes + tries[t][1] )
 					continue;
 				gc_wd_lm_heap = (byte *)memalign( 32, bytes );
 				if( gc_wd_lm_heap )
 				{
 					gc_wd_lm_store = gc_wd_lm_heap;
-					gc_wd_lm_nslots = (int)( tries[t] / gc_wd_lm_page_bytes );
+					gc_wd_lm_nslots = (int)( bytes / gc_wd_lm_page_bytes );
 				}
 			}
 		}
