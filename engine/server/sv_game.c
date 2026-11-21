@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "server.h"
+#include "pm_local.h"
 #include "sv_lazy_logic.h"
 #include "net_encode.h"
 #include "event_flags.h"
@@ -7805,6 +7806,8 @@ static void SV_LoadFromFile( const char *mapname, char *entities )
 		Con_Reportf( "Xash3D GameCube: arena budget map=%s entity_overflow=%s arena_tail_left=%s\n", mapname,
 			SV_GCPrivateOverflowReserved() ? "64 Kb" : "none",
 			Q_memprint( GC_MapArenaLargestGap()));
+	// the world's .mcol collision claims its arena gap before the packet ring sizes itself to what is left
+	PM_WorldMesh( sv.worldmodel );
 	SV_GCSizePacketEntities();
 	gc_soundent_fallback_used = false;
 	gc_ent_priv_slab_used = 0;

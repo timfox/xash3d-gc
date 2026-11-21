@@ -15,6 +15,7 @@ GNU General Public License for more details.
 
 #include "common.h"
 #include "server.h"
+#include "pm_local.h"
 #include "library.h"
 #include "const.h"
 #include "render_api.h"	// decallist_t
@@ -2105,6 +2106,8 @@ static int LoadGameState( char const *level, qboolean changelevel )
 	 * the c1a4k revisit the new world loaded over it, the client delta'd
 	 * against garbage ("46 should be 45") and then indexed entity
 	 * 0x03000000 in CL_ProcessPacket. */
+	// the world's .mcol collision claims its arena gap before the packet ring sizes itself to what is left
+	PM_WorldMesh( sv.worldmodel );
 	SV_GCSizePacketEntities();
 #endif
 	// create entity list
