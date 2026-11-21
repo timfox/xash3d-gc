@@ -2215,6 +2215,7 @@ def bake_world_dl(bsp: Path, cache: Path) -> Path | None:
 		print(f"  world DL: bake failed for {bsp.name}: {error}")
 		return None
 	stamp.write_text(key)
+	_pad_slots()
 	return out
 
 
