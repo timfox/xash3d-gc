@@ -1378,10 +1378,11 @@ qboolean GC_MapLoadBufferIsWorldSettled( void )
 	return gc_mapload_world_settled;
 }
 
-#define GC_MAPLOAD_RESET_HOOKS 4
+#define GC_MAPLOAD_RESET_HOOKS 8
 static void (*gc_mapload_reset_hooks[GC_MAPLOAD_RESET_HOOKS])( void );
 
-/* Several owners (client temp entities, the view model skin window) may hold
+/* Several owners (client temp entities, the view model skin window, the world
+ * mesh, the game DLL's MOHAA script pool) may hold
  * post-load claims at once; registering the same hook twice keeps one entry. */
 void GC_SetMapArenaResetHook( void (*hook)( void ))
 {
