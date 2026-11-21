@@ -17,7 +17,7 @@ kept ones). No libogc or engine dependency: tested on the host (tests/test_lazy_
 
 #include <stdint.h>
 
-#define LAZY_LOGIC_MAX 192
+#define LAZY_LOGIC_MAX 256
 
 /* The same string hash on both sides (the engine hashes the name it is asked for). */
 uint32_t LazyLogic_Hash( const char *name );
@@ -32,6 +32,8 @@ int  LazyLogic_Total( void );
 int  LazyLogic_Spawned( void );
 /* Lookups that wanted to spawn something and could not (no edict, no heap): the entries stay pending and retry. */
 int  LazyLogic_Failed( void );
+/* Entities that could not be remembered because the table was full (they are dropped, as before the lazy path). */
+int  LazyLogic_Dropped( void );
 /* The engine records which edict a spawned entry got, so a report can say whether it still exists. */
 void LazyLogic_NoteEdict( uint32_t ofs, int edict );
 /* Entry i in the order they were added: lump offset, length, spawned flag, edict (0 = none recorded). 0 when i is out of range. */

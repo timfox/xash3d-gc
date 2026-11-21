@@ -136,9 +136,11 @@ class LazyLogic(unittest.TestCase):
 
     def test_table_limit(self):
         L = self.L
-        for i in range(192):
+        L.LazyLogic_Dropped.restype = ctypes.c_int
+        for i in range(256):
             self.assertGreaterEqual(L.LazyLogic_Add(5, i, 1), 0)
         self.assertEqual(L.LazyLogic_Add(5, 999, 1), -1)
+        self.assertEqual(L.LazyLogic_Dropped(), 1, "a full table drops, and says so")
 
     def test_engine_hooks_are_wired_and_default_off(self):
         src = (ROOT / "engine/server/sv_game.c").read_text()
@@ -216,3 +218,21 @@ class LazyLogicLifecycle(LazyLogic):
         self.assertIn('SV_GCLazyReport( "previous map table"', src)
         self.assertIn("gc_lazy_report", src)
         self.assertIn('Cvar_FindVar( "sv_gc_lazy_log" )', src)
+
+
+class LazyEffects(unittest.TestCase):
+    def test_named_effects_are_eligible_and_lights_are_not(self):
+        src = (ROOT / "engine/server/sv_game.c").read_text()
+        body = src[src.index("static qboolean SV_GCLazyEligibleClass"):][:1500]
+        for cls in ("trigger_relay", "trigger_changetarget", "info_target", "ambient_generic", "env_sprite", "env_shake",
+                    "env_shooter"):
+            self.assertIn(f'"{cls}"', body)
+        self.assertNotIn('"light"', body)       # a named light sets its light style in Spawn: must happen at load
+        self.assertNotIn('"light_spot"', body)
+        # only entities with a targetname can be looked up, so only they are deferred
+        self.assertIn("ent->v.targetname && gc_blk && SV_GCLazyEligibleClass", src)
+
+    def test_class_counters_are_in_the_report_and_reset_per_map(self):
+        src = (ROOT / "engine/server/sv_game.c").read_text()
+        self.assertIn("spawned by class: relay %d changetarget %d", src)
+        self.assertIn("memset( gc_lazy_class_spawned, 0", src)
