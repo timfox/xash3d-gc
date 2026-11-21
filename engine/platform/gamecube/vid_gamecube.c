@@ -18414,6 +18414,8 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 					}
 					else
 					{
+						if( Sys_CheckParm( "-gcnohud" ))
+							goto gc_nohud_end;  /* spectator footage: no placeholder HUD */
 						char picked[64];
 						char ammo_txt[16];
 						static int live_hud_frames;
@@ -18526,6 +18528,8 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 							Con_Reportf( "Xash3D GameCube: CapFaces SFX follow-up %s left=%d ammo=%d\n",
 								gc_team_fire_sfx, gc_team_fire_followups, live_ammo );
 						}
+						gc_nohud_end:
+						;
 					}
 				}
 				if( !capfaces_hud_logged && Sys_CheckParm( "-gcworldrender" ))
