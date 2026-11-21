@@ -174,6 +174,7 @@ extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t siz
 extern int GC_WorldTexCount( void );
 extern void R_GXCmprStats( unsigned *hits, unsigned *misses );
 extern qboolean R_GXWorldDLBindTex( unsigned texnum );
+extern qboolean R_GXWorldDLBindChecker( void );
 extern qboolean R_GXTexnumMasked( unsigned texnum );
 /* The last world texture bound has a cut-out mask: its batches alpha-test. */
 static qboolean gc_wd_masked;
@@ -3586,6 +3587,13 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 					bound = true;
 				}
 			}
+			else if( R_GXWorldDLBindChecker())
+			{
+				/* Material whose texture is not in the pack: the missing-texture checker, not a vanished batch. */
+				gc_wd_masked = false;
+				R_GXTevMatAppend( 0, 1, 1 );
+				bound = true;
+			}
 			cur_key = key;
 		}
 		if( !bound )
@@ -4255,6 +4263,8 @@ int R_GXWorldDLDraw( void )
 				}
 				if( (int)b->mat != cur_mat )
 				{
+					unsigned miss_tex = 0;
+
 					if( gc_wd_texnum[b->mat] < 0 )
 						gc_wd_texnum[b->mat] = (s16)GC_WorldTexnumByHash( m->tex_hash );
 					/* Do not permanently cache a failed bind — tip-lean may stub
@@ -4273,16 +4283,24 @@ int R_GXWorldDLDraw( void )
 							{
 								miss_logged++;
 								gEngfuncs.Con_Reportf(
-									"Xash3D GameCube: world DL mat bind miss mat=%u hash=0x%08x\n",
+									"Xash3D GameCube: world DL mat bind miss mat=%u hash=0x%08x (drawn as the pink/black checker)\n",
 									(unsigned)b->mat, (unsigned)m->tex_hash );
 							}
-							continue;
+							/* A material whose texture is not in the pack draws as the missing-texture checker
+							 * instead of vanishing.  Not cached: the pack may still stream the real one in. */
+							miss_tex = 0xFFFFFFFFu;	/* bind the checker below */
 						}
 					}
 					{
 						qboolean bound;
 
-						WD_PF( 4, bound = R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ));
+						if( miss_tex == 0xFFFFFFFFu )
+							{
+								bound = R_GXWorldDLBindChecker();
+								gc_wd_masked = false;
+							}
+							else
+								WD_PF( 4, bound = R_GXWorldDLBind( (unsigned)gc_wd_texnum[b->mat] ));
 						if( !bound )
 						{
 							bind_fail++;

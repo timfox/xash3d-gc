@@ -1550,10 +1550,42 @@ void GAME_EXPORT GL_UpdateTexSize( int texnum, int width, int height, int depth 
 GL_LoadTexture
 ================
 */
+/* The engine's "missing texture": 16x16 pink/black checker (4-texel cells), the same one the GL renderer makes at
+ * init.  The GX renderer never built it, so every stub (tip-lean texture miss, unpacked world material, studio skin
+ * without a bitmap) was texture 0 and drew as nothing / plain colour.  Built on first request. */
+static int R_GXMakeDefaultChecker( void )
+{
+	static byte px[16 * 16 * 4];   /* kept: the texture may reference the caller buffer */
+	int x, y;
+
+	for( y = 0; y < 16; y++ )
+	{
+		for( x = 0; x < 16; x++ )
+		{
+			const qboolean pink = (( x >> 2 ) ^ ( y >> 2 )) & 1;
+			byte *p = px + ( y * 16 + x ) * 4;
+
+			p[0] = pink ? 255 : 0;
+			p[1] = 0;
+			p[2] = pink ? 255 : 0;
+			p[3] = 255;
+		}
+	}
+	{
+		const int n = GL_CreateTexture( REF_DEFAULT_TEXTURE, 16, 16, px, TF_NOMIPMAP | TF_NEAREST );
+
+		return n;
+	}
+}
+
 int GAME_EXPORT GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 {
 	image_t *tex;
 	uint    picFlags = 0;
+
+	if( !buf && !size && name && !Q_strcmp( name, REF_DEFAULT_TEXTURE ) && !tr.defaultTexture
+		&& !GL_TextureForName( name ))
+		return R_GXMakeDefaultChecker();
 
 	if( !GL_CheckTexName( name ))
 		return 0;

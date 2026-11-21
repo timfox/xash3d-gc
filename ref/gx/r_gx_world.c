@@ -3581,8 +3581,51 @@ static int R_GXHudPickSlot( const image_t *img, size_t need )
 	return -1;
 }
 
+/* The missing-texture checker (pink/black, 4-texel cells): an 8x8 RGB565 GX texture built here, so a stub never depends on the
+ * generic texture upload.  RGB565 is stored in 4x4-texel tiles, row-major: tiles 0..3 = black, pink, pink, black. */
+static u16 r_gx_checker_pix[64] __attribute__(( aligned( 32 )));
+static gc_gx_tex_t r_gx_checker;
+
+static gc_gx_tex_t *R_GXBindChecker( void )
+{
+	if( !r_gx_checker.valid )
+	{
+		int tile, i;
+
+		for( tile = 0; tile < 4; tile++ )
+			for( i = 0; i < 16; i++ )
+				r_gx_checker_pix[tile * 16 + i] = (( tile == 1 || tile == 2 ) ? 0xF81F : 0x0000 );
+		DCFlushRange( r_gx_checker_pix, sizeof( r_gx_checker_pix ));
+		GX_InitTexObj( &r_gx_checker.obj, r_gx_checker_pix, 8, 8, GX_TF_RGB565, GX_REPEAT, GX_REPEAT, GX_FALSE );
+		GX_InitTexObjFilterMode( &r_gx_checker.obj, GX_NEAR, GX_NEAR );
+		r_gx_checker.fmt = GX_TF_RGB565;
+		r_gx_checker.w = r_gx_checker.h = 8;
+		r_gx_checker.tiled = r_gx_checker_pix;
+		r_gx_checker.valid = true;
+	}
+	GX_LoadTexObj( &r_gx_checker.obj, GX_TEXMAP0 );
+	r_gx_bound_texnum = 0xFFFFFFF0u;	/* never equals a real texnum: the next bind reloads its own object */
+	return &r_gx_checker;
+}
+
+qboolean R_GXWorldDLBindChecker( void )
+{
+	return R_GXBindChecker() != NULL;
+}
+
 static gc_gx_tex_t *R_GXBindTexnum( unsigned texnum, qboolean hud_bind )
 {
+	/* The engine's "*default" texture (what every stub points at) is the checker. */
+	/* The engine's "*default" texture (what every stub points at) is the checker.  Matched by name: the image can exist
+	 * without tr.defaultTexture ever being set in this renderer. */
+	if( texnum && texnum < (unsigned)MAX_TEXTURES && !hud_bind )
+	{
+		const image_t *dimg = R_GetTexture( texnum );
+
+		if( dimg && !Q_strcmp( dimg->name, REF_DEFAULT_TEXTURE ))
+			return R_GXBindChecker();
+	}
+
 	image_t *img;
 	int i, slot, victim, src_w, src_h, dst_w, dst_h;
 	int x, y, step_x, step_y;
