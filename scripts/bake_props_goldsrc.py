@@ -28,6 +28,8 @@ PROP_CLASSES = ("env_model", "dod_object")
 GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 7
 GC_PR_VERSION_CELLS = 9	# v7, plus far cells (hdr word 2 low half: cell count) and a per-instance scale (model word high byte)
+GC_PR_VERSION_VIS = 10	# v9, plus a u16 per instance after the cells: its PVS cluster (leaf - 1), 0xffff = always drawn
+GC_PR_VIS_ALL = 0xFFFF
 GC_PR_MAX_INST = 512
 GC_PR_MAX_INST_BIG = 4096  # a converted map's pack: the engine moves its tables to the map arena
 GC_PR_FIXED_INST = 512  # the engine's fixed tables; past them the pack is written nearest a player start first
@@ -780,7 +782,8 @@ def instance_record(floor, mi: int, tris: int, mins, maxs, origin, angles, named
 
 
 def write_pack(out_gcp: Path, out_gct: Path, model_recs, chains, inst_blob: bytearray, light_blob: bytearray,
-		sun, n_inst: int, piece_blob: bytearray, far_blob: bytes = b"", cells=(), version: int = GC_PR_VERSION) -> bytearray:
+		sun, n_inst: int, piece_blob: bytearray, far_blob: bytes = b"", cells=(), version: int = GC_PR_VERSION,
+		vis=None) -> bytearray:
 	"""Write media/gp_<map>.gcp and media/pt_<map>.gct. Returns the texture blob."""
 	inst_blob = bytearray(inst_blob)
 	model_blob = bytearray()
@@ -799,6 +802,10 @@ def write_pack(out_gcp: Path, out_gct: Path, model_recs, chains, inst_blob: byte
 	for cell_inst, first, count in cells:
 		inst_blob += struct.pack(">HHHH", cell_inst, first, count, 0)
 	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	# v10: each instance's PVS cluster, right after the cells
+	if vis is not None:
+		inst_blob += struct.pack(f">{len(vis)}H", *vis)
+		inst_blob += b"\0" * (-len(inst_blob) % 32)
 	inst_ofs = 32
 	models_ofs = inst_ofs + len(inst_blob)
 	dl_base = models_ofs + len(model_blob)
@@ -1174,6 +1181,32 @@ def _unit3(v):
 	return (v[0] / n, v[1] / n, v[2] / n) if n > 1e-9 else (0.0, 0.0, 1.0)
 
 
+def box_cluster(bsp, mins, maxs) -> int:
+	"""The one PVS cluster (leaf - 1, as the world DL numbers them) whose space holds the box, or
+	GC_PR_VIS_ALL when the box reaches into more than one open leaf (or none): drawn whatever the PVS."""
+	found = set()
+	stack = [0] if bsp is not None and bsp.nodes else []
+	while stack:
+		idx = stack.pop()
+		if idx < 0:
+			leaf = -1 - idx
+			if 0 < leaf < len(bsp.leaves) and bsp.leaves[leaf][0] != -2:	# CONTENTS_SOLID holds nothing seen
+				found.add(leaf - 1)
+				if len(found) > 1:
+					return GC_PR_VIS_ALL
+			continue
+		planenum, c0, c1 = bsp.nodes[idx][0], bsp.nodes[idx][1], bsp.nodes[idx][2]
+		nx, ny, nz, dist = bsp.planes[planenum]
+		# the box's nearest and farthest corner along the plane normal
+		lo = sum(n * (mn if n > 0 else mx) for n, mn, mx in zip((nx, ny, nz), mins, maxs)) - dist
+		hi = sum(n * (mx if n > 0 else mn) for n, mn, mx in zip((nx, ny, nz), mins, maxs)) - dist
+		if hi >= 0.0:
+			stack.append(c0)
+		if lo < 0.0:
+			stack.append(c1)
+	return found.pop() if len(found) == 1 else GC_PR_VIS_ALL
+
+
 def plan_cells(members, max_cells: int):
 	"""Group far-drawable instances into square grid cells: {cell key: [member indices]}, cell side.
 	members: [(index, origin)]. The side grows until the cells (with at least CELL_MIN_MEMBERS
@@ -1416,18 +1449,25 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 	light_blob = bytearray(b"".join(placed[k][6] for k in order))
 	n_inst = len(order)
 	placed_tris = sum(model_recs[placed[k][0]][2] for k in order[:n_inst - len(cells_out)])
+	# the PVS cluster of each instance (cells span many: always drawn while far)
+	vis, version = None, GC_PR_VERSION_CELLS
+	if floor is not None:
+		vis = [GC_PR_VIS_ALL if placed[k][2] is None else box_cluster(floor.bsp, placed[k][3], placed[k][4])
+			for k in order]
+		version = GC_PR_VERSION_VIS
 	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob,
-		far_blob, cells_out, GC_PR_VERSION_CELLS)
+		far_blob, cells_out, version, vis)
 	stats = {
 		"instances": n_inst, "models": len(model_recs), "materials": len(chains),
 		"model_tris": sum(r[2] for r in model_recs), "placed_tris": placed_tris,
 		"missing": missing, "dropped": dropped, "chain_bytes": len(piece_blob), "tex_bytes": len(blob),
 		"impostors": impostors, "cells": len(cells_out), "cell_members": sum(c[2] for c in cells_out),
 		"far_bytes": len(far_blob),
+		"vis_placed": sum(v != GC_PR_VIS_ALL for v in vis) if vis else 0,
 	}
 	log(f"  props: {out_gcp.name} instances={n_inst} models={len(model_recs)} tris={stats['model_tris']} "
 		f"(placed {placed_tris}) chains={len(piece_blob)} B far={len(far_blob)} B impostors={impostors} "
-		f"cells={len(cells_out)} ({stats['cell_members']} members), {out_gct.name} materials={len(chains)} {len(blob)} B")
+		f"cells={len(cells_out)} ({stats['cell_members']} members) pvs={stats['vis_placed']}, {out_gct.name} materials={len(chains)} {len(blob)} B")
 	return stats
 
 

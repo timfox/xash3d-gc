@@ -2661,6 +2661,20 @@ qboolean R_GXWorldDLEntityVisible( int key, const float *mins, const float *maxs
 	return ( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))) != 0;
 }
 
+/* The eye's PVS row is loaded (a real cluster's, not the all-visible one). */
+qboolean R_GXWorldDLPvsLive( void )
+{
+	return gc_wd_state == 1 && gc_wd_pvs && gc_wd_pvs_cluster >= 0 && gc_wd_frame >= 2 && !R_GXCaptureMode();
+}
+
+/* Is the cluster in the eye's PVS row? True when there is no row to ask. */
+qboolean R_GXWorldDLClusterVisible( int cluster )
+{
+	if( !R_GXWorldDLPvsLive() || cluster < 0 || (u32)cluster >= gc_wd_hdr.n_clusters )
+		return true;
+	return ( gc_wd_pvs[cluster >> 3] & ( 1 << ( cluster & 7 ))) != 0;
+}
+
 /* Harbor industrial stacks: tall and narrow. Wide cliff plates must stay on
  * the shore pass — SpecOn fill turns them into a white sheet. */
 static qboolean R_GXWorldDLIsTower( u32 i )
