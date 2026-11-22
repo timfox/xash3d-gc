@@ -20,6 +20,11 @@ Commands: gc_card_save, gc_card_load, gc_card_format confirmed. Cvar gc_card_sta
 #include "settings_blob.h"
 #include "card_art.h"
 
+/* libogc2 renamed libogc's CARD_WORKAREA_SIZE to CARD_WORKAREA. */
+#ifndef CARD_WORKAREA_SIZE
+#define CARD_WORKAREA_SIZE CARD_WORKAREA
+#endif
+
 /* Per-game identity.  The card file name, the IPL comment and CARD_Init's
  * game/maker codes were Day of Defeat's in every build, so the Half-Life
  * disc saved as "Day of Defeat GameCube".  The codes now come from the disc
