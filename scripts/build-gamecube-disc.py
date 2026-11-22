@@ -550,6 +550,15 @@ SMOKE_INTRO_MEDIA = (
 	"media/sierra.avi",
 	"media/valve.avi",
 )
+MOHAA_NATIVE_STARTUP_MOVIE = "media/mohaa_intro.avi"
+
+
+def startup_movie_playlist(source: Path) -> list[str]:
+	"""List retail AVI names whose native GameCube companions are staged."""
+	movies = [relative for relative in SMOKE_INTRO_MEDIA if (source / relative).is_file()]
+	if (source / "media/mohaa_intro.gcvid").is_file():
+		movies.insert(0, MOHAA_NATIVE_STARTUP_MOVIE)
+	return movies
 
 MENU_RESOURCE_ASSETS = (
 	"resource/logo_game.tga",
@@ -3895,11 +3904,7 @@ def create_retail_boot_overlays(
 		overlays.append(("media/StartupVids.txt", startup_vids))
 		return tuple(overlays)
 
-	movies = [
-		relative
-		for relative in SMOKE_INTRO_MEDIA
-		if (source / relative).is_file()
-	]
+	movies = startup_movie_playlist(source)
 	if movies:
 		startup_vids.write_text("".join(f"{movie}\n" for movie in movies), encoding="ascii")
 		overlays.append(("media/StartupVids.txt", startup_vids))
