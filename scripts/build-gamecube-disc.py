@@ -290,22 +290,31 @@ def write_bootstrap_pk3(
 	bootstrap: Path,
 	recursive: bool = False,
 	extra_media: list[Path] | None = None,
+	fallback: Path | None = None,
 ) -> None:
 	"""Write gamecube-bootstrap.pk3 (small files plus GC studio/HUD/font/sky mirrors).
+
+	fallback: the data of the game's fallback_dir. A game folder that holds only
+	its own files (mohaa over dod) has no gfx.wad, HUD sheets or player models to
+	bake from, so whatever the game folder did not supply is taken from there.
 
 	Shared by the disc image and the Swiss SD card stage so both routes boot
 	the same payload. extra_media: CapFaces packs / sky CMPR from overlays —
 	ISO9660 directory find misses these on some grafts (charlie exists=0).
 	"""
 	with zipfile.ZipFile(bootstrap, "w", zipfile.ZIP_DEFLATED) as archive:
-		children = data.rglob("*") if recursive else data.iterdir()
-		for child in sorted(children):
+		roots = [data] + ([fallback] if fallback is not None and fallback != data else [])
+		children = [(root, child) for root in roots
+			for child in sorted(root.rglob("*") if recursive else root.iterdir())]
+		for root, child in children:
+			if root is not data and child.relative_to(root).as_posix() in archive.NameToInfo:
+				continue
 			suffix = child.suffix.lower()
 			# Keep the startup playlist as a loose ISO file. Retail boot overlays
 			# replace it per build (Valve intro enabled or intentionally skipped),
 			# while the bootstrap archive is mounted with higher search priority.
 			# Copying an older empty playlist here silently masks the overlay.
-			if child.relative_to(data).as_posix().lower() == "media/startupvids.txt":
+			if child.relative_to(root).as_posix().lower() == "media/startupvids.txt":
 				continue
 			# G346: smoke changelevel dests like c1a0.bsp are ~2.5 MiB. The
 			# old 2 MiB cap left them FST-only; when directory find flaps to
@@ -339,7 +348,7 @@ def write_bootstrap_pk3(
 				)
 				archive.write(
 					child,
-					child.relative_to(data).as_posix(),
+					child.relative_to(root).as_posix(),
 					compress_type=compress_type,
 				)
 		# The fallback menu is loaded through the bootstrap search path during
@@ -350,21 +359,24 @@ def write_bootstrap_pk3(
 			for child in sorted(menu_dir.rglob("*")):
 				if child.is_file() and child.suffix.lower() not in BOOTSTRAP_EXCLUDED_EXTENSIONS:
 					archive.write(child, child.relative_to(data).as_posix(), compress_type=zipfile.ZIP_STORED)
-		studio_count = inject_gc_studio_into_bootstrap(archive, data)
-		if studio_count:
-			print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
-		player_count = inject_gc_player_models(archive, data)
-		if player_count:
-			print(f"GameCube player models: injected {player_count} file(s) into bootstrap pk3")
-		hud_count = inject_gc_hud_into_bootstrap(archive, data)
-		if hud_count:
-			print(f"GameCube HUD mirror: injected {hud_count} sprite(s) into bootstrap pk3")
-		font_count = inject_gc_font_into_bootstrap(archive, data)
-		if font_count:
-			print(f"GameCube font mirror: injected {font_count} lean font(s) into bootstrap pk3")
-		sky_count = inject_gc_sky_into_bootstrap(archive, data)
-		if sky_count:
-			print(f"GameCube sky mirror: injected {sky_count} lean BMP(s) into bootstrap pk3")
+		for root in roots:
+			if root is not data:
+				print(f"GameCube bootstrap: baking what {data.name} lacks from {root}")
+			studio_count = inject_gc_studio_into_bootstrap(archive, root)
+			if studio_count:
+				print(f"GameCube studio mirror: injected {studio_count} MDL(s) into bootstrap pk3")
+			player_count = inject_gc_player_models(archive, root)
+			if player_count:
+				print(f"GameCube player models: injected {player_count} file(s) into bootstrap pk3")
+			hud_count = inject_gc_hud_into_bootstrap(archive, root)
+			if hud_count:
+				print(f"GameCube HUD mirror: injected {hud_count} sprite(s) into bootstrap pk3")
+			font_count = inject_gc_font_into_bootstrap(archive, root)
+			if font_count:
+				print(f"GameCube font mirror: injected {font_count} lean font(s) into bootstrap pk3")
+			sky_count = inject_gc_sky_into_bootstrap(archive, root)
+			if sky_count:
+				print(f"GameCube sky mirror: injected {sky_count} lean BMP(s) into bootstrap pk3")
 		extra_n = 0
 		for path in extra_media or []:
 			if not path.is_file():
@@ -431,6 +443,23 @@ def parse_extra_data_args(values: list[str] | None) -> list[tuple[str, Path]]:
 	return result
 
 
+def fallback_data_dir(data: Path, extra_gamedirs) -> Path | None:
+	"""The staged data of the fallback_dir named in data/gameinfo.txt or liblist.gam, if it is on this disc."""
+	for name in ("gameinfo.txt", "liblist.gam"):
+		try:
+			text = (data / name).read_text(errors="replace")
+		except OSError:
+			continue
+		for line in text.splitlines():
+			parts = line.split(None, 1)
+			if len(parts) == 2 and parts[0].lower() == "fallback_dir":
+				want = parts[1].strip().strip('"').lower()
+				for gamedir, path in extra_gamedirs:
+					if gamedir.lower() == want:
+						return path
+	return None
+
+
 def build_iso9660(
 	data: Path,
 	extras: Path | None,
@@ -478,7 +507,8 @@ def build_iso9660(
 			)
 		]
 		write_bootstrap_pk3(
-			data, bootstrap, bootstrap_recursive, extra_media=boot_media
+			data, bootstrap, bootstrap_recursive, extra_media=boot_media,
+			fallback=fallback_data_dir(data, extra_gamedirs),
 		)
 
 		if extras is not None:
