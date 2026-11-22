@@ -2214,6 +2214,224 @@ qboolean R_GXLightSamplesRead( u32 ofs, void *out, u32 len )
 	return true;
 }
 
+/* MOHAA's light grid (media/lg_<map>.gcg, mohaa-gc tools/bsp19_lightgrid.py):
+ * the light retail gives models, one colour per 32 MOHAA units. The palette and
+ * the per-x block table stay in BSS (2.8 KB); the column offsets and the
+ * run-length coded columns stay in ARAM, MOHAA's own layout, and a few decoded
+ * columns are cached (a soldier standing still reads the same four). */
+#define GC_LG_HDR	64
+#define GC_LG_PAL_END	832
+#define GC_LG_ZMAX	512
+#define GC_LG_CACHE	16
+#define GC_LG_XMAX	1024	/* 32 K MOHAA units at 32 a point */
+
+static u32 gc_lg_aram, gc_lg_cap, gc_lg_offs_at, gc_lg_data_at, gc_lg_data_len;
+static u32 gc_lg_bx, gc_lg_by, gc_lg_bz;
+static float gc_lg_org[3], gc_lg_inv[3];
+static byte gc_lg_pal[768];
+static u16 gc_lg_base[GC_LG_XMAX] __attribute__(( aligned( 32 )));
+static qboolean gc_lg_ok;
+static struct { u32 ofs; int n; byte z[GC_LG_ZMAX]; } gc_lg_col[GC_LG_CACHE];
+static int gc_lg_col_next;
+
+static void R_GXLightGridLoad( const char *mapbase )
+{
+	char path[96];
+	file_t *f;
+	byte hdr[GC_LG_HDR] __attribute__(( aligned( 32 )));
+	u32 size, done, offs_n;
+	int i;
+
+	gc_lg_ok = false;
+	if( !gc_wd_cache || gc_wd_cache_size < 32u || gEngfuncs.Sys_CheckParm( "-gcnolightgrid" ))
+		return;
+	Q_snprintf( path, sizeof( path ), "media/lg_%s.gcg", mapbase );
+	f = gEngfuncs.fsapi->Open( path, "rb", false );
+	if( !f )
+		return;
+	if( gEngfuncs.fsapi->Read( f, hdr, GC_LG_HDR ) != GC_LG_HDR || memcmp( hdr, "GClg", 4 ) || *(u32 *)( hdr + 4 ) != 1u )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: light grid bad header %s\n", path );
+		gEngfuncs.fsapi->Close( f );
+		return;
+	}
+	gc_lg_bx = *(u32 *)( hdr + 8 );
+	gc_lg_by = *(u32 *)( hdr + 12 );
+	gc_lg_bz = *(u32 *)( hdr + 16 );
+	gc_lg_offs_at = *(u32 *)( hdr + 20 );
+	offs_n = *(u32 *)( hdr + 24 );
+	gc_lg_data_at = *(u32 *)( hdr + 28 );
+	gc_lg_data_len = *(u32 *)( hdr + 32 );
+	for( i = 0; i < 3; i++ )
+	{
+		float cell;
+
+		memcpy( &gc_lg_org[i], hdr + 36 + 4 * i, 4 );
+		memcpy( &cell, hdr + 48 + 4 * i, 4 );
+		gc_lg_inv[i] = cell > 0.0f ? 1.0f / cell : 0.0f;
+	}
+	if( !gc_lg_bx || !gc_lg_by || !gc_lg_bz || offs_n != gc_lg_bx * gc_lg_by + gc_lg_bx
+		|| gc_lg_bx > GC_LG_XMAX || gc_lg_offs_at < GC_LG_PAL_END || gc_lg_data_at < gc_lg_offs_at + offs_n * 2u || !gc_lg_inv[0] )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: light grid bad layout %s\n", path );
+		gEngfuncs.fsapi->Close( f );
+		return;
+	}
+	if( gEngfuncs.fsapi->Read( f, gc_lg_pal, 768 ) != 768 )
+	{
+		gEngfuncs.fsapi->Close( f );
+		return;
+	}
+	size = ( gc_lg_data_at + gc_lg_data_len + 31u ) & ~31u;
+	if( !gc_lg_aram || gc_lg_cap < size )
+	{
+		if( gc_lg_aram )
+			GC_AramFree( gc_lg_aram );
+		gc_lg_aram = GC_AramAllocTagged( size, true, "lightgrid" );
+		gc_lg_cap = gc_lg_aram ? size : 0;
+	}
+	if( !gc_lg_aram )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light grid: no room for %u bytes (ARAM)\n", size );
+		gEngfuncs.fsapi->Close( f );
+		return;
+	}
+	gEngfuncs.fsapi->Seek( f, 0, SEEK_SET );
+	for( done = 0; done < size; )
+	{
+		u32 n = Q_min( size - done, gc_wd_cache_size & ~31u );
+		fs_offset_t got = gEngfuncs.fsapi->Read( f, gc_wd_cache, n );
+
+		if( got <= 0 )
+			break;
+		GC_AramCopy( gc_lg_aram + done, gc_wd_cache, ( (u32)got + 31u ) & ~31u, true );
+		done += (u32)got;
+		if( (u32)got < n )
+			break;
+	}
+	gEngfuncs.fsapi->Close( f );
+	if( done < gc_lg_data_at + gc_lg_data_len )
+	{
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: light grid short read %u/%u\n", done, size );
+		return;
+	}
+	GC_AramCopy( gc_lg_aram + gc_lg_offs_at, gc_lg_base, gc_lg_bx * 2u, false );
+	for( i = 0; i < GC_LG_CACHE; i++ )
+		gc_lg_col[i].ofs = 0xffffffffu;
+	gc_lg_ok = true;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: light grid %s %ux%ux%u (ARAM %u)\n", path, gc_lg_bx, gc_lg_by, gc_lg_bz, size );
+}
+
+/* Palette indices of column (x, y), decoded up to z = need. */
+static const byte *R_GXLightGridColumn( u32 x, u32 y, int need, int *count )
+{
+	byte raw[GC_LG_ZMAX + GC_LG_ZMAX / 64 + 32] __attribute__(( aligned( 32 )));
+	u16 low;
+	u32 ofs, len, at = 0;
+	int i, n = 0, slot;
+
+	GC_AramCopy( gc_lg_aram + gc_lg_offs_at + ( gc_lg_bx + x * gc_lg_by + y ) * 2u, &low, 2, false );
+	ofs = (u32)gc_lg_base[x] * 256u + low;
+	if( ofs >= gc_lg_data_len )
+		return NULL;
+	for( i = 0; i < GC_LG_CACHE; i++ )
+	{
+		if( gc_lg_col[i].ofs == ofs && gc_lg_col[i].n > need )
+		{
+			*count = gc_lg_col[i].n;
+			return gc_lg_col[i].z;
+		}
+	}
+	len = Q_min( (u32)sizeof( raw ), gc_lg_data_len - ofs );
+	GC_AramCopy( gc_lg_aram + gc_lg_data_at + ofs, raw, len, false );
+	slot = gc_lg_col_next++ % GC_LG_CACHE;
+	while( n < GC_LG_ZMAX && at < len )
+	{
+		const int c = (signed char)raw[at++];
+
+		if( c < 0 )
+		{
+			for( i = 0; i < -c && n < GC_LG_ZMAX && at < len; i++ )
+				gc_lg_col[slot].z[n++] = raw[at++];
+		}
+		else if( at < len )
+		{
+			for( i = 0; i < c + 2 && n < GC_LG_ZMAX; i++ )
+				gc_lg_col[slot].z[n++] = raw[at];
+			at++;
+		}
+		if( n > need && n >= (int)gc_lg_bz )
+			break;
+	}
+	gc_lg_col[slot].ofs = ofs;
+	gc_lg_col[slot].n = n;
+	*count = n;
+	return gc_lg_col[slot].z;
+}
+
+/* The grid's light at org, as MOHAA's renderer reads it: trilinear over the
+ * eight points around it, points inside solid dropped. False off the grid. */
+qboolean R_GXLightGridSample( const float *org, byte *rgb )
+{
+	float f[3], fr[3], acc[3] = { 0.0f, 0.0f, 0.0f }, tw = 0.0f, m;
+	int i0[3], a, dx, dy, dz;
+
+	if( !gc_lg_ok )
+		return false;
+	for( a = 0; a < 3; a++ )
+	{
+		f[a] = ( org[a] - gc_lg_org[a] ) * gc_lg_inv[a];
+		i0[a] = (int)floorf( f[a] );
+		fr[a] = f[a] - (float)i0[a];
+	}
+	for( dx = 0; dx < 2; dx++ )
+	{
+		for( dy = 0; dy < 2; dy++ )
+		{
+			const int x = i0[0] + dx, y = i0[1] + dy;
+			const byte *col;
+			int n = 0;
+
+			if( x < 0 || y < 0 || x >= (int)gc_lg_bx || y >= (int)gc_lg_by )
+				continue;
+			col = R_GXLightGridColumn( (u32)x, (u32)y, Q_max( i0[2] + 1, 0 ), &n );
+			if( !col )
+				continue;
+			for( dz = 0; dz < 2; dz++ )
+			{
+				const int z = i0[2] + dz;
+				float w;
+
+				if( z < 0 || z >= n || !col[z] )
+					continue;
+				w = ( dx ? fr[0] : 1.0f - fr[0] ) * ( dy ? fr[1] : 1.0f - fr[1] ) * ( dz ? fr[2] : 1.0f - fr[2] );
+				acc[0] += gc_lg_pal[col[z] * 3 + 0] * w;
+				acc[1] += gc_lg_pal[col[z] * 3 + 1] * w;
+				acc[2] += gc_lg_pal[col[z] * 3 + 2] * w;
+				tw += w;
+			}
+		}
+	}
+	if( tw <= 0.0f )
+		return false;
+	if( tw < 0.99f )
+	{
+		acc[0] /= tw;
+		acc[1] /= tw;
+		acc[2] /= tw;
+	}
+	m = Q_max( acc[0], Q_max( acc[1], acc[2] ));
+	if( m > 255.0f )
+	{
+		acc[0] *= 255.0f / m;
+		acc[1] *= 255.0f / m;
+		acc[2] *= 255.0f / m;
+	}
+	for( a = 0; a < 3; a++ )
+		rgb[a] = (byte)( acc[a] + 0.5f );
+	return true;
+}
+
 qboolean R_GXWorldDLActive( void )
 {
 	model_t *world = WORLDMODEL;
@@ -2233,6 +2451,7 @@ qboolean R_GXWorldDLActive( void )
 		Q_strncpy( gc_wd_map, base, sizeof( gc_wd_map ));
 		R_GXWorldDLLoad( base );
 		R_GXLightFacesLoad( base );
+		R_GXLightGridLoad( base );
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL Active done state=%d\n", gc_wd_state );
 		GC_HeapCheck( "world DL load done" );
 	}
