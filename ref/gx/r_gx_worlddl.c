@@ -1013,6 +1013,7 @@ static void R_GXTevMatAppendStages( int id, int a, int b )
 static void R_GXTevMatEndAlphaTest( void ) {}
 /* Real Flipper fog lives in r_gx_bloom.c (d2_lostcoast env_fog_controller). */
 extern void R_GXFogBegin( void );
+extern float R_GXFarplaneCull2( void );
 extern void R_GXFogEnd( void );
 
 static int gc_wd_state;	/* 0 untried, 1 ready, -1 absent */
@@ -4115,6 +4116,9 @@ int R_GXWorldDLDraw( void )
 		int oi, pass;
 		u32 tower_budget = 288u * 1024u;
 		u32 tower_grant, shore_budget;
+		/* MOHAA farplane: chunks wholly past it are all fog. */
+		const float far2 = capture ? 0.0f : R_GXFarplaneCull2();
+		const float *far_eye = ( r_gx_mirror || eye_ok ) ? RI.rvp.vieworigin : org;
 
 		R_GXWorldDLBoxTestSet( normals, ( r_gx_mirror || eye_ok ) ? RI.rvp.vieworigin : org );
 		for( i = 0; i < gc_wd_hdr.n_chunks; i++ )
@@ -4124,6 +4128,26 @@ int R_GXWorldDLDraw( void )
 			if( !capture && !( gc_wd_pvs[cl >> 3] & ( 1 << ( cl & 7 ))))
 				continue;
 			pvs_hits++;
+			if( far2 > 0.0f )
+			{
+				float d2 = 0.0f;
+				int a;
+
+				for( a = 0; a < 3; a++ )
+				{
+					const float c = far_eye[a];
+					const float mn = (float)gc_wd_chunk_mins[i * 3 + a];
+					const float mx = (float)gc_wd_chunk_maxs[i * 3 + a];
+					const float e = c < mn ? mn - c : ( c > mx ? c - mx : 0.0f );
+
+					d2 += e * e;
+				}
+				if( d2 > far2 )
+				{
+					frustum_drop++;
+					continue;
+				}
+			}
 			/* Nothing under the water reflects in it. */
 			if( r_gx_mirror && (float)gc_wd_chunk_maxs[i * 3 + 2] <= r_gx_mirror_z )
 				continue;

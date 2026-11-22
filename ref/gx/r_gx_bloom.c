@@ -858,6 +858,29 @@ void R_GXFogBegin( void )
 
 	if( gc_fog_on )
 		return;
+	{
+		/* A converted MOHAA map's farplane: linear fog to farplane_color,
+		 * full by the far plane (everything past it is culled). */
+		extern qboolean R_GXMapFarplane( float *dist, float *bias, byte *rgb );
+		float fd, fb;
+		byte rgb[3];
+
+		if( R_GXMapFarplane( &fd, &fb, rgb ))
+		{
+			const GXColor fc = { rgb[0], rgb[1], rgb[2], 255 };
+
+			zfar = Q_max( 256.0f, RI.farClip > 1.0f ? RI.farClip : 4096.0f );
+			GX_SetFog( GX_FOG_PERSP_LIN, fb, fd, znear, zfar, fc );
+			gc_fog_on = true;
+			if( !logged )
+			{
+				logged = true;
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: fog farplane color=%d,%d,%d start=%.0f end=%.0f zfar=%.0f\n",
+					rgb[0], rgb[1], rgb[2], fb, fd, zfar );
+			}
+			return;
+		}
+	}
 	/* nearZ/farZ MUST match guFrustum from R_GXBuildWorldProjection.
 	 * fogstart/fogend stay at map values (1600/50000) even when zfar is
 	 * shorter — density just never reaches 1.0 inside the frustum. */

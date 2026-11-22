@@ -4323,6 +4323,7 @@ G285: tip-safe Flipper outdoor sky — one lean skybox side as a fullscreen
 textured quad (no SURF_DRAWSKY BSP walk, no new BSS). Falls back to clear.
 =============
 */
+qboolean R_GXMapFarplane( float *dist, float *bias, byte *rgb );
 static void R_GXDrawSkyBackdrop( GXRModeObj *rmode )
 {
 	Mtx44 ortho;
@@ -4424,6 +4425,14 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 		&& gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 		&& !gEngfuncs.Sys_CheckParm( "-gcconnect" ))
 		sky = 0x5A8CD2FFu;
+	{
+		/* A converted MOHAA map with a far plane: past it is all fog, so
+		 * the backdrop is the fog colour, as in retail. */
+		byte fr[3];
+
+		if( R_GXMapFarplane( NULL, NULL, fr ))
+			sky = ( (u32)fr[0] << 24 ) | ( (u32)fr[1] << 16 ) | ( (u32)fr[2] << 8 ) | 0xffu;
+	}
 
 	copy_clear.r = (u8)(( sky >> 24 ) & 0xff );
 	copy_clear.g = (u8)(( sky >> 16 ) & 0xff );
@@ -4473,7 +4482,7 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 
 	/* Single-side Flipper backdrop is a tip-era cheat. When the real 6-face
 	 * CMPR cube is resident, skip it — R_GXDrawSkyBox draws the cube. */
-	if( !GC_IsTramIntroMap() && !r_gx_sky_ready )
+	if( !GC_IsTramIntroMap() && !r_gx_sky_ready && !R_GXMapFarplane( NULL, NULL, NULL ))
 		R_GXDrawSkyBackdrop( rmode );
 }
 
@@ -4854,7 +4863,7 @@ static void R_GXSetupWorld3DState( void )
 	/* Real 6-face cube is mandatory outdoors. CMPR sides live in BSS (48 KiB)
 	 * so draw never needs tip — tip-gating left WorldDL on solid clear + the
 	 * single-side Flipper backdrop forever (ava-prop-2 tip≈26 Kb). */
-	if( R_GXSkyVisible( ))
+	if( R_GXSkyVisible( ) && !R_GXMapFarplane( NULL, NULL, NULL ))
 	{
 		R_GXDrawSkyBox();
 		/* Full restore after NumChans(0)+REPLACE — incomplete state left
@@ -6760,6 +6769,100 @@ static qboolean gc_prop_grey_ready;
 static void R_GXPropLoad( void );
 static void R_GXPropLoadTex( void );
 
+/* MOHAA's far plane. A converted map's worldspawn carries the retail
+ * "farplane" (already in map units), "farplane_bias" and "farplane_color"
+ * (0..1). Retail fogs linearly to that colour by the far plane and draws
+ * nothing past it: that is what lets m6l1a stand 2763 trees in a valley.
+ * Read once per world from the entity lump's first block. */
+static const void *gc_fp_world;
+static float gc_fp_dist, gc_fp_bias;
+static byte gc_fp_rgb[3];
+
+static qboolean R_GXWorldspawnValue( const char *ents, const char *key, char *out, size_t outsz )
+{
+	const char *end, *p, *v;
+	char quoted[48];
+	size_t n;
+
+	if( !ents || !out || outsz < 2 )
+		return false;
+	end = Q_strchr( ents, '}' );	/* worldspawn is the first block */
+	Q_snprintf( quoted, sizeof( quoted ), "\"%s\"", key );
+	p = Q_stristr( ents, quoted );
+	if( !p || ( end && p > end ))
+		return false;
+	v = Q_strchr( p + Q_strlen( quoted ), '"' );
+	if( !v )
+		return false;
+	v++;
+	p = Q_strchr( v, '"' );
+	if( !p )
+		return false;
+	n = (size_t)( p - v );
+	if( n >= outsz )
+		n = outsz - 1;
+	memcpy( out, v, n );
+	out[n] = '\0';
+	return out[0] != '\0';
+}
+
+qboolean R_GXMapFarplane( float *dist, float *bias, byte *rgb )
+{
+	if( !WORLDMODEL )
+		return false;
+	if( gc_fp_world != (const void *)WORLDMODEL )
+	{
+		char buf[64];
+		float c[3] = { 0.0f, 0.0f, 0.0f };
+		int i;
+
+		gc_fp_world = WORLDMODEL;
+		gc_fp_dist = gc_fp_bias = 0.0f;
+		gc_fp_rgb[0] = gc_fp_rgb[1] = gc_fp_rgb[2] = 0;
+		if( !gEngfuncs.Sys_CheckParm( "-gcnofarplane" )
+			&& R_GXWorldspawnValue( WORLDMODEL->entities, "farplane", buf, sizeof( buf )))
+		{
+			gc_fp_dist = Q_atof( buf );
+			if( R_GXWorldspawnValue( WORLDMODEL->entities, "farplane_bias", buf, sizeof( buf )))
+				gc_fp_bias = Q_atof( buf );
+			if( R_GXWorldspawnValue( WORLDMODEL->entities, "farplane_color", buf, sizeof( buf )))
+				sscanf( buf, "%f %f %f", &c[0], &c[1], &c[2] );
+			for( i = 0; i < 3; i++ )
+				gc_fp_rgb[i] = (byte)bound( 0, (int)( c[i] * 255.0f + 0.5f ), 255 );
+			if( gc_fp_dist < 64.0f )
+				gc_fp_dist = 0.0f;
+			if( gc_fp_bias < 0.0f || gc_fp_bias >= gc_fp_dist )
+				gc_fp_bias = 0.0f;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: farplane %.0f bias %.0f colour %d %d %d (fog and cull)\n",
+				gc_fp_dist, gc_fp_bias, gc_fp_rgb[0], gc_fp_rgb[1], gc_fp_rgb[2] );
+		}
+	}
+	if( gc_fp_dist <= 0.0f )
+		return false;
+	if( dist )
+		*dist = gc_fp_dist;
+	if( bias )
+		*bias = gc_fp_bias;
+	if( rgb )
+	{
+		rgb[0] = gc_fp_rgb[0];
+		rgb[1] = gc_fp_rgb[1];
+		rgb[2] = gc_fp_rgb[2];
+	}
+	return true;
+}
+
+/* Squared far-plane cull distance (0: none). A prop or chunk whose nearest
+ * point lies past it is fully fogged: skip it. */
+float R_GXFarplaneCull2( void )
+{
+	float d;
+
+	if( !R_GXMapFarplane( &d, NULL, NULL ))
+		return 0.0f;
+	return d * d;
+}
+
 static float R_GXPropD2( const float *org, const s16 mins[3], const s16 maxs[3] )
 {
 	float d = 0.0f;
@@ -8451,7 +8554,8 @@ void R_GXPropDrawHorizon( const float *org )
 		gc_prop_glint_k.a = gEngfuncs.Sys_CheckParm( "-gcnorockglint" ) ? 0 : 255;
 	}
 	float *key;
-	int i, n = 0, ninst = 0, drawn = 0, a, b, gap, cut = 0;
+	float far2;
+	int i, n = 0, ninst = 0, drawn = 0, a, b, gap, cut = 0, farcut = 0;
 	u16 tmp;
 	float ftmp;
 
@@ -8486,16 +8590,25 @@ void R_GXPropDrawHorizon( const float *org )
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_U16, 8 );
 	gc_prop_vtx_frac = -1;
 	R_GXBuildFrustum();
+	far2 = R_GXFarplaneCull2();
 	for( i = 0; i < (int)gc_prop_ninst; i++ )
 	{
 		const gc_prop_inst_t *in = &gc_prop_inst[i];
 		vec3_t mins, maxs;
+		float d2;
 
 		if( in->count == 0 )
 			continue;
 		/* The near pass draws anything inside the reach. */
-		if( R_GXPropD2( org, in->mins, in->maxs ) <= GC_PROP_REACH2 )
+		d2 = R_GXPropD2( org, in->mins, in->maxs );
+		if( d2 <= GC_PROP_REACH2 )
 			continue;
+		/* Past the map's far plane it is all fog (MOHAA farplane). */
+		if( far2 > 0.0f && d2 > far2 )
+		{
+			farcut++;
+			continue;
+		}
 		/* Size filters from the CapFaces era, when wide props doubled baked
 		 * world plates. The world DL is BSP only, so they dropped real
 		 * props: the docks, the village clusters on the hill, the wreck,
@@ -8508,7 +8621,7 @@ void R_GXPropDrawHorizon( const float *org )
 		if( R_GXBoxOutsideFrustum( mins, maxs ))
 			continue;
 		order[n] = (u16)i;
-		key[n] = R_GXPropD2( org, in->mins, in->maxs );
+		key[n] = d2;
 		n++;
 	}
 	/* Nearest first (a shell sort: a converted map's forest puts 1900
@@ -8557,7 +8670,7 @@ void R_GXPropDrawHorizon( const float *org )
 		if( !logged )
 		{
 			logged = true;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d past budget=%d\n", drawn, ninst, cut );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d past budget=%d past farplane=%d\n", drawn, ninst, cut, farcut );
 		}
 	}
 }
@@ -8598,13 +8711,17 @@ static void R_GXPropDraw( const float *org )
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
 	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_U16, 8 );
 	gc_prop_vtx_frac = -1;
+	{
+		const float far2 = R_GXFarplaneCull2();
+
 	for( i = 0; i < (int)gc_prop_ninst; i++ )
 	{
 		const gc_prop_inst_t *in = &gc_prop_inst[i];
+		const float d2 = in->count ? R_GXPropD2( org, in->mins, in->maxs ) : 0.0f;
 
 		if( in->count == 0 )
 			continue;
-		if( R_GXPropD2( org, in->mins, in->maxs ) > GC_PROP_REACH2 )
+		if( d2 > GC_PROP_REACH2 || ( far2 > 0.0f && d2 > far2 ))
 			continue;
 		/* Size filters from the CapFaces era, when wide props doubled baked
 		 * world plates. The world DL is BSP only, so they dropped real
@@ -8617,6 +8734,7 @@ static void R_GXPropDraw( const float *org )
 			continue;
 		drawn += R_GXPropEmitReal( in );
 		near++;
+	}
 	}
 	if( drawn > 0 )
 	{
