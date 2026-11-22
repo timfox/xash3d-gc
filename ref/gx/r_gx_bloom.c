@@ -916,6 +916,12 @@ float R_GXMapFarplane( void )
 	return gc_mapfog_end;
 }
 
+/* The far plane fog colour as 0xRRGGBBAA (the clear colour past the plane). */
+u32 R_GXMapFogRGBA( void )
+{
+	return ((u32)gc_mapfog_col.r << 24 ) | ((u32)gc_mapfog_col.g << 16 ) | ((u32)gc_mapfog_col.b << 8 ) | 0xffu;
+}
+
 /* Arms the map's far plane fog for a projection with these planes; false
  * when the map has none. */
 qboolean R_GXMapFogSet( f32 z_near, f32 z_far )

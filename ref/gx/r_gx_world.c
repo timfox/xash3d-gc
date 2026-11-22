@@ -52,6 +52,8 @@ Not feature-parity: full brush-mover lighting remains soft/diagnostic.
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 #include "../../engine/platform/gamecube/hud_hires.h"
 
+extern float R_GXMapFarplane( void );	/* r_gx_bloom.c: a converted map's far plane, 0 = none */
+
 extern qboolean GC_UseGxWorldDraw( void );
 extern qboolean GC_UseGxRenderer( void );
 extern void GC_MarkGxWorldEfbReady( void );
@@ -4424,6 +4426,13 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 		&& gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 		&& !gEngfuncs.Sys_CheckParm( "-gcconnect" ))
 		sky = 0x5A8CD2FFu;
+	/* A MOHAA far plane: past it is the fog colour, sky included. */
+	{
+		extern u32 R_GXMapFogRGBA( void );
+
+		if( R_GXMapFarplane() > 0.0f )
+			sky = R_GXMapFogRGBA();
+	}
 
 	copy_clear.r = (u8)(( sky >> 24 ) & 0xff );
 	copy_clear.g = (u8)(( sky >> 16 ) & 0xff );
@@ -4473,7 +4482,7 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 
 	/* Single-side Flipper backdrop is a tip-era cheat. When the real 6-face
 	 * CMPR cube is resident, skip it — R_GXDrawSkyBox draws the cube. */
-	if( !GC_IsTramIntroMap() && !r_gx_sky_ready )
+	if( !GC_IsTramIntroMap() && !r_gx_sky_ready && R_GXMapFarplane() <= 0.0f )
 		R_GXDrawSkyBackdrop( rmode );
 }
 
@@ -4854,7 +4863,7 @@ static void R_GXSetupWorld3DState( void )
 	/* Real 6-face cube is mandatory outdoors. CMPR sides live in BSS (48 KiB)
 	 * so draw never needs tip — tip-gating left WorldDL on solid clear + the
 	 * single-side Flipper backdrop forever (ava-prop-2 tip≈26 Kb). */
-	if( R_GXSkyVisible( ))
+	if( R_GXSkyVisible( ) && R_GXMapFarplane() <= 0.0f )
 	{
 		R_GXDrawSkyBox();
 		/* Full restore after NumChans(0)+REPLACE — incomplete state left
@@ -8496,7 +8505,6 @@ static void R_GXCanisterFlightDraw( const float *org )
 	}
 }
 
-extern float R_GXMapFarplane( void );
 static float gc_prop_far2;	/* this pass: the far plane squared, 0 = none */
 
 /* Once per prop pass: which cells are far, and the far plane. */

@@ -4299,6 +4299,24 @@ R_StudioDrawModelInternal
 static void R_StudioDrawModelInternal( cl_entity_t *e, int flags )
 {
 #if XASH_GAMECUBE
+	/* A MOHAA far plane: past it the fog is solid, and retail draws no
+	 * character there either. Bones, skinning and lighting are the biggest
+	 * part of a forest frame (12-15 ms for about twenty soldiers). */
+	if( e && e != tr.viewent && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+	{
+		extern float R_GXMapFarplane( void );
+		const float fp = R_GXMapFarplane();
+
+		if( fp > 0.0f )
+		{
+			vec3_t d;
+			const float reach = fp + 96.0f;	/* a body's half height and some */
+
+			VectorSubtract( e->origin, RI.rvp.vieworigin, d );
+			if( DotProduct( d, d ) > reach * reach )
+				return;
+		}
+	}
 	/* Lean New Game: client StudioDrawModel + STUDIO_EVENTS hung Flipper on
 	 * the first world studio (probes 171034/171424). Engine path, render-only.
 	 * Listen WorldDL (-gclistenserver / GC_UseGxWorldDraw) must use the same
