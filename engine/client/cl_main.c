@@ -57,6 +57,8 @@ static void CL_GameCubeStartDoDMenuMusic( void )
 }
 void GC_DrawLoadingStatus( const char *message, const char *details );
 void GC_SetLoadingProgress( float progress );
+void GC_LoadingSetStage( float fraction );
+void GC_LoadingOverlayPulse( void );
 void GC_ArmPostMapFrameBudgetSamples( void );
 qboolean GC_IsNewGameG36Done( void );
 qboolean GC_IsNewGameWorldReady( void );
@@ -3868,6 +3870,9 @@ static qboolean CL_ShouldRescanFilesystem( void )
 qboolean CL_PrecacheResources( void )
 {
 	resource_t	*pRes;
+#if XASH_GAMECUBE
+	int		gc_prec_total, gc_prec_done;
+#endif
 
 	// if we downloaded new WAD files or any other archives they must be added to searchpath
 	if( CL_ShouldRescanFilesystem( ))
@@ -3916,11 +3921,24 @@ qboolean CL_PrecacheResources( void )
 	if( cls.state != ca_active )
 		S_BeginRegistration();
 
+#if XASH_GAMECUBE
+	// the load bar follows the precache: count what is left, then step through it
+	for( pRes = cl.resourcesonhand.pNext, gc_prec_total = 0; pRes && pRes != &cl.resourcesonhand; pRes = pRes->pNext )
+		if( !FBitSet( pRes->ucFlags, RES_PRECACHED ))
+			gc_prec_total++;
+	gc_prec_done = 0;
+#endif
+
 	// precache all the remaining resources where order is doesn't matter
 	for( pRes = cl.resourcesonhand.pNext; pRes && pRes != &cl.resourcesonhand; pRes = pRes->pNext )
 	{
 		if( FBitSet( pRes->ucFlags, RES_PRECACHED ))
 			continue;
+
+#if XASH_GAMECUBE
+		GC_LoadingSetStage( 0.75f + 0.2f * (float)gc_prec_done++ / (float)gc_prec_total );
+		GC_LoadingOverlayPulse();
+#endif
 
 		switch( pRes->type )
 		{

@@ -327,6 +327,7 @@ void GC_CapFacesSoundscapeArm( void );
 void GC_CapFacesSoundscapeFrame( void );
 qboolean GC_MenuRunsServer( void ); /* menu New Game runs the real map logic */
 void GC_LoadingOverlayPulse( void ); /* animate LOADING during a held load */
+void GC_LoadingSetStage( float fraction ); /* raise the load bar floor (0..1) */
 void GC_DrawLoadingStatus( const char *message, const char *details );
 void GC_SetLoadingProgress( float progress );
 float GC_GetLoadingProgress( void );
