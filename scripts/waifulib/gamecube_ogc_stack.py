@@ -225,10 +225,13 @@ def engine_extra_ldflags(info: Optional[Dict[str, Any]] = None) -> List[str]:
 	# fall back to the boot pad's small zone instead of returning NULL.
 	flags.append("-Wl,--wrap=free,--wrap=realloc,--wrap=malloc,--wrap=calloc,--wrap=memalign")
 	# Drop the plain-C libraries' DWARF unwind tables (~47 KiB of MEM1 image);
-	# see the script for why no exception path needs them.
+	# see the script for why no exception path needs them. The libogc2 GameCube
+	# link can have no .eh_frame output section at all, in which case GNU ld
+	# rejects the script's INSERT anchor instead of producing a DOL. Its current
+	# libraries are built without unwind tables, so there is nothing to discard.
 	discard = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
 		"engine", "platform", "gamecube", "discard_c_unwind.ld")
-	if os.path.isfile(discard):
+	if os.path.isfile(discard) and info.get("stack") != "libogc2":
 		# INSERT scripts must be given with -T: they then augment the default
 		# GameCube script instead of replacing it.
 		flags.append("-Wl,-T," + discard)
