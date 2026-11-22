@@ -1218,6 +1218,21 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 
 		// copy results back to client
 		SV_FinishPMove( svgame.pmove, cl );
+#if XASH_GAMECUBE
+		/* LOCAL MOHAA TEST ONLY (not committed): slot 0 origin/onground once a second. */
+		if( cl == svs.clients && clent->v.health > 0 )
+		{
+			static double next_trace;
+			if( sv.time >= next_trace )
+			{
+				next_trace = sv.time + 1.0;
+				Con_Reportf( "MOHAA trace t=%.1f origin=(%.1f,%.1f,%.1f) onground=%d vel=(%.0f,%.0f,%.0f) fwd=%.0f\n",
+					sv.time, clent->v.origin[0], clent->v.origin[1], clent->v.origin[2],
+					FBitSet( clent->v.flags, FL_ONGROUND ) ? 1 : 0,
+					clent->v.velocity[0], clent->v.velocity[1], clent->v.velocity[2], ucmd->forwardmove );
+			}
+		}
+#endif
 #if XASH_DODGC_NETWORK
 		/* Sparse OSReport only — hull-path + PM_PlayerTrace after land hung
 		 * Host_Frame (ava-hl1move-10/11). Movement proof is velocity delta. */

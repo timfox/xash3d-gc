@@ -716,7 +716,7 @@ Host_ServerFrame
 
 ==================
 */
-void Host_ServerFrame( void )
+static void Host_ServerFrame_Inner( void )
 {
 #if XASH_GAMECUBE
 	GC_HeapCheckArmed( "server frame enter" );
@@ -1385,3 +1385,17 @@ void SV_Shutdown( const char *finalmsg )
 
 	svs.initialized = false;
 }
+
+#if XASH_GAMECUBE
+/* LOCAL TEST ONLY (not committed): time spent in the server frame (game DLL think, physics, MOHAA VM, soldier AI). */
+#include <ogc/lwp_watchdog.h>
+unsigned long long gc_split_sv_ticks;
+void Host_ServerFrame( void )
+{
+	const u64 t0 = gettime();
+	Host_ServerFrame_Inner();
+	gc_split_sv_ticks += gettime() - t0;
+}
+#else
+void Host_ServerFrame( void ) { Host_ServerFrame_Inner(); }
+#endif

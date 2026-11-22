@@ -1,0 +1,5 @@
+# cutride: hands off for the opening ride (~125 s at ~35 fps host frames), then forward ~7 s, then still
+30 - 0 0 0 0
+4400 - 0 0 0 0
+250 - 0 127 0 0
+120 - 0 0 0 0

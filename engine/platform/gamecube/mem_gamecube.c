@@ -2485,3 +2485,41 @@ qboolean GC_PrefetchContains( const char *path, unsigned int size )
 	return false;
 }
 #endif
+
+/* LOCAL MOHAA TEST ONLY (not committed): heap picture at a script allocation failure.
+ * used/free from mallinfo, the largest free chunk (bins 1..127 plus top), unclaimed MEM1 above
+ * the heap, then the zone pools and the per-caller heap census (disc cfg "heapcensus"). */
+void GC_MemReportPools( const char *stage );
+void GC_MohaaHeapReport( const char *tag, size_t want )
+{
+	size_t used, free_in_heap, unclaimed, largest = 0, nfree = 0;
+	gc_mchunk_t *top;
+	int i;
+
+	GC_MemHeapStats( &used, &free_in_heap, &unclaimed );
+	__malloc_lock( _REENT );
+	top = GC_HC_BIN( 0 )->fd;
+	if( top && (uintptr_t)top >= 0x80000000u && (uintptr_t)top < 0x81800000u )
+		largest = top->size & ~(size_t)3;
+	for( i = 1; i < GC_HC_NAV; i++ )
+	{
+		gc_mchunk_t *b = GC_HC_BIN( i );
+		gc_mchunk_t *c = b->bk;
+		int steps = 0;
+
+		for( ; c != b && steps < 8192; c = c->bk, steps++ )
+		{
+			size_t sz = c->size & ~(size_t)3;
+
+			nfree++;
+			if( sz > largest )
+				largest = sz;
+		}
+	}
+	__malloc_unlock( _REENT );
+	Con_Reportf( "MOHAA heap at=%s want=%lu heap_used=%lu heap_free=%lu largest_free=%lu free_chunks=%lu unclaimed=%lu top=%lu\n",
+		tag, (unsigned long)want, (unsigned long)used, (unsigned long)free_in_heap, (unsigned long)largest,
+		(unsigned long)nfree, (unsigned long)unclaimed, (unsigned long)( top ? ( top->size & ~(size_t)3 ) : 0 ));
+	GC_MemReportPools( tag );
+	GC_HeapCensusReport( tag );
+}

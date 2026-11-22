@@ -1159,6 +1159,8 @@ static qboolean gc_landmark3_configured;
 static qboolean gc_leanpvs_configured;
 static qboolean gc_fullphysics_configured;
 static qboolean gc_worldrender_configured;
+static char gc_local_args[8][32];	/* LOCAL TEST ONLY */
+static int gc_local_nargs;
 static qboolean gc_nohud_configured;	/* gamecube.cfg 'nohud': the engine's lean HUD is not drawn (spectator footage) */
 static qboolean gc_capfaces_smoke_configured;
 static qboolean gc_tas_configured;
@@ -1251,6 +1253,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_fullphysics_configured = false;
 	gc_worldrender_configured = false;
 	gc_nohud_configured = false;
+	gc_local_nargs = 0;
 	gc_capfaces_smoke_configured = false;
 	gc_tas_configured = false;
 	gc_dumpframes_configured = false;
@@ -1690,6 +1693,22 @@ static void GCube_LoadDiscBootOverrides( void )
 			continue;
 		}
 
+		/* LOCAL TEST ONLY (not committed): "arg -gcsomething" passes one engine parm. */
+		if( !Q_strnicmp( cursor, "arg", 3 ) && ( cursor[3] == ' ' || cursor[3] == '\t' ))
+		{
+			phase = cursor + 3;
+			while( *phase == ' ' || *phase == '\t' )
+				phase++;
+			len = strlen( phase );
+			while( len > 0 && ( phase[len - 1] == '\r' || phase[len - 1] == '\n' || phase[len - 1] == ' ' ))
+				phase[--len] = '\0';
+			if( len > 1 && len < sizeof( gc_local_args[0] ) && phase[0] == '-' && gc_local_nargs < 8 )
+			{
+				Q_strncpy( gc_local_args[gc_local_nargs++], phase, sizeof( gc_local_args[0] ));
+				SYS_Report( "Xash3D GameCube: disc boot override arg %s\n", phase );
+			}
+			continue;
+		}
 		if( !Q_strnicmp( cursor, "tas", 3 ) && ( cursor[3] == ' ' || cursor[3] == '\t' ))
 		{
 			phase = cursor + 3;
@@ -2177,6 +2196,12 @@ static void GCube_ReinjectMissingBootArgv( void )
 		gc_argv[n++] = "-gcworldrender";
 	if( gc_nohud_configured && !Sys_CheckParm( "-gcnohud" ) && n + 1 < cap )
 		gc_argv[n++] = "-gcnohud";
+	{
+		int la;
+		for( la = 0; la < gc_local_nargs; la++ )
+			if( !Sys_CheckParm( gc_local_args[la] ) && n + 1 < cap )
+				gc_argv[n++] = gc_local_args[la];
+	}
 	if( gc_capfaces_smoke_configured && !Sys_CheckParm( "-gccapfacessmoke" ) && n + 1 < cap )
 		gc_argv[n++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured && !Sys_CheckParm( "-gcmap" ) && n + 2 < cap )
@@ -2298,6 +2323,11 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 		gc_argv[fake_argc++] = "-gcworldrender";
 	if( gc_nohud_configured )
 		gc_argv[fake_argc++] = "-gcnohud";
+	{
+		int la;
+		for( la = 0; la < gc_local_nargs; la++ )
+			gc_argv[fake_argc++] = gc_local_args[la];
+	}
 	if( gc_capfaces_smoke_configured )
 		gc_argv[fake_argc++] = "-gccapfacessmoke";
 	if( gc_smoke_map_configured )

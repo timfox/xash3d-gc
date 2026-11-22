@@ -4352,7 +4352,7 @@ int gc_menu_step_frames;
 #define CL_GC_STEP( name ) ((void)0)
 #endif
 
-void Host_ClientFrame( void )
+static void Host_ClientFrame_Inner( void )
 {
 #if XASH_GAMECUBE
 	GC_HeapCheckArmed( "client frame enter" );
@@ -4930,3 +4930,36 @@ void CL_Shutdown( void )
 
 	Con_Shutdown ();
 }
+
+#if XASH_GAMECUBE
+/* LOCAL TEST ONLY (not committed): client frame (render + present) vs server frame vs everything else, every 120 frames. */
+#include <ogc/lwp_watchdog.h>
+extern unsigned long long gc_split_sv_ticks;
+void Host_ClientFrame( void )
+{
+	static u64 last, cl_acc, wall_acc, sv_prev;
+	static int n;
+	const u64 t0 = gettime();
+	Host_ClientFrame_Inner();
+	{
+		const u64 t1 = gettime();
+		cl_acc += t1 - t0;
+		if( last )
+			wall_acc += t1 - last;
+		last = t1;
+		if( ++n >= 120 )
+		{
+			const u64 sv = gc_split_sv_ticks - sv_prev;
+			const float k = 1.0f / ( 1000.0f * 120.0f );
+			const float wall = ticks_to_microsecs( wall_acc ) * k, clt = ticks_to_microsecs( cl_acc ) * k, svt = ticks_to_microsecs( sv ) * k;
+			Con_Reportf( "Xash3D GameCube: frame split ms server=%.1f client(render+present)=%.1f other=%.1f wall=%.1f (%.1f fps)\n",
+				svt, clt, wall - clt - svt, wall, wall > 0.0f ? 1000.0f / wall : 0.0f );
+			sv_prev = gc_split_sv_ticks;
+			cl_acc = wall_acc = 0;
+			n = 0;
+		}
+	}
+}
+#else
+void Host_ClientFrame( void ) { Host_ClientFrame_Inner(); }
+#endif
