@@ -53,6 +53,7 @@ void Mod_GCClearRetainedBspScratch( void );
 #include <ogc/lwp_watchdog.h>
 #include <ogc/pad.h>
 #include "gcmp.h"
+#include "gc_loadscreen.h"
 #endif
 
 typedef struct gc_video_s
@@ -580,6 +581,16 @@ static u32 gc_spn_track, gc_spn_fill;
 static float gc_loading_stage;		/* fraction reached by load stages */
 static float gc_loading_progress;	/* drawn fraction, creeps toward the next stage */
 
+/* A game's own full-screen loading screen (gc_loadscreen.h): drawn once into
+ * the displayed XFB when the load starts, then only its bar is redrawn. The
+ * bar's plate and fill textures live in gc_loading_spn while it is up. */
+static qboolean gc_lscr_active;
+static gc_loadscreen_t gc_lscr;
+static char gc_lscr_map[64];		/* map the screen on show was asked for */
+static char gc_lscr_want[64];		/* map the load has named so far */
+static qboolean GC_LoadScreenDrawFull( const char *map );
+static void GC_LoadScreenDrawBar( void );
+
 static u16 GC_SpnU16( const byte *p ) { return (u16)(( p[0] << 8 ) | p[1] ); }
 static u32 GC_SpnU32( const byte *p ) { return ((u32)p[0] << 24 ) | ((u32)p[1] << 16 ) | ((u32)p[2] << 8 ) | p[3]; }
 
@@ -741,6 +752,14 @@ static void GC_LoadingOverlayBegin( void )
 	gc_loading_fb = fb;
 	gc_loading_phase = 0;
 	gc_loading_stage = gc_loading_progress = 0.0f;
+	gc_lscr_active = false;
+	/* A game loading screen covers the whole frame, held or not. */
+	if( GC_LoadScreenDrawFull( gc_lscr_want ))
+	{
+		gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+		Con_Reportf( "Xash3D GameCube: loading overlay on (screen %s)\n", gc_lscr_map[0] ? gc_lscr_map : "default" );
+		return;
+	}
 	/* Menu New Game has no previous gameplay frame to preserve. Cover the
 	 * transition in black while the server, BSP and first Flipper frame settle;
 	 * changelevels retain the retail behavior of holding the prior frame.
@@ -767,13 +786,90 @@ static void GC_LoadingOverlayBegin( void )
 	Con_Reportf( "Xash3D GameCube: loading overlay on\n" );
 }
 
+/* The screen is up outside a transition hold and still the frame on display. */
+static qboolean GC_LoadScreenStandalone( void )
+{
+	if( !gc_lscr_active || !gc_loading_fb || gc_transition_hold_start > 0.0 )
+		return false;
+	/* In the game, or a present has flipped the screen away: it is over. */
+	if( cls.state == ca_active || gc_loading_fb != (u8 *)VIDEO_GetCurrentFramebuffer())
+	{
+		gc_lscr_active = false;
+		gc_loading_fb = NULL;
+		return false;
+	}
+	return true;
+}
+
+/* A load status outside a transition hold: put the game's loading screen on
+ * the displayed XFB (again, if a present has flipped it away or the map is now
+ * named) and move its bar. False when this load has no screen to show. */
+static qboolean GC_LoadScreenStatus( const char *message, const char *details )
+{
+	static const struct { const char *msg; float frac; } stages[] = {
+		{ "NEW GAME", 0.05f }, { "DIRECT MAP LOAD", 0.05f }, { "PREPARING MAP", 0.1f },
+		{ "LOADING BSP", 0.25f }, { "SPAWNING WORLD", 0.55f }, { "SPAWNING ENTITIES", 0.65f },
+		{ "MAP LOADED", 0.9f }, { "MAP READY", 1.0f },
+	};
+	static int unusable;	/* 1: no default screen on this game's disc or card */
+	u8 *fb;
+	int si;
+
+	if( host.status == HOST_INIT || !message || !gc.initialized || !rmode || unusable )
+		return false;
+	for( si = 0; si < (int)ARRAYSIZE( stages ); si++ )
+	{
+		if( !Q_stricmp( message, stages[si].msg ))
+			break;
+	}
+	if( si == (int)ARRAYSIZE( stages ))
+		return false;
+	GC_WaitPendingFlip();	/* a queued flip would swap the screen away right after the draw */
+	fb = (u8 *)VIDEO_GetCurrentFramebuffer();
+	if( !fb || ( fb != (u8 *)xfb[0] && fb != (u8 *)xfb[1] ))
+		return false;
+	if( si < 2 || !gc_lscr_active )
+		gc_loading_stage = gc_loading_progress = 0.0f;
+	GC_LoadingSetStage( stages[si].frac );
+	(void)details;
+	if( !gc_lscr_active || fb != gc_loading_fb
+		|| ( gc_lscr_want[0] && Q_stricmp( gc_lscr_want, gc_lscr_map )))
+	{
+		gc_loading_fb = fb;
+		gc_lscr_active = false;
+		if( !GC_LoadScreenDrawFull( gc_lscr_want ))
+		{
+			/* not even a default screen: the status panel from here on */
+			gc_loading_fb = NULL;
+			unusable = 1;
+			return false;
+		}
+	}
+	else GC_LoadScreenDrawBar();
+	gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+	return true;
+}
+
 void GC_LoadingOverlayPulse( void )
 {
+	if( GC_LoadScreenStandalone())
+	{
+		if( Sys_FloatTime() < gc_loading_next )
+			return;
+		GC_LoadingCreep();
+		GC_LoadScreenDrawBar();
+		gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+		return;
+	}
 	if( !gc_loading_fb || !GC_TransitionHoldActive() || Sys_FloatTime() < gc_loading_next )
 		return;
 	gc_loading_phase++;
 	GC_LoadingCreep();
-	GC_LoadingOverlayDraw();
+	/* (the plaque path would reload its spans over the screen's resident bar) */
+	if( gc_lscr_active )
+		GC_LoadScreenDrawBar();
+	else
+		GC_LoadingOverlayDraw();
 	gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
 }
 
@@ -782,6 +878,8 @@ static void GC_LoadingOverlayEnd( void )
 	if( !gc_loading_fb )
 		return;
 	gc_loading_fb = NULL;
+	gc_lscr_active = false;
+	gc_lscr_want[0] = 0;
 	Con_Reportf( "Xash3D GameCube: loading overlay off after %u pulses\n", gc_loading_phase );
 }
 
@@ -8559,6 +8657,199 @@ static void GC_InitPresentTextureTiled( void *tiled, int width, int height )
 	gc_present_tex_ready = true;
 }
 
+/* The full loading screen reads into the soft-present staging buffer: during a
+ * load the soft present is held, and nothing else keeps data in it across a
+ * status draw (the capture lightmap atlas copies straight out again). */
+typedef char gc_lscr_fits_tile_buf[
+	( GC_LOADSCREEN_SCREEN_BYTES <= sizeof( gc_tiled_rgb565 )) ? 1 : -1];
+typedef char gc_lscr_fits_spn_buf[( GC_LOADSCREEN_RESIDENT_MAX <= GC_LOADING_SPN_MAX ) ? 1 : -1];
+
+static void GC_LoadScreenPipe( u16 fb_w, u16 efb_h )
+{
+	Mtx44 proj;
+	Mtx mv;
+
+	GX_SetViewport( 0.0f, 0.0f, fb_w, efb_h, 0.0f, 1.0f );
+	GX_SetScissor( 0, 0, fb_w, efb_h );
+	guOrtho( proj, 0.0f, efb_h, 0.0f, fb_w, 0.0f, 1.0f );
+	GX_LoadProjectionMtx( proj, GX_ORTHOGRAPHIC );
+	guMtxIdentity( mv );
+	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
+	GX_SetCurrentMtx( GX_PNMTX0 );
+	GX_SetNumChans( 1 );
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetNumTexGens( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	GX_SetNumTevStages( 1 );
+	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0 );
+	GX_SetTevOp( GX_TEVSTAGE0, GX_REPLACE );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
+	GX_SetColorUpdate( GX_TRUE );
+	GX_SetCullMode( GX_CULL_NONE );
+	{
+		extern void R_GXInvalidateTriApiLayout( void );
+
+		R_GXInvalidateTriApiLayout();
+	}
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+	GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0 );
+	GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0 );
+	GX_InvVtxCache();
+	GX_InvalidateTexAll();
+}
+
+/* One CMPR texture (tw x th at data) stretched over x,y,w,h, showing s 0..s1, t 0..t1. */
+static void GC_LoadScreenQuad( void *data, u16 tw, u16 th, f32 x, f32 y, f32 w, f32 h, f32 s1, f32 t1 )
+{
+	GXTexObj tex;
+
+	GX_InitTexObj( &tex, data, tw, th, GX_TF_CMPR, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjFilterMode( &tex, GX_LINEAR, GX_LINEAR );
+	GX_LoadTexObj( &tex, GX_TEXMAP0 );
+	GX_Begin( GX_QUADS, GX_VTXFMT0, 4 );
+	GX_Position3f32( x, y, 0.0f );
+	GX_Color1u32( 0xFFFFFFFF );
+	GX_TexCoord2f32( 0.0f, 0.0f );
+	GX_Position3f32( x + w, y, 0.0f );
+	GX_Color1u32( 0xFFFFFFFF );
+	GX_TexCoord2f32( s1, 0.0f );
+	GX_Position3f32( x + w, y + h, 0.0f );
+	GX_Color1u32( 0xFFFFFFFF );
+	GX_TexCoord2f32( s1, t1 );
+	GX_Position3f32( x, y + h, 0.0f );
+	GX_Color1u32( 0xFFFFFFFF );
+	GX_TexCoord2f32( 0.0f, t1 );
+	GX_End();
+}
+
+/* The plate, then the fill up to the load fraction, into the EFB. */
+static void GC_LoadScreenEmitBar( f32 sx, f32 sy )
+{
+	const gc_loadscreen_t *ls = &gc_lscr;
+	const float fill = Q_max( 0.0f, Q_min( gc_loading_progress, 1.0f ));
+	const f32 fw = (f32)ls->bar_w * fill;
+
+	GC_LoadScreenQuad( gc_loading_spn, (u16)( ls->plate_tw * 8 ), (u16)( ls->plate_th * 8 ),
+		ls->plate_tx * 8 * sx, ls->plate_ty * 8 * sy, ls->plate_tw * 8 * sx, ls->plate_th * 8 * sy, 1.0f, 1.0f );
+	if( fw >= 1.0f )
+		GC_LoadScreenQuad( gc_loading_spn + ls->plate_bytes, ls->fill_w, ls->fill_h,
+			ls->bar_x * sx, ls->bar_y * sy, fw * sx, ls->bar_h * sy,
+			fw / (f32)ls->fill_w, (f32)ls->bar_h / (f32)ls->fill_h );
+}
+
+/* Draw resource/gc_loading/<map>.cmp (or default.cmp) over the whole displayed
+ * XFB. map may be empty. False, with nothing drawn, when there is no usable file. */
+static qboolean GC_LoadScreenDrawFull( const char *map )
+{
+	const u16 efb_h = rmode ? rmode->efbHeight : 0, xfb_h = rmode ? rmode->xfbHeight : 0;
+	const u16 fb_w = rmode ? rmode->fbWidth : 0;
+	byte head[GC_GCMP_HEADER_BYTES];
+	byte *screen = (byte *)gc_tiled_rgb565;
+	gc_loadscreen_t ls;
+	char path[96];
+	file_t *f = NULL;
+	u32 r;
+
+	if( !gc_loading_fb || !rmode || Sys_CheckParm( "-gcnoloadscreen" ))
+		return false;
+	if( map && map[0] )
+	{
+		Q_snprintf( path, sizeof( path ), "resource/gc_loading/%s.cmp", map );
+		f = FS_Open( path, "rb", false );
+	}
+	if( !f )
+		f = FS_Open( "resource/gc_loading/default.cmp", "rb", false );
+	if( !f )
+		return false;
+	if( FS_Read( f, head, sizeof( head )) != (fs_offset_t)sizeof( head )
+		|| !GC_LoadScreenParse( head, sizeof( head ), &ls ))
+	{
+		FS_Close( f );
+		Con_Reportf( "Xash3D GameCube: loading screen for %s is not usable\n", map && map[0] ? map : "default" );
+		return false;
+	}
+	/* Nothing may still be reading the staging buffer or the resident bar. */
+	GC_GXDrawDoneTimed( "loading screen stage" );
+	if( FS_Read( f, screen, GC_LOADSCREEN_SCREEN_BYTES ) != (fs_offset_t)GC_LOADSCREEN_SCREEN_BYTES )
+	{
+		FS_Close( f );
+		return false;
+	}
+	for( r = 0; r < (u32)ls.fill_h / 8u; r++ )
+	{
+		const u32 want = ( ls.fill_w / 8u ) * 32u;
+
+		if( FS_Read( f, gc_loading_spn + ls.plate_bytes + r * want, want ) != (fs_offset_t)want
+			|| ( r + 1u < (u32)ls.fill_h / 8u && want < GC_LOADSCREEN_TILES_X * 32u
+				&& FS_Seek( f, GC_LOADSCREEN_TILES_X * 32u - want, SEEK_CUR ) != 0 ))
+		{
+			FS_Close( f );
+			return false;
+		}
+	}
+	FS_Close( f );
+	GC_LoadScreenCutPlate( &ls, screen, gc_loading_spn );
+	gc_loading_spn_state = 0;	/* the HL plaque spans reload if wanted later */
+	gc_lscr = ls;
+	DCFlushRange( screen, GC_LOADSCREEN_SCREEN_BYTES );
+	DCFlushRange( gc_loading_spn, GC_LOADING_SPN_MAX );
+
+	GC_LoadScreenPipe( fb_w, efb_h );
+	GC_LoadScreenQuad( screen, GC_LOADSCREEN_W, GC_LOADSCREEN_H, 0.0f, 0.0f, fb_w, efb_h, 1.0f, 1.0f );
+	GC_LoadScreenEmitBar((f32)fb_w / GC_LOADSCREEN_W, (f32)efb_h / GC_LOADSCREEN_H );
+	GX_SetDispCopySrc( 0, 0, fb_w, efb_h );
+	GX_SetDispCopyDst( fb_w, xfb_h );
+	GX_SetDispCopyYScale((f32)xfb_h / (f32)efb_h );
+	GC_GXDrawDoneTimed( "loading screen" );
+	GX_CopyDisp( gc_loading_fb, GX_FALSE );
+	GX_Flush();
+	GC_GXDrawDoneTimed( "loading screen present" );
+	gc_gx_present_pipe_ready = false;
+	gc_gx_world_efb_ready = false;	/* the EFB holds the screen, not a world frame */
+	gc_lscr_active = true;
+	Q_strncpy( gc_lscr_map, map ? map : "", sizeof( gc_lscr_map ));
+	Con_Reportf( "Xash3D GameCube: loading screen %s bar %u,%u %ux%u\n",
+		gc_lscr_map[0] ? gc_lscr_map : "default", ls.bar_x, ls.bar_y, ls.bar_w, ls.bar_h );
+	return true;
+}
+
+/* The bar alone: its plate and fill into the EFB, copied into just the plate's
+ * rectangle of the displayed XFB (32-byte XFB lines: x and width in 16s). */
+static void GC_LoadScreenDrawBar( void )
+{
+	const u16 efb_h = rmode->efbHeight, xfb_h = rmode->xfbHeight, fb_w = rmode->fbWidth;
+	const f32 sx = (f32)fb_w / GC_LOADSCREEN_W, sy = (f32)efb_h / GC_LOADSCREEN_H;
+	const gc_loadscreen_t *ls = &gc_lscr;
+	u32 x0 = (u32)ceilf( ls->plate_tx * 8 * sx ), x1 = (u32)( ( ls->plate_tx + ls->plate_tw ) * 8 * sx );
+	u32 y0 = (u32)ceilf( ls->plate_ty * 8 * sy ), y1 = (u32)( ( ls->plate_ty + ls->plate_th ) * 8 * sy );
+	u32 lines;
+
+	x0 = ( x0 + 15u ) & ~15u;
+	x1 &= ~15u;
+	y0 = ( y0 + 1u ) & ~1u;
+	y1 &= ~1u;
+	if( x1 <= x0 || y1 <= y0 )
+		return;
+	GC_LoadScreenPipe( fb_w, efb_h );
+	GC_LoadScreenEmitBar( sx, sy );
+	GX_SetDispCopySrc((u16)x0, (u16)y0, (u16)( x1 - x0 ), (u16)( y1 - y0 ));
+	lines = GX_SetDispCopyYScale((f32)xfb_h / (f32)efb_h );
+	GX_SetDispCopyDst( fb_w, (u16)lines );
+	GC_GXDrawDoneTimed( "loading screen bar" );
+	GX_CopyDisp( gc_loading_fb + ( y0 * xfb_h / efb_h ) * fb_w * 2 + x0 * 2, GX_FALSE );
+	GX_Flush();
+	GX_SetDispCopySrc( 0, 0, fb_w, efb_h );
+	GX_SetDispCopyDst( fb_w, xfb_h );
+	GX_SetDispCopyYScale((f32)xfb_h / (f32)efb_h );
+	gc_gx_present_pipe_ready = false;
+}
+
 static void GC_SwizzleRGB565ToTiled( const unsigned short *src, int src_stride,
 	int width, int height, unsigned short *dst )
 {
@@ -11576,6 +11867,10 @@ void GC_DrawLoadingStatus( const char *message, const char *details )
 	/* Changelevel / New Game hold: keep the last frame (or a black cover)
 	 * with the "LOADING…" text overlay. Do not start that hold for early
 	 * boot statuses like CLIENT INIT — those were blanking the intro AVI. */
+	if( host.status != HOST_INIT && message && details && details[0]
+		&& ( !Q_stricmp( message, "NEW GAME" ) || !Q_stricmp( message, "PREPARING MAP" )
+			|| !Q_stricmp( message, "LOADING BSP" ) || !Q_stricmp( message, "DIRECT MAP LOAD" )))
+		COM_FileBase( details, gc_lscr_want, sizeof( gc_lscr_want ));
 	if( host.status != HOST_INIT && GC_MenuRunsServer() && message
 		&& ( !Q_stricmp( message, "NEW GAME" )
 			|| !Q_stricmp( message, "PREPARING MAP" )
@@ -11600,9 +11895,18 @@ void GC_DrawLoadingStatus( const char *message, const char *details )
 			if( !Q_stricmp( message, stages[si].msg ))
 				GC_LoadingSetStage( stages[si].frac );
 		}
+		/* A changelevel's hold starts before the map is named: swap the
+		 * default screen for the map's own once it is. */
+		if( gc_lscr_active && gc_lscr_want[0] && Q_stricmp( gc_lscr_want, gc_lscr_map ))
+			GC_LoadScreenDrawFull( gc_lscr_want );
 		GC_LoadingOverlayPulse();
 		return;
 	}
+
+	/* No hold (the DoD-family menu starts its map without -gcmenuplaystart):
+	 * a game's own loading screen takes the place of the status panel. */
+	if( GC_LoadScreenStatus( message, details ))
+		return;
 
 	if( gc.buffer && gc.width > 0 && gc.height > 0 )
 	{

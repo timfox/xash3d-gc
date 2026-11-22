@@ -7810,7 +7810,7 @@ static int gc_prop_pf_frames;
 /* Position scale of the vertex layout in place for the props, -1 = not set.
  * Each prop pass resets it after its own state setup. */
 static int gc_prop_vtx_frac = -1;
-static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 0 flat colour, -1 not set */
+static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 2 two channels, 3 baked vertex light, 0 flat colour, -1 not set */
 /* The prop stage's colour scale: 1 = x2, 0 = x1, -1 not set. The world's
  * lightmap stage is x2 (a texel of 0.5 is identity), so a sunlit wall reaches
  * twice its texture; the props' light was baked to 0..1 and stopped at once,
@@ -7818,6 +7818,46 @@ static int gc_prop_lit_mode = -1;	/* 1 hardware lights, 0 flat colour, -1 not se
  * stand on. A light record marked 2 (byte 9) is baked at half scale and
  * drawn x2, like the world. */
 static int gc_prop_tev_x2 = -1;
+/* Piece header byte 1, bit 0: the piece's vertices carry baked light, 13
+ * bytes each (position, RGB8, s, t), no normal. MOHAA world meshes (terrain,
+ * curved patches, soups): their light is MOHAA's own lightmap and vertex
+ * light, stored one overbright bit down, so it is drawn texture x light x 2.
+ * The vertex layout and channel are switched here; the next unlit instance
+ * finds gc_prop_vtx_frac, gc_prop_lit_mode and gc_prop_tev_x2 changed and
+ * sets its own again. */
+#define GC_PR_PIECE_LIT 1
+static void R_GXPropLitPiece( int frac )
+{
+	if( gc_prop_vtx_frac != 1000 + frac )
+	{
+		GX_ClearVtxDesc();
+		GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+		GX_SetVtxDesc( GX_VA_CLR0, GX_DIRECT );
+		GX_SetVtxDesc( GX_VA_TEX0, GX_DIRECT );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, frac );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGB, GX_RGB8, 0 );
+		GX_SetVtxAttrFmt( GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_S16, 8 );
+		gc_prop_vtx_frac = 1000 + frac;
+	}
+	if( gc_prop_lit_mode != 3 )
+	{
+		const GXColor white = { 255, 255, 255, 255 };
+
+		GX_SetNumChans( 1 );
+		GX_SetChanCtrl( GX_COLOR0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+		GX_SetChanCtrl( GX_ALPHA0, GX_DISABLE, GX_SRC_REG, GX_SRC_REG, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+		GX_SetChanMatColor( GX_COLOR0A0, white );
+		gc_prop_lit_mode = 3;
+	}
+	if( gc_prop_tev_x2 != 3 )
+	{
+		GX_SetNumTevStages( 1 );
+		GX_SetTevColorIn( GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, GX_CC_RASC, GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_2, GX_TRUE, GX_TEVPREV );
+		gc_prop_tev_x2 = 3;
+	}
+}
+
 
 static u32 gc_prop_far_fallbacks;	/* small props drawn from the far chain because the cache was full */
 
@@ -8075,8 +8115,11 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		nverts = *(const u16 *)( hdr + 2 );
 		body = *(const u32 *)( hdr + 4 );
 		next = *(const u32 *)( hdr + 8 );
-		if( !nverts || nverts * ( gc_prop_uv8 ? 9u : gc_prop_vsize ) + 3u > body || body + 32u != bytes )
+		if( !nverts || nverts * (( hdr[1] & GC_PR_PIECE_LIT ) ? 13u : gc_prop_uv8 ? 9u : gc_prop_vsize ) + 3u > body
+			|| body + 32u != bytes )
 			break;
+		if( hdr[1] & GC_PR_PIECE_LIT )
+			R_GXPropLitPiece( m->frac );
 		{
 			u64 t0 = gettime();
 
