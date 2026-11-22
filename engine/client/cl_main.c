@@ -49,7 +49,7 @@ static void CL_GameCubeStartDoDMenuMusic( void )
 	if( gc_menu_music_started || !snd.initialized )
 		return;
 	gc_menu_music_started = true;
-	ifCL_GameIsDoDFamily( )
+	if( CL_GameIsDoDFamily( ))
 	{
 		S_StartBackgroundTrack( "media/gamestartup.wav", "media/gamestartup.wav", 0, false );
 		Con_Reportf( "Xash3D GameCube: DoD main-menu music start requested\n" );
@@ -4682,7 +4682,7 @@ void CL_Init( void )
 			S_Init();
 			Voice_Init( VOICE_DEFAULT_CODEC, 3, true );
 			Con_Reportf( "Xash3D GameCube: menu-only sound init ready\n" );
-			ifCL_GameIsDoDFamily( )
+			if( CL_GameIsDoDFamily( ))
 			{
 				S_StartBackgroundTrack( "media/gamestartup.wav", "media/gamestartup.wav", 0, false );
 				Con_Reportf( "Xash3D GameCube: DoD main-menu music started\n" );
