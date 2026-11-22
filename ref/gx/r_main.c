@@ -460,7 +460,13 @@ static float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
 	{
+		extern float R_GXMapFarplane( void );
 		float zfar = gp_movevars->zmax * 1.73f;
+		const float farplane = R_GXMapFarplane();
+
+		/* A MOHAA far plane: the fog is solid there, so nothing past it is drawn. */
+		if( farplane > 0.0f && zfar > farplane + 256.0f )
+			zfar = farplane + 256.0f;
 
 		/* -gccapture: a film camera out at sea must still see the far end
 		 * of the beach, whatever sv_zmax the map was built with. */
@@ -2704,6 +2710,13 @@ void GAME_EXPORT R_RenderScene( void )
 #endif
 	// R_PushDlights (r_worldmodel); ??
 	// R_DrawWorld();
+#if XASH_GAMECUBE
+	{
+		extern void R_GXFogSceneBegin( void );
+
+		R_GXFogSceneBegin();
+	}
+#endif
 	R_EdgeDrawing();
 #if XASH_GAMECUBE
 	GC_WatchdogMark( "R_EdgeDrawing (world)" );
@@ -2728,6 +2741,11 @@ void GAME_EXPORT R_RenderScene( void )
 		/* Lean DrawEntities: brushes + studio + viewmodel + EFX + solid/trans
 		 * client tris (gated after world studio). */
 		R_DrawEntitiesOnList();
+		{
+			extern void R_GXFogSceneEnd( void );
+
+			R_GXFogSceneEnd();
+		}
 		/* Bloom after the world is in the EFB. The kernel is a few texels
 		 * wide so bright edges glow without a second copy of the mesh. */
 		{
@@ -2761,6 +2779,11 @@ void GAME_EXPORT R_RenderScene( void )
 		if( tr.framecount <= 1 )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: R_RenderScene gcmap route complete worldrender=%d\n",
 				GC_UseLowResWorldProbe() ? 1 : 0 );
+		{
+			extern void R_GXFogSceneEnd( void );
+
+			R_GXFogSceneEnd();
+		}
 		return;
 	}
 #endif
@@ -2768,6 +2791,13 @@ void GAME_EXPORT R_RenderScene( void )
 	gEngfuncs.CL_ExtraUpdate(); // don't let sound get messed up if going slow
 
 	R_DrawEntitiesOnList();
+#if XASH_GAMECUBE
+	{
+		extern void R_GXFogSceneEnd( void );
+
+		R_GXFogSceneEnd();
+	}
+#endif
 
 #if XASH_GAMECUBE
 	if( tr.framecount <= 32 )

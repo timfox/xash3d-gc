@@ -27,6 +27,7 @@ from pathlib import Path
 PROP_CLASSES = ("env_model", "dod_object")
 GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 7
+GC_PR_VERSION_CELLS = 9	# v7, plus far cells (hdr word 2 low half: cell count) and a per-instance scale (model word high byte)
 GC_PR_MAX_INST = 512
 GC_PR_MAX_INST_BIG = 4096  # a converted map's pack: the engine moves its tables to the map arena
 GC_PR_FIXED_INST = 512  # the engine's fixed tables; past them the pack is written nearest a player start first
@@ -634,6 +635,14 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 		plain = big_c.reshape(th, 4, tw, 4, 3).mean((1, 3))
 		rgb = np.where(a[..., None] > 0, c / np.maximum(a[..., None], 1e-6), plain)
 		cov = a / 16.0
+	return (tw, th) + encode_rgb_cov(rgb, cov, encode_blocks)
+
+
+def encode_rgb_cov(rgb, cov, encode_blocks) -> tuple[int, bytes]:
+	"""(levels, CMPR mip chain) for float RGB (h, w, 3) and coverage (h, w) with power-of-two sides.
+	Each smaller level averages the colour over covered texels only."""
+	import numpy as np
+
 	body = bytearray()
 	levels = 0
 	while True:
@@ -647,7 +656,7 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 		plain = rgb.reshape(ch // 2, 2, cw // 2, 2, 3).mean((1, 3))
 		rgb = np.where(a[..., None] > 0, c / np.maximum(a[..., None], 1e-6), plain)
 		cov = a / 4.0
-	return tw, th, levels, bytes(body)
+	return levels, bytes(body)
 
 
 def grey_texture(encode_blocks) -> tuple[int, int, int, bytes]:
@@ -675,7 +684,10 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 			# A strip longer than a command holds is cut on an even vertex so
 			# the winding carries on; a fan restarts from its hub.
 			runs = []
-			if len(verts) <= GC_PR_CMD_VERTS:
+			if fan == 2:  # GX quads: whole quads per command
+				step = GC_PR_CMD_VERTS - GC_PR_CMD_VERTS % 4
+				runs = [verts[k:k + step] for k in range(0, len(verts), step)]
+			elif len(verts) <= GC_PR_CMD_VERTS:
 				runs.append(verts)
 			elif fan:
 				k = 1
@@ -688,7 +700,7 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 					runs.append(verts[k:k + GC_PR_CMD_VERTS])
 					k += GC_PR_CMD_VERTS - 2
 			for run in runs:
-				cb = bytearray(struct.pack(">BH", 0xA0 if fan else 0x98, len(run)))
+				cb = bytearray(struct.pack(">BH", 0x80 if fan == 2 else 0xA0 if fan else 0x98, len(run)))
 				for pos, nrm, s, t in run:
 					cb += struct.pack(
 						">hhhBhh",
@@ -702,7 +714,7 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 					body, nv, nt = bytearray(), 0, 0
 				body += cb
 				nv += len(run)
-				nt += len(run) - 2
+				nt += len(run) // 2 if fan == 2 else len(run) - 2
 		if body:
 			body += b"\0" * (-len(body) % 32)
 			pieces.append((mid, nv, bytes(body), nt))
@@ -768,30 +780,37 @@ def instance_record(floor, mi: int, tris: int, mins, maxs, origin, angles, named
 
 
 def write_pack(out_gcp: Path, out_gct: Path, model_recs, chains, inst_blob: bytearray, light_blob: bytearray,
-		sun, n_inst: int, piece_blob: bytearray) -> bytearray:
+		sun, n_inst: int, piece_blob: bytearray, far_blob: bytes = b"", cells=(), version: int = GC_PR_VERSION) -> bytearray:
 	"""Write media/gp_<map>.gcp and media/pt_<map>.gct. Returns the texture blob."""
 	inst_blob = bytearray(inst_blob)
 	model_blob = bytearray()
-	for dl_ofs, first_bytes, tris, frac in model_recs:
-		# No far level: a far instance draws the full chain (the engine
-		# keeps it resident), so the far fields stay empty.
-		model_blob += struct.pack(">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0, 0, 0, 0, 0)
+	for r in model_recs:
+		# No far level (a 4-tuple): a far instance draws the full chain (the
+		# engine keeps it resident), so the far fields stay empty.
+		dl_ofs, first_bytes, tris, frac = r[:4]
+		far_ofs, far_first, far_tris = r[4:7] if len(r) > 4 else (0, 0, 0)
+		model_blob += struct.pack(">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0,
+			far_ofs, far_first, min(65535, far_tris), 0)
 	model_blob += b"\0" * (-len(model_blob) % 32)
 	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, v)) * 32767.0)) for v in sun]).ljust(32, b"\0")
 	inst_blob += light_blob
+	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	# v9: the far cells (cell instance, first member, members), right after the light
+	for cell_inst, first, count in cells:
+		inst_blob += struct.pack(">HHHH", cell_inst, first, count, 0)
 	inst_blob += b"\0" * (-len(inst_blob) % 32)
 	inst_ofs = 32
 	models_ofs = inst_ofs + len(inst_blob)
 	dl_base = models_ofs + len(model_blob)
 	hdr = struct.pack(
 		">4sHHHHIIII",
-		GC_PR_MAGIC, GC_PR_VERSION, n_inst, len(model_recs), 0,
+		GC_PR_MAGIC, version, n_inst, len(model_recs), len(cells),
 		inst_ofs, models_ofs, dl_base, 0xFFFFFFFF,
 	)
-	hdr += struct.pack(">I", dl_base + len(piece_blob))	# far region: empty, at the end
+	hdr += struct.pack(">I", dl_base + len(piece_blob))	# far region: the far chains, at the end
 	hdr = hdr.ljust(32, b"\0")
 	out_gcp.parent.mkdir(parents=True, exist_ok=True)
-	out_gcp.write_bytes(hdr + inst_blob + model_blob + piece_blob)
+	out_gcp.write_bytes(hdr + inst_blob + model_blob + piece_blob + bytes(far_blob))
 
 	entries, blob = [], bytearray()
 	for name, tw, th, lv, flag, body in chains:
@@ -988,6 +1007,7 @@ MPROP_MAGIC = b"MPRP"
 # A prop's scale is baked into its model (an instance has no scale), so
 # instances share a model per 5 % step of scale.
 MPROP_SCALE_STEP = 1.05
+MPROP_WORLD_PREFIX = "*world/"	# mohaa-gc props_models.WORLD_PREFIX: a world mesh (terrain) in map units
 
 
 def read_mprop(data: bytes) -> dict:
@@ -1033,8 +1053,144 @@ def read_mprop(data: bytes) -> dict:
 	return {"textures": textures, "models": models, "instances": instances}
 
 
+# ---- far trees: impostors and cells ---------------------------------------
+
+IMPOSTOR_MIN_TRIS = 40	# smaller models draw whole far away
+IMPOSTOR_W, IMPOSTOR_H = 32, 64	# texels per view; the two views share one 64 x 64 texture
+IMPOSTOR_SS = 4	# supersampling of the render
+CELL_MIN_MEMBERS = 3
+CELL_FULL_TRIS = 48	# a model without an impostor joins a cell whole up to this many triangles
+CELL_SIDE = 1024.0	# first grid tried; grown until the cells fit the model table
+
+
+def render_impostor(tris, textures, lo, hi):
+	"""Two orthographic views of a model, front (along +y) and side (along +x), side by side:
+	(rgb float (H, 2W, 3), coverage (H, 2W)). tris: [((p, n, s, t) x 3, texture index)]."""
+	import numpy as np
+
+	W, H, S = IMPOSTOR_W * IMPOSTOR_SS, IMPOSTOR_H * IMPOSTOR_SS, IMPOSTOR_SS
+	tex_cache = {}
+
+	def tex_arrays(ti):
+		if ti not in tex_cache:
+			if 0 <= ti < len(textures):
+				t = textures[ti]
+				pal = np.frombuffer(t["palette"], np.uint8).reshape(256, 3).astype(np.float32)
+				idx = np.frombuffer(t["pixels"], np.uint8).reshape(t["h"], t["w"])
+				tex_cache[ti] = (pal, idx, bool(t["flags"] & STUDIO_NF_MASKED))
+			else:
+				tex_cache[ti] = None
+		return tex_cache[ti]
+
+	views = []
+	for ua, da in ((0, 1), (1, 0)):	# image u axis, depth axis; v is always z (up)
+		span_u = max(hi[ua] - lo[ua], 1e-3)
+		span_v = max(hi[2] - lo[2], 1e-3)
+		rgb = np.zeros((H, W, 3), np.float32)
+		cov = np.zeros((H, W), np.float32)
+		depth = np.full((H, W), np.inf, np.float32)
+		for verts, ti in tris:
+			px = np.array([(v[0][ua] - lo[ua]) / span_u * W for v in verts])
+			py = np.array([(hi[2] - v[0][2]) / span_v * H for v in verts])
+			pz = np.array([v[0][da] for v in verts])
+			x0, x1 = max(int(np.floor(px.min())), 0), min(int(np.ceil(px.max())), W - 1)
+			y0, y1 = max(int(np.floor(py.min())), 0), min(int(np.ceil(py.max())), H - 1)
+			if x1 < x0 or y1 < y0:
+				continue
+			area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0])
+			if abs(area) < 1e-9:
+				continue
+			gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+			w0 = ((px[1] - gx) * (py[2] - gy) - (px[2] - gx) * (py[1] - gy)) / area
+			w1 = ((px[2] - gx) * (py[0] - gy) - (px[0] - gx) * (py[2] - gy)) / area
+			w2 = 1.0 - w0 - w1
+			inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+			if not inside.any():
+				continue
+			z = w0 * pz[0] + w1 * pz[1] + w2 * pz[2]
+			sub = depth[y0:y1 + 1, x0:x1 + 1]
+			ok = inside & (z < sub)
+			ta = tex_arrays(ti)
+			if ta is not None:
+				pal, idx, masked = ta
+				th, tw = idx.shape
+				su = w0 * verts[0][2] + w1 * verts[1][2] + w2 * verts[2][2]
+				sv = w0 * verts[0][3] + w1 * verts[1][3] + w2 * verts[2][3]
+				tx = (np.floor((su % 1.0) * tw).astype(np.int64)) % tw
+				ty = (np.floor((sv % 1.0) * th).astype(np.int64)) % th
+				texel = idx[ty, tx]
+				if masked:
+					ok &= texel != 255
+				col = pal[texel]
+			else:
+				col = np.full(z.shape + (3,), 150.0, np.float32)
+			if not ok.any():
+				continue
+			# a little shape from the normals: the engine lights the quads as if facing up
+			nz = [v[1][2] for v in verts]
+			shade = 0.8 + 0.2 * np.clip(w0 * nz[0] + w1 * nz[1] + w2 * nz[2], -1.0, 1.0)
+			sub[ok] = z[ok]
+			rgb[y0:y1 + 1, x0:x1 + 1][ok] = (col * shade[..., None])[ok]
+			cov[y0:y1 + 1, x0:x1 + 1][ok] = 1.0
+		# box down to the texture, colour averaged over covered samples only
+		a = cov.reshape(IMPOSTOR_H, S, IMPOSTOR_W, S).sum((1, 3))
+		c = (rgb * cov[..., None]).reshape(IMPOSTOR_H, S, IMPOSTOR_W, S, 3).sum((1, 3))
+		views.append((c / np.maximum(a[..., None], 1e-6), a / float(S * S)))
+	rgb = np.concatenate([views[0][0], views[1][0]], axis=1)
+	cov = np.concatenate([views[0][1], views[1][1]], axis=1)
+	# fill the colour of empty texels from covered neighbours so mips and filtering don't go dark at the edges
+	for _ in range(4):
+		empty = cov <= 0.0
+		if not empty.any():
+			break
+		acc = np.zeros_like(rgb)
+		n = np.zeros(cov.shape, np.float32)
+		for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+			sh_c = np.roll(cov > 0, (dy, dx), (0, 1))
+			acc += np.roll(rgb, (dy, dx), (0, 1)) * sh_c[..., None]
+			n += sh_c
+		fill = empty & (n > 0)
+		rgb[fill] = acc[fill] / n[fill][..., None]
+		cov = np.where(fill, 1e-6, cov)
+	return rgb, np.where(cov > 1e-5, cov, 0.0)
+
+
+def impostor_quads(lo, hi):
+	"""Two crossed upright quads through the middle of the bounds, as GX quad vertices
+	(pos, normal, s, t): the front view on the x-z quad, the side view on the y-z quad."""
+	cx, cy = 0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])
+	up = (0.0, 0.0, 1.0)
+	z0, z1 = lo[2], hi[2]
+	return [
+		((lo[0], cy, z0), up, 0.0, 1.0), ((lo[0], cy, z1), up, 0.0, 0.0),
+		((hi[0], cy, z1), up, 0.5, 0.0), ((hi[0], cy, z0), up, 0.5, 1.0),
+		((cx, lo[1], z0), up, 0.5, 1.0), ((cx, lo[1], z1), up, 0.5, 0.0),
+		((cx, hi[1], z1), up, 1.0, 0.0), ((cx, hi[1], z0), up, 1.0, 1.0),
+	]
+
+
+def _unit3(v):
+	n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+	return (v[0] / n, v[1] / n, v[2] / n) if n > 1e-9 else (0.0, 0.0, 1.0)
+
+
+def plan_cells(members, max_cells: int):
+	"""Group far-drawable instances into square grid cells: {cell key: [member indices]}, cell side.
+	members: [(index, origin)]. The side grows until the cells (with at least CELL_MIN_MEMBERS
+	members) number at most max_cells."""
+	side = CELL_SIDE
+	while True:
+		grid = {}
+		for k, org in members:
+			grid.setdefault((math.floor(org[0] / side), math.floor(org[1] / side)), []).append(k)
+		cells = {c: m for c, m in grid.items() if len(m) >= CELL_MIN_MEMBERS}
+		if len(cells) <= max_cells or side > 65536.0:
+			return cells, side
+		side *= 1.5
+
+
 def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bsp_path: Path | None = None,
-		log=print) -> dict | None:
+		log=print, impostor: bool = True, cells: bool = True) -> dict | None:
 	"""The prop pack for a converted MOHAA map, from its .mprop. With the
 	converted BSP the props are lit from the floor under them and, past the
 	engine's instance limit, the ones nearest a player start are kept."""
@@ -1080,22 +1236,24 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 		chains.append((f"p{len(chains):03d}", tw, th, lv, flag, body))
 		return mat_of[ti]
 
-	models, model_recs, model_bounds, steps_of = {}, [], [], {}
-	piece_blob = bytearray()
+	models, model_recs, model_bounds = {}, [], []
+	model_tris, model_quads = [], []	# per baked model: its triangles (pos, normal, s, t) x 3 + material; its impostor quads or None
+	piece_blob, far_blob = bytearray(), bytearray()
+	impostors = 0
 
-	def model_index(mi: int, scale: float) -> int | None:
-		step = int(round(math.log(max(scale, 1e-4)) / math.log(MPROP_SCALE_STEP)))
-		if (mi, step) not in models and len(model_recs) >= GC_PR_MAX_MODELS and steps_of.get(mi):
-			step = min(steps_of[mi], key=lambda k: abs(k - step))	# out of models: the nearest scale baked
-		key = (mi, step)
+	def model_index(mi: int) -> int | None:
+		"""The baked model of an .mprop model, at its own size: v9 scales each instance at draw time."""
+		nonlocal impostors
+		key = mi
 		if key in models:
 			return models[key]
 		models[key] = None
 		if len(model_recs) >= GC_PR_MAX_MODELS or not 0 <= mi < len(pack["models"]):
 			return None
-		q_scale = MPROP_SCALE_STEP ** step
+		q_scale = 1.0
 		by_mat, ext = {}, 1.0
 		lo, hi = [1e30] * 3, [-1e30] * 3
+		render, tris_out = [], []
 		for ti, verts, tris in pack["models"][mi]["surfaces"]:
 			mid = material(ti)
 			runs = by_mat.setdefault(mid, [])
@@ -1110,6 +1268,8 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 						hi[a] = max(hi[a], p[a])
 						ext = max(ext, abs(p[a]))
 				runs.append((False, vs))	# a 3-vertex strip is one triangle
+				render.append((vs, ti))
+				tris_out.append((vs, mid))
 		if not any(by_mat.values()):
 			return None
 		frac = 0
@@ -1118,22 +1278,41 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 		got = emit_pieces({k: v for k, v in by_mat.items() if v}, float(1 << frac), piece_blob)
 		if got is None:
 			return None
+		rec = (got[0], got[1], got[2], frac)
+		quads = None
+		# Far away the model is two crossed cut-out quads showing it from the front and the side.
+		world = pack["models"][mi]["name"].startswith(MPROP_WORLD_PREFIX)	# terrain: drawn whole, never a cut-out
+		if impostor and not world and got[2] >= IMPOSTOR_MIN_TRIS and len(chains) < GC_PR_MAX_MAT \
+				and min(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) > 1.0:
+			rgb, cov = render_impostor(render, pack["textures"], lo, hi)
+			if (cov >= 0.5).any():
+				levels, body = encode_rgb_cov(rgb, cov, encode_blocks)
+				imid = len(chains)
+				chains.append((f"i{imid:03d}", rgb.shape[1], rgb.shape[0], levels, GC_WT_FLAG_ALPHA, body))
+				quads = (imid, impostor_quads(lo, hi))
+				far = emit_pieces({imid: [(2, quads[1])]}, float(1 << frac), far_blob)
+				if far is not None:
+					rec = rec + far
+					impostors += 1
 		models[key] = len(model_recs)
-		steps_of.setdefault(mi, []).append(step)
-		model_recs.append((got[0], got[1], got[2], frac))
+		model_recs.append(rec)
 		model_bounds.append((lo, hi))
+		model_tris.append(tris_out)
+		model_quads.append(quads)
 		return models[key]
 
-	inst_blob, light_blob = bytearray(), bytearray()
-	n_inst = placed_tris = missing = 0
+	placed = []	# per instance: model, origin, matrix, mins, maxs, record, light
+	missing = 0
 	for mi, origin, angles, scale in insts:
-		gi = model_index(mi, scale)
+		gi = model_index(mi)
 		if gi is None:
 			missing += 1
 			continue
 		# Drawn like a studio model at these entity angles: pitch negated.
 		pitch, yaw, roll = -angles[0], angles[1], angles[2]
-		m = angle_matrix(pitch, yaw, roll)
+		code = max(-127, min(127, int(round(math.log(max(scale, 1e-4)) / math.log(MPROP_SCALE_STEP)))))
+		sc = MPROP_SCALE_STEP ** code
+		m = [[v * sc for v in row] for row in angle_matrix(pitch, yaw, roll)]
 		lo, hi = model_bounds[gi]
 		mins, maxs = [1e30] * 3, [-1e30] * 3
 		for cx in (lo[0], hi[0]):
@@ -1143,21 +1322,112 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 					for a in range(3):
 						mins[a] = min(mins[a], w[a] + origin[a])
 						maxs[a] = max(maxs[a], w[a] + origin[a])
-		rec, light = instance_record(floor, gi, model_recs[gi][2], mins, maxs, origin, (pitch, yaw, roll))
-		inst_blob += rec
-		light_blob += light
-		n_inst += 1
-		placed_tris += model_recs[gi][2]
-	if not n_inst:
+		rec, light = instance_record(floor, gi, model_recs[gi][2], mins, maxs, origin, (pitch, yaw, roll),
+			named=code + 128)	# v9: the high byte of the model word is the scale, 1.05 ^ (byte - 128)
+		placed.append((gi, origin, m, mins, maxs, rec, light))
+	if not placed:
 		return None
-	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob)
+
+	# Far cells: the instances that can draw far away (an impostor, or a few triangles) are
+	# grouped by grid cell and each cell is baked into one chain in world space. The engine
+	# draws a cell's chain while the cell is far and its members one by one while it is near.
+	cells_out, order = [], list(range(len(placed)))
+	if cells:
+		members = [(k, p[1]) for k, p in enumerate(placed)
+			if model_quads[p[0]] is not None or model_recs[p[0]][2] <= CELL_FULL_TRIS]
+		grid, side = plan_cells(members, max(0, GC_PR_MAX_MODELS - len(model_recs)))
+		in_cell = {k for ks in grid.values() for k in ks}
+		starts = [_floats(e.get("origin", "0 0 0"), 3) for e in ents if e.get("classname", "").startswith("info_player")]
+
+		def near_start(key):
+			if not starts:
+				return 0.0
+			c = ((key[0] + 0.5) * side, (key[1] + 0.5) * side)
+			return min((c[0] - s_[0]) ** 2 + (c[1] - s_[1]) ** 2 for s_ in starts)
+
+		order = [k for k in range(len(placed)) if k not in in_cell]
+		groups = []
+		for key in sorted(grid, key=near_start):
+			ks = sorted(grid[key], key=lambda k: placed[k][0])	# by model: one texture bind serves a run
+			groups.append((key, len(order), ks))
+			order += ks
+		cell_recs = []
+		for key, _first, ks in groups:
+			by_mat = {}
+			ctr = [sum(placed[k][1][a] for k in ks) / len(ks) for a in range(3)]
+			mins, maxs = [1e30] * 3, [-1e30] * 3
+			ext = 1.0
+			for k in ks:
+				gi, origin, m, imins, imaxs = placed[k][:5]
+				for a in range(3):
+					mins[a] = min(mins[a], imins[a])
+					maxs[a] = max(maxs[a], imaxs[a])
+
+				def world(p):
+					w = _rotate(m, p)
+					return tuple(w[a] + origin[a] - ctr[a] for a in range(3))
+
+				if model_quads[gi] is not None:
+					imid, quads = model_quads[gi]
+					vs = [(world(p), n, s_, t_) for p, n, s_, t_ in quads]
+					lst = by_mat.setdefault(imid, [])
+					if lst and lst[-1][0] == 2:
+						lst[-1][1].extend(vs)
+					else:
+						lst.append((2, vs))
+				else:
+					for tri, mid in model_tris[gi]:
+						vs = [(world(p), _unit3(_rotate(m, n)), s_, t_) for p, n, s_, t_ in tri]
+						by_mat.setdefault(mid, []).append((False, vs))
+				for a in range(3):
+					ext = max(ext, abs(imins[a] - ctr[a]), abs(imaxs[a] - ctr[a]))
+			frac = 0
+			while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
+				frac += 1
+			if ext > 32000.0 or len(model_recs) >= GC_PR_MAX_MODELS:
+				order = [k for k in order if k not in ks] + ks	# stays a plain run of instances
+				continue
+			full = emit_pieces(by_mat, float(1 << frac), piece_blob)
+			far = emit_pieces(by_mat, float(1 << frac), far_blob)
+			if full is None or far is None:
+				continue
+			gi = len(model_recs)
+			model_recs.append(full + (frac,) + far)
+			cell_recs.append((gi, ctr, mins, maxs, ks))
+		# instance order is final now: the plain ones, the cells' members, then the cell instances
+		pos = {k: n for n, k in enumerate(order)}
+		for gi, ctr, mins, maxs, ks in cell_recs:
+			rec, light = instance_record(None, gi, model_recs[gi][2], mins, maxs, ctr, (0.0, 0.0, 0.0), named=128)
+			# lit like its members: their light and colour averaged
+			lights = [placed[k][6] for k in ks]
+			light = bytes(sum(l_[b] for l_ in lights) // len(lights) for b in range(12))
+			cols = [struct.unpack_from(">I", placed[k][5], 28)[0] for k in ks]
+			col = 1
+			for sh in (24, 16, 8):
+				col |= (sum((c >> sh) & 255 for c in cols) // len(cols)) << sh
+			rec = rec[:28] + struct.pack(">I", col)
+			first = min(pos[k] for k in ks)
+			cells_out.append((len(order), first, len(ks)))
+			placed.append((gi, ctr, None, mins, maxs, rec, light))
+			order.append(len(placed) - 1)
+	if len(placed) > 65535:
+		raise ValueError("too many instances")
+	inst_blob = bytearray(b"".join(placed[k][5] for k in order))
+	light_blob = bytearray(b"".join(placed[k][6] for k in order))
+	n_inst = len(order)
+	placed_tris = sum(model_recs[placed[k][0]][2] for k in order[:n_inst - len(cells_out)])
+	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob,
+		far_blob, cells_out, GC_PR_VERSION_CELLS)
 	stats = {
 		"instances": n_inst, "models": len(model_recs), "materials": len(chains),
 		"model_tris": sum(r[2] for r in model_recs), "placed_tris": placed_tris,
 		"missing": missing, "dropped": dropped, "chain_bytes": len(piece_blob), "tex_bytes": len(blob),
+		"impostors": impostors, "cells": len(cells_out), "cell_members": sum(c[2] for c in cells_out),
+		"far_bytes": len(far_blob),
 	}
 	log(f"  props: {out_gcp.name} instances={n_inst} models={len(model_recs)} tris={stats['model_tris']} "
-		f"(placed {placed_tris}) chains={len(piece_blob)} B, {out_gct.name} materials={len(chains)} {len(blob)} B")
+		f"(placed {placed_tris}) chains={len(piece_blob)} B far={len(far_blob)} B impostors={impostors} "
+		f"cells={len(cells_out)} ({stats['cell_members']} members), {out_gct.name} materials={len(chains)} {len(blob)} B")
 	return stats
 
 

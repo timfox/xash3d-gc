@@ -3293,8 +3293,12 @@ static void R_GXWorldDLClearDepth( void )
  * to 16384+. With one shared range the backdrop had no haze at all. */
 static void R_GXWorldDLFog( f32 z_near, f32 z_far )
 {
+	extern qboolean R_GXMapFogSet( f32 z_near, f32 z_far );
 	const GXColor fog = { 151, 166, 181, 255 };
 
+	/* A converted MOHAA map's far plane fog, not Lost Coast's haze. */
+	if( R_GXMapFogSet( z_near, z_far ))
+		return;
 	GX_SetFog( GX_FOG_PERSP_LIN, 1600.0f, 50000.0f, z_near, z_far, fog );
 }
 

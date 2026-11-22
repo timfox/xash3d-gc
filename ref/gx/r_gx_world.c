@@ -52,6 +52,8 @@ Not feature-parity: full brush-mover lighting remains soft/diagnostic.
 #include "../../engine/platform/gamecube/mem_gamecube.h"
 #include "../../engine/platform/gamecube/hud_hires.h"
 
+extern float R_GXMapFarplane( void );	/* r_gx_bloom.c: a converted map's far plane, 0 = none */
+
 extern qboolean GC_UseGxWorldDraw( void );
 extern qboolean GC_UseGxRenderer( void );
 extern void GC_MarkGxWorldEfbReady( void );
@@ -4424,6 +4426,13 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 		&& gEngfuncs.Sys_CheckParm( "-gcworldrender" )
 		&& !gEngfuncs.Sys_CheckParm( "-gcconnect" ))
 		sky = 0x5A8CD2FFu;
+	/* A MOHAA far plane: past it is the fog colour, sky included. */
+	{
+		extern u32 R_GXMapFogRGBA( void );
+
+		if( R_GXMapFarplane() > 0.0f )
+			sky = R_GXMapFogRGBA();
+	}
 
 	copy_clear.r = (u8)(( sky >> 24 ) & 0xff );
 	copy_clear.g = (u8)(( sky >> 16 ) & 0xff );
@@ -4473,7 +4482,7 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 
 	/* Single-side Flipper backdrop is a tip-era cheat. When the real 6-face
 	 * CMPR cube is resident, skip it — R_GXDrawSkyBox draws the cube. */
-	if( !GC_IsTramIntroMap() && !r_gx_sky_ready )
+	if( !GC_IsTramIntroMap() && !r_gx_sky_ready && R_GXMapFarplane() <= 0.0f )
 		R_GXDrawSkyBackdrop( rmode );
 }
 
@@ -4854,7 +4863,7 @@ static void R_GXSetupWorld3DState( void )
 	/* Real 6-face cube is mandatory outdoors. CMPR sides live in BSS (48 KiB)
 	 * so draw never needs tip — tip-gating left WorldDL on solid clear + the
 	 * single-side Flipper backdrop forever (ava-prop-2 tip≈26 Kb). */
-	if( R_GXSkyVisible( ))
+	if( R_GXSkyVisible( ) && R_GXMapFarplane() <= 0.0f )
 	{
 		R_GXDrawSkyBox();
 		/* Full restore after NumChans(0)+REPLACE — incomplete state left
@@ -6613,6 +6622,7 @@ static u32 gc_prop_ntris, gc_prop_dl_base;
  * the harbor) draws without one ARAM read per piece. */
 static u32 gc_prop_far_base, gc_prop_far_size;
 static byte *gc_prop_far_mem;
+static byte *gc_prop_far_heap;	/* gc_prop_far_mem when the map arena had no room for it */
 static qboolean gc_prop_far_tried;
 /* Full-detail chains of the models in view, kept in the idle middle of the
  * studio-model arena (Lost Coast loads 150 KB of studio models into 976).
@@ -6670,9 +6680,35 @@ static float gc_prop_key_fixed[GC_PROP_MAX_INST];
 static u16 *gc_prop_order = gc_prop_order_fixed;
 static float *gc_prop_key = gc_prop_key_fixed;
 static void *gc_prop_tables_heap;	/* the big tables when the map arena had no room */
+/* Pack v9 (converted maps): the high byte of an instance's model word is its
+ * scale, 1.05 ^ ( byte - 128 ), and far cells: each cell is one instance whose
+ * chain holds its members' impostors in world space. A cell draws while it is
+ * far, its members one by one while it is near. */
+#define GC_PROP_MAX_CELLS	224
+#define GC_PROP_CELL_NONE	0xffffu
+#define GC_PROP_CELL_SELF	0x8000u	/* the cell's own instance (low bits: the cell) */
+static qboolean gc_prop_v9;
+static u16 gc_prop_ncells;
+static struct { u16 inst, first, count, pad; } gc_prop_cells[GC_PROP_MAX_CELLS] __attribute__(( aligned( 32 )));
+static u8 gc_prop_cell_far[GC_PROP_MAX_CELLS];
+static u16 gc_prop_cellof_fixed[GC_PROP_MAX_INST];
+static u16 *gc_prop_cellof = gc_prop_cellof_fixed;	/* per instance: its cell, GC_PROP_CELL_SELF | cell, or none */
+static float gc_prop_scale_of[256];
+/* A cell switches to its members inside this distance (nearest point of its box). */
+#define GC_PROP_CELL_NEAR	2400.0f
+
+static u8 gc_prop_model_cell[256];	/* v9: the model is a cell's chain */
 
 static void R_GXPropTablesReset( void )
 {
+	if( gc_prop_far_heap )
+	{
+		GX_DrawDone();
+		free( gc_prop_far_heap );
+		gc_prop_far_heap = NULL;
+		gc_prop_far_mem = NULL;
+	}
+	memset( gc_prop_model_cell, 0, sizeof( gc_prop_model_cell ));
 	if( gc_prop_tables_heap )
 	{
 		GX_DrawDone();
@@ -6683,6 +6719,9 @@ static void R_GXPropTablesReset( void )
 	gc_prop_light = gc_prop_light_fixed;
 	gc_prop_order = gc_prop_order_fixed;
 	gc_prop_key = gc_prop_key_fixed;
+	gc_prop_cellof = gc_prop_cellof_fixed;
+	gc_prop_ncells = 0;
+	gc_prop_v9 = false;
 }
 
 /* Tables for more than GC_PROP_MAX_INST instances: the idle map arena first,
@@ -6692,7 +6731,7 @@ static qboolean R_GXPropTablesGrow( u32 ninst )
 	const u32 inst_bytes = ninst * (u32)sizeof( gc_prop_inst_t );
 	const u32 light_bytes = ( ninst * 12u + 31u ) & ~31u;
 	const u32 order_bytes = ( ninst * 2u + 31u ) & ~31u;
-	const u32 need = inst_bytes + light_bytes + order_bytes + ninst * 4u;
+	const u32 need = inst_bytes + light_bytes + 2u * order_bytes + ninst * 4u;
 	const char *where = "map arena";
 	byte *p = NULL;
 
@@ -6714,6 +6753,7 @@ static qboolean R_GXPropTablesGrow( u32 ninst )
 	gc_prop_light = (u8 ( * )[12])( p + inst_bytes );
 	gc_prop_order = (u16 *)( p + inst_bytes + light_bytes );
 	gc_prop_key = (float *)( p + inst_bytes + light_bytes + order_bytes );
+	gc_prop_cellof = (u16 *)( p + inst_bytes + light_bytes + order_bytes + ninst * 4u );
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tables %u instances in the %s (%u bytes)\n", ninst, where, need );
 	return true;
 }
@@ -6923,9 +6963,9 @@ static void R_GXPropLoad( void )
 		return;
 	}
 	if( gEngfuncs.fsapi->Read( f, hdr, 32 ) != 32
-		|| hdr[0] != GC_PROP_MAGIC || (( hdr[1] >> 16 ) < 6 || ( hdr[1] >> 16 ) > 8 ))
+		|| hdr[0] != GC_PROP_MAGIC || (( hdr[1] >> 16 ) < 6 || ( hdr[1] >> 16 ) > 9 ))
 	{
-		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6 or v7)\n" );
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop pack reject (want v6 to v9)\n" );
 		gEngfuncs.fsapi->Close( f );
 		return;
 	}
@@ -7028,6 +7068,51 @@ static void R_GXPropLoad( void )
 			}
 			DCFlushRange( gc_prop_nrm, sizeof( gc_prop_nrm ));
 			gc_prop_vsize = 11;
+		}
+		gc_prop_v9 = ( hdr[1] >> 16 ) == 9 && gc_prop_map_owned;
+		gc_prop_ncells = 0;
+		if( gc_prop_v9 )
+		{
+			/* the light block of the file's own instance count, then the cells */
+			const u32 file_ninst = hdr[1] & 0xffffu;
+			const u32 cells_at = 32u + file_ninst * (u32)sizeof( gc_prop_inst_t ) + (( 32u + file_ninst * 12u + 31u ) & ~31u );
+			u32 c, j, n = hdr[2] & 0xffffu;
+
+			for( c = 0; c < 256; c++ )
+				gc_prop_scale_of[c] = powf( 1.05f, (float)c - 128.0f );
+			for( j = 0; j < gc_prop_ninst; j++ )
+				gc_prop_cellof[j] = GC_PROP_CELL_NONE;
+			/* the fixed tables kept only the head: no cells then, and the
+			 * cell instances at the end are past it */
+			if( n > GC_PROP_MAX_CELLS || gc_prop_ninst != file_ninst )
+				n = 0;
+			if( n )
+				GC_AramTransfer( gc_prop_aram + cells_at, gc_prop_cells, ( n * 8u + 31u ) & ~31u, false );
+			for( c = 0; c < n; c++ )
+			{
+				if( gc_prop_cells[c].inst >= gc_prop_ninst
+					|| (u32)gc_prop_cells[c].first + gc_prop_cells[c].count > gc_prop_ninst )
+				{
+					n = 0;
+					break;
+				}
+			}
+			for( c = 0; c < n; c++ )
+			{
+				for( j = gc_prop_cells[c].first; j < (u32)gc_prop_cells[c].first + gc_prop_cells[c].count; j++ )
+					gc_prop_cellof[j] = (u16)c;
+				gc_prop_cellof[gc_prop_cells[c].inst] = (u16)( GC_PROP_CELL_SELF | c );
+				gc_prop_model_cell[gc_prop_inst[gc_prop_cells[c].inst].model & 0xffu] = 1;
+			}
+			gc_prop_ncells = (u16)n;
+			if( !n && ( hdr[2] & 0xffffu ))
+			{
+				/* cells unusable: their instances (the last ones) are dropped */
+				u32 first_cell = file_ninst - ( hdr[2] & 0xffffu );
+
+				if( gc_prop_ninst > first_cell )
+					gc_prop_ninst = (u16)first_cell;
+			}
 		}
 		bytes = ( gc_prop_nmodels * (u32)sizeof( gc_prop_model_t ) + 31u ) & ~31u;
 		GC_AramTransfer( gc_prop_aram + hdr[4], gc_prop_models, bytes, false );
@@ -7175,7 +7260,25 @@ static qboolean R_GXPropsShareSlots( void )
 #endif
 }
 
+/* The last material bound and the far flag it was bound with: a repeat bind
+ * of the same material (the next instance of the same model) is skipped.
+ * -1 after anything else may have bound texture map 0. */
+static int gc_prop_bound_mat = -1;
+static int gc_prop_bound_ret;
+static qboolean gc_prop_bound_far;
+static int R_GXPropBindReal( u8 mat );
+
 static int R_GXPropBind( u8 mat )
+{
+	if( gc_prop_bound_mat == (int)mat && gc_prop_bound_far == r_gx_cmpr_want_far )
+		return gc_prop_bound_ret;
+	gc_prop_bound_far = r_gx_cmpr_want_far;
+	gc_prop_bound_ret = R_GXPropBindReal( mat );
+	gc_prop_bound_mat = mat;
+	return gc_prop_bound_ret;
+}
+
+static int R_GXPropBindReal( u8 mat )
 {
 	int s;
 	u16 w, h;
@@ -7682,6 +7785,8 @@ static int gc_prop_tev_x2 = -1;
 
 static u32 gc_prop_far_fallbacks;	/* small props drawn from the far chain because the cache was full */
 
+static float gc_prop_cur_scale = 1.0f;	/* v9: the instance being drawn */
+
 static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, float yaw, float roll, qboolean far_lod )
 {
 	const gc_prop_model_t *m;
@@ -7699,17 +7804,33 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 
 	if( model >= gc_prop_nmodels )
 		return 0;
-	/* A map pack has no far chains: its models are a few hundred triangles
-	 * and the resident copy is the full one. Only the texture goes far. */
-	if( gc_prop_map_owned )
-		far_lod = false;
 	m = &gc_prop_models[model];
+	/* A GoldSrc map pack has no far chains: its models are a few hundred
+	 * triangles and the resident copy is the full one. Only the texture goes
+	 * far. A v9 pack's trees have impostors there. */
+	if( gc_prop_map_owned && !m->far_bytes )
+		far_lod = false;
 	mm[0][0] = cp * cy; mm[0][1] = sr * sp * cy - cr * sy; mm[0][2] = cr * sp * cy + sr * sy; mm[0][3] = org[0];
 	mm[1][0] = cp * sy; mm[1][1] = sr * sp * sy + cr * cy; mm[1][2] = cr * sp * sy - sr * cy; mm[1][3] = org[1];
 	mm[2][0] = -sp; mm[2][1] = sr * cp; mm[2][2] = cr * cp; mm[2][3] = org[2];
 	R_GXBuildWorldModelview( mv );
 	guMtxConcat( mv, mm, out );
-	GX_LoadPosMtxImm( out, GX_PNMTX0 );
+	if( gc_prop_cur_scale != 1.0f )
+	{
+		Mtx scaled;
+		int r;
+
+		for( r = 0; r < 3; r++ )
+		{
+			scaled[r][0] = out[r][0] * gc_prop_cur_scale;
+			scaled[r][1] = out[r][1] * gc_prop_cur_scale;
+			scaled[r][2] = out[r][2] * gc_prop_cur_scale;
+			scaled[r][3] = out[r][3];
+		}
+		GX_LoadPosMtxImm( scaled, GX_PNMTX0 );
+	}
+	else
+		GX_LoadPosMtxImm( out, GX_PNMTX0 );
 	if( r_gx_mirror_clip )
 		R_GXMirrorClipMtx( mm[2][0], mm[2][1], mm[2][2], mm[2][3] );
 	col.r = (u8)( gc_prop_lit >> 24 );
@@ -7840,6 +7961,18 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		gc_prop_far_tried = true;
 		gc_prop_far_mem = (byte *)GC_MapLoadBufferTailAlloc(
 			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), gc_prop_far_size );
+		/* A converted map's far region (impostors and cells: 152-270 KB)
+		 * may not fit the arena's tail: the heap, while that leaves it
+		 * 320 KB. */
+		if( !gc_prop_far_mem && gc_prop_v9 )
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+
+			if( GC_MemHeapFreeBytes() >= (size_t)gc_prop_far_size + 320u * 1024u )
+				gc_prop_far_mem = gc_prop_far_heap = (byte *)memalign( 32, gc_prop_far_size );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop far LODs %s (%u Kb)\n",
+				gc_prop_far_mem ? "in the heap" : "FAIL, cells from the chain cache", gc_prop_far_size / 1024u );
+		}
 		if( gc_prop_far_mem )
 		{
 			GC_AramTransfer( gc_prop_aram + gc_prop_far_base, gc_prop_far_mem, gc_prop_far_size, false );
@@ -7847,6 +7980,8 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 				gc_prop_far_size / 1024u );
 		}
 	}
+	if( far_lod && !gc_prop_far_mem && gc_prop_model_cell[model] )
+		far_lod = false;
 	R_GXCmprSetFar( far_tex || gc_prop_tex_far );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;
@@ -8076,7 +8211,7 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 	/* Named map props (high byte of the model word: ordinal + 1) are drawn
 	 * while their edict is drawable, so the good/destroyed pairs that
 	 * env_render swaps show and hide as in retail (sv_game.c). */
-	if( in->model >> 8 )
+	if(( in->model >> 8 ) && !gc_prop_v9 )
 	{
 		extern int SV_GCNamedPropVisible( int ord );
 
@@ -8198,12 +8333,16 @@ static int R_GXPropEmitReal( const gc_prop_inst_t *in )
 			}
 		}
 		gc_prop_tex_nobig = bm->close_model && bm->close_dist8 >= 100 && model == ( in->model & 0xffu );
+		gc_prop_cur_scale = gc_prop_v9 ? gc_prop_scale_of[in->model >> 8] : 1.0f;
 		drawn = R_GXPropEmitModel( model, org, (float)in->ang[0] * k,
 			(float)in->ang[1] * k + hinge_turn, (float)in->ang[2] * k,
 			/* The water mirror is 256x192 under ripples: the far chain
 			 * (already resident) reads the same there, and the full
-			 * chains it asked for no longer compete for the cache. */
-			r_gx_mirror || cover2 < gc_prop_far_cover * gc_prop_far_cover );
+			 * chains it asked for no longer compete for the cache. A
+			 * cell is only ever drawn from its far chain. */
+			r_gx_mirror || cover2 < gc_prop_far_cover * gc_prop_far_cover
+			|| ( gc_prop_ncells && ( gc_prop_cellof[in - gc_prop_inst] & GC_PROP_CELL_SELF )));
+		gc_prop_cur_scale = 1.0f;
 		gc_prop_cur_light = NULL;
 		gc_prop_tex_far = false;
 		gc_prop_tex_nobig = false;
@@ -8325,6 +8464,7 @@ static void R_GXFishermanWalkDraw( const float *org )
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	gc_prop_vtx_frac = -1;
+	gc_prop_bound_mat = -1;
 	R_GXPropEmitModel( gc_prop_walk_model, pos, 0.0f, yaw, 0.0f, false );
 	if( !logged )
 	{
@@ -8354,6 +8494,7 @@ static void R_GXCanisterFlightDraw( const float *org )
 		R_GXPropSetLitAt( pos[i] );
 		gc_prop_vtx_frac = -1;
 		/* nose along the flight */
+		gc_prop_bound_mat = -1;
 		R_GXPropEmitModel( gc_prop_flight_model, pos[i], -atan2f( vel[i][2], hv ), atan2f( vel[i][1], vel[i][0] ), 0.0f, false );
 		if( !logged )
 		{
@@ -8362,6 +8503,42 @@ static void R_GXCanisterFlightDraw( const float *org )
 				(int)pos[i][0], (int)pos[i][1], (int)pos[i][2] );
 		}
 	}
+}
+
+static float gc_prop_far2;	/* this pass: the far plane squared, 0 = none */
+
+/* Once per prop pass: which cells are far, and the far plane. */
+static void R_GXPropCellsUpdate( const float *eye )
+{
+	const float fp = gc_prop_map_owned ? R_GXMapFarplane() : 0.0f;
+	int c;
+
+	gc_prop_far2 = fp > 0.0f ? fp * fp : 0.0f;
+	gc_prop_bound_mat = -1;
+	for( c = 0; c < gc_prop_ncells; c++ )
+	{
+		const gc_prop_inst_t *ci = &gc_prop_inst[gc_prop_cells[c].inst];
+
+		gc_prop_cell_far[c] = R_GXPropD2( eye, ci->mins, ci->maxs ) > GC_PROP_CELL_NEAR * GC_PROP_CELL_NEAR;
+	}
+}
+
+/* False for an instance past the far plane, a member of a far cell, or the
+ * instance of a near cell. d2: its box's squared distance from the eye. */
+static qboolean R_GXPropShown( int i, float d2 )
+{
+	u16 c;
+
+	if( gc_prop_far2 > 0.0f && d2 > gc_prop_far2 )
+		return false;
+	if( !gc_prop_ncells )
+		return true;
+	c = gc_prop_cellof[i];
+	if( c == GC_PROP_CELL_NONE )
+		return true;
+	if( c & GC_PROP_CELL_SELF )
+		return gc_prop_cell_far[c & 0x7fffu] != 0;
+	return !gc_prop_cell_far[c];
 }
 
 static qboolean R_GXPropOutside( const gc_prop_inst_t *in )
@@ -8462,6 +8639,7 @@ void R_GXPropDrawHorizon( const float *org )
 		return;
 	order = gc_prop_order;
 	key = gc_prop_key;
+	R_GXPropCellsUpdate( org );
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetZCompLoc( GX_TRUE );
@@ -8491,10 +8669,13 @@ void R_GXPropDrawHorizon( const float *org )
 		const gc_prop_inst_t *in = &gc_prop_inst[i];
 		vec3_t mins, maxs;
 
+		float d2;
+
 		if( in->count == 0 )
 			continue;
 		/* The near pass draws anything inside the reach. */
-		if( R_GXPropD2( org, in->mins, in->maxs ) <= GC_PROP_REACH2 )
+		d2 = R_GXPropD2( org, in->mins, in->maxs );
+		if( d2 <= GC_PROP_REACH2 || !R_GXPropShown( i, d2 ))
 			continue;
 		/* Size filters from the CapFaces era, when wide props doubled baked
 		 * world plates. The world DL is BSP only, so they dropped real
@@ -8536,13 +8717,37 @@ void R_GXPropDrawHorizon( const float *org )
 
 		for( a = 0; a < n; a++ )
 		{
-			tris += gc_prop_inst[order[a]].count;
+			const gc_prop_inst_t *bi = &gc_prop_inst[order[a]];
+			const gc_prop_model_t *bm = &gc_prop_models[( bi->model & 0xffu ) < gc_prop_nmodels ? bi->model & 0xffu : 0];
+
+			/* past the reach a model with a far chain draws that */
+			tris += bm->far_bytes ? bm->far_tris : bi->count;
 			if( tris > GC_PROP_HORIZON_TRIS )
 				break;
 		}
 		if( a < n )
 			cut += n - a;
 		n = a;
+	}
+	if( gc_prop_v9 )
+	{
+		for( a = 0; a < n; a++ )
+			key[a] = (float)( gc_prop_inst[order[a]].model & 0xffu );
+		for( gap = n / 2; gap > 0; gap = gap == 2 ? 1 : gap * 5 / 11 )
+		{
+			for( a = gap; a < n; a++ )
+			{
+				tmp = order[a];
+				ftmp = key[a];
+				for( b = a; b >= gap && key[b - gap] < ftmp; b -= gap )
+				{
+					order[b] = order[b - gap];
+					key[b] = key[b - gap];
+				}
+				order[b] = tmp;
+				key[b] = ftmp;
+			}
+		}
 	}
 	/* Far first so a nearer sheet of the same tower hides the one behind it. */
 	for( i = n - 1; i >= 0; i-- )
@@ -8557,9 +8762,10 @@ void R_GXPropDrawHorizon( const float *org )
 		if( !logged )
 		{
 			logged = true;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d past budget=%d\n", drawn, ninst, cut );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d past budget=%d cells=%u\n", drawn, ninst, cut, gc_prop_ncells );
 		}
 	}
+	gc_prop_bound_mat = -1;
 }
 
 
@@ -8573,6 +8779,7 @@ static void R_GXPropDraw( const float *org )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
 		return;
+	R_GXPropCellsUpdate( org );
 	R_GXBuildFrustum();
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
@@ -8602,9 +8809,12 @@ static void R_GXPropDraw( const float *org )
 	{
 		const gc_prop_inst_t *in = &gc_prop_inst[i];
 
+		float d2;
+
 		if( in->count == 0 )
 			continue;
-		if( R_GXPropD2( org, in->mins, in->maxs ) > GC_PROP_REACH2 )
+		d2 = R_GXPropD2( org, in->mins, in->maxs );
+		if( d2 > GC_PROP_REACH2 || !R_GXPropShown( i, d2 ))
 			continue;
 		/* Size filters from the CapFaces era, when wide props doubled baked
 		 * world plates. The world DL is BSP only, so they dropped real
@@ -8628,6 +8838,7 @@ static void R_GXPropDraw( const float *org )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop draw tris=%d near=%d\n", drawn, near );
 		}
 	}
+	gc_prop_bound_mat = -1;
 }
 
 /* Source water_ati_cheap001 / water_ati_beneath body:
