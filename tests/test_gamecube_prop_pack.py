@@ -455,8 +455,15 @@ class MohaaPropPackTests(unittest.TestCase):
 		self.assertEqual((rest[1], rest[4], rest[5]), (200, 208, 16))
 		self.assertEqual(gct[:4], b"GCWT")
 
-	def test_past_the_instance_limit_some_are_left_out(self):
-		n = self.baker.GC_PR_MAX_INST + 5
+	def test_past_the_fixed_tables_every_instance_is_kept(self):
+		n = self.baker.GC_PR_FIXED_INST + 88
 		stats, gcp, _gct, logs = self.bake([(0, (i, 0, 0), (0, 0, 0), 1.0) for i in range(n)])
-		self.assertEqual((stats["instances"], stats["dropped"]), (self.baker.GC_PR_MAX_INST, 5))
+		self.assertEqual((stats["instances"], stats["dropped"]), (n, 0))
+		self.assertEqual(struct.unpack_from(">I", gcp, 4)[0] & 0xFFFF, n)
+		self.assertFalse(any("left out" in line for line in logs))
+
+	def test_past_the_instance_limit_some_are_left_out(self):
+		n = self.baker.GC_PR_MAX_INST_BIG + 5
+		stats, gcp, _gct, logs = self.bake([(0, (i, 0, 0), (0, 0, 0), 1.0) for i in range(n)])
+		self.assertEqual((stats["instances"], stats["dropped"]), (self.baker.GC_PR_MAX_INST_BIG, 5))
 		self.assertTrue(any("left out" in line for line in logs))

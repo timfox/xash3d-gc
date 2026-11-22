@@ -28,6 +28,8 @@ PROP_CLASSES = ("env_model", "dod_object")
 GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 7
 GC_PR_MAX_INST = 512
+GC_PR_MAX_INST_BIG = 4096  # a converted map's pack: the engine moves its tables to the map arena
+GC_PR_FIXED_INST = 512  # the engine's fixed tables; past them the pack is written nearest a player start first
 GC_PR_MAX_MODELS = 192
 GC_PR_MAX_MAT = 127
 GC_PR_PIECE_BYTES = 15360	# piece body cap: header + body fit the engine's 16 KB bounce
@@ -1049,15 +1051,16 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 	sun = sun_direction(ents)
 	insts = list(pack["instances"])
 	dropped = 0
-	if len(insts) > GC_PR_MAX_INST:
+	if len(insts) > GC_PR_FIXED_INST:
 		starts = [_floats(e.get("origin", "0 0 0"), 3) for e in ents
 			if e.get("classname", "").startswith("info_player")]
-		if starts:
+		if starts:  # if the engine can't grow its tables it keeps the head
 			insts.sort(key=lambda i: min(sum((i[1][a] - s_[a]) ** 2 for a in range(3)) for s_ in starts))
-		dropped = len(insts) - GC_PR_MAX_INST
-		insts = insts[:GC_PR_MAX_INST]
-		log(f"  props: {Path(mprop_path).name}: {dropped} of {len(pack['instances'])} instances past the engine's "
-			f"{GC_PR_MAX_INST} left out" + (" (kept the ones nearest a player start)" if starts else ""))
+		if len(insts) > GC_PR_MAX_INST_BIG:
+			dropped = len(insts) - GC_PR_MAX_INST_BIG
+			insts = insts[:GC_PR_MAX_INST_BIG]
+			log(f"  props: {Path(mprop_path).name}: {dropped} of {len(pack['instances'])} instances past the engine's "
+				f"{GC_PR_MAX_INST_BIG} left out" + (" (kept the ones nearest a player start)" if starts else ""))
 
 	chains, mat_of = [], {}
 

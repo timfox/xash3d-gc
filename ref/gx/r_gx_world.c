@@ -6538,6 +6538,9 @@ qboolean R_GXTexnumMasked( unsigned texnum )
  * boats read as one surface under the tight bloom. */
 #define GC_PROP_MAGIC		0x47437072u
 #define GC_PROP_MAX_INST	512
+/* A converted map's pack (MOHAA: m6l1a has 2763 trees and rocks) may hold
+ * more: its tables then go to the map arena, or the heap, for that map. */
+#define GC_PROP_MAX_INST_BIG	4096
 /* A prop switches to its far chain when its bounding sphere covers less
  * than this fraction of the view distance (radius / distance). The switch is
  * a visible pop, so it is pushed as far out as the chain cache allows: the
@@ -6562,6 +6565,9 @@ static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
  * the tighter gate. */
 #define GC_PROP_CLOSE_COVER	0.15f
 #define GC_PROP_DRAW_TRIS	6000
+/* Triangles the horizon pass draws on a converted map (Lost Coast draws all).
+ * m6l1a: 16000 ran 19 fps deep in the forest, 8000 runs 22-24. */
+#define GC_PROP_HORIZON_TRIS	8000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
 #define GC_PROP_TEX_SLOTS	16
 #define GC_PROP_TEX_BYTES	2048u
@@ -6638,7 +6644,8 @@ static u16 gc_prop_nmodels;
 static u16 gc_prop_flight_model, gc_prop_flight_count;
 static u16 gc_prop_walk_model, gc_prop_walk_count;
 /* Both tables are ARAM DMA targets: 32-byte aligned, whole 32-byte sizes. */
-static gc_prop_inst_t gc_prop_inst[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+static gc_prop_inst_t gc_prop_inst_fixed[GC_PROP_MAX_INST] __attribute__(( aligned( 32 )));
+static gc_prop_inst_t *gc_prop_inst = gc_prop_inst_fixed;
 #define GC_PROP_HINGES	4
 
 static struct
@@ -6655,7 +6662,61 @@ static int gc_prop_nhinge;
  * along +Z, what the sun adds along its direction. The GX lights add the
  * last two by N.L, as Source lights a static prop without baked vertex
  * light. v6 packs (no normals) keep the single colour per instance. */
-static u8 gc_prop_light[GC_PROP_MAX_INST][12];
+static u8 gc_prop_light_fixed[GC_PROP_MAX_INST][12];
+static u8 ( *gc_prop_light )[12] = gc_prop_light_fixed;
+/* The horizon pass's sort, sized like the tables. */
+static u16 gc_prop_order_fixed[GC_PROP_MAX_INST];
+static float gc_prop_key_fixed[GC_PROP_MAX_INST];
+static u16 *gc_prop_order = gc_prop_order_fixed;
+static float *gc_prop_key = gc_prop_key_fixed;
+static void *gc_prop_tables_heap;	/* the big tables when the map arena had no room */
+
+static void R_GXPropTablesReset( void )
+{
+	if( gc_prop_tables_heap )
+	{
+		GX_DrawDone();
+		free( gc_prop_tables_heap );
+		gc_prop_tables_heap = NULL;
+	}
+	gc_prop_inst = gc_prop_inst_fixed;
+	gc_prop_light = gc_prop_light_fixed;
+	gc_prop_order = gc_prop_order_fixed;
+	gc_prop_key = gc_prop_key_fixed;
+}
+
+/* Tables for more than GC_PROP_MAX_INST instances: the idle map arena first,
+ * the heap next. False keeps the fixed tables. */
+static qboolean R_GXPropTablesGrow( u32 ninst )
+{
+	const u32 inst_bytes = ninst * (u32)sizeof( gc_prop_inst_t );
+	const u32 light_bytes = ( ninst * 12u + 31u ) & ~31u;
+	const u32 order_bytes = ( ninst * 2u + 31u ) & ~31u;
+	const u32 need = inst_bytes + light_bytes + order_bytes + ninst * 4u;
+	const char *where = "map arena";
+	byte *p = NULL;
+
+	if( GC_MapLoadBufferTailHighwater() > 0 || GC_MapLoadBufferTailPeak() > 0 )
+		p = (byte *)GC_MapLoadBufferTailAlloc( Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), need );
+	if( !p )
+	{
+		p = (byte *)memalign( 32, need );
+		gc_prop_tables_heap = p;
+		where = "heap";
+	}
+	if( !p )
+	{
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tables FAIL (%u bytes), first %u instances only\n",
+			need, GC_PROP_MAX_INST );
+		return false;
+	}
+	gc_prop_inst = (gc_prop_inst_t *)p;
+	gc_prop_light = (u8 ( * )[12])( p + inst_bytes );
+	gc_prop_order = (u16 *)( p + inst_bytes + light_bytes );
+	gc_prop_key = (float *)( p + inst_bytes + light_bytes + order_bytes );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tables %u instances in the %s (%u bytes)\n", ninst, where, need );
+	return true;
+}
 static s8 gc_prop_nrm[256][3] __attribute__(( aligned( 32 )));
 static float gc_prop_sun[3];
 static u32 gc_prop_vsize = 10;	/* bytes per vertex: 10 (v6) or 11 (v7, v8) */
@@ -6779,7 +6840,12 @@ static void R_GXPropMapCheck( void )
 		Q_strncpy( base, "d2_lostcoast", sizeof( base ));
 	else
 		COM_FileBase( world->name, base, sizeof( base ));
-	if( !Q_stricmp( base, gc_prop_map ))
+	/* Same map loaded again with the big instance tables in the map arena:
+	 * the arena went with the old load, so the pack loads again. */
+	const qboolean again = !Q_stricmp( base, gc_prop_map ) && gc_prop_epoch != r_gx_world_epoch
+		&& gc_prop_inst != gc_prop_inst_fixed && !gc_prop_tables_heap;
+
+	if( !again && !Q_stricmp( base, gc_prop_map ))
 	{
 		extern size_t Mod_GCWorldArraySpillUsed( void );
 
@@ -6824,6 +6890,7 @@ static void R_GXPropMapCheck( void )
 	gc_prop_ninst = 0;
 	gc_prop_nmodels = 0;
 	gc_prop_nhinge = 0;
+	R_GXPropTablesReset();
 	memset( gc_prop_hinge, 0, sizeof( gc_prop_hinge ));
 	R_GXPropCacheHeapFree();
 	gc_prop_cache = NULL;
@@ -6872,7 +6939,7 @@ static void R_GXPropLoad( void )
 	gc_prop_walk_model = (u16)( hdr[6] & 0xffffu );
 	gEngfuncs.fsapi->Seek( f, 0, SEEK_END );
 	size = (u32)gEngfuncs.fsapi->Tell( f );
-	if( gc_prop_ninst == 0 || gc_prop_ninst > GC_PROP_MAX_INST
+	if( gc_prop_ninst == 0 || gc_prop_ninst > ( gc_prop_map_owned ? GC_PROP_MAX_INST_BIG : GC_PROP_MAX_INST )
 		|| gc_prop_nmodels == 0 || gc_prop_nmodels > GC_PROP_MAX_MODELS
 		|| hdr[3] != 32u || ( hdr[4] & 31u ) || ( gc_prop_dl_base & 31u )
 		|| ( size & 31u ) || gc_prop_dl_base > size
@@ -6912,20 +6979,36 @@ static void R_GXPropLoad( void )
 		u32 bytes = gc_prop_ninst * (u32)sizeof( gc_prop_inst_t );
 		u32 i;
 
-		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, bytes, false );
+		/* The bake writes a big pack nearest the player start first, so
+		 * keeping the head of the table keeps the props around the start. */
+		if( gc_prop_ninst > GC_PROP_MAX_INST && !R_GXPropTablesGrow( gc_prop_ninst ))
+			gc_prop_ninst = GC_PROP_MAX_INST;
+		GC_AramTransfer( gc_prop_aram + 32u, gc_prop_inst, gc_prop_ninst * (u32)sizeof( gc_prop_inst_t ), false );
 		gc_prop_vsize = 10;
 		gc_prop_uv8 = ( hdr[1] >> 16 ) == 8;
 		if(( hdr[1] >> 16 ) >= 7 )
 		{
-			const u32 lbytes = ( 32u + gc_prop_ninst * 12u + 31u ) & ~31u;
+			/* 32 bytes of sun, then 12 per instance, read through the
+			 * bounce buffer a piece at a time (2763 instances are 33 KB). */
+			const u32 lend = 32u + gc_prop_ninst * 12u;
+			const u32 lbytes = ( lend + 31u ) & ~31u;
+			u32 done;
 			int q;
 
-			if( lbytes <= sizeof( gc_prop_bounce ))
+			for( done = 0; done < lbytes; done += sizeof( gc_prop_bounce ))
 			{
-				GC_AramTransfer( gc_prop_aram + 32u + bytes, gc_prop_bounce, lbytes, false );
-				for( q = 0; q < 3; q++ )
-					gc_prop_sun[q] = (float)(( (const s16 *)gc_prop_bounce )[q] ) * ( 1.0f / 32767.0f );
-				memcpy( gc_prop_light, gc_prop_bounce + 32, gc_prop_ninst * 12u );
+				const u32 n = lbytes - done < sizeof( gc_prop_bounce ) ? lbytes - done : (u32)sizeof( gc_prop_bounce );
+				const u32 from = done < 32u ? 32u : done;
+				const u32 to = done + n < lend ? done + n : lend;
+
+				GC_AramTransfer( gc_prop_aram + 32u + bytes + done, gc_prop_bounce, n, false );
+				if( done == 0 )
+				{
+					for( q = 0; q < 3; q++ )
+						gc_prop_sun[q] = (float)(( (const s16 *)gc_prop_bounce )[q] ) * ( 1.0f / 32767.0f );
+				}
+				if( to > from )
+					memcpy( (byte *)gc_prop_light + ( from - 32u ), gc_prop_bounce + ( from - done ), to - from );
 			}
 			for( q = 0; q < 256; q++ )
 			{
@@ -8296,7 +8379,7 @@ static qboolean R_GXPropOutside( const gc_prop_inst_t *in )
 void R_GXPropDrawHorizon( const float *org )
 {
 	const qboolean prop_plate_cull = gEngfuncs.Sys_CheckParm( "-gcpropplatecull" ) != 0;
-	static u16 order[GC_PROP_MAX_INST];
+	u16 *order;	/* set after the load: a big pack moves the tables */
 
 	/* The water mirror draws the props first and the main view after it,
 	 * in the same frame. Counted as two frames, each pass saw the other's
@@ -8367,8 +8450,8 @@ void R_GXPropDrawHorizon( const float *org )
 		gc_prop_glint_k.b = (u8)( 78.0f * kf );
 		gc_prop_glint_k.a = gEngfuncs.Sys_CheckParm( "-gcnorockglint" ) ? 0 : 255;
 	}
-	static float key[GC_PROP_MAX_INST];
-	int i, n = 0, ninst = 0, drawn = 0, a, b;
+	float *key;
+	int i, n = 0, ninst = 0, drawn = 0, a, b, gap, cut = 0;
 	u16 tmp;
 	float ftmp;
 
@@ -8377,6 +8460,8 @@ void R_GXPropDrawHorizon( const float *org )
 		R_GXPropLoad();
 	if( gc_prop_state != 1 || !org )
 		return;
+	order = gc_prop_order;
+	key = gc_prop_key;
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetZMode( GX_TRUE, GX_LEQUAL, GX_TRUE );
 	GX_SetZCompLoc( GX_TRUE );
@@ -8426,22 +8511,41 @@ void R_GXPropDrawHorizon( const float *org )
 		key[n] = R_GXPropD2( org, in->mins, in->maxs );
 		n++;
 	}
-	/* Far first so a nearer sheet of the same tower hides the one behind it. */
-	for( a = 1; a < n; a++ )
+	/* Nearest first (a shell sort: a converted map's forest puts 1900
+	 * instances past the reach, too many for an insertion sort a frame). */
+	for( gap = n / 2; gap > 0; gap = gap == 2 ? 1 : gap * 5 / 11 )
 	{
-		tmp = order[a];
-		ftmp = key[a];
-		b = a - 1;
-		while( b >= 0 && key[b] < ftmp )
+		for( a = gap; a < n; a++ )
 		{
-			order[b + 1] = order[b];
-			key[b + 1] = key[b];
-			b--;
+			tmp = order[a];
+			ftmp = key[a];
+			for( b = a; b >= gap && key[b - gap] > ftmp; b -= gap )
+			{
+				order[b] = order[b - gap];
+				key[b] = key[b - gap];
+			}
+			order[b] = tmp;
+			key[b] = ftmp;
 		}
-		order[b + 1] = tmp;
-		key[b + 1] = ftmp;
 	}
-	for( i = 0; i < n; i++ )
+	/* A converted map stops at a triangle budget, nearest kept: m6l1a's
+	 * 1910 horizon trees were 146600 triangles and 9 fps. */
+	if( gc_prop_map_owned )
+	{
+		int tris = 0;
+
+		for( a = 0; a < n; a++ )
+		{
+			tris += gc_prop_inst[order[a]].count;
+			if( tris > GC_PROP_HORIZON_TRIS )
+				break;
+		}
+		if( a < n )
+			cut += n - a;
+		n = a;
+	}
+	/* Far first so a nearer sheet of the same tower hides the one behind it. */
+	for( i = n - 1; i >= 0; i-- )
 	{
 		drawn += R_GXPropEmitReal( &gc_prop_inst[order[i]] );
 		ninst++;
@@ -8453,7 +8557,7 @@ void R_GXPropDrawHorizon( const float *org )
 		if( !logged )
 		{
 			logged = true;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d\n", drawn, ninst );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d past budget=%d\n", drawn, ninst, cut );
 		}
 	}
 }
