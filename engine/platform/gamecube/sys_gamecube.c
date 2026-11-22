@@ -504,7 +504,7 @@ static int GCube_AddDetectedGame( char names[][GC_MAX_GAMEDIR_NAME], int count, 
 static int GCube_CollectDetectedGames( const char *xashdir, char names[][GC_MAX_GAMEDIR_NAME], int max_names )
 {
 	static const char *const k_known[] = {
-		"valve", "dod", "gearbox", "bshift", "cstrike", "czero",
+		"valve", "dod", "mohaa", "gearbox", "bshift", "cstrike", "czero",
 		"tfc", "dmc", "ricochet", "valve_addon",
 	};
 	int count = 0;

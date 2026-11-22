@@ -308,7 +308,7 @@ def build(bld):
 		if gc_malloc_trace:
 			bld.env.LDFLAGS += ['-Wl,--wrap=malloc', '-Wl,--wrap=calloc',
 				'-Wl,--wrap=memalign', '-Wl,--wrap=realloc']
-		if ogc.get('stack') == 'libogc2' and bld.env.GAMEDIR == 'dod':
+		if ogc.get('stack') == 'libogc2' and bld.env.GAMEDIR in ('dod', 'mohaa'):
 			bld.env.LDFLAGS += ['-Wl,--wrap=__lwp_wkspace_init']
 		if has_hlsdk_server:
 			Logs.info('Using GameCube HLSDK server archive from %s' % hlsdk_dest)

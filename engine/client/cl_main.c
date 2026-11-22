@@ -35,12 +35,21 @@ extern int gc_menu_step_frames;
 extern qboolean UI_UsingBuiltInFallbackMenu( void );
 void UI_GameCubeLeaveMenuOnlyBootstrap( void );
 static qboolean gc_menu_music_started;
+/* Day of Defeat or a game built on it: a game folder whose fallback_dir is dod
+ * (mohaa-gc's mohaa runs the DoD game code over dod/). */
+static qboolean CL_GameIsDoDFamily( void )
+{
+	const gameinfo_t *gi = ( FI && FI->GameInfo ) ? FI->GameInfo : NULL;
+
+	return gi && ( !Q_stricmp( gi->gamefolder, "dod" ) || !Q_stricmp( gi->falldir, "dod" ));
+}
+
 static void CL_GameCubeStartDoDMenuMusic( void )
 {
 	if( gc_menu_music_started || !snd.initialized )
 		return;
 	gc_menu_music_started = true;
-	if( FI && FI->GameInfo && !Q_stricmp( FI->GameInfo->gamefolder, "dod" ))
+	if( CL_GameIsDoDFamily( ))
 	{
 		S_StartBackgroundTrack( "media/gamestartup.wav", "media/gamestartup.wav", 0, false );
 		Con_Reportf( "Xash3D GameCube: DoD main-menu music start requested\n" );
@@ -4673,7 +4682,7 @@ void CL_Init( void )
 			S_Init();
 			Voice_Init( VOICE_DEFAULT_CODEC, 3, true );
 			Con_Reportf( "Xash3D GameCube: menu-only sound init ready\n" );
-			if( FI && FI->GameInfo && !Q_stricmp( FI->GameInfo->gamefolder, "dod" ))
+			if( CL_GameIsDoDFamily( ))
 			{
 				S_StartBackgroundTrack( "media/gamestartup.wav", "media/gamestartup.wav", 0, false );
 				Con_Reportf( "Xash3D GameCube: DoD main-menu music started\n" );
@@ -4781,7 +4790,7 @@ qboolean CL_GameCubeEnsureClientReady( void )
 			map = worldbase;
 		}
 		if(( map && map[0] && !Q_strnicmp( map, "dod_", 4 ))
-			|| ( FI && FI->GameInfo && !Q_stricmp( FI->GameInfo->gamefolder, "dod" )))
+			|| CL_GameIsDoDFamily( ))
 		{
 			Cvar_Set( "gc_quality", "0" );
 			Con_Reportf( "Xash3D GameCube: DoD deferred client lean HUD (tip-safe)\n" );

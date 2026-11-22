@@ -760,6 +760,20 @@ void GAME_EXPORT Key_Event( int key, int down )
 	const char *kb = keys[key].binding;
 	keys[key].down = down ? true : false;
 
+#if XASH_GAMECUBE
+	/* The pad has no Escape key, and the hack below drops every other key
+	 * while a cinematic plays, so the boot intro could not be skipped.
+	 * A, B or Start skips to the next movie in the playlist (or the menu). */
+	if( down && keys[key].repeats == 0 && cls.state == ca_cinematic
+		&& cls.key_dest == key_game
+		&& ( key == K_A_BUTTON || key == K_B_BUTTON || key == K_START_BUTTON ))
+	{
+		Con_Reportf( "Xash3D GameCube: cinematic skipped by %s\n", Key_KeynumToString( key ));
+		SCR_NextMovie();
+		return;
+	}
+#endif
+
 #ifdef HACKS_RELATED_HLMODS
 	if(( cls.key_dest == key_game ) && ( cls.state == ca_cinematic ) && ( key != K_ESCAPE || !down ))
 	{
