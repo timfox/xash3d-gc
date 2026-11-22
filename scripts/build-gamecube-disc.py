@@ -4234,6 +4234,13 @@ def stage_smoke_data(
 		stage_probe_tas(output, tas)
 	for relative in smoke_hud_resources(source):
 		copy_if_present(source, output, relative)
+	# MOHAA's low-memory GameCube HUD draws the retail Pak1 images through
+	# direct SPR_Load calls rather than listing them in the GoldSrc hud.txt.
+	# Stage the converted v32 RGBA sprite set for smoke ISOs too.
+	mohaa_hud = source / "sprites" / "mohaa"
+	if mohaa_hud.is_dir():
+		for sprite in sorted(mohaa_hud.glob("*.spr")):
+			copy_if_present(source, output, f"sprites/mohaa/{sprite.name}")
 	for relative in SMOKE_PRECACHE_MODELS:
 		copy_if_present(source, output, relative)
 	for relative in SMOKE_SOUND_DIRS:
