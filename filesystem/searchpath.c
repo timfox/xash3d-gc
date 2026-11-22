@@ -536,6 +536,19 @@ void FS_AddGameHierarchy( const char *dir, uint flags )
 		Q_snprintf( buf, sizeof( buf ), "%s/" DEFAULT_CUSTOM_DIRECTORY, dir );
 		FS_AddGameDirectory( buf, flags );
 	}
+
+#if defined( XASH_GC_OVERLAY_DIR )
+	/* A content folder layered over the game (waf --gc-overlay): mohaa-gc keeps
+	 * everything converted from the player's MOHAA in sd:/xash3d/mohaa/ and runs
+	 * the DoD game code underneath. Added last, so it is searched first; never
+	 * written. Missing on the card: skipped, the game plays without it. */
+	if( is_game_dir && Q_stricmp( dir, XASH_GC_OVERLAY_DIR ))
+	{
+		Q_snprintf( buf, sizeof( buf ), "%s/", XASH_GC_OVERLAY_DIR );
+		Con_Reportf( "%s: content overlay %s over %s\n", __func__, buf, dir );
+		FS_AddGameDirectory( buf, flags );
+	}
+#endif
 }
 
 /*

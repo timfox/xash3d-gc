@@ -190,6 +190,9 @@ def options(opt):
 	grp.add_option('--gamedir', action = 'store', dest = 'GAMEDIR', default = 'valve',
 		help = 'engine default (base) game directory [default: %(default)s]')
 
+	grp.add_option('--gc-overlay', action = 'store', dest = 'GC_OVERLAY', default = '',
+		help = 'GameCube: content folder searched over the game folder, e.g. mohaa [default: none]')
+
 	grp.add_option('-8', '--64bits', action = 'store_true', dest = 'ALLOW64', default = False,
 		help = 'allow targetting 64-bit engine(Linux/Windows only) [default: %(default)s]')
 
@@ -622,6 +625,8 @@ def configure(conf):
 
 	conf.env.GAMEDIR = conf.options.GAMEDIR
 	conf.define('XASH_GAMEDIR', conf.options.GAMEDIR)
+	if conf.options.GC_OVERLAY:
+		conf.define('XASH_GC_OVERLAY_DIR', conf.options.GC_OVERLAY)
 
 	if conf.env.DEST_OS == 'gamecube':
 		conf.define('XASH_GAMECUBE', 1)
