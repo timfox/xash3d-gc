@@ -215,6 +215,13 @@ static searchpath_t *FS_AddArchive_Fullpath( const fs_archive_t *archive, const 
 		}
 	}
 
+	/* MOHAA's GameCube fallback is DoD content, but its map WAD collection
+	 * consumes most of the retail MEM1 heap before the menu can start. Keep the
+	 * fallback search paths for loose files and packs while allowing the port's
+	 * converted MOHAA textures to supply its campaign maps. */
+	if( FBitSet( flags, FS_SKIP_WADS ) && archive->type == SEARCHPATH_WAD )
+		return NULL;
+
 	for( search = fs_searchpaths; search; search = search->next )
 	{
 		if( search->type == archive->type && !Q_stricmp( search->filename, file ))
@@ -238,7 +245,8 @@ static searchpath_t *FS_AddArchive_Fullpath( const fs_archive_t *archive, const 
 	fs_searchpaths = search;
 
 	// time to add in search list all the wads from this archive
-	if( archive->load_wads && !FBitSet( flags, FS_SKIP_ARCHIVED_WADS ))
+	if( archive->load_wads && !FBitSet( flags, FS_SKIP_ARCHIVED_WADS )
+		&& !FBitSet( flags, FS_SKIP_WADS ))
 	{
 		stringlist_t list;
 
@@ -312,6 +320,8 @@ void FS_AddGameDirectory( const char *dir, uint flags )
 		for( int i = 0; i < list.numstrings; i++ )
 		{
 			if( Q_stricmp( COM_FileExtension( list.strings[i] ), g_archives[j].ext ))
+				continue;
+			if( FBitSet( flags, FS_SKIP_WADS ) && g_archives[j].type == SEARCHPATH_WAD )
 				continue;
 
 			Q_snprintf( fullpath, sizeof( fullpath ), "%s%s", dir, list.strings[i] );
@@ -576,7 +586,14 @@ void FS_Rescan( uint32_t flags, const char *language )
 		FS_AddGameHierarchy( GI->basedir, flags );
 
 	if( Q_stricmp( GI->basedir, GI->falldir ) && Q_stricmp( GI->gamefolder, GI->falldir ))
-		FS_AddGameHierarchy( GI->falldir, flags );
+	{
+		uint fallback_flags = flags;
+		/* The converted MOHAA campaign has its own native texture packs. DoD's
+		 * map WADs are not used by MOHAA and exhaust MEM1 during retail startup. */
+		if( !Q_stricmp( GI->gamefolder, "mohaa" ))
+			SetBits( fallback_flags, FS_SKIP_WADS );
+		FS_AddGameHierarchy( GI->falldir, fallback_flags );
+	}
 
 	((gameinfo_t *)GI)->added = true; // getting rid of const here, as this modifier only for the engine
 	FS_AddGameHierarchy( GI->gamefolder, FS_GAMEDIR_PATH | flags );

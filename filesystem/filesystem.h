@@ -48,6 +48,7 @@ enum
 
 	FS_SKIP_ARCHIVED_WADS = BIT( 16 ), // don't mount wads inside archives automatically
 	FS_LOAD_PACKED_WAD    = BIT( 17 ), // this wad is packed inside other archive
+	FS_SKIP_WADS          = BIT( 18 ), // don't mount WAD archives or WADs inside archives
 
 	FS_MOUNT_HD    = BIT( 24 ), // mount high definition content folder
 	FS_MOUNT_LV    = BIT( 25 ), // mount low violence content folder
