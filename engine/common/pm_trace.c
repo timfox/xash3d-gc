@@ -114,6 +114,15 @@ static byte *PM_WorldMeshRead( const char *path, size_t *outlen, qboolean *in_ar
 #endif
 	if( !buf )
 		buf = (byte *)Mem_Malloc( host.mempool, need );
+	if( !buf )
+	{
+		/* Mem_Malloc soft-fails on GameCube when MEM1 is short (m1l1 with
+		 * its own textures: 380 KB asked, 292 KB free, then a write to
+		 * address 4). Without the mesh, box traces use the BSP hulls only. */
+		Con_Printf( S_WARN "%s: no room for %s (%lu bytes): collision mesh left out\n", __func__, path, (unsigned long)need );
+		FS_Close( f );
+		return NULL;
+	}
 
 	memcpy( buf, header, sizeof( header ));
 	total = sizeof( header );

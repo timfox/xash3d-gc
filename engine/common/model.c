@@ -2515,10 +2515,19 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		{
 			file_t *f = FS_Open( loadname, "rb", false );
 			dheader_t hdr;
-			int light_ofs = 0, light_len = 0;
+			int light_ofs = 0, light_len = 0, tex_ofs = 0, tex_len = 0;
 			size_t compact_need = (size_t)filesize;
 			size_t light_align_pad = 0;
 			qboolean prefer_compact = false;
+			/* Byte ranges of the file left out of (or replaced in) the
+			 * buffer, in file order: the lighting lump (G154 reads it from
+			 * disc) and the miptex pixels when the world texture pack owns
+			 * the world's textures. */
+			struct { int ofs, len; const byte *rep; size_t replen; } cut[2];
+			int ncut = 0, c;
+			byte *tex_blob = NULL;
+			size_t tex_blob_len = 0;
+			qboolean light_cut = false;
 
 			if( f && FS_Read( f, &hdr, sizeof( hdr )) == (fs_offset_t)sizeof( hdr ))
 			{
@@ -2528,6 +2537,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				{
 					light_ofs = LittleLong( hdr.lumps[LUMP_LIGHTING].fileofs );
 					light_len = LittleLong( hdr.lumps[LUMP_LIGHTING].filelen );
+					tex_ofs = LittleLong( hdr.lumps[LUMP_TEXTURES].fileofs );
+					tex_len = LittleLong( hdr.lumps[LUMP_TEXTURES].filelen );
 				}
 			}
 
@@ -2540,9 +2551,102 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				&& (size_t)light_ofs + (size_t)light_len <= (size_t)filesize )
 			{
 				light_align_pad = (size_t)light_len & 3u;
-				compact_need = (size_t)filesize - (size_t)light_len + light_align_pad;
-				prefer_compact = compact_need < (size_t)filesize;
+				cut[ncut].ofs = light_ofs;
+				cut[ncut].len = light_len;
+				cut[ncut].rep = NULL;	/* zeros */
+				cut[ncut].replen = light_align_pad;
+				ncut++;
+				light_cut = true;
 			}
+
+			/* A world drawn from its texture pack (media/wt_<map>.gct) never
+			 * reads the miptex pixels: Mod_LoadTextureData takes the pack's
+			 * texture before looking at them. Converted MOHAA maps embed their
+			 * own images (m1l1: 1.2 MB of the 3 MB BSP), and keeping them in
+			 * the map arena left no room for the collision mesh (mcol), whose
+			 * heap fallback then failed. Keep only the lump header and each
+			 * mip header, with the mip offsets zeroed (no embedded data). */
+			if( f && tex_len > 64 * 1024 && tex_ofs > 0
+				&& (size_t)tex_ofs + (size_t)tex_len <= (size_t)filesize
+				&& !( light_len > 0 && tex_ofs < light_ofs + light_len && light_ofs < tex_ofs + tex_len )
+				&& !Sys_CheckParm( "-gcnotexpacks" ) && !Sys_CheckParm( "-gckeepmiptex" ))
+			{
+				string stem, pack;
+				int n = 0;
+
+				COM_FileBase( loadname, stem, sizeof( stem ));
+				Q_strnlwr( stem, stem, sizeof( stem ));
+				Q_snprintf( pack, sizeof( pack ), "media/wt_%s.gct", stem );
+				FS_Seek( f, tex_ofs, SEEK_SET );
+				if( FS_FileExists( pack, false ) && FS_Read( f, &n, 4 ) == 4
+					&& ( n = LittleLong( n )) > 0 && n <= 4096 && 4 + 4 * n <= tex_len )
+				{
+					int *offs = (int *)Mem_Malloc( host.mempool, 4 * n );
+					int k, valid = 0;
+
+					if( FS_Read( f, offs, 4 * n ) == 4 * n )
+					{
+						for( k = 0; k < n; k++ )
+						{
+							offs[k] = LittleLong( offs[k] );
+							if( offs[k] >= 0 && offs[k] + (int)sizeof( mip_t ) <= tex_len )
+								valid++;
+							else
+								offs[k] = -1;
+						}
+						tex_blob_len = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
+						tex_blob = (byte *)Mem_Malloc( host.mempool, tex_blob_len );
+						*(int *)tex_blob = LittleLong( n );
+						for( k = 0, valid = 0; k < n && tex_blob; k++ )
+						{
+							const size_t at = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
+							mip_t *mt = (mip_t *)( tex_blob + at );
+
+							if( offs[k] < 0 )
+							{
+								((int *)tex_blob)[1 + k] = LittleLong( -1 );
+								continue;
+							}
+							FS_Seek( f, tex_ofs + offs[k], SEEK_SET );
+							if( FS_Read( f, mt, sizeof( mip_t )) != (fs_offset_t)sizeof( mip_t ))
+							{
+								Mem_Free( tex_blob );
+								tex_blob = NULL;
+								break;
+							}
+							memset( mt->offsets, 0, sizeof( mt->offsets ));
+							((int *)tex_blob)[1 + k] = LittleLong( (int)at );
+							valid++;
+						}
+					}
+					Mem_Free( offs );
+				}
+				if( tex_blob )
+				{
+					/* Later lumps keep their 4-byte alignment: the cut is a
+					 * multiple of 4 (the replacement takes the remainder). */
+					cut[ncut].ofs = tex_ofs;
+					cut[ncut].len = tex_len;
+					cut[ncut].rep = tex_blob;
+					cut[ncut].replen = tex_blob_len + (((size_t)tex_len - tex_blob_len ) & 3u );
+					ncut++;
+				}
+			}
+			if( ncut == 2 && cut[1].ofs < cut[0].ofs )
+			{
+				const int o = cut[0].ofs, l = cut[0].len;
+				const byte *r = cut[0].rep;
+				const size_t rl = cut[0].replen;
+
+				cut[0] = cut[1];
+				cut[1].ofs = o;
+				cut[1].len = l;
+				cut[1].rep = r;
+				cut[1].replen = rl;
+			}
+			for( c = 0; c < ncut; c++ )
+				compact_need -= (size_t)cut[c].len - cut[c].replen;
+			prefer_compact = ncut > 0 && compact_need < (size_t)filesize;
 
 			if( f && prefer_compact
 				&& ( buf = GC_BorrowMapLoadBuffer( compact_need )) != NULL )
@@ -2554,33 +2658,32 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				int i;
 
 				FS_Seek( f, 0, SEEK_SET );
+				c = 0;
 				while( pos < filesize && ok )
 				{
 					size_t want;
 					fs_offset_t got;
 
-					if( light_len > 0 && pos >= light_ofs
-						&& pos < (fs_offset_t)( light_ofs + light_len ))
+					if( c < ncut && pos >= cut[c].ofs )
 					{
-						if( light_align_pad )
+						if( out + cut[c].replen > compact_need )
 						{
-							if( out + light_align_pad > compact_need )
-							{
-								ok = false;
-								break;
-							}
-							memset( buf + out, 0, light_align_pad );
-							out += light_align_pad;
+							ok = false;
+							break;
 						}
-						pos = (fs_offset_t)( light_ofs + light_len );
+						memset( buf + out, 0, cut[c].replen );
+						if( cut[c].rep )
+							memcpy( buf + out, cut[c].rep, tex_blob_len );
+						out += cut[c].replen;
+						pos = (fs_offset_t)( cut[c].ofs + cut[c].len );
 						FS_Seek( f, pos, SEEK_SET );
+						c++;
 						continue;
 					}
 
 					want = sizeof( chunk );
-					if( light_len > 0 && pos < light_ofs
-						&& pos + (fs_offset_t)want > light_ofs )
-						want = (size_t)( light_ofs - pos );
+					if( c < ncut && pos + (fs_offset_t)want > cut[c].ofs )
+						want = (size_t)( cut[c].ofs - pos );
 					if( pos + (fs_offset_t)want > filesize )
 						want = (size_t)( filesize - pos );
 					if( out + want > compact_need )
@@ -2603,22 +2706,33 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				if( ok && out == compact_need && out >= sizeof( dheader_t ))
 				{
 					dheader_t *dh = (dheader_t *)buf;
-					const int shrink = light_len - (int)light_align_pad;
 
-					dh->lumps[LUMP_LIGHTING].fileofs = 0;
-					dh->lumps[LUMP_LIGHTING].filelen = 0;
 					for( i = 0; i < HEADER_LUMPS; i++ )
 					{
 						const int ofs = LittleLong( dh->lumps[i].fileofs );
 						const int len = LittleLong( dh->lumps[i].filelen );
+						int shift = 0;
 
-						if( i == LUMP_LIGHTING || len <= 0 )
+						if( i == LUMP_LIGHTING && light_cut )
+						{
+							dh->lumps[i].fileofs = 0;
+							dh->lumps[i].filelen = 0;
 							continue;
-						if( ofs > light_ofs )
-							dh->lumps[i].fileofs = LittleLong( ofs - shrink );
+						}
+						if( len <= 0 )
+							continue;
+						for( c = 0; c < ncut; c++ )
+						{
+							if( cut[c].ofs < ofs )
+								shift += cut[c].len - (int)cut[c].replen;
+						}
+						dh->lumps[i].fileofs = LittleLong( ofs - shift );
+						if( i == LUMP_TEXTURES && tex_blob )
+							dh->lumps[i].filelen = LittleLong( (int)tex_blob_len );
 					}
 					length = (fs_offset_t)out;
-					Con_Reportf( "Xash3D GameCube: map load compact (no lighting) %s → %s (G154 disc LM)%s\n",
+					Con_Reportf( "Xash3D GameCube: map load compact (%s%s) %s → %s (G154 disc LM)%s\n",
+						light_cut ? "no lighting" : "", tex_blob ? ( light_cut ? ", miptex headers only" : "miptex headers only" ) : "",
 						Q_memprint( (size_t)filesize ), Q_memprint( out ),
 						light_align_pad ? " +align" : "" );
 				}
@@ -2648,6 +2762,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				}
 			}
 
+			if( tex_blob )
+				Mem_Free( tex_blob );
 			if( f )
 				FS_Close( f );
 		}
