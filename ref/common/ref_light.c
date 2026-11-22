@@ -32,6 +32,7 @@ typedef struct
 #define GC_LF_TILED 2
 #define GC_LF_NOLIGHT 0xFFFFFFu
 int R_GXLightFacesCount( void );
+int R_GXLightFacesLit( void );
 qboolean R_GXLightFacesRead( int first, int num, void *out );
 qboolean R_GXLightSamplesRead( unsigned int ofs, void *out, unsigned int len );
 /* Last sky trace of R_EntityDynamicLight: 0 no surface, 1 not sky, 2 sky. */
@@ -63,7 +64,7 @@ void CL_RunLightStyles( lightstyle_t *ls )
 #if XASH_GAMECUBE
 	/* On the world DL route the lightmap lives in the baked light faces; the
 	 * light styles still scale it (65536 saturated every light point). */
-	have_light = have_light || R_GXLightFacesCount() > 0;
+	have_light = have_light || R_GXLightFacesLit() > 0;
 #endif
 
 	if( r_fullbright->value || !have_light )
@@ -411,7 +412,7 @@ start:
 	if( !model->surfaces ) // GameCube World DL route: no live surface table
 	{
 #if XASH_GAMECUBE
-		if( R_GXLightFacesCount() > 0
+		if( R_GXLightFacesLit() > 0
 			&& R_GCLightFacesAt( firstsurface, numsurfaces, mid, midf, cv, false ))
 			return true;
 #endif
@@ -543,7 +544,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 	if( !gp_cl->models[1] || ( !gp_cl->models[1]->lightdata
 #if XASH_GAMECUBE
 		&& !Mod_GCAramLightmapActive() && !Mod_GCLightPointsActive( gp_cl->models[1] )
-		&& !( !gp_cl->models[1]->surfaces && R_GXLightFacesCount() > 0 )
+		&& !( !gp_cl->models[1]->surfaces && R_GXLightFacesLit() > 0 )
 #endif
 		))
 		return (colorVec){ 255, 255, 255, 0 };

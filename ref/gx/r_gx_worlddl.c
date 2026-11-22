@@ -2186,6 +2186,12 @@ int R_GXLightFacesCount( void )
 	return gc_lf_aram ? (int)gc_lf_faces : 0;
 }
 
+/* Light faces that carry lightmap samples (a converted map can ship faces with lighting=0) */
+int R_GXLightFacesLit( void )
+{
+	return gc_lf_aram && gc_lf_lit_bytes ? (int)gc_lf_faces : 0;
+}
+
 qboolean R_GXLightFacesRead( int first, int num, void *out )
 {
 	if( !gc_lf_faces || first < 0 || num <= 0 || (u32)( first + num ) > gc_lf_faces )
