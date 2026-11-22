@@ -2186,6 +2186,14 @@ int R_GXLightFacesCount( void )
 	return gc_lf_aram ? (int)gc_lf_faces : 0;
 }
 
+/* Light faces with light samples. A map without a lightmap (its lighting lump
+ * is empty) still writes the face records, and sampling those gave the
+ * models black (ambient 1, shade 0) where GoldSrc lights them fully. */
+qboolean R_GXLightFacesLit( void )
+{
+	return gc_lf_aram && gc_lf_faces && gc_lf_lit_bytes > 0;
+}
+
 qboolean R_GXLightFacesRead( int first, int num, void *out )
 {
 	if( !gc_lf_faces || first < 0 || num <= 0 || (u32)( first + num ) > gc_lf_faces )
