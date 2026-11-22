@@ -31,6 +31,8 @@ typedef struct
 #define GC_LF_SKY   1
 #define GC_LF_TILED 2
 #define GC_LF_NOLIGHT 0xFFFFFFu
+/* The light a model gets when its light trace hits no BSP face at all. */
+#define GC_LIGHTVEC_MISS 128
 int R_GXLightFacesCount( void );
 qboolean R_GXLightFacesLit( void );
 qboolean R_GXLightFacesRead( int first, int num, void *out );
@@ -554,6 +556,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 	float last_fraction = 1.0f;
 	int max_ents = r_lighting_extended.value ? MAX_PHYSENTS : 1; // get light from bmodels too
 	colorVec light = { 0 };
+	qboolean hit = false;
 
 	// check all the bsp-models
 	for( int i = 0; i < max_ents; i++ )
@@ -590,6 +593,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 		colorVec cv;
 		if( !R_RecursiveLightPoint( pe->model, pnodes, 0.0f, 1.0f, &cv, start_l, end_l ))
 			continue;	// didn't hit anything
+		hit = true;
 
 		if( g_trace_fraction < last_fraction )
 		{
@@ -606,6 +610,14 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 		}
 	}
 
+#if XASH_GAMECUBE
+	/* Nothing lit under the point. Converted MOHAA maps put their ground in
+	 * terrain and patch meshes outside the BSP, so a soldier standing on them
+	 * traces down through clip brushes to nothing and drew black (ambient 1,
+	 * shade 0). A miss is not darkness: give it a middle light. */
+	if( !hit )
+		light = (colorVec){ GC_LIGHTVEC_MISS, GC_LIGHTVEC_MISS, GC_LIGHTVEC_MISS, 0 };
+#endif
 	return light;
 }
 
