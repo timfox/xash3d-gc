@@ -24,6 +24,8 @@ GNU General Public License for more details.
 #include "library.h"
 #include "vid_common.h"
 #include "pm_local.h"
+#include "multi_emulator.h"
+
 #if XASH_GAMECUBE
 #include "gamecube/mem_gamecube.h"
 #include "gamecube/storage_gamecube.h"
