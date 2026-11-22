@@ -640,7 +640,8 @@ def configure(conf):
 			conf.define('DEFAULT_MAX_EDICTS', 256)
 			conf.define('GC_SP_EDICT_CAP', 256)
 			conf.define('GC_GCMAP_CLIENT_EDICTS', 256)
-		if conf.options.GAMEDIR == 'dod':
+		# mohaa (mohaa-gc) is DoD-GC's game code with MOHAA content: same tables and limits.
+		if conf.options.GAMEDIR in ('dod', 'mohaa'):
 			conf.define('XASH_DODGC_NETWORK', 1)
 			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
 			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
@@ -669,7 +670,7 @@ def configure(conf):
 		# client start is unchanged (442-450 KiB); entities are the ceiling (the map uses
 		# ~422 of the 460 edicts, 7 bots reached 453 and crashed once), so the table is
 		# 5 as well. XASH_GC_SLIM_CLIENTS=0 turns it off.
-		is_dod = conf.options.GAMEDIR == 'dod'
+		is_dod = conf.options.GAMEDIR in ('dod', 'mohaa')
 		slim_env = os.environ.get('XASH_GC_SLIM_CLIENTS', '1' if is_dod else '').lower()
 		if slim_env in ('1', 'yes', 'true', 'on'):
 			max_slots = os.environ.get('XASH_GC_MAX_SLOTS', '5' if is_dod else '4')

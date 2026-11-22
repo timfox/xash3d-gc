@@ -402,7 +402,7 @@ def _safe_gamedir_name(name: str) -> str:
 
 def discover_sibling_gamedirs(primary_data: Path, primary_gamedir: str) -> list[tuple[str, Path]]:
 	"""Find sibling GoldSrc trees next to the primary --data folder (e.g. dod beside valve)."""
-	known = ("valve", "dod", "gearbox", "bshift", "cstrike", "czero", "tfc", "dmc", "ricochet")
+	known = ("valve", "dod", "mohaa", "gearbox", "bshift", "cstrike", "czero", "tfc", "dmc", "ricochet")
 	parent = primary_data.resolve().parent
 	found: list[tuple[str, Path]] = []
 	for name in known:
