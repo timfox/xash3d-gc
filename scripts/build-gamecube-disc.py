@@ -2565,6 +2565,34 @@ def map_sky_names(source: Path) -> set[str]:
 	return names
 
 
+def stage_smoke_sky_assets(source: Path, output: Path, map_relative: str) -> int:
+	"""Keep the selected map's prebuilt CMPR sky faces on a trimmed smoke disc."""
+	bsp = source / map_relative
+	skyname = "desert"
+	try:
+		with bsp.open("rb") as f:
+			head = f.read(12)
+			off, length = struct.unpack_from("<ii", head, 4)
+			f.seek(off)
+			entities = f.read(min(length, 4096)).decode("latin-1", "replace")
+		match = re.search(r'"skyname"\s+"([^"/\\]+)"', entities.split("}", 1)[0])
+		if match:
+			skyname = match.group(1).lower()
+	except (OSError, struct.error):
+		return 0
+	if not re.fullmatch(r"[a-z0-9_-]+", skyname):
+		return 0
+	found = []
+	for suffix in GC_SKY_SUFFIXES:
+		relative = f"media/sky_{skyname}{suffix}.cmp"
+		if (source / relative).is_file():
+			copy_if_present(source, output, relative)
+			found.append(relative)
+	if found:
+		print(f"  smoke sky: {skyname} ({len(found)}/6 prebuilt CMPR faces)")
+	return len(found)
+
+
 def build_sky_cmpr_overlays(
 	source: Path,
 	output: Path,
@@ -4236,6 +4264,7 @@ def stage_smoke_data(
 			copy_if_present(source, output, f"events/{event.name}")
 
 	copy_if_present(source, output, map_relative)
+	stage_smoke_sky_assets(source, output, map_relative)
 	resources = smoke_map_resources(map_source)
 	for resource in sorted(resources):
 		copy_if_present(source, output, resource)
