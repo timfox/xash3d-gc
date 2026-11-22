@@ -2559,7 +2559,7 @@ def map_sky_names(source: Path) -> set[str]:
 def build_sky_cmpr_overlays(
 	source: Path,
 	output: Path,
-	fallback: Path | None = None,
+	fallbacks: tuple[Path, ...] = (),
 ) -> list[tuple[str, Path]]:
 	"""Skyboxes as 128×128 GX CMPR sides (8 KiB each) in shallow media/.
 
@@ -2573,8 +2573,11 @@ def build_sky_cmpr_overlays(
 	names = sorted(map_sky_names(source))
 
 	search_roots = [source]
-	if fallback is not None and fallback.resolve() != source.resolve():
-		search_roots.append(fallback)
+	for fallback in fallbacks:
+		if fallback.resolve() != source.resolve() and fallback.resolve() not in {
+			root.resolve() for root in search_roots
+		}:
+			search_roots.append(fallback)
 
 	# Prefer prebuilt CMPR (stage-lean-dod / sky cache) — no Pillow round-trip.
 	for name in names:
@@ -3826,7 +3829,7 @@ def create_retail_boot_overlays(
 	source: Path,
 	output: Path,
 	include_startup_vids: bool = True,
-	fallback: Path | None = None,
+	fallbacks: tuple[Path, ...] = (),
 ) -> tuple[tuple[str, Path], ...]:
 	"""Overlay read-only retail boot files without mutating the source tree."""
 	output.mkdir(parents=True, exist_ok=True)
@@ -3864,7 +3867,7 @@ def create_retail_boot_overlays(
 		*((f"media/c0a0_tr_{n}.wav", source / f"sound/tride/c0a0_tr_{n}.wav")
 			for n in ("dest", "noeat", "emerg", "tourn", "jobs", "haz", "arrive", "exit")),
 	)
-	overlays.extend(build_sky_cmpr_overlays(source, output, fallback))
+	overlays.extend(build_sky_cmpr_overlays(source, output, fallbacks))
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
 	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
@@ -3920,9 +3923,9 @@ def create_startup_vids_overlay(
 	source: Path,
 	output: Path,
 	include_startup_vids: bool = True,
-	fallback: Path | None = None,
+	fallbacks: tuple[Path, ...] = (),
 ) -> tuple[tuple[str, Path], ...]:
-	return create_retail_boot_overlays(source, output, include_startup_vids, fallback)
+	return create_retail_boot_overlays(source, output, include_startup_vids, fallbacks)
 
 
 def build_gcvid_companion(
@@ -5210,7 +5213,14 @@ def main() -> None:
 				args.data,
 				overlay_root,
 				include_startup_vids=not args.skip_startup_vids,
-				fallback=fallback_data_dir(args.data, extra_gamedirs_tuple),
+				fallbacks=tuple(
+					path
+					for path in (
+						fallback_data_dir(args.data, extra_gamedirs_tuple),
+						*(candidate for _, candidate in extra_gamedirs_tuple),
+					)
+					if path is not None
+				),
 			)
 			build_disc(
 				args.dol,
