@@ -7970,8 +7970,9 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 
 			if( GC_MemHeapFreeBytes() >= (size_t)gc_prop_far_size + 320u * 1024u )
 				gc_prop_far_mem = gc_prop_far_heap = (byte *)memalign( 32, gc_prop_far_size );
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop far LODs %s (%u Kb)\n",
-				gc_prop_far_mem ? "in the heap" : "FAIL, cells from the chain cache", gc_prop_far_size / 1024u );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop far LODs %s (%u Kb, heap free %u Kb)\n",
+				gc_prop_far_mem ? "in the heap" : "FAIL, cells from the chain cache", gc_prop_far_size / 1024u,
+				(unsigned)( GC_MemHeapFreeBytes() / 1024u ));
 		}
 		if( gc_prop_far_mem )
 		{

@@ -45,7 +45,11 @@ static GXTexObj gc_bloom_tex;
 #define GC_BLOOM_TINT_A 120    /* lift tower/sky glow; taps stay tight */
 
 static int gc_bloom_enabled = -1;
+float R_GXMapFarplane( void );
 
+/* Off on maps with a MOHAA far plane: everything past it is the dark fog
+ * colour, which the auto-exposure (Lost Coast's tonemap data) lifted to
+ * white in about 5 s, and the fog already sets the look. */
 qboolean R_GXBloomEnabled( void )
 {
 	if( gc_bloom_enabled < 0 )
@@ -58,6 +62,8 @@ qboolean R_GXBloomEnabled( void )
 				|| gEngfuncs.Sys_CheckParm( "-gcvst" )))
 			gc_bloom_enabled = 1;
 	}
+	if( gc_bloom_enabled && R_GXMapFarplane() > 0.0f )
+		return false;
 	return gc_bloom_enabled ? true : false;
 }
 
