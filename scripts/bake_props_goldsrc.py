@@ -611,7 +611,7 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 	w, h = tex["w"], tex["h"]
 	masked = bool(tex["flags"] & STUDIO_NF_MASKED)
 	pal = np.frombuffer(tex["palette"], np.uint8).reshape(256, 3)
-	if not masked:
+	if not masked and tex.get("texgamma", True):
 		# GoldSrc's texture gamma, as the stock loader applies to an
 		# unmasked studio skin (imagelib LUMP_TEXGAMMA, texgamma 2.0 over
 		# gamma 2.5).
@@ -714,6 +714,92 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 		blob += body
 		total += ntris
 	return ofs, 32 + len(pieces[0][2]), total
+
+
+def _a16(deg: float) -> int:
+	return ((int(round(deg * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
+
+
+def instance_record(floor, mi: int, tris: int, mins, maxs, origin, angles, named: int = 0) -> tuple[bytes, bytes]:
+	"""One 32-byte instance and its 12-byte light, as R_GXPropLoad reads them.
+	angles are the draw angles (pitch already as the renderer wants it)."""
+	# GoldSrc lights a studio model from the floor under it: an ambient
+	# part on every face and the rest by N.L.
+	c = None
+	if floor is not None:
+		# Half the footprint's shorter side, between 16 and 48 units.
+		reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
+		# The floor under the origin. Only when there is none there, or
+		# only a face with no light at all, try the middle and then the
+		# top of the bounds: dod_caen's far King Tiger stands over
+		# nothing but its own unlit collision brush. Taking the
+		# brightest of the three instead lit indoor sandbags from the
+		# sunlit top of their collision brush.
+		mid = (0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), 0.5 * (mins[2] + maxs[2]))
+		for at in (
+			(origin[0], origin[1], origin[2] + 8.0),
+			mid,
+			(mid[0], mid[1], maxs[2]),
+		):
+			g = floor.footprint(at, reach)
+			if g is not None and max(g) >= 4:
+				c = g
+				break
+	if c is None:
+		c = (150, 150, 150)
+	# Props read darker than the lightmapped walls beside them at 0.6 +
+	# 0.4 (Dolphin, charlie beach): the shaded side keeps 0.75 and the
+	# lit side may reach 1.2, which GX clamps per channel.
+	c = [max(40, v) for v in c]
+	base = [int(v * 0.75) for v in c]
+	direct = [min(255, int(v * 0.45)) for v in c]
+	light = bytes(base + [0, 0, 0] + direct + [0, 0, 0])
+	rec = struct.pack(
+		">HH3h3h3h3hI",
+		mi | (named << 8), min(65535, tris),
+		*[_clamp16(math.floor(v)) for v in mins], *[_clamp16(math.ceil(v)) for v in maxs],
+		*[_clamp16(v) for v in origin],
+		_a16(angles[0]), _a16(angles[1]), _a16(angles[2]),
+		(c[0] << 24) | (c[1] << 16) | (c[2] << 8) | 1,
+	)
+	return rec, light
+
+
+def write_pack(out_gcp: Path, out_gct: Path, model_recs, chains, inst_blob: bytearray, light_blob: bytearray,
+		sun, n_inst: int, piece_blob: bytearray) -> bytearray:
+	"""Write media/gp_<map>.gcp and media/pt_<map>.gct. Returns the texture blob."""
+	inst_blob = bytearray(inst_blob)
+	model_blob = bytearray()
+	for dl_ofs, first_bytes, tris, frac in model_recs:
+		# No far level: a far instance draws the full chain (the engine
+		# keeps it resident), so the far fields stay empty.
+		model_blob += struct.pack(">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0, 0, 0, 0, 0)
+	model_blob += b"\0" * (-len(model_blob) % 32)
+	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, v)) * 32767.0)) for v in sun]).ljust(32, b"\0")
+	inst_blob += light_blob
+	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	inst_ofs = 32
+	models_ofs = inst_ofs + len(inst_blob)
+	dl_base = models_ofs + len(model_blob)
+	hdr = struct.pack(
+		">4sHHHHIIII",
+		GC_PR_MAGIC, GC_PR_VERSION, n_inst, len(model_recs), 0,
+		inst_ofs, models_ofs, dl_base, 0xFFFFFFFF,
+	)
+	hdr += struct.pack(">I", dl_base + len(piece_blob))	# far region: empty, at the end
+	hdr = hdr.ljust(32, b"\0")
+	out_gcp.parent.mkdir(parents=True, exist_ok=True)
+	out_gcp.write_bytes(hdr + inst_blob + model_blob + piece_blob)
+
+	entries, blob = [], bytearray()
+	for name, tw, th, lv, flag, body in chains:
+		entries.append(GC_WT_ENTRY.pack(name.encode("latin-1"), tw, th, lv, flag, 0, len(blob)))
+		blob += body
+		blob += bytes(-len(blob) & 31)
+	head = b"GCWT" + struct.pack(">II", len(entries), len(blob)) + b"".join(entries)
+	out_gct.write_bytes(head + bytes(-len(head) & 31) + bytes(blob))
+
+	return blob
 
 
 def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, encode_blocks, log=print) -> dict | None:
@@ -845,7 +931,6 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	inst_blob = bytearray()
 	light_blob = bytearray()
 	n_inst = placed_tris = 0
-	a16 = lambda deg: ((int(round(deg * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
 	for prop in props:
 		if n_inst >= GC_PR_MAX_INST:
 			log(f"  props: {bsp_path.name}: more than {GC_PR_MAX_INST} instances, rest dropped")
@@ -866,45 +951,10 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 					for a in range(3):
 						mins[a] = min(mins[a], w[a] + prop["origin"][a])
 						maxs[a] = max(maxs[a], w[a] + prop["origin"][a])
-		# GoldSrc lights a studio model from the floor under it: an ambient
-		# part on every face and the rest by N.L.
-		c = None
-		if floor is not None:
-			# Half the footprint's shorter side, between 16 and 48 units.
-			reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
-			# The floor under the origin. Only when there is none there, or
-			# only a face with no light at all, try the middle and then the
-			# top of the bounds: dod_caen's far King Tiger stands over
-			# nothing but its own unlit collision brush. Taking the
-			# brightest of the three instead lit indoor sandbags from the
-			# sunlit top of their collision brush.
-			mid = (0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), 0.5 * (mins[2] + maxs[2]))
-			for at in (
-				(prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0),
-				mid,
-				(mid[0], mid[1], maxs[2]),
-			):
-				g = floor.footprint(at, reach)
-				if g is not None and max(g) >= 4:
-					c = g
-					break
-		if c is None:
-			c = (150, 150, 150)
-		# Props read darker than the lightmapped walls beside them at 0.6 +
-		# 0.4 (Dolphin, charlie beach): the shaded side keeps 0.75 and the
-		# lit side may reach 1.2, which GX clamps per channel.
-		c = [max(40, v) for v in c]
-		base = [int(v * 0.75) for v in c]
-		direct = [min(255, int(v * 0.45)) for v in c]
-		light_blob += bytes(base + [0, 0, 0] + direct + [0, 0, 0])
-		inst_blob += struct.pack(
-			">HH3h3h3h3hI",
-			mi | (prop.get("named", 0) << 8), min(65535, model_recs[mi][2]),
-			*[_clamp16(math.floor(v)) for v in mins], *[_clamp16(math.ceil(v)) for v in maxs],
-			*[_clamp16(v) for v in prop["origin"]],
-			a16(pitch), a16(yaw), a16(roll),
-			(c[0] << 24) | (c[1] << 16) | (c[2] << 8) | 1,
-		)
+		rec, light = instance_record(floor, mi, model_recs[mi][2], mins, maxs, prop["origin"], (pitch, yaw, roll),
+			prop.get("named", 0))
+		inst_blob += rec
+		light_blob += light
 		n_inst += 1
 		placed_tris += model_recs[mi][2]
 	if not n_inst:
@@ -912,35 +962,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 			log(f"  props: {bsp_path.name}: no model file for {rel} ({n} placed)")
 		return None
 
-	model_blob = bytearray()
-	for dl_ofs, first_bytes, tris, frac in model_recs:
-		# No far level: a far instance draws the full chain (the engine
-		# keeps it resident), so the far fields stay empty.
-		model_blob += struct.pack(">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0, 0, 0, 0, 0)
-	model_blob += b"\0" * (-len(model_blob) % 32)
-	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, v)) * 32767.0)) for v in sun]).ljust(32, b"\0")
-	inst_blob += light_blob
-	inst_blob += b"\0" * (-len(inst_blob) % 32)
-	inst_ofs = 32
-	models_ofs = inst_ofs + len(inst_blob)
-	dl_base = models_ofs + len(model_blob)
-	hdr = struct.pack(
-		">4sHHHHIIII",
-		GC_PR_MAGIC, GC_PR_VERSION, n_inst, len(model_recs), 0,
-		inst_ofs, models_ofs, dl_base, 0xFFFFFFFF,
-	)
-	hdr += struct.pack(">I", dl_base + len(piece_blob))	# far region: empty, at the end
-	hdr = hdr.ljust(32, b"\0")
-	out_gcp.parent.mkdir(parents=True, exist_ok=True)
-	out_gcp.write_bytes(hdr + inst_blob + model_blob + piece_blob)
-
-	entries, blob = [], bytearray()
-	for name, tw, th, lv, flag, body in chains:
-		entries.append(GC_WT_ENTRY.pack(name.encode("latin-1"), tw, th, lv, flag, 0, len(blob)))
-		blob += body
-		blob += bytes(-len(blob) & 31)
-	head = b"GCWT" + struct.pack(">II", len(entries), len(blob)) + b"".join(entries)
-	out_gct.write_bytes(head + bytes(-len(head) & 31) + bytes(blob))
+	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob)
 
 	for rel, n in sorted(missing.items()):
 		log(f"  props: {bsp_path.name}: no model file for {rel} ({n} placed)")
@@ -958,13 +980,192 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	return stats
 
 
+# ---- MOHAA static models (.mprop from timfox/mohaa-gc tools/props_models.py) ----
+
+MPROP_MAGIC = b"MPRP"
+# A prop's scale is baked into its model (an instance has no scale), so
+# instances share a model per 5 % step of scale.
+MPROP_SCALE_STEP = 1.05
+
+
+def read_mprop(data: bytes) -> dict:
+	"""{"textures": [{name, w, h, flags, palette (RGB 768), pixels}], "models": [{name, mins, maxs,
+	surfaces: [(texture, verts [(pos, normal, s, t)], tris)]}], "instances": [(model, origin, angles, scale)]}."""
+	magic, ver, ntex, nmod, ninst = struct.unpack_from("<4s4i", data, 0)
+	if magic != MPROP_MAGIC or ver != 2:
+		raise ValueError(f"not an MPRP v2 pack (got {magic!r} v{ver})")
+	at = 20
+	textures, models, instances = [], [], []
+	for _ in range(ntex):
+		name = data[at:at + 32].split(b"\0", 1)[0].decode("latin-1")
+		w, h, flags = struct.unpack_from("<2HI", data, at + 32)
+		rgba = data[at + 40:at + 40 + 1024]
+		pixels = data[at + 1064:at + 1064 + w * h]
+		pal = b"".join(rgba[i * 4:i * 4 + 3] for i in range(256))
+		textures.append({"name": name, "w": w, "h": h, "flags": STUDIO_NF_MASKED if flags & 1 else 0,
+			"palette": pal, "pixels": pixels, "texgamma": False})
+		at += 1064 + w * h
+	for _ in range(nmod):
+		name = data[at:at + 64].split(b"\0", 1)[0].decode("latin-1")
+		vals = struct.unpack_from("<6fi", data, at + 64)
+		at += 64 + 28
+		surfs = []
+		for _ in range(vals[6]):
+			ti, nv, nt = struct.unpack_from("<3i", data, at)
+			at += 12
+			verts = []
+			for k in range(nv):
+				x, y, z, nx, ny, nz, s_, t_ = struct.unpack_from("<8f", data, at + 32 * k)
+				verts.append(((x, y, z), (nx, ny, nz), s_, t_))
+			at += 32 * nv
+			tris = [struct.unpack_from("<3H", data, at + 6 * k) for k in range(nt)]
+			at += 6 * nt
+			surfs.append((ti, verts, tris))
+		models.append({"name": name, "mins": vals[0:3], "maxs": vals[3:6], "surfaces": surfs})
+	for _ in range(ninst):
+		mi, *f = struct.unpack_from("<i7f", data, at)
+		instances.append((mi, tuple(f[0:3]), tuple(f[3:6]), f[6]))
+		at += 32
+	if at != len(data):
+		raise ValueError(f"MPRP pack has {len(data) - at} bytes past its end")
+	return {"textures": textures, "models": models, "instances": instances}
+
+
+def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bsp_path: Path | None = None,
+		log=print) -> dict | None:
+	"""The prop pack for a converted MOHAA map, from its .mprop. With the
+	converted BSP the props are lit from the floor under them and, past the
+	engine's instance limit, the ones nearest a player start are kept."""
+	pack = read_mprop(Path(mprop_path).read_bytes())
+	ents = parse_entities(Path(bsp_path).read_bytes()) if bsp_path else []
+	floor = None
+	if bsp_path:
+		try:
+			floor = FloorLight(bsp_path)
+			floor.add_brush_entities(ents)
+		except (Exception, SystemExit) as error:  # lighting is optional; geometry is not
+			log(f"  props: {Path(bsp_path).name}: no floor light ({error})")
+			floor = None
+	sun = sun_direction(ents)
+	insts = list(pack["instances"])
+	dropped = 0
+	if len(insts) > GC_PR_MAX_INST:
+		starts = [_floats(e.get("origin", "0 0 0"), 3) for e in ents
+			if e.get("classname", "").startswith("info_player")]
+		if starts:
+			insts.sort(key=lambda i: min(sum((i[1][a] - s_[a]) ** 2 for a in range(3)) for s_ in starts))
+		dropped = len(insts) - GC_PR_MAX_INST
+		insts = insts[:GC_PR_MAX_INST]
+		log(f"  props: {Path(mprop_path).name}: {dropped} of {len(pack['instances'])} instances past the engine's "
+			f"{GC_PR_MAX_INST} left out" + (" (kept the ones nearest a player start)" if starts else ""))
+
+	chains, mat_of = [], {}
+
+	def material(ti: int) -> int:
+		if ti in mat_of:
+			return mat_of[ti]
+		if len(chains) >= GC_PR_MAX_MAT:
+			return 0
+		if 0 <= ti < len(pack["textures"]):
+			tex = pack["textures"][ti]
+			tw, th, lv, body = encode_texture(tex, encode_blocks)
+			flag = GC_WT_FLAG_ALPHA if tex["flags"] & STUDIO_NF_MASKED else 0
+		else:
+			tw, th, lv, body = grey_texture(encode_blocks)
+			flag = 0
+		mat_of[ti] = len(chains)
+		chains.append((f"p{len(chains):03d}", tw, th, lv, flag, body))
+		return mat_of[ti]
+
+	models, model_recs, model_bounds, steps_of = {}, [], [], {}
+	piece_blob = bytearray()
+
+	def model_index(mi: int, scale: float) -> int | None:
+		step = int(round(math.log(max(scale, 1e-4)) / math.log(MPROP_SCALE_STEP)))
+		if (mi, step) not in models and len(model_recs) >= GC_PR_MAX_MODELS and steps_of.get(mi):
+			step = min(steps_of[mi], key=lambda k: abs(k - step))	# out of models: the nearest scale baked
+		key = (mi, step)
+		if key in models:
+			return models[key]
+		models[key] = None
+		if len(model_recs) >= GC_PR_MAX_MODELS or not 0 <= mi < len(pack["models"]):
+			return None
+		q_scale = MPROP_SCALE_STEP ** step
+		by_mat, ext = {}, 1.0
+		lo, hi = [1e30] * 3, [-1e30] * 3
+		for ti, verts, tris in pack["models"][mi]["surfaces"]:
+			mid = material(ti)
+			runs = by_mat.setdefault(mid, [])
+			for tri in tris:
+				vs = []
+				for k in tri:
+					pos, nrm, s_, t_ = verts[k]
+					p = (pos[0] * q_scale, pos[1] * q_scale, pos[2] * q_scale)
+					vs.append((p, nrm, s_, t_))
+					for a in range(3):
+						lo[a] = min(lo[a], p[a])
+						hi[a] = max(hi[a], p[a])
+						ext = max(ext, abs(p[a]))
+				runs.append((False, vs))	# a 3-vertex strip is one triangle
+		if not any(by_mat.values()):
+			return None
+		frac = 0
+		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
+			frac += 1
+		got = emit_pieces({k: v for k, v in by_mat.items() if v}, float(1 << frac), piece_blob)
+		if got is None:
+			return None
+		models[key] = len(model_recs)
+		steps_of.setdefault(mi, []).append(step)
+		model_recs.append((got[0], got[1], got[2], frac))
+		model_bounds.append((lo, hi))
+		return models[key]
+
+	inst_blob, light_blob = bytearray(), bytearray()
+	n_inst = placed_tris = missing = 0
+	for mi, origin, angles, scale in insts:
+		gi = model_index(mi, scale)
+		if gi is None:
+			missing += 1
+			continue
+		# Drawn like a studio model at these entity angles: pitch negated.
+		pitch, yaw, roll = -angles[0], angles[1], angles[2]
+		m = angle_matrix(pitch, yaw, roll)
+		lo, hi = model_bounds[gi]
+		mins, maxs = [1e30] * 3, [-1e30] * 3
+		for cx in (lo[0], hi[0]):
+			for cy in (lo[1], hi[1]):
+				for cz in (lo[2], hi[2]):
+					w = _rotate(m, (cx, cy, cz))
+					for a in range(3):
+						mins[a] = min(mins[a], w[a] + origin[a])
+						maxs[a] = max(maxs[a], w[a] + origin[a])
+		rec, light = instance_record(floor, gi, model_recs[gi][2], mins, maxs, origin, (pitch, yaw, roll))
+		inst_blob += rec
+		light_blob += light
+		n_inst += 1
+		placed_tris += model_recs[gi][2]
+	if not n_inst:
+		return None
+	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob)
+	stats = {
+		"instances": n_inst, "models": len(model_recs), "materials": len(chains),
+		"model_tris": sum(r[2] for r in model_recs), "placed_tris": placed_tris,
+		"missing": missing, "dropped": dropped, "chain_bytes": len(piece_blob), "tex_bytes": len(blob),
+	}
+	log(f"  props: {out_gcp.name} instances={n_inst} models={len(model_recs)} tris={stats['model_tris']} "
+		f"(placed {placed_tris}) chains={len(piece_blob)} B, {out_gct.name} materials={len(chains)} {len(blob)} B")
+	return stats
+
+
 def main() -> int:
 	import argparse
 	import importlib.util
 
 	ap = argparse.ArgumentParser(description=__doc__)
-	ap.add_argument("--map", type=Path, required=True)
-	ap.add_argument("--src", type=Path, action="append", required=True, help="gamedir root with models/ (repeatable)")
+	ap.add_argument("--map", type=Path, required=True, help="the map's BSP (with --mprop: the converted MOHAA map, for light)")
+	ap.add_argument("--src", type=Path, action="append", help="gamedir root with models/ (repeatable)")
+	ap.add_argument("--mprop", type=Path, help="a converted MOHAA map's static props (mohaa-gc tools/props_models.py)")
 	ap.add_argument("--out", type=Path, required=True, help="output directory (media/)")
 	args = ap.parse_args()
 	spec = importlib.util.spec_from_file_location("build_gamecube_disc", Path(__file__).with_name("build-gamecube-disc.py"))
@@ -972,6 +1173,12 @@ def main() -> int:
 	sys.modules["build_gamecube_disc"] = disc
 	spec.loader.exec_module(disc)
 	stem = args.map.stem.lower()
+	if args.mprop:
+		got = bake_mprop(args.mprop, args.out / f"gp_{stem}.gcp", args.out / f"pt_{stem}.gct", disc.gx_cmpr_encode_blocks,
+			args.map if args.map.is_file() else None)
+		return 0 if got else 1
+	if not args.src:
+		ap.error("--src is needed without --mprop")
 	got = bake(args.map, args.src, args.out / f"gp_{stem}.gcp", args.out / f"pt_{stem}.gct", disc.gx_cmpr_encode_blocks)
 	return 0 if got else 1
 

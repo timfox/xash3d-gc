@@ -394,3 +394,69 @@ class DropToFloorTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+def make_mprop(instances, ntex=1):
+	"""An MPRP v2 pack (mohaa-gc tools/props_models.py): one 8x8 texture, one
+	quad model 10 x 20 in x/z, and the given (model, origin, angles, scale)."""
+	out = bytearray(b"MPRP" + struct.pack("<4i", 2, ntex, 1, len(instances)))
+	for _ in range(ntex):
+		pal = b"".join(bytes((i, 255 - i, 40, 255)) for i in range(256))
+		out += b"textures/models/bark.tga".ljust(32, b"\0") + struct.pack("<2HI", 8, 8, 0) + pal + bytes(range(64))
+	verts = [(0, 0, 0), (10, 0, 0), (10, 0, 20), (0, 0, 20)]
+	out += b"static/pine.tik".ljust(64, b"\0") + struct.pack("<6fi", 0, 0, 0, 10, 0, 20, 1)
+	out += struct.pack("<3i", 0, 4, 2)
+	for k, v in enumerate(verts):
+		out += struct.pack("<8f", *v, 0, -1, 0, k & 1, k >> 1)
+	out += struct.pack("<6H", 0, 1, 2, 0, 2, 3)
+	for mi, org, ang, sc in instances:
+		out += struct.pack("<i7f", mi, *org, *ang, sc)
+	return bytes(out)
+
+
+class MohaaPropPackTests(unittest.TestCase):
+	@classmethod
+	def setUpClass(cls):
+		cls.baker = load("bake_props_goldsrc", "scripts/bake_props_goldsrc.py")
+		cls.disc = load("build_gamecube_disc_props", "scripts/build-gamecube-disc.py")
+
+	def bake(self, instances):
+		with tempfile.TemporaryDirectory() as d:
+			d = Path(d)
+			(d / "m.mprop").write_bytes(make_mprop(instances))
+			logs = []
+			stats = self.baker.bake_mprop(d / "m.mprop", d / "gp_m.gcp", d / "pt_m.gct",
+				self.disc.gx_cmpr_encode_blocks, log=logs.append)
+			return stats, (d / "gp_m.gcp").read_bytes(), (d / "pt_m.gct").read_bytes(), logs
+
+	def test_reads_the_mprop_pack(self):
+		pack = self.baker.read_mprop(make_mprop([(0, (1, 2, 3), (0, 90, 0), 0.766)]))
+		self.assertEqual(len(pack["textures"]), 1)
+		self.assertEqual(pack["textures"][0]["palette"][:3], bytes((0, 255, 40)))
+		self.assertEqual(len(pack["models"][0]["surfaces"][0][1]), 4)
+		self.assertEqual(pack["instances"][0][0], 0)
+		with self.assertRaises(ValueError):
+			self.baker.read_mprop(make_mprop([])[:-1] + b"\0\0")
+
+	def test_scales_share_a_model_per_step(self):
+		stats, gcp, gct, _logs = self.bake([
+			(0, (100, 200, 0), (0, 90, 0), 0.766),
+			(0, (300, 200, 0), (0, 0, 0), 0.77),	# same 5 % step as 0.766
+			(0, (500, 200, 0), (0, 0, 0), 1.0),
+		])
+		self.assertEqual((stats["instances"], stats["models"], stats["materials"]), (3, 2, 1))
+		hdr = struct.unpack_from(">8I", gcp, 0)
+		self.assertEqual((gcp[:4], hdr[1] >> 16, hdr[1] & 0xFFFF, hdr[2] >> 16), (b"GCpr", 7, 3, 2))
+		model, count, *rest = struct.unpack_from(">HH3h3h3h3hI", gcp, 32)
+		self.assertEqual((model, count), (0, 2))
+		self.assertEqual(tuple(rest[6:9]), (100, 200, 0))
+		self.assertEqual(rest[10], 16384)	# 90 degrees of yaw
+		# the 0.766 quad is about 7.7 wide and 15.3 high, yawed onto +y
+		self.assertEqual((rest[1], rest[4], rest[5]), (200, 208, 16))
+		self.assertEqual(gct[:4], b"GCWT")
+
+	def test_past_the_instance_limit_some_are_left_out(self):
+		n = self.baker.GC_PR_MAX_INST + 5
+		stats, gcp, _gct, logs = self.bake([(0, (i, 0, 0), (0, 0, 0), 1.0) for i in range(n)])
+		self.assertEqual((stats["instances"], stats["dropped"]), (self.baker.GC_PR_MAX_INST, 5))
+		self.assertTrue(any("left out" in line for line in logs))
