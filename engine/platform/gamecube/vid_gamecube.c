@@ -641,7 +641,7 @@ void GC_LoadingSetStage( float fraction )
 
 static void GC_LoadingCreep( void )
 {
-	const float cap = Q_min( gc_loading_stage + 0.2f, 0.97f );
+	const float cap = Q_min( gc_loading_stage + 0.2f, 0.98f );
 
 	if( gc_loading_progress < cap )
 		gc_loading_progress += ( cap - gc_loading_progress ) * 0.12f;
@@ -786,19 +786,54 @@ static void GC_LoadingOverlayBegin( void )
 	Con_Reportf( "Xash3D GameCube: loading overlay on\n" );
 }
 
-/* The screen is up outside a transition hold and still the frame on display. */
+static double gc_lscr_standalone_start;	/* when the screen went up outside a hold */
+static qboolean gc_gx_world_efb_ready;	/* defined with the GX present path below */
+
+static void GC_LoadScreenStandaloneEnd( const char *why )
+{
+	Con_Reportf( "Xash3D GameCube: loading screen off (%s) after %.2fs\n", why,
+		gc_lscr_standalone_start > 0.0 ? Sys_FloatTime() - gc_lscr_standalone_start : 0.0 );
+	gc_lscr_active = false;
+	gc_loading_fb = NULL;
+	gc_lscr_want[0] = 0;
+	gc_lscr_standalone_start = 0.0;
+}
+
+/* The screen is up outside a transition hold and still the frame on display.
+ * It stays up, presents held back (GC_LoadScreenHoldPresent), until the first
+ * world frame of the new map, like the transition hold. */
 static qboolean GC_LoadScreenStandalone( void )
 {
 	if( !gc_lscr_active || !gc_loading_fb || gc_transition_hold_start > 0.0 )
 		return false;
-	/* In the game, or a present has flipped the screen away: it is over. */
-	if( cls.state == ca_active || gc_loading_fb != (u8 *)VIDEO_GetCurrentFramebuffer())
+	/* Something else flipped the screen away, or the world never came: over. */
+	if( gc_loading_fb != (u8 *)VIDEO_GetCurrentFramebuffer())
 	{
-		gc_lscr_active = false;
-		gc_loading_fb = NULL;
+		GC_LoadScreenStandaloneEnd( "flipped away" );
+		return false;
+	}
+	if( gc_lscr_standalone_start > 0.0
+		&& Sys_FloatTime() - gc_lscr_standalone_start > GC_TRANSITION_HOLD_MAX_SEC )
+	{
+		GC_LoadScreenStandaloneEnd( "timed out" );
 		return false;
 	}
 	return true;
+}
+
+/* Move the standalone screen's bar up to at least frac now: the waits after
+ * the server is up see few statuses and few presents, so do not leave the
+ * jump to the next pulse. */
+static void GC_LoadScreenRaise( float frac )
+{
+	const float before = gc_loading_progress;
+
+	GC_LoadingSetStage( frac );
+	if( gc_loading_progress > before + 0.005f )
+	{
+		GC_LoadScreenDrawBar();
+		gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+	}
 }
 
 /* A load status outside a transition hold: put the game's loading screen on
@@ -807,9 +842,9 @@ static qboolean GC_LoadScreenStandalone( void )
 static qboolean GC_LoadScreenStatus( const char *message, const char *details )
 {
 	static const struct { const char *msg; float frac; } stages[] = {
-		{ "NEW GAME", 0.05f }, { "DIRECT MAP LOAD", 0.05f }, { "PREPARING MAP", 0.1f },
-		{ "LOADING BSP", 0.25f }, { "SPAWNING WORLD", 0.55f }, { "SPAWNING ENTITIES", 0.65f },
-		{ "MAP LOADED", 0.9f }, { "MAP READY", 1.0f },
+		{ "NEW GAME", 0.05f }, { "DIRECT MAP LOAD", 0.05f }, { "PREPARING MAP", 0.15f },
+		{ "LOADING BSP", 0.3f }, { "SPAWNING WORLD", 0.6f }, { "SPAWNING ENTITIES", 0.7f },
+		{ "MAP LOADED", 0.9f }, { "MAP READY", 0.95f },	/* 1.0 at the first world frame */
 	};
 	static int unusable;	/* 1: no default screen on this game's disc or card */
 	u8 *fb;
@@ -831,6 +866,7 @@ static qboolean GC_LoadScreenStatus( const char *message, const char *details )
 	if( si < 2 || !gc_lscr_active )
 		gc_loading_stage = gc_loading_progress = 0.0f;
 	GC_LoadingSetStage( stages[si].frac );
+	Con_Reportf( "Xash3D GameCube: loading screen stage %s %.2f\n", message, gc_loading_progress );
 	(void)details;
 	if( !gc_lscr_active || fb != gc_loading_fb
 		|| ( gc_lscr_want[0] && Q_stricmp( gc_lscr_want, gc_lscr_map )))
@@ -846,7 +882,47 @@ static qboolean GC_LoadScreenStatus( const char *message, const char *details )
 		}
 	}
 	else GC_LoadScreenDrawBar();
+	if( gc_lscr_standalone_start <= 0.0 )
+		gc_lscr_standalone_start = Sys_FloatTime();
 	gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+	return true;
+}
+
+/* GC_PresentBuffer, outside a transition hold: while the standalone screen is
+ * up, nothing flips until a world frame of the new map is in the EFB (frames
+ * before it copy, with clear, into the hidden XFB, as the hold does). True
+ * when the present was held back. */
+static qboolean GC_LoadScreenHoldPresent( void )
+{
+	if( !GC_LoadScreenStandalone())
+		return false;
+	if( gc_gx_world_efb_ready && cls.state == ca_active && GC_IsNewGameWorldReady())
+	{
+		/* (no last bar draw: the EFB now holds the world frame about to show) */
+		GC_LoadScreenStandaloneEnd( "first world frame" );
+		return false;
+	}
+	/* In the game, waiting for the first world frame: the last stretch of the bar. */
+	if( cls.state == ca_active )
+		GC_LoadScreenRaise( 0.9f );
+	if( gc_gx_world_efb_ready )
+	{
+		static int logged;
+		/* clear the EFB through the XFB that is not on screen */
+		void *back = (u8 *)xfb[which_fb] != gc_loading_fb ? xfb[which_fb] : xfb[which_fb ^ 1];
+
+		if( logged++ < 4 )
+			Con_Reportf( "Xash3D GameCube: loading screen hold frame which_fb=%d on_screen=%d back=%d\n",
+				which_fb, gc_loading_fb == (u8 *)xfb[0] ? 0 : gc_loading_fb == (u8 *)xfb[1] ? 1 : -1,
+				back == xfb[0] ? 0 : back == xfb[1] ? 1 : -1 );
+		GC_GXDrawDoneTimed( "loading screen hold" );
+		GC_WaitPendingFlip();
+		if( back && back != (void *)gc_loading_fb )
+			GX_CopyDisp( back, GX_TRUE );
+		GX_Flush();
+		gc_gx_world_efb_ready = false;
+	}
+	GC_LoadingOverlayPulse();
 	return true;
 }
 
@@ -8671,6 +8747,18 @@ static void GC_LoadScreenPipe( u16 fb_w, u16 efb_h )
 
 	GX_SetViewport( 0.0f, 0.0f, fb_w, efb_h, 0.0f, 1.0f );
 	GX_SetScissor( 0, 0, fb_w, efb_h );
+	GX_SetScissorBoxOffset( 0, 0 );
+	GX_SetClipMode( GX_CLIP_ENABLE );
+	/* the world renderer may leave indirect stages, fog, a swap table or
+	 * destination alpha set; the screen needs plain direct texturing */
+	GX_SetNumIndStages( 0 );
+	GX_SetTevDirect( GX_TEVSTAGE0 );
+	GX_SetTevSwapMode( GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0 );
+	GX_SetFog( GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, (GXColor){ 0, 0, 0, 0 });
+	GX_SetZCompLoc( GX_TRUE );
+	GX_SetDstAlpha( GX_DISABLE, 0 );
+	GX_SetAlphaUpdate( GX_FALSE );
+	GX_SetTexCoordScaleManually( GX_TEXCOORD0, GX_FALSE, 0, 0 );
 	guOrtho( proj, 0.0f, efb_h, 0.0f, fb_w, 0.0f, 1.0f );
 	GX_LoadProjectionMtx( proj, GX_ORTHOGRAPHIC );
 	guMtxIdentity( mv );
@@ -9310,6 +9398,8 @@ static void GC_PresentBuffer( void )
 			return;
 		}
 	}
+	if( GC_LoadScreenHoldPresent())
+		return;
 	if( GC_TransitionHoldActive())
 	{
 		/* HUD/2D GX draws also mark the EFB ready, so only a frame of the
@@ -11907,6 +11997,15 @@ void GC_DrawLoadingStatus( const char *message, const char *details )
 	 * a game's own loading screen takes the place of the status panel. */
 	if( GC_LoadScreenStatus( message, details ))
 		return;
+	/* Later statuses (client connect, precache) while the screen is still up:
+	 * keep the screen, do not flip the status panel over it. */
+	if( GC_LoadScreenStandalone())
+	{
+		Con_Reportf( "Xash3D GameCube: loading screen keeps status %s\n", message ? message : "?" );
+		GC_LoadScreenRaise( 0.75f );	/* the server is up; the client is joining it */
+		GC_LoadingOverlayPulse();
+		return;
+	}
 
 	if( gc.buffer && gc.width > 0 && gc.height > 0 )
 	{
