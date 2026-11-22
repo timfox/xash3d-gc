@@ -949,11 +949,33 @@ void R_GXFogBegin( void )
 	}
 }
 
+/* Held for the whole 3D scene on a map with a far plane: the world, its
+ * brush entities (converted detail walls and terrain are func_walls), the
+ * props and the characters all fog alike. The passes' own begin/end pairs
+ * leave it on meanwhile. */
+static qboolean gc_fog_scene;
+
+void R_GXFogSceneBegin( void )
+{
+	if( R_GXMapFarplane() <= 0.0f )
+		return;
+	R_GXFogBegin();
+	gc_fog_scene = true;
+}
+
+void R_GXFogSceneEnd( void )
+{
+	extern void R_GXFogEnd( void );
+
+	gc_fog_scene = false;
+	R_GXFogEnd();
+}
+
 void R_GXFogEnd( void )
 {
 	const GXColor none = { 0, 0, 0, 0 };
 
-	if( !gc_fog_on )
+	if( !gc_fog_on || gc_fog_scene )
 		return;
 	GX_SetFog( GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, none );
 	gc_fog_on = false;
