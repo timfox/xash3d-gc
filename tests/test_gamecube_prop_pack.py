@@ -452,6 +452,19 @@ class MohaaPropPackTests(unittest.TestCase):
 				self.disc.gx_cmpr_encode_blocks, log=logs.append, **kw)
 			return stats, (d / "gp_m.gcp").read_bytes(), (d / "pt_m.gct").read_bytes(), logs
 
+	def test_box_cluster_is_the_one_open_leaf_holding_the_box(self):
+		class Bsp:	# one plane x = 0: leaf 1 (x >= 0) and leaf 2 (x < 0) open, leaf 3 solid under z = 0
+			planes = [(1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0)]
+			nodes = [(0, 1, -3), (1, -2, -4)]	# node 1 splits x >= 0 by z: above leaf 1, below leaf 3
+			leaves = [(-2, 0), (-1, 0), (-1, 0), (-2, 0)]
+		b = Bsp()
+		cluster = self.baker.box_cluster
+		self.assertEqual(cluster(b, (10, 0, 10), (20, 5, 30)), 0)	# leaf 1
+		self.assertEqual(cluster(b, (-20, 0, 10), (-10, 5, 30)), 1)	# leaf 2
+		self.assertEqual(cluster(b, (-5, 0, 10), (5, 5, 30)), self.baker.GC_PR_VIS_ALL)	# across the plane
+		self.assertEqual(cluster(b, (10, 0, -5), (20, 5, 30)), 0)	# dips into solid: still the one open leaf
+		self.assertEqual(cluster(None, (0, 0, 0), (1, 1, 1)), self.baker.GC_PR_VIS_ALL)
+
 	def test_a_tree_gets_an_impostor_far_chain(self):
 		stats, gcp, gct, _logs = self.bake(None, make_tree_mprop([(0, (0, 0, 0), (0, 0, 0), 1.0)]))
 		self.assertEqual((stats["impostors"], stats["materials"]), (1, 2))
