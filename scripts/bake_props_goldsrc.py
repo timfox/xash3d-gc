@@ -1007,6 +1007,7 @@ MPROP_MAGIC = b"MPRP"
 # A prop's scale is baked into its model (an instance has no scale), so
 # instances share a model per 5 % step of scale.
 MPROP_SCALE_STEP = 1.05
+MPROP_WORLD_PREFIX = "*world/"	# mohaa-gc props_models.WORLD_PREFIX: a world mesh (terrain) in map units
 
 
 def read_mprop(data: bytes) -> dict:
@@ -1280,7 +1281,8 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 		rec = (got[0], got[1], got[2], frac)
 		quads = None
 		# Far away the model is two crossed cut-out quads showing it from the front and the side.
-		if impostor and got[2] >= IMPOSTOR_MIN_TRIS and len(chains) < GC_PR_MAX_MAT \
+		world = pack["models"][mi]["name"].startswith(MPROP_WORLD_PREFIX)	# terrain: drawn whole, never a cut-out
+		if impostor and not world and got[2] >= IMPOSTOR_MIN_TRIS and len(chains) < GC_PR_MAX_MAT \
 				and min(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) > 1.0:
 			rgb, cov = render_impostor(render, pack["textures"], lo, hi)
 			if (cov >= 0.5).any():

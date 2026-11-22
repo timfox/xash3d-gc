@@ -415,7 +415,7 @@ def make_mprop(instances, ntex=1):
 	return bytes(out)
 
 
-def make_tree_mprop(instances):
+def make_tree_mprop(instances, name=b"static/pine.tik"):
 	"""An MPRP v2 pack with one masked 8x8 texture and a 48-triangle cone 40 wide and 100 high."""
 	out = bytearray(b"MPRP" + struct.pack("<4i", 2, 1, 1, len(instances)))
 	pal = b"".join(bytes((20, 100 + i // 3, 30, 255)) for i in range(256))
@@ -425,7 +425,7 @@ def make_tree_mprop(instances):
 	for k in range(48):
 		a = 2 * math.pi * k / 48
 		verts.append((20 * math.cos(a), 20 * math.sin(a), 0.0, k / 48, 1.0))
-	out += b"static/pine.tik".ljust(64, b"\0") + struct.pack("<6fi", -20, -20, 0, 20, 20, 100, 1)
+	out += name.ljust(64, b"\0") + struct.pack("<6fi", -20, -20, 0, 20, 20, 100, 1)
 	out += struct.pack("<3i", 0, len(verts), 48)
 	for x, y, z, s_, t_ in verts:
 		out += struct.pack("<8f", x, y, z, x / 20.0, y / 20.0, 0.5, s_, t_)
@@ -467,6 +467,11 @@ class MohaaPropPackTests(unittest.TestCase):
 		# the impostor texture: 64 x 64, alpha tested, some texels cut out and some kept
 		name, tw, th, lv, flag, _r, _o = self.baker.GC_WT_ENTRY.unpack_from(gct, 12 + self.baker.GC_WT_ENTRY.size)
 		self.assertEqual((name.rstrip(b"\0"), tw, th, flag), (b"i001", 64, 64, 1))
+
+	def test_a_world_mesh_never_becomes_a_cutout(self):
+		stats, _gcp, _gct, _logs = self.bake(None, make_tree_mprop([(0, (0, 0, 0), (0, 0, 0), 1.0)],
+			b"*world/terrain_0_0"), cells=True)
+		self.assertEqual((stats["impostors"], stats["cells"], stats["materials"]), (0, 0, 1))
 
 	def test_far_trees_are_baked_into_cells(self):
 		trees = [(0, (x * 256.0, y * 256.0, 0), (0, x * 37 % 360, 0), 1.0) for x in range(8) for y in range(8)]
