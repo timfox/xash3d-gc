@@ -64,6 +64,14 @@ static qboolean s_gc_bsp_file_busy;
 /* Kept for diagnostics; true while any intro static slot is busy. */
 qboolean g_gc_intro_file_busy;
 
+static qboolean FS_GCLowMemoryBoot( void )
+{
+	return Sys_CheckParm( "-gcnewgame" )
+		|| Sys_CheckParm( "-gcmap" )
+		|| Sys_CheckParm( "-gcmenuplaystart" )
+		|| Sys_CheckParm( "-gclistenserver" );
+}
+
 void GC_IntroFileRelease( file_t *f )
 {
 	int i;
@@ -459,13 +467,12 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 
 	file = (file_t *)Mem_Calloc( fs_mempool, sizeof( *file ));
 #if XASH_GAMECUBE
-	/* G278: post-G36 FileSystem pool is often exhausted (~2 KiB file_t soft-fails).
-	 * Intro VO + CapFaces tip-safe SFX need an open fd; try libc, then static slots.
-	 * Listen/WorldDL boots use -gcmap (not -gcnewgame) — same tip starvation. */
-	if( !file && ( Sys_CheckParm( "-gcnewgame" )
-		|| Sys_CheckParm( "-gcmap" )
-		|| Sys_CheckParm( "-gcmenuplaystart" )
-		|| Sys_CheckParm( "-gclistenserver" )))
+	/* G278: the FileSystem pool can be too fragmented for the ~2 KiB file_t
+	 * even while libc can still satisfy the raw allocation. Keep FS reads that
+	 * can soft-fail (including retail menu localization) available on every
+	 * GameCube route; reserve static slots for the intro/SFX paths that need a
+	 * handle even after libc is exhausted. */
+	if( !file )
 	{
 		const qboolean tip_sfx =
 			( Q_stristr( filepath, "/media/sfx_" ) != NULL )
@@ -482,7 +489,7 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 			SetBits( file->flags, FILE_SYS_MALLOC );
 			Con_Reportf( "Xash3D GameCube: G278 FS_SysOpen malloc fallback path=%s\n", filepath );
 		}
-		else if( intro_vo || tip_sfx )
+		else if( FS_GCLowMemoryBoot() && ( intro_vo || tip_sfx ))
 		{
 			int i;
 			for( i = 0; i < 2; i++ )
@@ -499,7 +506,7 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
 				break;
 			}
 		}
-		else if( !s_gc_bsp_file_busy && Q_stristr( filepath, "/maps/" ))
+		else if( FS_GCLowMemoryBoot() && !s_gc_bsp_file_busy && Q_stristr( filepath, "/maps/" ))
 		{
 			memset( &s_gc_bsp_file, 0, sizeof( s_gc_bsp_file ));
 			file = &s_gc_bsp_file;
@@ -548,10 +555,10 @@ file_t *FS_OpenHandle( searchpath_t *searchpath, int handle, fs_offset_t offset,
 	file_t *file = (file_t *)Mem_Calloc( fs_mempool, sizeof( file_t ));
 
 #if XASH_GAMECUBE
-	/* ZIP/P filesystem subhandles are short-lived but still need a file_t.
-	 * During low-memory BSP startup the pool may be fragmented even when the
-	 * libc heap can satisfy this small allocation. */
-	if( !file && Sys_CheckParm( "-gcnewgame" ))
+	/* ZIP/PAK subhandles use the same ~2 KiB structure as SysOpen. The pool can
+	 * be fragmented at the retail menu too, so give all failed FS opens the
+	 * raw libc fallback before considering the BSP-only static slot. */
+	if( !file )
 	{
 		file = (file_t *)calloc( 1, sizeof( *file ));
 		if( file )
@@ -560,7 +567,7 @@ file_t *FS_OpenHandle( searchpath_t *searchpath, int handle, fs_offset_t offset,
 			Con_Reportf( "Xash3D GameCube: FS_OpenHandle malloc fallback offset=%lu len=%lu\n",
 				(unsigned long)offset, (unsigned long)len );
 		}
-		else if( !s_gc_bsp_file_busy )
+		else if( FS_GCLowMemoryBoot() && !s_gc_bsp_file_busy )
 		{
 			memset( &s_gc_bsp_file, 0, sizeof( s_gc_bsp_file ));
 			file = &s_gc_bsp_file;
