@@ -2556,7 +2556,11 @@ def map_sky_names(source: Path) -> set[str]:
 	return names
 
 
-def build_sky_cmpr_overlays(source: Path, output: Path) -> list[tuple[str, Path]]:
+def build_sky_cmpr_overlays(
+	source: Path,
+	output: Path,
+	fallback: Path | None = None,
+) -> list[tuple[str, Path]]:
 	"""Skyboxes as 128×128 GX CMPR sides (8 KiB each) in shallow media/.
 
 	Per-map lean discs stage media/sky_<name>*.cmp first (or gfx/env TGAs).
@@ -2566,15 +2570,26 @@ def build_sky_cmpr_overlays(source: Path, output: Path) -> list[tuple[str, Path]
 	overlays: list[tuple[str, Path]] = []
 	media = output / "media"
 	media.mkdir(parents=True, exist_ok=True)
-	src_media = source / "media"
 	names = sorted(map_sky_names(source))
+
+	search_roots = [source]
+	if fallback is not None and fallback.resolve() != source.resolve():
+		search_roots.append(fallback)
 
 	# Prefer prebuilt CMPR (stage-lean-dod / sky cache) — no Pillow round-trip.
 	for name in names:
 		prebuilt = []
 		for suffix in GC_SKY_SUFFIXES:
-			cand = src_media / f"sky_{name}{suffix}.cmp"
-			if cand.is_file() and cand.stat().st_size > 0:
+			cand = next(
+				(
+					root / "media" / f"sky_{name}{suffix}.cmp"
+					for root in search_roots
+					if (root / "media" / f"sky_{name}{suffix}.cmp").is_file()
+					and (root / "media" / f"sky_{name}{suffix}.cmp").stat().st_size > 0
+				),
+				None,
+			)
+			if cand is not None:
 				prebuilt.append((suffix, cand))
 		if len(prebuilt) == 6:
 			for suffix, src in prebuilt:
@@ -2593,10 +2608,13 @@ def build_sky_cmpr_overlays(source: Path, output: Path) -> list[tuple[str, Path]
 			continue
 		sides = []
 		for suffix in GC_SKY_SUFFIXES:
-			for ext in ("tga", "bmp"):
-				src = source / "gfx/env" / f"{name}{suffix}.{ext}"
-				if src.is_file():
-					sides.append((suffix, src))
+			for root in search_roots:
+				for ext in ("tga", "bmp"):
+					src = root / "gfx/env" / f"{name}{suffix}.{ext}"
+					if src.is_file():
+						sides.append((suffix, src))
+						break
+				if sides and sides[-1][0] == suffix:
 					break
 		if len(sides) != 6:
 			print(f"warning: incomplete skybox '{name}' (need 6 sides, have {len(sides)})")
@@ -3808,6 +3826,7 @@ def create_retail_boot_overlays(
 	source: Path,
 	output: Path,
 	include_startup_vids: bool = True,
+	fallback: Path | None = None,
 ) -> tuple[tuple[str, Path], ...]:
 	"""Overlay read-only retail boot files without mutating the source tree."""
 	output.mkdir(parents=True, exist_ok=True)
@@ -3845,7 +3864,7 @@ def create_retail_boot_overlays(
 		*((f"media/c0a0_tr_{n}.wav", source / f"sound/tride/c0a0_tr_{n}.wav")
 			for n in ("dest", "noeat", "emerg", "tourn", "jobs", "haz", "arrive", "exit")),
 	)
-	overlays.extend(build_sky_cmpr_overlays(source, output))
+	overlays.extend(build_sky_cmpr_overlays(source, output, fallback))
 	overlays.extend(build_music_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-music-cache"))
 	overlays.extend(build_world_dl_overlays(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wd-cache"))
 	overlays.extend(build_world_texture_packs(source, output, Path(__file__).resolve().parents[1] / "build" / "gc-wt-cache"))
@@ -3901,8 +3920,9 @@ def create_startup_vids_overlay(
 	source: Path,
 	output: Path,
 	include_startup_vids: bool = True,
+	fallback: Path | None = None,
 ) -> tuple[tuple[str, Path], ...]:
-	return create_retail_boot_overlays(source, output, include_startup_vids)
+	return create_retail_boot_overlays(source, output, include_startup_vids, fallback)
 
 
 def build_gcvid_companion(
@@ -5190,6 +5210,7 @@ def main() -> None:
 				args.data,
 				overlay_root,
 				include_startup_vids=not args.skip_startup_vids,
+				fallback=fallback_data_dir(args.data, extra_gamedirs_tuple),
 			)
 			build_disc(
 				args.dol,
