@@ -25,6 +25,7 @@ GNU General Public License for more details.
 #include "server.h"			// LUMP_ error codes
 
 #if XASH_GAMECUBE
+extern qboolean gc_world_miptex_cut;
 #include <stdlib.h>
 #include "gamecube/mem_gamecube.h"
 #include "platform/platform.h"
@@ -6415,6 +6416,19 @@ static void Mod_LoadTextureData( model_t *mod, dbspmodel_t *bmod, int textureInd
 			texture->width = mipTex.width;
 			texture->height = mipTex.height;
 		}
+		return;
+	}
+	/* The compact load left this world's miptex pixels out because a texture
+	 * pack exists; its mip offsets are zero. A texture the pack lacks then
+	 * looked external and went to the WAD search, which opened WAD files on a
+	 * heap the map load had already spent (m1l1 with a partial pack: no room
+	 * left for the world screen). Stub it instead, as a tip-safe miss. */
+	if( bmod->isworld && gc_world_miptex_cut && mipTex.offsets[0] <= 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: texture pack miss (miptex cut) stub name=%s\n", mipTex.name );
+		texture->gl_texturenum = R_GetBuiltinTexture( REF_DEFAULT_TEXTURE );
+		texture->width = mipTex.width;
+		texture->height = mipTex.height;
 		return;
 	}
 	/* Tip-safe: never fall into WAD/EXPAND when the heap cannot hold it. */

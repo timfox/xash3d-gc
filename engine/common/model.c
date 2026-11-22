@@ -160,6 +160,9 @@ static int     gc_studio_bss_owners; /* resident cache.data slices */
 /* Pre-entity promote: mesh only — G376 skin uploads tip MEM1 and crash
  * mid-spawn (c1a1f ~entity 96). Skins re-promote after MAP_READY. */
 static qboolean gc_studio_pre_entity_mesh_only;
+/* The world's miptex pixels were left out of the compact load (the texture
+ * pack owns them): a texture the pack lacks has no pixels to fall back on. */
+qboolean gc_world_miptex_cut;
 
 qboolean Mod_GCStudioPreEntityMeshOnly( void )
 {
@@ -2648,6 +2651,7 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				compact_need -= (size_t)cut[c].len - cut[c].replen;
 			prefer_compact = ncut > 0 && compact_need < (size_t)filesize;
 
+			gc_world_miptex_cut = false;
 			if( f && prefer_compact
 				&& ( buf = GC_BorrowMapLoadBuffer( compact_need )) != NULL )
 			{
@@ -2731,6 +2735,7 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 							dh->lumps[i].filelen = LittleLong( (int)tex_blob_len );
 					}
 					length = (fs_offset_t)out;
+					gc_world_miptex_cut = tex_blob != NULL;
 					Con_Reportf( "Xash3D GameCube: map load compact (%s%s) %s → %s (G154 disc LM)%s\n",
 						light_cut ? "no lighting" : "", tex_blob ? ( light_cut ? ", miptex headers only" : "miptex headers only" ) : "",
 						Q_memprint( (size_t)filesize ), Q_memprint( out ),
