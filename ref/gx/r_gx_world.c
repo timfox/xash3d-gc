@@ -6613,6 +6613,7 @@ static u32 gc_prop_ntris, gc_prop_dl_base;
  * the harbor) draws without one ARAM read per piece. */
 static u32 gc_prop_far_base, gc_prop_far_size;
 static byte *gc_prop_far_mem;
+static byte *gc_prop_far_heap;	/* gc_prop_far_mem when the map arena had no room for it */
 static qboolean gc_prop_far_tried;
 /* Full-detail chains of the models in view, kept in the idle middle of the
  * studio-model arena (Lost Coast loads 150 KB of studio models into 976).
@@ -6687,8 +6688,18 @@ static float gc_prop_scale_of[256];
 /* A cell switches to its members inside this distance (nearest point of its box). */
 #define GC_PROP_CELL_NEAR	2400.0f
 
+static u8 gc_prop_model_cell[256];	/* v9: the model is a cell's chain */
+
 static void R_GXPropTablesReset( void )
 {
+	if( gc_prop_far_heap )
+	{
+		GX_DrawDone();
+		free( gc_prop_far_heap );
+		gc_prop_far_heap = NULL;
+		gc_prop_far_mem = NULL;
+	}
+	memset( gc_prop_model_cell, 0, sizeof( gc_prop_model_cell ));
 	if( gc_prop_tables_heap )
 	{
 		GX_DrawDone();
@@ -7082,6 +7093,7 @@ static void R_GXPropLoad( void )
 				for( j = gc_prop_cells[c].first; j < (u32)gc_prop_cells[c].first + gc_prop_cells[c].count; j++ )
 					gc_prop_cellof[j] = (u16)c;
 				gc_prop_cellof[gc_prop_cells[c].inst] = (u16)( GC_PROP_CELL_SELF | c );
+				gc_prop_model_cell[gc_prop_inst[gc_prop_cells[c].inst].model & 0xffu] = 1;
 			}
 			gc_prop_ncells = (u16)n;
 			if( !n && ( hdr[2] & 0xffffu ))
@@ -7940,6 +7952,18 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 		gc_prop_far_tried = true;
 		gc_prop_far_mem = (byte *)GC_MapLoadBufferTailAlloc(
 			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), gc_prop_far_size );
+		/* A converted map's far region (impostors and cells: 152-270 KB)
+		 * may not fit the arena's tail: the heap, while that leaves it
+		 * 320 KB. */
+		if( !gc_prop_far_mem && gc_prop_v9 )
+		{
+			extern size_t GC_MemHeapFreeBytes( void );
+
+			if( GC_MemHeapFreeBytes() >= (size_t)gc_prop_far_size + 320u * 1024u )
+				gc_prop_far_mem = gc_prop_far_heap = (byte *)memalign( 32, gc_prop_far_size );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop far LODs %s (%u Kb)\n",
+				gc_prop_far_mem ? "in the heap" : "FAIL, cells from the chain cache", gc_prop_far_size / 1024u );
+		}
 		if( gc_prop_far_mem )
 		{
 			GC_AramTransfer( gc_prop_aram + gc_prop_far_base, gc_prop_far_mem, gc_prop_far_size, false );
@@ -7947,6 +7971,8 @@ static int R_GXPropEmitModel( unsigned model, const float *org, float pitch, flo
 				gc_prop_far_size / 1024u );
 		}
 	}
+	if( far_lod && !gc_prop_far_mem && gc_prop_model_cell[model] )
+		far_lod = false;
 	R_GXCmprSetFar( far_tex || gc_prop_tex_far );
 	ofs = far_lod ? m->far_ofs : m->dl_ofs;
 	bytes = far_lod ? m->far_bytes : m->first_bytes;

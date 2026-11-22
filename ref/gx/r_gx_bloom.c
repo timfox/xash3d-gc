@@ -916,6 +916,16 @@ float R_GXMapFarplane( void )
 	return gc_mapfog_end;
 }
 
+/* Arms the map's far plane fog for a projection with these planes; false
+ * when the map has none. */
+qboolean R_GXMapFogSet( f32 z_near, f32 z_far )
+{
+	if( R_GXMapFarplane() <= 0.0f )
+		return false;
+	GX_SetFog( GX_FOG_PERSP_LIN, 0.0f, gc_mapfog_end, z_near, z_far, gc_mapfog_col );
+	return true;
+}
+
 void R_GXFogBegin( void )
 {
 	const GXColor fog = { 151, 166, 181, 255 };
@@ -928,9 +938,17 @@ void R_GXFogBegin( void )
 	if( R_GXMapFarplane() > 0.0f )
 	{
 		/* MOHAA's far plane: linear from the eye to the plane. */
+		static qboolean map_logged;
+
 		zfar = Q_max( 256.0f, RI.farClip > 1.0f ? RI.farClip : 4096.0f );
-		GX_SetFog( GX_FOG_PERSP_LIN, 0.0f, gc_mapfog_end, znear, zfar, gc_mapfog_col );
+		R_GXMapFogSet( znear, zfar );
 		gc_fog_on = true;
+		if( !map_logged )
+		{
+			map_logged = true;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: fog map farplane colour=%u,%u,%u end=%.0f zfar=%.0f\n",
+				gc_mapfog_col.r, gc_mapfog_col.g, gc_mapfog_col.b, gc_mapfog_end, zfar );
+		}
 		return;
 	}
 	/* nearZ/farZ MUST match guFrustum from R_GXBuildWorldProjection.
