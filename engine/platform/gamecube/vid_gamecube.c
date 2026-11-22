@@ -786,8 +786,81 @@ static void GC_LoadingOverlayBegin( void )
 	Con_Reportf( "Xash3D GameCube: loading overlay on\n" );
 }
 
+/* The screen is up outside a transition hold and still the frame on display. */
+static qboolean GC_LoadScreenStandalone( void )
+{
+	if( !gc_lscr_active || !gc_loading_fb || gc_transition_hold_start > 0.0 )
+		return false;
+	/* In the game, or a present has flipped the screen away: it is over. */
+	if( cls.state == ca_active || gc_loading_fb != (u8 *)VIDEO_GetCurrentFramebuffer())
+	{
+		gc_lscr_active = false;
+		gc_loading_fb = NULL;
+		return false;
+	}
+	return true;
+}
+
+/* A load status outside a transition hold: put the game's loading screen on
+ * the displayed XFB (again, if a present has flipped it away or the map is now
+ * named) and move its bar. False when this load has no screen to show. */
+static qboolean GC_LoadScreenStatus( const char *message, const char *details )
+{
+	static const struct { const char *msg; float frac; } stages[] = {
+		{ "NEW GAME", 0.05f }, { "DIRECT MAP LOAD", 0.05f }, { "PREPARING MAP", 0.1f },
+		{ "LOADING BSP", 0.25f }, { "SPAWNING WORLD", 0.55f }, { "SPAWNING ENTITIES", 0.65f },
+		{ "MAP LOADED", 0.9f }, { "MAP READY", 1.0f },
+	};
+	static int unusable;	/* 1: no default screen on this game's disc or card */
+	u8 *fb;
+	int si;
+
+	if( host.status == HOST_INIT || !message || !gc.initialized || !rmode || unusable )
+		return false;
+	for( si = 0; si < (int)ARRAYSIZE( stages ); si++ )
+	{
+		if( !Q_stricmp( message, stages[si].msg ))
+			break;
+	}
+	if( si == (int)ARRAYSIZE( stages ))
+		return false;
+	GC_WaitPendingFlip();	/* a queued flip would swap the screen away right after the draw */
+	fb = (u8 *)VIDEO_GetCurrentFramebuffer();
+	if( !fb || ( fb != (u8 *)xfb[0] && fb != (u8 *)xfb[1] ))
+		return false;
+	if( si < 2 || !gc_lscr_active )
+		gc_loading_stage = gc_loading_progress = 0.0f;
+	GC_LoadingSetStage( stages[si].frac );
+	(void)details;
+	if( !gc_lscr_active || fb != gc_loading_fb
+		|| ( gc_lscr_want[0] && Q_stricmp( gc_lscr_want, gc_lscr_map )))
+	{
+		gc_loading_fb = fb;
+		gc_lscr_active = false;
+		if( !GC_LoadScreenDrawFull( gc_lscr_want ))
+		{
+			/* not even a default screen: the status panel from here on */
+			gc_loading_fb = NULL;
+			unusable = 1;
+			return false;
+		}
+	}
+	else GC_LoadScreenDrawBar();
+	gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+	return true;
+}
+
 void GC_LoadingOverlayPulse( void )
 {
+	if( GC_LoadScreenStandalone())
+	{
+		if( Sys_FloatTime() < gc_loading_next )
+			return;
+		GC_LoadingCreep();
+		GC_LoadScreenDrawBar();
+		gc_loading_next = Sys_FloatTime() + GC_LOADING_PULSE_SEC;
+		return;
+	}
 	if( !gc_loading_fb || !GC_TransitionHoldActive() || Sys_FloatTime() < gc_loading_next )
 		return;
 	gc_loading_phase++;
@@ -8738,6 +8811,7 @@ static qboolean GC_LoadScreenDrawFull( const char *map )
 	GX_Flush();
 	GC_GXDrawDoneTimed( "loading screen present" );
 	gc_gx_present_pipe_ready = false;
+	gc_gx_world_efb_ready = false;	/* the EFB holds the screen, not a world frame */
 	gc_lscr_active = true;
 	Q_strncpy( gc_lscr_map, map ? map : "", sizeof( gc_lscr_map ));
 	Con_Reportf( "Xash3D GameCube: loading screen %s bar %u,%u %ux%u\n",
@@ -11793,7 +11867,7 @@ void GC_DrawLoadingStatus( const char *message, const char *details )
 	/* Changelevel / New Game hold: keep the last frame (or a black cover)
 	 * with the "LOADING…" text overlay. Do not start that hold for early
 	 * boot statuses like CLIENT INIT — those were blanking the intro AVI. */
-	if( host.status != HOST_INIT && GC_MenuRunsServer() && message && details && details[0]
+	if( host.status != HOST_INIT && message && details && details[0]
 		&& ( !Q_stricmp( message, "NEW GAME" ) || !Q_stricmp( message, "PREPARING MAP" )
 			|| !Q_stricmp( message, "LOADING BSP" ) || !Q_stricmp( message, "DIRECT MAP LOAD" )))
 		COM_FileBase( details, gc_lscr_want, sizeof( gc_lscr_want ));
@@ -11828,6 +11902,11 @@ void GC_DrawLoadingStatus( const char *message, const char *details )
 		GC_LoadingOverlayPulse();
 		return;
 	}
+
+	/* No hold (the DoD-family menu starts its map without -gcmenuplaystart):
+	 * a game's own loading screen takes the place of the status panel. */
+	if( GC_LoadScreenStatus( message, details ))
+		return;
 
 	if( gc.buffer && gc.width > 0 && gc.height > 0 )
 	{
