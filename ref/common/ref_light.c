@@ -35,6 +35,7 @@ typedef struct
 #define GC_LIGHTVEC_MISS 128
 int R_GXLightFacesCount( void );
 qboolean R_GXLightFacesLit( void );
+qboolean R_GXLightGridSample( const float *org, byte *rgb );
 qboolean R_GXLightFacesRead( int first, int num, void *out );
 qboolean R_GXLightSamplesRead( unsigned int ofs, void *out, unsigned int len );
 /* Last sky trace of R_EntityDynamicLight: 0 no surface, 1 not sky, 2 sky. */
@@ -630,6 +631,23 @@ check bspmodels to get light from
 */
 colorVec R_LightVec( const vec3_t start, const vec3_t end, vec3_t lspot, vec3_t lvec )
 {
+#if XASH_GAMECUBE
+	/* A converted MOHAA map carries MOHAA's light grid: retail lights models
+	 * from it, not from the floor under them (terrain is not BSP here, so the
+	 * floor trace missed on half of m1l1). */
+	{
+		byte rgb[3];
+
+		if( R_GXLightGridSample( start, rgb ))
+		{
+			if( lspot )
+				VectorCopy( start, lspot );
+			if( lvec )
+				VectorClear( lvec );
+			return (colorVec){ rgb[0], rgb[1], rgb[2], 0 };
+		}
+	}
+#endif
 	colorVec light = R_LightVecInternal( start, end, lspot, lvec );
 
 	if( r_lighting_extended.value && lspot != NULL && lvec != NULL )
