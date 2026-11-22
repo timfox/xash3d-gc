@@ -23,6 +23,7 @@ GNU General Public License for more details.
 #include "mcol.h"
 #if XASH_GAMECUBE
 #include "platform/platform.h"
+#include "gamecube/mem_gamecube.h"
 #endif
 
 #define PM_AllowHitBoxTrace( model, hull ) ( model && model->type == mod_studio && ( FBitSet( model->flags, STUDIO_TRACE_HITBOX ) || hull == 2 ))
@@ -65,10 +66,71 @@ static const vec3_t pm_hullmaxs[MAX_MAP_HULLS] =
 static struct
 {
 	string	name;	// world the cache belongs to
-	byte	*buf;
+	byte	*buf;	// heap copy, or NULL when the file lives in the map arena
 	mcol_t	mesh;
 	qboolean	ok;
 } pm_worldmesh;
+
+// the map arena is about to be reused for another map: our copy in it is gone
+static void PM_WorldMeshArenaReset( void )
+{
+	if( pm_worldmesh.ok && !pm_worldmesh.buf )
+		memset( &pm_worldmesh, 0, sizeof( pm_worldmesh ));
+}
+
+/*
+The file goes into a free gap of the map arena when there is one (the BSP of a
+converted MOHAA map leaves most of the 3 MiB arena unused, while MEM1 has well
+under 1 MB free after a map loads), else onto the heap.
+*/
+static byte *PM_WorldMeshRead( const char *path, size_t *outlen, qboolean *in_arena )
+{
+	byte header[44], *buf = NULL;
+	file_t *f;
+	size_t need, total = 0;
+	fs_offset_t got;
+
+	*in_arena = false;
+	if( !( f = FS_Open( path, "rb", false )))
+		return NULL;
+
+	if( FS_Read( f, header, sizeof( header )) != sizeof( header ) || !( need = MCol_Size( header, sizeof( header ))))
+	{
+		Con_Printf( S_WARN "%s: %s is not a version %d collision file, ignored\n", __func__, path, MCOL_VERSION );
+		FS_Close( f );
+		return NULL;
+	}
+
+#if XASH_GAMECUBE
+	{
+		const size_t at = GC_MapArenaFind( need );
+
+		if( at != (size_t)-1 && ( buf = (byte *)GC_MapLoadBufferTailAlloc( at, need )) != NULL )
+		{
+			*in_arena = true;
+			GC_SetMapArenaResetHook( PM_WorldMeshArenaReset );
+		}
+	}
+#endif
+	if( !buf )
+		buf = (byte *)Mem_Malloc( host.mempool, need );
+
+	memcpy( buf, header, sizeof( header ));
+	total = sizeof( header );
+	while( total < need && ( got = FS_Read( f, buf + total, need - total )) > 0 )
+		total += (size_t)got;
+	FS_Close( f );
+
+	if( total < need )
+	{
+		Con_Printf( S_WARN "%s: %s is truncated, ignored\n", __func__, path );
+		if( !*in_arena )
+			Mem_Free( buf );
+		return NULL;
+	}
+	*outlen = need;
+	return buf;
+}
 
 const mcol_t *PM_WorldMesh( const struct model_s *world )
 {
@@ -78,7 +140,9 @@ const mcol_t *PM_WorldMesh( const struct model_s *world )
 	if( Q_stricmp( pm_worldmesh.name, world->name ))
 	{
 		string path;
-		fs_offset_t len = 0;
+		size_t len = 0;
+		qboolean in_arena = false;
+		byte *buf;
 
 		if( pm_worldmesh.buf )
 			Mem_Free( pm_worldmesh.buf );
@@ -87,21 +151,23 @@ const mcol_t *PM_WorldMesh( const struct model_s *world )
 		Q_strncpy( path, world->name, sizeof( path ));
 		COM_ReplaceExtension( path, ".mcol", sizeof( path ));
 
-		pm_worldmesh.buf = FS_LoadFile( path, &len, false );
-		if( pm_worldmesh.buf )
+		if( !FS_FileExists( path, false ))
+			return NULL;
+
+		buf = PM_WorldMeshRead( path, &len, &in_arena );
+		if( buf && MCol_Parse( &pm_worldmesh.mesh, buf, len ))
 		{
-			if( MCol_Parse( &pm_worldmesh.mesh, pm_worldmesh.buf, (size_t)len ))
-			{
-				pm_worldmesh.ok = true;
-				Con_Reportf( "%s: %s, %d brushes, %d nodes, %li bytes\n", __func__, path,
-					pm_worldmesh.mesh.numbrushes, pm_worldmesh.mesh.numnodes, (long)len );
-			}
-			else
-			{
-				Con_Printf( S_WARN "%s: %s is malformed, ignored\n", __func__, path );
-				Mem_Free( pm_worldmesh.buf );
-				pm_worldmesh.buf = NULL;
-			}
+			pm_worldmesh.ok = true;
+			pm_worldmesh.buf = in_arena ? NULL : buf;
+			Con_Reportf( "%s: %s, %d brushes, %d terrain patches, %d patch triangles, %lu bytes in the %s\n", __func__, path,
+				pm_worldmesh.mesh.numbrushes, pm_worldmesh.mesh.numterrain, pm_worldmesh.mesh.numtris, (unsigned long)len,
+				in_arena ? "map arena" : "heap" );
+		}
+		else if( buf )
+		{
+			Con_Printf( S_WARN "%s: %s is malformed, ignored\n", __func__, path );
+			if( !in_arena )
+				Mem_Free( buf );
 		}
 	}
 
