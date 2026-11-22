@@ -26,6 +26,7 @@ Enabled for -gccapfacessmoke (Lost Coast) or -gcbloom; -gcnobloom disables.
 #include <ogc/gx.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 #define GC_BLOOM_MAX_BYTES ( 96u * 1024u )
 #define GC_BLOOM_TAPS 6
@@ -849,6 +850,72 @@ qboolean R_GXBloomDrawSun( void *rmode_ptr )
  */
 static qboolean gc_fog_on;
 
+/* A converted MOHAA map's far plane (worldspawn "farplane", already in map
+ * units, and "farplane_color", 0..1): retail fogs to that colour and draws
+ * nothing past it, which is how its forests stay dense. 0 = none. */
+static char gc_mapfog_name[64];
+static float gc_mapfog_end;
+static GXColor gc_mapfog_col = { 51, 51, 77, 255 };
+
+static const char *R_GXWorldspawnValue( const char *ents, const char *end, const char *key )
+{
+	char quoted[40];
+	const char *p;
+	size_t n;
+
+	Q_snprintf( quoted, sizeof( quoted ), "\"%s\"", key );
+	n = Q_strlen( quoted );
+	p = Q_strstr( ents, quoted );
+	if( !p || p + n >= end )
+		return NULL;
+	p += n;
+	while( p < end && *p != '"' )
+		p++;
+	return p < end ? p + 1 : NULL;
+}
+
+float R_GXMapFarplane( void )
+{
+	const model_t *world = WORLDMODEL;
+
+	if( !world || !world->name[0] )
+		return 0.0f;
+	if( Q_stricmp( world->name, gc_mapfog_name ))
+	{
+		const char *ents = world->entities;
+		const char *end = ents ? Q_strchr( ents, '}' ) : NULL;	/* worldspawn comes first */
+		const char *v;
+
+		Q_strncpy( gc_mapfog_name, world->name, sizeof( gc_mapfog_name ));
+		gc_mapfog_end = 0.0f;
+		if( end && ( v = R_GXWorldspawnValue( ents, end, "farplane" )) != NULL )
+		{
+			const float fp = (float)strtod( v, NULL );
+
+			if( fp >= 64.0f )
+			{
+				float rgb[3] = { 0.2f, 0.2f, 0.3f };
+				int k;
+
+				gc_mapfog_end = fp;
+				if(( v = R_GXWorldspawnValue( ents, end, "farplane_color" )) != NULL )
+				{
+					char *next = (char *)v;
+
+					for( k = 0; k < 3; k++ )
+						rgb[k] = (float)strtod( next, &next );
+				}
+				gc_mapfog_col.r = (u8)( bound( 0.0f, rgb[0], 1.0f ) * 255.0f + 0.5f );
+				gc_mapfog_col.g = (u8)( bound( 0.0f, rgb[1], 1.0f ) * 255.0f + 0.5f );
+				gc_mapfog_col.b = (u8)( bound( 0.0f, rgb[2], 1.0f ) * 255.0f + 0.5f );
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: map farplane %.0f colour %u %u %u\n", fp,
+					gc_mapfog_col.r, gc_mapfog_col.g, gc_mapfog_col.b );
+			}
+		}
+	}
+	return gc_mapfog_end;
+}
+
 void R_GXFogBegin( void )
 {
 	const GXColor fog = { 151, 166, 181, 255 };
@@ -858,6 +925,14 @@ void R_GXFogBegin( void )
 
 	if( gc_fog_on )
 		return;
+	if( R_GXMapFarplane() > 0.0f )
+	{
+		/* MOHAA's far plane: linear from the eye to the plane. */
+		zfar = Q_max( 256.0f, RI.farClip > 1.0f ? RI.farClip : 4096.0f );
+		GX_SetFog( GX_FOG_PERSP_LIN, 0.0f, gc_mapfog_end, znear, zfar, gc_mapfog_col );
+		gc_fog_on = true;
+		return;
+	}
 	/* nearZ/farZ MUST match guFrustum from R_GXBuildWorldProjection.
 	 * fogstart/fogend stay at map values (1600/50000) even when zfar is
 	 * shorter — density just never reaches 1.0 inside the frustum. */

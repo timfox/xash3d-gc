@@ -1,6 +1,7 @@
 """scripts/bake_props_goldsrc.py: a map's static studio props as a GX prop
 pack (media/gp_<map>.gcp + media/pt_<map>.gct), read by ref/gx/r_gx_world.c."""
 import importlib.util
+import math
 import struct
 import sys
 import tempfile
@@ -414,20 +415,80 @@ def make_mprop(instances, ntex=1):
 	return bytes(out)
 
 
+def make_tree_mprop(instances):
+	"""An MPRP v2 pack with one masked 8x8 texture and a 48-triangle cone 40 wide and 100 high."""
+	out = bytearray(b"MPRP" + struct.pack("<4i", 2, 1, 1, len(instances)))
+	pal = b"".join(bytes((20, 100 + i // 3, 30, 255)) for i in range(256))
+	out += b"textures/models/pine.tga".ljust(32, b"\0") + struct.pack("<2HI", 8, 8, 1) + pal
+	out += bytes(255 if (i % 8 + i // 8) % 4 == 0 else 7 for i in range(64))
+	verts = [(0.0, 0.0, 100.0, 0.5, 0.0)]
+	for k in range(48):
+		a = 2 * math.pi * k / 48
+		verts.append((20 * math.cos(a), 20 * math.sin(a), 0.0, k / 48, 1.0))
+	out += b"static/pine.tik".ljust(64, b"\0") + struct.pack("<6fi", -20, -20, 0, 20, 20, 100, 1)
+	out += struct.pack("<3i", 0, len(verts), 48)
+	for x, y, z, s_, t_ in verts:
+		out += struct.pack("<8f", x, y, z, x / 20.0, y / 20.0, 0.5, s_, t_)
+	for k in range(48):
+		out += struct.pack("<3H", 0, 1 + k, 1 + (k + 1) % 48)
+	for mi, org, ang, sc in instances:
+		out += struct.pack("<i7f", mi, *org, *ang, sc)
+	return bytes(out)
+
+
 class MohaaPropPackTests(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):
 		cls.baker = load("bake_props_goldsrc", "scripts/bake_props_goldsrc.py")
 		cls.disc = load("build_gamecube_disc_props", "scripts/build-gamecube-disc.py")
 
-	def bake(self, instances):
+	def bake(self, instances, data=None, **kw):
+		kw.setdefault("cells", False)
 		with tempfile.TemporaryDirectory() as d:
 			d = Path(d)
-			(d / "m.mprop").write_bytes(make_mprop(instances))
+			(d / "m.mprop").write_bytes(data or make_mprop(instances))
 			logs = []
 			stats = self.baker.bake_mprop(d / "m.mprop", d / "gp_m.gcp", d / "pt_m.gct",
-				self.disc.gx_cmpr_encode_blocks, log=logs.append)
+				self.disc.gx_cmpr_encode_blocks, log=logs.append, **kw)
 			return stats, (d / "gp_m.gcp").read_bytes(), (d / "pt_m.gct").read_bytes(), logs
+
+	def test_a_tree_gets_an_impostor_far_chain(self):
+		stats, gcp, gct, _logs = self.bake(None, make_tree_mprop([(0, (0, 0, 0), (0, 0, 0), 1.0)]))
+		self.assertEqual((stats["impostors"], stats["materials"]), (1, 2))
+		hdr = struct.unpack_from(">8I", gcp, 0)
+		models_ofs, dl_base, far_base = hdr[4], hdr[5], hdr[7]
+		self.assertGreater(len(gcp), far_base)
+		dl_ofs, first, tris, frac, _c, far_ofs, far_first, far_tris, _cm = struct.unpack_from(">IIHBBIIHH", gcp, models_ofs)
+		self.assertEqual((tris, far_tris), (48, 4))
+		piece = gcp[far_base + far_ofs:far_base + far_ofs + far_first]
+		self.assertEqual(len(piece), far_first)
+		self.assertEqual(piece[0], 1)	# the impostor's material
+		self.assertEqual((piece[32], struct.unpack_from(">H", piece, 33)[0]), (0x80, 8))	# one GX quads command, 2 quads
+		# the impostor texture: 64 x 64, alpha tested, some texels cut out and some kept
+		name, tw, th, lv, flag, _r, _o = self.baker.GC_WT_ENTRY.unpack_from(gct, 12 + self.baker.GC_WT_ENTRY.size)
+		self.assertEqual((name.rstrip(b"\0"), tw, th, flag), (b"i001", 64, 64, 1))
+
+	def test_far_trees_are_baked_into_cells(self):
+		trees = [(0, (x * 256.0, y * 256.0, 0), (0, x * 37 % 360, 0), 1.0) for x in range(8) for y in range(8)]
+		stats, gcp, _gct, _logs = self.bake(None, make_tree_mprop(trees), cells=True)
+		hdr = struct.unpack_from(">8I", gcp, 0)
+		ncells = hdr[2] & 0xFFFF
+		self.assertEqual((hdr[1] >> 16, ncells, stats["cells"]), (9, stats["cells"], ncells))
+		self.assertGreater(ncells, 1)
+		ninst = hdr[1] & 0xFFFF
+		self.assertEqual(ninst, 64 + ncells)
+		at = 32 + ninst * 32
+		at += (32 + ninst * 12 + 31) & ~31
+		seen = []
+		for c in range(ncells):
+			cell_inst, first, count, _pad = struct.unpack_from(">4H", gcp, at + 8 * c)
+			self.assertEqual(cell_inst, 64 + c)	# the cell instances come last
+			seen += range(first, first + count)
+			model, tris = struct.unpack_from(">HH", gcp, 32 + 32 * cell_inst)
+			self.assertEqual(tris, 4 * count)	# two quads a tree
+			self.assertGreaterEqual(model, 1)
+		self.assertEqual(sorted(seen), list(range(64)))	# every tree in one cell, members contiguous
+		self.assertEqual(stats["cell_members"], 64)
 
 	def test_reads_the_mprop_pack(self):
 		pack = self.baker.read_mprop(make_mprop([(0, (1, 2, 3), (0, 90, 0), 0.766)]))
@@ -438,17 +499,20 @@ class MohaaPropPackTests(unittest.TestCase):
 		with self.assertRaises(ValueError):
 			self.baker.read_mprop(make_mprop([])[:-1] + b"\0\0")
 
-	def test_scales_share_a_model_per_step(self):
+	def test_every_scale_shares_one_model(self):
 		stats, gcp, gct, _logs = self.bake([
 			(0, (100, 200, 0), (0, 90, 0), 0.766),
 			(0, (300, 200, 0), (0, 0, 0), 0.77),	# same 5 % step as 0.766
 			(0, (500, 200, 0), (0, 0, 0), 1.0),
 		])
-		self.assertEqual((stats["instances"], stats["models"], stats["materials"]), (3, 2, 1))
+		# one model: v9 scales each instance at draw time (high byte: 1.05 ^ (byte - 128))
+		self.assertEqual((stats["instances"], stats["models"], stats["materials"]), (3, 1, 1))
 		hdr = struct.unpack_from(">8I", gcp, 0)
-		self.assertEqual((gcp[:4], hdr[1] >> 16, hdr[1] & 0xFFFF, hdr[2] >> 16), (b"GCpr", 7, 3, 2))
+		self.assertEqual((gcp[:4], hdr[1] >> 16, hdr[1] & 0xFFFF, hdr[2] >> 16), (b"GCpr", 9, 3, 1))
 		model, count, *rest = struct.unpack_from(">HH3h3h3h3hI", gcp, 32)
-		self.assertEqual((model, count), (0, 2))
+		self.assertEqual((model, count), ((128 - 5) << 8, 2))
+		self.assertEqual(struct.unpack_from(">H", gcp, 64)[0], (128 - 5) << 8)	# 0.77: the same step
+		self.assertEqual(struct.unpack_from(">H", gcp, 96)[0], 128 << 8)
 		self.assertEqual(tuple(rest[6:9]), (100, 200, 0))
 		self.assertEqual(rest[10], 16384)	# 90 degrees of yaw
 		# the 0.766 quad is about 7.7 wide and 15.3 high, yawed onto +y

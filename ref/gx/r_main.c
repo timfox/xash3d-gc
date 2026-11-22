@@ -460,7 +460,13 @@ static float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
 	{
+		extern float R_GXMapFarplane( void );
 		float zfar = gp_movevars->zmax * 1.73f;
+		const float farplane = R_GXMapFarplane();
+
+		/* A MOHAA far plane: the fog is solid there, so nothing past it is drawn. */
+		if( farplane > 0.0f && zfar > farplane + 256.0f )
+			zfar = farplane + 256.0f;
 
 		/* -gccapture: a film camera out at sea must still see the far end
 		 * of the beach, whatever sv_zmax the map was built with. */
