@@ -1028,13 +1028,19 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 		print("Warning: Pillow not installed; skipping GameCube menu background bake.", file=sys.stderr)
 		return False
 
-	# Preserve host-prebaked Lost Coast title plates (Source console/background01).
-	# Without this, lean CapFaces stages fall through to the synthetic HL1 sheet.
+	# Preserve host-prebaked Lost Coast title plates and the MOHAA retail war-room
+	# menu sheet. Without these, lean stages can fall through to the synthetic
+	# HL1 sheet because the prebaked layouts live under resource/gc_menu/.
 	prebaked_menu = source / "resource" / "gc_menu"
 	prebaked_src = prebaked_menu / "SOURCE.txt"
-	if (
+	is_lostcoast_menu = (
 		prebaked_src.is_file()
 		and "Lost Coast" in prebaked_src.read_text(encoding="utf-8", errors="replace")
+	)
+	is_mohaa_menu = (prebaked_menu / "mohaa_main.txt").is_file()
+	if (
+		(is_lostcoast_menu or is_mohaa_menu)
+		and (prebaked_menu / "BackgroundLayout.txt").is_file()
 		and (prebaked_menu / "background.tga").is_file()
 		and (prebaked_menu / "bg_0_0.tga").is_file()
 	):
@@ -1045,10 +1051,8 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 				shutil.copy2(child, menu_dir / child.name)
 		_stage_gc_menu_btn_strips(source, menu_dir)
 		_stage_gc_menu_loading_cmp(menu_dir)
-		print(
-			f"GameCube menu assets: preserve Lost Coast retail title "
-			f"{(menu_dir / 'background.tga').relative_to(output)}"
-		)
+		label = "MOHAA retail war-room" if is_mohaa_menu else "Lost Coast retail title"
+		print(f"GameCube menu assets: preserve {label} {(menu_dir / 'background.tga').relative_to(output)}")
 		return True
 
 	candidates = [
