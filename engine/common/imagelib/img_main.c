@@ -84,7 +84,11 @@ qboolean Image_GCIsMdlDecode( const void *ptr )
 
 void Image_GCReleaseMdlDecode( void )
 {
-	gc_mdl_decode_busy = false;
+	/* A borrower owns the buffer until its eviction hook has returned it.
+	 * Unrelated image cleanup must not make the live HUD arena available to a
+	 * decoder without first waiting for the GPU and dropping its cells. */
+	if( !gc_mdl_decode_evict )
+		gc_mdl_decode_busy = false;
 }
 
 void *Image_GCAllocTransient( size_t bytes )
@@ -726,7 +730,9 @@ void FS_FreeImage( rgbdata_t *pack )
 		Image_GCReleaseTransient();
 	else if( pack->buffer && !Image_GCIsMdlDecode( pack->buffer ))
 		Mem_Free( pack->buffer );
-	if( gc_mdl_decode_busy )
+	/* FS_FreeImage can run while the decode buffer is lent to another owner.
+	 * Preserve that borrow until Image_GCAllocMdlDecode invokes its evictor. */
+	if( gc_mdl_decode_busy && !gc_mdl_decode_evict )
 		gc_mdl_decode_busy = false;
 	#else
 	if( pack->buffer ) Mem_Free( pack->buffer );

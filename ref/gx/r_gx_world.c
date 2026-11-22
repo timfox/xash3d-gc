@@ -707,10 +707,11 @@ void R_GXHudHiBeginFrame( void )
 extern void *Image_GCLendMdlDecode( void (*evict)( void ), size_t *bytes );
 extern void Image_GCReturnMdlDecode( void );
 static qboolean r_hudhi_arena_lent;	/* the arena is the borrowed decode buffer */
-/* Half-Life's 640 HUD: cells in the lent decode buffer, token resident
- * copies (never drawn). Day of Defeat keeps its heap arena and 64 px
- * fallback copies. */
-#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+/* Half-Life and MOHAA use the lent decode buffer for cells, token resident
+ * copies (never drawn). MOHAA is single-player and its extra script state can
+ * fragment MEM1 before the 64 KiB HUD arena is requested. Networked DoD keeps
+ * its heap arena because model loads may evict the cells while clients play. */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK ) || ( defined( XASH_GC_MOHAA ) && XASH_GC_MOHAA )
 #define GC_HUDHI_LEND_DECODE 1
 #else
 #define GC_HUDHI_LEND_DECODE 0

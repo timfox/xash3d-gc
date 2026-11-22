@@ -643,6 +643,8 @@ def configure(conf):
 		# mohaa (mohaa-gc) is DoD-GC's game code with MOHAA content: same tables and limits.
 		if conf.options.GAMEDIR in ('dod', 'mohaa'):
 			conf.define('XASH_DODGC_NETWORK', 1)
+			if conf.options.GAMEDIR == 'mohaa':
+				conf.define('XASH_GC_MOHAA', 1)
 			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
 			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
 			# screen) can be built with a bigger table: XASH_GC_MAX_EDICTS=560 costs about
