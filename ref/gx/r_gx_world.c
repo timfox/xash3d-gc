@@ -4455,6 +4455,15 @@ static void R_GXClearEfbSky( GXRModeObj *rmode )
 	GX_SetCullMode( GX_CULL_NONE );
 	GX_SetColorUpdate( GX_TRUE );
 	GX_SetNumChans( 1 );
+	/* The vertex colour, unlit. The props leave channel 0 lit from the
+	 * material register (the last instance's light), which painted this
+	 * fill white behind m6l1a's trees in Dolphin. Their blend and alpha
+	 * test would cut it too. Fog stays: the scene holds it, and on a far
+	 * plane map it is this colour. */
+	GX_SetChanCtrl( GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX,
+		GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
 	GX_SetNumTexGens( 0 );
 	GX_SetNumTevStages( 1 );
 	GX_SetTevOrder( GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0 );
@@ -8678,7 +8687,7 @@ void R_GXPropDrawHorizon( const float *org )
 	R_GXPropMapCheck();
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
-	if( gc_prop_state != 1 || !org )
+	if( gc_prop_state != 1 || !org || gEngfuncs.Sys_CheckParm( "-gcpropnohorizon" ))
 		return;
 	order = gc_prop_order;
 	key = gc_prop_key;
@@ -8820,7 +8829,7 @@ static void R_GXPropDraw( const float *org )
 	R_GXPropMapCheck();
 	if( gc_prop_state == 0 )
 		R_GXPropLoad();
-	if( gc_prop_state != 1 || !org )
+	if( gc_prop_state != 1 || !org || gEngfuncs.Sys_CheckParm( "-gcpropnonear" ))
 		return;
 	R_GXPropCellsUpdate( org );
 	R_GXBuildFrustum();
