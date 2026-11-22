@@ -6565,6 +6565,8 @@ static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
  * the tighter gate. */
 #define GC_PROP_CLOSE_COVER	0.15f
 #define GC_PROP_DRAW_TRIS	6000
+/* Triangles the horizon pass draws on a converted map (Lost Coast draws all). */
+#define GC_PROP_HORIZON_TRIS	16000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
 #define GC_PROP_TEX_SLOTS	16
 #define GC_PROP_TEX_BYTES	2048u
@@ -8448,7 +8450,7 @@ void R_GXPropDrawHorizon( const float *org )
 		gc_prop_glint_k.a = gEngfuncs.Sys_CheckParm( "-gcnorockglint" ) ? 0 : 255;
 	}
 	float *key;
-	int i, n = 0, ninst = 0, drawn = 0, a, b;
+	int i, n = 0, ninst = 0, drawn = 0, a, b, gap, cut = 0;
 	u16 tmp;
 	float ftmp;
 
@@ -8508,22 +8510,41 @@ void R_GXPropDrawHorizon( const float *org )
 		key[n] = R_GXPropD2( org, in->mins, in->maxs );
 		n++;
 	}
-	/* Far first so a nearer sheet of the same tower hides the one behind it. */
-	for( a = 1; a < n; a++ )
+	/* Nearest first (a shell sort: a converted map's forest puts 1900
+	 * instances past the reach, too many for an insertion sort a frame). */
+	for( gap = n / 2; gap > 0; gap = gap == 2 ? 1 : gap * 5 / 11 )
 	{
-		tmp = order[a];
-		ftmp = key[a];
-		b = a - 1;
-		while( b >= 0 && key[b] < ftmp )
+		for( a = gap; a < n; a++ )
 		{
-			order[b + 1] = order[b];
-			key[b + 1] = key[b];
-			b--;
+			tmp = order[a];
+			ftmp = key[a];
+			for( b = a; b >= gap && key[b - gap] > ftmp; b -= gap )
+			{
+				order[b] = order[b - gap];
+				key[b] = key[b - gap];
+			}
+			order[b] = tmp;
+			key[b] = ftmp;
 		}
-		order[b + 1] = tmp;
-		key[b + 1] = ftmp;
 	}
-	for( i = 0; i < n; i++ )
+	/* A converted map stops at a triangle budget, nearest kept: m6l1a's
+	 * 1910 horizon trees were 146600 triangles and 9 fps. */
+	if( gc_prop_map_owned )
+	{
+		int tris = 0;
+
+		for( a = 0; a < n; a++ )
+		{
+			tris += gc_prop_inst[order[a]].count;
+			if( tris > GC_PROP_HORIZON_TRIS )
+				break;
+		}
+		if( a < n )
+			cut += n - a;
+		n = a;
+	}
+	/* Far first so a nearer sheet of the same tower hides the one behind it. */
+	for( i = n - 1; i >= 0; i-- )
 	{
 		drawn += R_GXPropEmitReal( &gc_prop_inst[order[i]] );
 		ninst++;
@@ -8535,7 +8556,7 @@ void R_GXPropDrawHorizon( const float *org )
 		if( !logged )
 		{
 			logged = true;
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d\n", drawn, ninst );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: prop horizon tris=%d inst=%d past budget=%d\n", drawn, ninst, cut );
 		}
 	}
 }
