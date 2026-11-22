@@ -6566,7 +6566,7 @@ static float gc_prop_far_cover = GC_PROP_FAR_COVER_MAX;
 #define GC_PROP_CLOSE_COVER	0.15f
 #define GC_PROP_DRAW_TRIS	6000
 /* Triangles the horizon pass draws on a converted map (Lost Coast draws all). */
-#define GC_PROP_HORIZON_TRIS	16000
+#define GC_PROP_HORIZON_TRIS	8000
 #define GC_PROP_REACH2		( 4000.0f * 4000.0f )
 #define GC_PROP_TEX_SLOTS	16
 #define GC_PROP_TEX_BYTES	2048u
