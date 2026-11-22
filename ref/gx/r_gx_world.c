@@ -7435,13 +7435,18 @@ static int R_GXPropBindReal( u8 mat )
 	/* Only without the shared slot cache: its 96 KB went to far LODs. */
 	if( !gc_prop_texmem_tried && !R_GXPropsShareSlots() && GC_MapLoadBufferTailPeak() > 0 )
 	{
-		const u32 extra = (u32)( GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS ) * GC_PROP_TEX_BYTES;
+		int more = GC_PROP_TEX_SLOTS_MAX - GC_PROP_TEX_SLOTS;
 
+		/* 48 more slots want 96 KB. A converted map's arena often has no
+		 * gap that big after the prop tables (m1l1, m5l2b), so take what
+		 * fits, down to 8 more slots (16 KB), before staying at 16. */
 		gc_prop_texmem_tried = true;
-		gc_prop_texmem_extra = (byte *)GC_MapLoadBufferTailAlloc(
-			Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), extra );
+		for( ; more >= 8 && !gc_prop_texmem_extra; more /= 2 )
+			gc_prop_texmem_extra = (byte *)GC_MapLoadBufferTailAlloc(
+				Q_max( GC_MapLoadBufferTailHighwater(), GC_MapLoadBufferTailPeak()), (u32)more * GC_PROP_TEX_BYTES );
 		if( gc_prop_texmem_extra )
-			gc_prop_tex_nslots = GC_PROP_TEX_SLOTS_MAX;
+			gc_prop_tex_nslots = GC_PROP_TEX_SLOTS + more;
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop texture slots %d\n", gc_prop_tex_nslots );
 	}
 	for( s = 0; s < gc_prop_tex_nslots; s++ )
 	{
