@@ -34,6 +34,7 @@ HUD + lean sky + baked water + Flipper EFX + tip-safe world decals (≤8).
 Not feature-parity: full brush-mover lighting remains soft/diagnostic.
 */
 #include "r_local.h"
+#include "xash3d_mathlib.h"
 
 #if XASH_GAMECUBE
 /* libogc also exposes COLOR_WHITE with its packed YUV value. This GX unit
@@ -6693,6 +6694,16 @@ static struct { u16 inst, first, count, pad; } gc_prop_cells[GC_PROP_MAX_CELLS] 
 static u8 gc_prop_cell_far[GC_PROP_MAX_CELLS];
 static u16 gc_prop_cellof_fixed[GC_PROP_MAX_INST];
 static u16 *gc_prop_cellof = gc_prop_cellof_fixed;	/* per instance: its cell, GC_PROP_CELL_SELF | cell, or none */
+/* Per instance: the smallest BSP node (or leaf, GC_PROP_VIS_LEAF | index)
+ * holding its box, GC_PROP_VIS_ALL when unknown. R_MarkLeaves stamps a
+ * node when any leaf under it is in the PVS, so an unstamped node means
+ * nothing of the prop can be seen. */
+#define GC_PROP_VIS_ALL		0xffffu
+#define GC_PROP_VIS_LEAF	0x8000u
+static u16 gc_prop_visnode_fixed[GC_PROP_MAX_INST];
+static u16 *gc_prop_visnode = gc_prop_visnode_fixed;
+static const model_t *gc_prop_vis_world;	/* the world the nodes were found in, NULL = not yet */
+static qboolean gc_prop_pvs_live;	/* this frame's leaves were marked from the PVS */
 static float gc_prop_scale_of[256];
 /* A cell switches to its members inside this distance (nearest point of its box). */
 #define GC_PROP_CELL_NEAR	2400.0f
@@ -6720,6 +6731,8 @@ static void R_GXPropTablesReset( void )
 	gc_prop_order = gc_prop_order_fixed;
 	gc_prop_key = gc_prop_key_fixed;
 	gc_prop_cellof = gc_prop_cellof_fixed;
+	gc_prop_visnode = gc_prop_visnode_fixed;
+	gc_prop_vis_world = NULL;
 	gc_prop_ncells = 0;
 	gc_prop_v9 = false;
 }
@@ -6731,7 +6744,7 @@ static qboolean R_GXPropTablesGrow( u32 ninst )
 	const u32 inst_bytes = ninst * (u32)sizeof( gc_prop_inst_t );
 	const u32 light_bytes = ( ninst * 12u + 31u ) & ~31u;
 	const u32 order_bytes = ( ninst * 2u + 31u ) & ~31u;
-	const u32 need = inst_bytes + light_bytes + 2u * order_bytes + ninst * 4u;
+	const u32 need = inst_bytes + light_bytes + 3u * order_bytes + ninst * 4u;
 	const char *where = "map arena";
 	byte *p = NULL;
 
@@ -6754,6 +6767,7 @@ static qboolean R_GXPropTablesGrow( u32 ninst )
 	gc_prop_order = (u16 *)( p + inst_bytes + light_bytes );
 	gc_prop_key = (float *)( p + inst_bytes + light_bytes + order_bytes );
 	gc_prop_cellof = (u16 *)( p + inst_bytes + light_bytes + order_bytes + ninst * 4u );
+	gc_prop_visnode = (u16 *)( p + inst_bytes + light_bytes + 2u * order_bytes + ninst * 4u );
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: prop tables %u instances in the %s (%u bytes)\n", ninst, where, need );
 	return true;
 }
@@ -8509,6 +8523,71 @@ static void R_GXCanisterFlightDraw( const float *org )
 static float gc_prop_far2;	/* this pass: the far plane squared, 0 = none */
 
 /* Once per prop pass: which cells are far, and the far plane. */
+/* The smallest node or leaf whose space holds the box (R_FindTopnode
+ * without the visibility test). */
+static u16 R_GXPropVisNode( const model_t *w, const gc_prop_inst_t *in )
+{
+	vec3_t mins, maxs;
+	mnode_t *node = w->nodes;
+	int depth = 0;
+
+	VectorSet( mins, in->mins[0] - 1.0f, in->mins[1] - 1.0f, in->mins[2] - 1.0f );
+	VectorSet( maxs, in->maxs[0] + 1.0f, in->maxs[1] + 1.0f, in->maxs[2] + 1.0f );
+	while( node && depth++ < 256 )
+	{
+		mnode_t *next;
+		int sides;
+
+		if( node->contents < 0 )
+		{
+			const int li = (int)((mleaf_t *)node - w->leafs );
+
+			/* a box wholly in solid: keep it drawn rather than guess */
+			if( node->contents == CONTENTS_SOLID || li <= 0 || li > 0x7fff )
+				return GC_PROP_VIS_ALL;
+			return (u16)( GC_PROP_VIS_LEAF | li );
+		}
+		sides = BOX_ON_PLANE_SIDE( mins, maxs, node->plane );
+		if( sides == 3 )
+		{
+			const int ni = (int)( node - w->nodes );
+
+			return ni >= 0 && ni < 0x7fff ? (u16)ni : GC_PROP_VIS_ALL;
+		}
+		next = node_child( node, ( sides & 1 ) ? 0 : 1, w );
+		if( !next )
+			break;
+		node = next;
+	}
+	return GC_PROP_VIS_ALL;
+}
+
+/* Converted maps carry full VIS: props in leaves out of the PVS are not
+ * drawn. Only when this frame's leaves really were marked from the PVS. */
+static void R_GXPropVisUpdate( void )
+{
+	const model_t *w = WORLDMODEL;
+	u32 i, culled = 0;
+
+	gc_prop_pvs_live = false;
+	if( !gc_prop_map_owned || !w || !w->nodes || !w->leafs || !w->visdata || !RI.viewleaf
+		|| gEngfuncs.Sys_CheckParm( "-gcnoproppvs" ))
+		return;
+	if( gc_prop_vis_world != w )
+	{
+		gc_prop_vis_world = w;
+		for( i = 0; i < gc_prop_ninst; i++ )
+		{
+			gc_prop_visnode[i] = R_GXPropVisNode( w, &gc_prop_inst[i] );
+			if( gc_prop_visnode[i] != GC_PROP_VIS_ALL )
+				culled++;
+		}
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: prop PVS %u of %u instances placed in the BSP\n",
+			culled, (unsigned)gc_prop_ninst );
+	}
+	gc_prop_pvs_live = ((mnode_t *)RI.viewleaf )->visframe == tr.visframecount;
+}
+
 static void R_GXPropCellsUpdate( const float *eye )
 {
 	const float fp = gc_prop_map_owned ? R_GXMapFarplane() : 0.0f;
@@ -8516,6 +8595,7 @@ static void R_GXPropCellsUpdate( const float *eye )
 
 	gc_prop_far2 = fp > 0.0f ? fp * fp : 0.0f;
 	gc_prop_bound_mat = -1;
+	R_GXPropVisUpdate();
 	for( c = 0; c < gc_prop_ncells; c++ )
 	{
 		const gc_prop_inst_t *ci = &gc_prop_inst[gc_prop_cells[c].inst];
@@ -8532,6 +8612,16 @@ static qboolean R_GXPropShown( int i, float d2 )
 
 	if( gc_prop_far2 > 0.0f && d2 > gc_prop_far2 )
 		return false;
+	if( gc_prop_pvs_live && gc_prop_visnode[i] != GC_PROP_VIS_ALL )
+	{
+		const model_t *w = gc_prop_vis_world;
+		const u16 v = gc_prop_visnode[i];
+		const mnode_t *n = ( v & GC_PROP_VIS_LEAF )
+			? (const mnode_t *)&w->leafs[v & 0x7fffu] : &w->nodes[v];
+
+		if( n->visframe != tr.visframecount )
+			return false;
+	}
 	if( !gc_prop_ncells )
 		return true;
 	c = gc_prop_cellof[i];
