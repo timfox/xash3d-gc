@@ -27,6 +27,10 @@ from pathlib import Path
 PROP_CLASSES = ("env_model", "dod_object")
 GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 7
+# Piece header byte 1: the piece's vertices carry baked light (13 bytes:
+# position, RGB8, s, t) instead of a normal. The light is MOHAA's own, one
+# overbright bit down; the engine doubles it.
+GC_PR_PIECE_LIT = 1
 GC_PR_VERSION_CELLS = 9	# v7, plus far cells (hdr word 2 low half: cell count) and a per-instance scale (model word high byte)
 GC_PR_VERSION_VIS = 10	# v9, plus a u16 per instance after the cells: its PVS cluster (leaf - 1), 0xffff = always drawn
 GC_PR_VIS_ALL = 0xFFFF
@@ -673,10 +677,13 @@ def _clamp16(v: float) -> int:
 	return int(max(-32767, min(32767, round(v))))
 
 
-def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
+def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray, lit: bool = False):
 	"""Append a model's piece chain: per material, GX draw commands (strips
 	and fans as the model stores them) of 11-byte vertices. Returns
-	(offset, bytes of the first piece, triangles) or None."""
+	(offset, bytes of the first piece, triangles) or None. lit: the vertices
+	are (pos, normal, s, t, rgb) with the light baked in (a MOHAA world mesh);
+	they are written as 13-byte position, RGB8 light, s, t and the pieces
+	flagged GC_PR_PIECE_LIT, which the engine draws with that light x 2."""
 	pieces = []
 	for mid in sorted(cmds_by_mat):
 		body, nv, nt = bytearray(), 0, 0
@@ -703,7 +710,17 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 					k += GC_PR_CMD_VERTS - 2
 			for run in runs:
 				cb = bytearray(struct.pack(">BH", 0x80 if fan == 2 else 0xA0 if fan else 0x98, len(run)))
-				for pos, nrm, s, t in run:
+				for vert in run:
+					pos, nrm, s, t = vert[:4]
+					if lit:
+						rgb = vert[4]
+						cb += struct.pack(
+							">hhh3Bhh",
+							_clamp16(pos[0] * q), _clamp16(pos[1] * q), _clamp16(pos[2] * q),
+							*rgb,
+							_clamp16((s - su) * 256.0), _clamp16((t - sv) * 256.0),
+						)
+						continue
 					cb += struct.pack(
 						">hhhBhh",
 						_clamp16(pos[0] * q), _clamp16(pos[1] * q), _clamp16(pos[2] * q),
@@ -726,7 +743,8 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 	ofs, total = len(blob), 0
 	for n, (mid, nverts, body, ntris) in enumerate(pieces):
 		nxt = (32 + len(pieces[n + 1][2])) if n + 1 < len(pieces) else 0
-		blob += struct.pack(">BBHIIH", mid, 0, min(65535, nverts), len(body), nxt, min(65535, ntris)) + b"\0" * 18
+		blob += struct.pack(">BBHIIH", mid, GC_PR_PIECE_LIT if lit else 0, min(65535, nverts), len(body), nxt,
+			min(65535, ntris)) + b"\0" * 18
 		blob += body
 		total += ntris
 	return ofs, 32 + len(pieces[0][2]), total
@@ -1014,6 +1032,7 @@ MPROP_MAGIC = b"MPRP"
 # A prop's scale is baked into its model (an instance has no scale), so
 # instances share a model per 5 % step of scale.
 MPROP_SCALE_STEP = 1.05
+MPROP_MODEL_LIT = 1	# mohaa-gc props_models.MODEL_LIT: v3 vertices carry RGBA light after the 8 floats
 MPROP_WORLD_PREFIX = "*world/"	# mohaa-gc props_models.WORLD_PREFIX: a world mesh (terrain) in map units
 
 
@@ -1021,8 +1040,8 @@ def read_mprop(data: bytes) -> dict:
 	"""{"textures": [{name, w, h, flags, palette (RGB 768), pixels}], "models": [{name, mins, maxs,
 	surfaces: [(texture, verts [(pos, normal, s, t)], tris)]}], "instances": [(model, origin, angles, scale)]}."""
 	magic, ver, ntex, nmod, ninst = struct.unpack_from("<4s4i", data, 0)
-	if magic != MPROP_MAGIC or ver != 2:
-		raise ValueError(f"not an MPRP v2 pack (got {magic!r} v{ver})")
+	if magic != MPROP_MAGIC or ver not in (2, 3):
+		raise ValueError(f"not an MPRP v2/v3 pack (got {magic!r} v{ver})")
 	at = 20
 	textures, models, instances = [], [], []
 	for _ in range(ntex):
@@ -1037,20 +1056,26 @@ def read_mprop(data: bytes) -> dict:
 	for _ in range(nmod):
 		name = data[at:at + 64].split(b"\0", 1)[0].decode("latin-1")
 		vals = struct.unpack_from("<6fi", data, at + 64)
-		at += 64 + 28
+		flags = struct.unpack_from("<i", data, at + 92)[0] if ver >= 3 else 0
+		at += 64 + (32 if ver >= 3 else 28)
+		lit = bool(flags & MPROP_MODEL_LIT)
+		vsz = 36 if lit else 32
 		surfs = []
 		for _ in range(vals[6]):
 			ti, nv, nt = struct.unpack_from("<3i", data, at)
 			at += 12
 			verts = []
 			for k in range(nv):
-				x, y, z, nx, ny, nz, s_, t_ = struct.unpack_from("<8f", data, at + 32 * k)
-				verts.append(((x, y, z), (nx, ny, nz), s_, t_))
-			at += 32 * nv
+				x, y, z, nx, ny, nz, s_, t_ = struct.unpack_from("<8f", data, at + vsz * k)
+				if lit:
+					verts.append(((x, y, z), (nx, ny, nz), s_, t_, struct.unpack_from("<3B", data, at + vsz * k + 32)))
+				else:
+					verts.append(((x, y, z), (nx, ny, nz), s_, t_))
+			at += vsz * nv
 			tris = [struct.unpack_from("<3H", data, at + 6 * k) for k in range(nt)]
 			at += 6 * nt
 			surfs.append((ti, verts, tris))
-		models.append({"name": name, "mins": vals[0:3], "maxs": vals[3:6], "surfaces": surfs})
+		models.append({"name": name, "mins": vals[0:3], "maxs": vals[3:6], "surfaces": surfs, "lit": lit})
 	for _ in range(ninst):
 		mi, *f = struct.unpack_from("<i7f", data, at)
 		instances.append((mi, tuple(f[0:3]), tuple(f[3:6]), f[6]))
@@ -1273,6 +1298,7 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 	model_tris, model_quads = [], []	# per baked model: its triangles (pos, normal, s, t) x 3 + material; its impostor quads or None
 	piece_blob, far_blob = bytearray(), bytearray()
 	impostors = 0
+	model_lit = set()	# baked models whose pieces carry their own light: never merged into a cell
 
 	def model_index(mi: int) -> int | None:
 		"""The baked model of an .mprop model, at its own size: v9 scales each instance at draw time."""
@@ -1287,15 +1313,16 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 		by_mat, ext = {}, 1.0
 		lo, hi = [1e30] * 3, [-1e30] * 3
 		render, tris_out = [], []
+		lit = bool(pack["models"][mi].get("lit"))
 		for ti, verts, tris in pack["models"][mi]["surfaces"]:
 			mid = material(ti)
 			runs = by_mat.setdefault(mid, [])
 			for tri in tris:
 				vs = []
 				for k in tri:
-					pos, nrm, s_, t_ = verts[k]
+					pos, nrm, s_, t_ = verts[k][:4]
 					p = (pos[0] * q_scale, pos[1] * q_scale, pos[2] * q_scale)
-					vs.append((p, nrm, s_, t_))
+					vs.append((p, nrm, s_, t_) + ((verts[k][4],) if lit else ()))
 					for a in range(3):
 						lo[a] = min(lo[a], p[a])
 						hi[a] = max(hi[a], p[a])
@@ -1308,10 +1335,12 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 		frac = 0
 		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
 			frac += 1
-		got = emit_pieces({k: v for k, v in by_mat.items() if v}, float(1 << frac), piece_blob)
+		got = emit_pieces({k: v for k, v in by_mat.items() if v}, float(1 << frac), piece_blob, lit)
 		if got is None:
 			return None
 		rec = (got[0], got[1], got[2], frac)
+		if lit:
+			model_lit.add(len(model_recs))
 		quads = None
 		# Far away the model is two crossed cut-out quads showing it from the front and the side.
 		world = pack["models"][mi]["name"].startswith(MPROP_WORLD_PREFIX)	# terrain: drawn whole, never a cut-out
@@ -1366,8 +1395,8 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 	# draws a cell's chain while the cell is far and its members one by one while it is near.
 	cells_out, order = [], list(range(len(placed)))
 	if cells:
-		members = [(k, p[1]) for k, p in enumerate(placed)
-			if model_quads[p[0]] is not None or model_recs[p[0]][2] <= CELL_FULL_TRIS]
+		members = [(k, p[1]) for k, p in enumerate(placed) if p[0] not in model_lit
+			and (model_quads[p[0]] is not None or model_recs[p[0]][2] <= CELL_FULL_TRIS)]
 		grid, side = plan_cells(members, max(0, GC_PR_MAX_MODELS - len(model_recs)))
 		in_cell = {k for ks in grid.values() for k in ks}
 		starts = [_floats(e.get("origin", "0 0 0"), 3) for e in ents if e.get("classname", "").startswith("info_player")]
@@ -1464,10 +1493,11 @@ def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bs
 		"impostors": impostors, "cells": len(cells_out), "cell_members": sum(c[2] for c in cells_out),
 		"far_bytes": len(far_blob),
 		"vis_placed": sum(v != GC_PR_VIS_ALL for v in vis) if vis else 0,
+		"lit_models": len(model_lit),
 	}
 	log(f"  props: {out_gcp.name} instances={n_inst} models={len(model_recs)} tris={stats['model_tris']} "
 		f"(placed {placed_tris}) chains={len(piece_blob)} B far={len(far_blob)} B impostors={impostors} "
-		f"cells={len(cells_out)} ({stats['cell_members']} members) pvs={stats['vis_placed']}, {out_gct.name} materials={len(chains)} {len(blob)} B")
+		f"cells={len(cells_out)} ({stats['cell_members']} members) pvs={stats['vis_placed']} lit={len(model_lit)}, {out_gct.name} materials={len(chains)} {len(blob)} B")
 	return stats
 
 

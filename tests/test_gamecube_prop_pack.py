@@ -415,6 +415,23 @@ def make_mprop(instances, ntex=1):
 	return bytes(out)
 
 
+def make_lit_world_mprop(n_small=6):
+	"""An MPRP v3 pack: a lit world mesh (a quad, light (10, 20, 30) and (200, 100, 50) per
+	vertex) and n_small instances of it close together, which would form a far cell if unlit."""
+	out = bytearray(b"MPRP" + struct.pack("<4i", 3, 1, 1, n_small))
+	pal = b"".join(bytes((i, i, i, 255)) for i in range(256))
+	out += b"textures/terrain/grass.tga".ljust(32, b"\0") + struct.pack("<2HI", 8, 8, 0) + pal + bytes(range(64))
+	out += b"*world/mesh_0_0".ljust(64, b"\0") + struct.pack("<6f2i", 0, 0, 0, 32, 32, 0, 1, 1)
+	out += struct.pack("<3i", 0, 4, 2)
+	for k, (x, y) in enumerate(((0, 0), (32, 0), (32, 32), (0, 32))):
+		rgb = (10, 20, 30) if k == 0 else (200, 100, 50)
+		out += struct.pack("<8f4B", x, y, 0, 0, 0, 1, x / 32, y / 32, *rgb, 255)
+	out += struct.pack("<6H", 0, 1, 2, 0, 2, 3)
+	for i in range(n_small):
+		out += struct.pack("<i7f", 0, i * 40.0, 0, 0, 0, 0, 0, 1.0)
+	return bytes(out)
+
+
 def make_tree_mprop(instances, name=b"static/pine.tik"):
 	"""An MPRP v2 pack with one masked 8x8 texture and a 48-triangle cone 40 wide and 100 high."""
 	out = bytearray(b"MPRP" + struct.pack("<4i", 2, 1, 1, len(instances)))
@@ -485,6 +502,23 @@ class MohaaPropPackTests(unittest.TestCase):
 		stats, _gcp, _gct, _logs = self.bake(None, make_tree_mprop([(0, (0, 0, 0), (0, 0, 0), 1.0)],
 			b"*world/terrain_0_0"), cells=True)
 		self.assertEqual((stats["impostors"], stats["cells"], stats["materials"]), (0, 0, 1))
+
+	def test_a_lit_world_mesh_keeps_its_light_in_13_byte_vertices(self):
+		pack = self.baker.read_mprop(make_lit_world_mprop())
+		self.assertTrue(pack["models"][0]["lit"])
+		self.assertEqual(pack["models"][0]["surfaces"][0][1][0][4], (10, 20, 30))
+		stats, gcp, _gct, logs = self.bake(None, make_lit_world_mprop(), cells=True)
+		self.assertEqual((stats["lit_models"], stats["cells"]), (1, 0))	# never merged into a cell
+		hdr = struct.unpack_from(">8I", gcp, 0)
+		models_ofs, dl_base = hdr[4], hdr[5]
+		dl_ofs, first, tris = struct.unpack_from(">IIH", gcp, models_ofs)
+		piece = gcp[dl_base + dl_ofs:dl_base + dl_ofs + first]
+		mid, flag, nverts, body = struct.unpack_from(">BBHI", piece, 0)
+		self.assertEqual((flag, nverts, tris), (self.baker.GC_PR_PIECE_LIT, 6, 2))
+		self.assertEqual(body, ((2 * (3 + 3 * 13)) + 31) & ~31)	# two 3-vertex commands of 13 bytes, padded
+		self.assertEqual(piece[32], 0x98)
+		self.assertEqual(tuple(piece[32 + 3 + 6:32 + 3 + 9]), (10, 20, 30))	# the first vertex's light
+		self.assertIn("lit=1", logs[-1])
 
 	def test_far_trees_are_baked_into_cells(self):
 		trees = [(0, (x * 256.0, y * 256.0, 0), (0, x * 37 % 360, 0), 1.0) for x in range(8) for y in range(8)]
