@@ -43,8 +43,10 @@ LM_PAGES_MAX = 1024
 # dod_caen alone has more than 2000 lit leaves.  4096 CMPR pages are the bytes of the 1024 RGB565 pages before
 # (2 MB of the ARAM stream at most), and the runtime's page hint (GC_WD_LM_HINT) is exact to 4096.
 LM_PAGES_MAX_CMPR = 4096
-# A crowded leaf takes up to this many pages; a batch names its page in the low bits of its pad word.
-LM_CHUNK_PAGES = 4
+# A crowded leaf takes up to this many pages; a batch names its page in the low bits of its pad word
+# (3 bits: r_gx_worlddl.c reads pad & 7). Four pages hold at most 252 CMPR cells, and converted MOHAA
+# leaves have more lit faces than that (m5l2b: 2817 faces flat grey); eight hold 504.
+LM_CHUNK_PAGES = 8
 WD_FLAG_LM_MULTI = 0x0040
 # Lightmap pages are 32x32 CMPR (512 bytes) instead of RGB565 (2048): four times the pages resident in the same memory.
 WD_FLAG_LM_CMPR = 0x0080
@@ -302,7 +304,20 @@ def lm_pack_pages(dims, npages: int, align: int = 1):
 		cells = lm_shelf_pages(sizes, npages, align)
 		if cells:
 			return cells
-	return [None] * len(dims)
+	# More faces than the pages have cells even at one luxel: the largest faces keep a luxel and only the
+	# rest go flat grey (before, every face of the chunk did).
+	lo, hi = 0, len(dims)	# lo faces fit, hi do not
+	while hi - lo > 1:
+		mid = (lo + hi) // 2
+		if lm_shelf_pages([(1, 1)] * mid, npages, align):
+			lo = mid
+		else:
+			hi = mid
+	out = [None] * len(dims)
+	cells = lm_shelf_pages([(1, 1)] * lo, npages, align) if lo else None
+	for i, cell in zip(by_area[:lo], cells or ()):
+		out[i] = cell
+	return out
 
 
 LM_SHARE_SPAN = 8	# a chunk's pages are its first page plus the 3-bit page number of a batch

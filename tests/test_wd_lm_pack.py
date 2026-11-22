@@ -43,9 +43,11 @@ class LmPackTest(unittest.TestCase):
 		rects = self.check([(3, 3)] * 400)
 		self.assertTrue(all(rects))
 
-	def test_overfull_page_reports_none(self):
+	def test_overfull_page_fills_every_cell_and_reports_the_rest_none(self):
 		rects = self.check([(2, 2)] * 1100)
-		self.assertTrue(all(r is None for r in rects))
+		kept = sum(r is not None for r in rects)
+		self.assertTrue(900 < kept <= 32 * 32 - 4)	# one luxel each, not all flat grey
+		self.assertTrue(any(r is None for r in rects))
 
 	def check_pages(self, dims, npages):
 		cells = bake.lm_pack_pages(dims, npages)
@@ -160,6 +162,16 @@ class LmGrantTest(unittest.TestCase):
 		self.assertFalse(all(bake.lm_pack_pages(dims, 1, 4)))
 		self.assertTrue(all(bake.lm_pack_pages(dims, 2, 4)))
 		self.assertGreaterEqual(bake.lm_pages_needed(dims, 4), 2)
+
+
+	def test_a_leaf_past_its_pages_keeps_a_luxel_for_its_largest_faces(self):
+		dims = [(2 + i % 7, 2 + i % 5) for i in range(600)]	# more than 8 CMPR pages of one-luxel cells
+		self.assertEqual(bake.LM_CHUNK_PAGES, 8)
+		cells = bake.lm_pack_pages(dims, bake.LM_CHUNK_PAGES, 4)
+		kept = [i for i, c in enumerate(cells) if c]
+		self.assertEqual(len(kept), 8 * 63)	# every cell of eight pages used, not all flat grey
+		areas = sorted((dims[i][0] * dims[i][1] for i in range(600)), reverse=True)
+		self.assertGreaterEqual(min(dims[i][0] * dims[i][1] for i in kept), areas[len(kept) - 1])
 
 
 class LmSharedPackerTest(unittest.TestCase):
