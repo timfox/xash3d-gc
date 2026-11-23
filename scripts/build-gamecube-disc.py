@@ -4147,6 +4147,7 @@ def stage_smoke_data(
 	saveinterrupt: bool = False,
 	video_mode: str | None = None,
 	world_render: bool = False,
+	world_dl: bool = True,
 	phasetest: str | None = None,
 	changelevel: str | None = None,
 	landmark: str | None = None,
@@ -4330,7 +4331,10 @@ def stage_smoke_data(
 	# Full BSP PVS cluster display lists (preferred world path over CapFaces).
 	media_out = output / "media"
 	media_out.mkdir(parents=True, exist_ok=True)
-	for stem in sorted(pack_stems):
+	world_dl_stems = sorted(pack_stems) if world_dl else []
+	if not world_dl:
+		print("  world DL: skipped by smoke profile (CapFaces/live BSP fallback)")
+	for stem in world_dl_stems:
 		name = f"wd_{stem}.gcd"
 		dest = media_out / name
 		src = None
@@ -4805,6 +4809,11 @@ def main() -> None:
 		help="enable gcmap world render probe via gamecube.cfg gcworldrender override",
 	)
 	parser.add_argument(
+		"--smoke-worlddl",
+		action="store_true",
+		help="bake and stage full WorldDL for a MOHAA smoke map (MOHAA defaults to live BSP)",
+	)
+	parser.add_argument(
 		"--intro-avi",
 		action="store_true",
 		help="stage boot essentials and original user-provided startup AVI files for local intro testing",
@@ -5027,6 +5036,7 @@ def main() -> None:
 				saveinterrupt=args.probe_saveinterrupt,
 				video_mode=args.probe_video_mode,
 				world_render=args.world_render,
+				world_dl=(primary_gamedir != "mohaa" or args.smoke_worlddl),
 				phasetest=args.probe_phasetest,
 				changelevel=args.probe_changelevel,
 				landmark=args.probe_landmark,
