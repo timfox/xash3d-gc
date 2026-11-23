@@ -4809,9 +4809,9 @@ def main() -> None:
 		help="enable gcmap world render probe via gamecube.cfg gcworldrender override",
 	)
 	parser.add_argument(
-		"--smoke-worlddl",
+		"--skip-smoke-worlddl",
 		action="store_true",
-		help="bake and stage full WorldDL for a MOHAA smoke map (MOHAA defaults to live BSP)",
+		help="skip full WorldDL for a smoke map and use the live-BSP diagnostic fallback",
 	)
 	parser.add_argument(
 		"--intro-avi",
@@ -5036,7 +5036,7 @@ def main() -> None:
 				saveinterrupt=args.probe_saveinterrupt,
 				video_mode=args.probe_video_mode,
 				world_render=args.world_render,
-				world_dl=(primary_gamedir != "mohaa" or args.smoke_worlddl),
+				world_dl=not args.skip_smoke_worlddl,
 				phasetest=args.probe_phasetest,
 				changelevel=args.probe_changelevel,
 				landmark=args.probe_landmark,
