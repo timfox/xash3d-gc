@@ -3554,6 +3554,7 @@ def write_smoke_overrides(
 	fullphysics: bool = False,
 	tas: str | None = None,
 	dumpframes: bool = False,
+	gcvst: bool = False,
 ) -> None:
 	(output / "valve.rc").write_text("stuffcmds\n", encoding="ascii")
 	(output / "config.cfg").write_text("\n", encoding="ascii")
@@ -3585,6 +3586,8 @@ def write_smoke_overrides(
 		lines.append("leanpvs")
 	if fullphysics:
 		lines.append("fullphysics")
+	if gcvst:
+		lines.append("gcvst")
 	if tas:
 		lines.append(f"tas {tas}")
 	if dumpframes:
@@ -4148,6 +4151,7 @@ def stage_smoke_data(
 	video_mode: str | None = None,
 	world_render: bool = False,
 	world_dl: bool = True,
+	gcvst: bool = False,
 	phasetest: str | None = None,
 	changelevel: str | None = None,
 	landmark: str | None = None,
@@ -4219,6 +4223,7 @@ def stage_smoke_data(
 		saveinterrupt=saveinterrupt,
 		video_mode=video_mode,
 		world_render=world_render,
+		gcvst=gcvst,
 		phasetest=phasetest,
 		changelevel=changelevel,
 		landmark=landmark,
@@ -4814,6 +4819,11 @@ def main() -> None:
 		help="skip full WorldDL for a smoke map and use the live-BSP diagnostic fallback",
 	)
 	parser.add_argument(
+		"--probe-gcvst",
+		action="store_true",
+		help="enable GameCube GX stage timing for a world-render smoke map",
+	)
+	parser.add_argument(
 		"--intro-avi",
 		action="store_true",
 		help="stage boot essentials and original user-provided startup AVI files for local intro testing",
@@ -4957,6 +4967,8 @@ def main() -> None:
 			)
 	if args.world_render and not (args.smoke_map or args.play or listen_boot):
 		parser.error("--world-render requires --smoke-map, --play, or a listen/connect boot config")
+	if args.probe_gcvst and not (args.smoke_map and args.world_render):
+		parser.error("--probe-gcvst requires --smoke-map and --world-render")
 	if args.probe_phasetest:
 		phase = args.probe_phasetest.strip().lower()
 		valid = {"early", "engine", "renderer", "sw_fb", "menu", "client", "intro", "map"}
@@ -5037,6 +5049,7 @@ def main() -> None:
 				video_mode=args.probe_video_mode,
 				world_render=args.world_render,
 				world_dl=not args.skip_smoke_worlddl,
+				gcvst=args.probe_gcvst,
 				phasetest=args.probe_phasetest,
 				changelevel=args.probe_changelevel,
 				landmark=args.probe_landmark,
