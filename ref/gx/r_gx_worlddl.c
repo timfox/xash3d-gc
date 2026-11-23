@@ -262,6 +262,8 @@ static const float gc_tev_emboss_ds = -0.7206f * GC_TEV_EMBOSS_EPS;
 static const float gc_tev_emboss_dt = -0.6716f * GC_TEV_EMBOSS_EPS;
 static byte *gc_wd_force;
 static u32 gc_wd_force_size;
+static u32 gc_wd_force_count, gc_wd_force_at;
+static u32 gc_wd_force_fences;
 static int gc_wd_tev_gens = 1;
 /* Lightmap pages: copied once from ARAM, kept at full 32×32. TEXMAP2. */
 static byte gc_wd_lm_bss[GC_WD_LM_SLOTS * GC_WD_LM_PAGE_BYTES] __attribute__(( aligned( 32 )));
@@ -1127,6 +1129,7 @@ static void R_GXWorldDLUnload( void )
 	}
 	gc_wd_force = NULL;
 	gc_wd_force_size = 0;
+	gc_wd_force_count = gc_wd_force_at = 0;
 	gc_wd_slots = NULL;
 	gc_wd_texnum = NULL;
 	gc_wd_pvs = NULL;
@@ -1984,11 +1987,17 @@ static void R_GXWorldDLLoad( const char *mapbase )
 
 		gc_wd_force = NULL;
 		gc_wd_force_size = 0;
+		gc_wd_force_count = gc_wd_force_at = 0;
 		if( tail >= 4096u && gc_wd_cache_size > tail + 96u * 1024u )
 		{
-			gc_wd_cache_size -= tail;
+			u32 count = ( gc_wd_cache_size - 96u * 1024u ) / tail;
+
+			if( count > 3 )
+				count = 3;
+			gc_wd_cache_size -= count * tail;
 			gc_wd_force = gc_wd_cache + gc_wd_cache_size;
 			gc_wd_force_size = tail;
+			gc_wd_force_count = count;
 		}
 		/* -gccapture: a 96 KiB cache holds the near ground of a wide shot
 		 * and nothing else. dod_charlie from the beach had ~1600 of 1830
@@ -2015,10 +2024,14 @@ static void R_GXWorldDLLoad( const char *mapbase )
 			{
 				gc_wd_force = gc_wd_force_heap;
 				gc_wd_force_size = tail;
+				gc_wd_force_count = 1;
 			}
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: capture world DL overflow bounce %u KiB %s\n",
 				tail / 1024u, gc_wd_force_heap ? "from the heap" : "not allocated (heap low): far chunks will not draw" );
 		}
+		if( gc_wd_force_count > 0 )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: world DL forced-chunk ring slots=%u size=%u KiB\n",
+				gc_wd_force_count, tail / 1024u );
 	}
 	GC_HeapCheck( "world DL before mat pack" );
 	R_GXMatPackLoad();
@@ -2758,17 +2771,26 @@ static byte *R_GXWorldDLResident( u32 i, u32 *budget )
 }
 
 /* Cache miss. The chunk is inside the frustum, so draw it from the tail
- * bounce instead of skipping it. Caller retires the GP before reuse. */
+ * bounce instead of skipping it. A small ring lets the GP consume several
+ * forced lists before the CPU fences and reuses their storage. */
 static byte *R_GXWorldDLForce( u32 i )
 {
 	const u32 bytes = gc_wd_chunk_bytes[i];
+	byte *dst;
 
-	if( !gc_wd_force || bytes == 0 || bytes > gc_wd_force_size )
+	if( !gc_wd_force || !gc_wd_force_count || bytes == 0 || bytes > gc_wd_force_size )
 		return NULL;
-	GX_DrawDone();
-	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_chunks + gc_wd_chunk_ofs[i], gc_wd_force, bytes ))
+	if( gc_wd_force_at >= gc_wd_force_count )
+	{
+		GX_DrawDone();
+		if( gc_wd_pf_on > 0 )
+			gc_wd_force_fences++;
+		gc_wd_force_at = 0;
+	}
+	dst = gc_wd_force + gc_wd_force_at++ * gc_wd_force_size;
+	if( !R_GXWorldDLFetch( gc_wd_hdr.ofs_chunks + gc_wd_chunk_ofs[i], dst, bytes ))
 		return NULL;
-	return gc_wd_force;
+	return dst;
 }
 
 static void R_GXWorldDLFrustum( vec3_t normals[4] )
@@ -4221,7 +4243,10 @@ int R_GXWorldDLDraw( void )
 	/* Retire last frame's display lists before this frame fills the FIFO.
 	 * Without it the second present waits forever on the GP. */
 	if( gc_wd_frame > 0 )
+	{
 		GX_DrawDone();
+		gc_wd_force_at = 0;
+	}
 	gc_wd_frame++;
 	R_GXWorldDLLmRateTick();
 	if( gc_wd_file && ( gc_wd_frame & 127 ) == 0 )
@@ -4750,10 +4775,7 @@ int R_GXWorldDLDraw( void )
 			if( want_tower )
 				tower_chunks++;
 			if( forced )
-			{
 				forced_n++;
-				GX_DrawDone();
-			}
 		}
 		}
 		{
@@ -4813,6 +4835,9 @@ int R_GXWorldDLDraw( void )
 			gc_wd_lm_heap ? " (heap)" : gc_wd_lm_in_arena ? " (map arena)" : " (BSS)", gc_wd_lm_ext_n,
 			(unsigned)( GC_MemHeapFreeBytes() / 1024u ), GC_MemPressureTight() ? " tight" : "" );
 		gc_wd_pf_lm_refused = gc_wd_lm_refused;
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: forced-chunk fences/frame=%.1f\n",
+			(float)gc_wd_force_fences / 120.0f );
+		gc_wd_force_fences = 0;
 		gEngfuncs.Con_Reportf( "Xash3D GameCube: worlddl2 ms/call pre=%.1f select+sky=%.1f chunks=%.1f envflush=%.1f lm_miss/call=%.1f\n",
 			(float)ticks_to_microsecs( gc_wd_pf[9] ) * k,
 			(float)ticks_to_microsecs( gc_wd_pf[6] ) * k,
