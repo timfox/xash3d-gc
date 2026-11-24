@@ -1828,6 +1828,7 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 	{
 		edict_t *ent = SV_EdictNum( i );
 		const char *classname;
+		qboolean mohaa_locked_door;
 		vec3_t center, delta;
 		float dist;
 
@@ -1835,6 +1836,14 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 			continue;
 		classname = SV_ClassName( ent );
 		if( !SV_IsNewGameInteractClass( classname ))
+			continue;
+		/* Retail MOHAA doors use trigger_use brushes named door_locked. Let USE
+		 * reach only that explicit gameplay target; all other post-changelevel
+		 * world interactions retain the c0a0-only safety gate below. */
+		mohaa_locked_door = !Q_stricmp( sv.name, "m1l2a" )
+			&& !Q_stricmp( classname, "trigger_multiple" ) && ent->v.targetname
+			&& !Q_stricmp( SV_GetString( ent->v.targetname ), "door_locked" );
+		if( Q_stricmp( sv.name, "c0a0" ) && !mohaa_locked_door )
 			continue;
 
 		VectorAverage( ent->v.absmin, ent->v.absmax, center );
@@ -1861,6 +1870,12 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 		}
 		return;
 	}
+	if( Q_stricmp( sv.name, "c0a0" ) && best_dist > 128.0f )
+	{
+		gc_interact_done = true;
+		Con_Reportf( "Xash3D GameCube: MOHAA door USE target too far dist=%.0f\n", best_dist );
+		return;
+	}
 
 	/* Cap extreme distances in the log but still attempt (G88 proof). */
 	if( best_dist > 2048.0f )
@@ -1880,8 +1895,10 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 
 	/* G320: func_button Use hung Host_Frame on c3a2 (20260809-003742).
 	 * trigger_once→func_breakable Touch cascade hung post-changelevel
-	 * (c3a2→c3a2a, 20260809-123327). Keep c0a0 G88 proof only. */
-	if( Q_stricmp( sv.name, "c0a0" ))
+	 * (c3a2→c3a2a, 20260809-123327). Keep the exception above limited to the
+	 * nearest named MOHAA door trigger; other interactions remain c0a0-only. */
+	if( Q_stricmp( sv.name, "c0a0" ) && ( Q_stricmp( sv.name, "m1l2a" )
+		|| Q_stricmp( SV_GetString( best->v.targetname ), "door_locked" )))
 	{
 		gc_interact_done = true;
 		Con_Reportf( "Xash3D GameCube: world interaction skip classname=%s map=%s\n",

@@ -2584,7 +2584,9 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 					int *offs = (int *)Mem_Malloc( host.mempool, 4 * n );
 					int k, valid = 0;
 
-					if( FS_Read( f, offs, 4 * n ) == 4 * n )
+					/* This is optional texture-lump compaction. Under MEM1 pressure
+					 * keep the original lump instead of passing NULL to FS_Read. */
+					if( offs && FS_Read( f, offs, 4 * n ) == 4 * n )
 					{
 						for( k = 0; k < n; k++ )
 						{
@@ -2596,7 +2598,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 						}
 						tex_blob_len = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
 						tex_blob = (byte *)Mem_Malloc( host.mempool, tex_blob_len );
-						*(int *)tex_blob = LittleLong( n );
+						if( tex_blob )
+							*(int *)tex_blob = LittleLong( n );
 						for( k = 0, valid = 0; k < n && tex_blob; k++ )
 						{
 							const size_t at = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
