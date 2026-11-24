@@ -4081,6 +4081,7 @@ def stage_smoke_data(
 	output: Path,
 	smoke_map: str,
 	*,
+	fallback_sources: tuple[Path, ...] = (),
 	newgame: bool = False,
 	newsaveload: bool = False,
 	configroundtrip: bool = False,
@@ -4130,10 +4131,20 @@ def stage_smoke_data(
 	output.mkdir(parents=True, exist_ok=True)
 	for relative in SMOKE_CONFIG_FILES:
 		copy_if_present(source, output, relative)
+		if not (output / relative).is_file():
+			for fallback_source in fallback_sources:
+				copy_if_present(fallback_source, output, relative)
+				if (output / relative).is_file():
+					break
 	# G296: keep gfx.wad on the smoke ISO so build_iso9660 can extract the
 	# retail CREDITSFONT into the tiny bootstrap font. .wad is excluded from
 	# the bootstrap archive, so this does not consume the runtime preload pool.
 	copy_if_present(source, output, "gfx.wad")
+	if not (output / "gfx.wad").is_file():
+		for fallback_source in fallback_sources:
+			copy_if_present(fallback_source, output, "gfx.wad")
+			if (output / "gfx.wad").is_file():
+				break
 	if destination_map_relative:
 		copy_if_present(source, output, destination_map_relative)
 	if destination2_map_relative:
@@ -4196,7 +4207,7 @@ def stage_smoke_data(
 			shutil.copy2(src, dest)
 	for source_relative, alias_relative in SMOKE_CASE_ALIASES:
 		copy_alias_if_present(output, source_relative, alias_relative)
-	extract_wad_lump(source / "gfx.wad", output, "conchars", "gfx/conchars")
+	extract_wad_lump(output / "gfx.wad", output, "conchars", "gfx/conchars")
 
 	events = source / "events"
 	if events.is_dir():
@@ -4940,10 +4951,18 @@ def main() -> None:
 	extras = args.extras if args.extras.exists() else None
 	if args.smoke_map:
 		with tempfile.TemporaryDirectory(prefix="xash3d-gc-smoke-data-") as temp:
+			fallback_sources = []
+			declared_fallback = fallback_data_dir(args.data, extra_gamedirs)
+			if declared_fallback:
+				fallback_sources.append(declared_fallback)
+			for _gamedir, fallback_path in extra_gamedirs:
+				if fallback_path not in fallback_sources:
+					fallback_sources.append(fallback_path)
 			smoke_data = stage_smoke_data(
 				args.data,
 				Path(temp) / primary_gamedir,
 				args.smoke_map,
+				fallback_sources=tuple(fallback_sources),
 				# ISO boots rebuild argv from gamecube.cfg; Dolphin -- guest
 				# args never reach the DOL. Bake newgame whenever the probe
 				# asks for it (lean New Game or fullphysics/save/config).
