@@ -1422,10 +1422,10 @@ qboolean GC_FillNewGameMoveUsercmd( usercmd_t *cmd, const float *cur_angles )
 		return false;
 	if( !Sys_CheckParm( "-gcnewgame" ) || !GC_IsNewGameG36Done() )
 		return false;
-	/* The smoke harness only needs input polling and a stable present.  Do not
-	 * synthesize a post-present command: the carved c0a0 collision hull is not
-	 * safe for automated movement, while real controller input remains active. */
-	if( gc_probe_synthetic )
+	/* Keep ordinary smoke runs buttons-only because the carved c0a0 collision
+	 * hull is not safe for automated movement. An explicit full-physics TAS is
+	 * the controlled exception used to exercise retail campaign paths. */
+	if( gc_probe_synthetic && !( Sys_CheckParm( "-gctas" ) && Sys_CheckParm( "-gcfullphysics" )))
 		return false;
 
 	memset( cmd, 0, sizeof( *cmd ));

@@ -1829,7 +1829,7 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 		edict_t *ent = SV_EdictNum( i );
 		const char *classname;
 		qboolean mohaa_locked_door;
-		vec3_t center, delta;
+		vec3_t center, closest, delta;
 		float dist;
 
 		if( !SV_IsValidEdict( ent ))
@@ -1846,10 +1846,24 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 		if( Q_stricmp( sv.name, "c0a0" ) && !mohaa_locked_door )
 			continue;
 
-		VectorAverage( ent->v.absmin, ent->v.absmax, center );
-		if( VectorIsNull( center ))
-			VectorCopy( ent->v.origin, center );
-		VectorSubtract( center, player->v.origin, delta );
+		if( mohaa_locked_door && !( VectorIsNull( ent->v.absmin ) && VectorIsNull( ent->v.absmax )))
+		{
+			int axis;
+
+			/* The retail door trigger can be an elongated brush whose center
+			 * lies outside the player's USE radius while its bounds touch the
+			 * doorway. Measure to the nearest point on that trigger volume. */
+			for( axis = 0; axis < 3; axis++ )
+				closest[axis] = bound( ent->v.absmin[axis], player->v.origin[axis], ent->v.absmax[axis] );
+			VectorSubtract( closest, player->v.origin, delta );
+		}
+		else
+		{
+			VectorAverage( ent->v.absmin, ent->v.absmax, center );
+			if( VectorIsNull( center ))
+				VectorCopy( ent->v.origin, center );
+			VectorSubtract( center, player->v.origin, delta );
+		}
 		dist = VectorLength( delta );
 		/* Prefer nearby interactables; still allow map-wide fallback for c0a0. */
 		if( dist >= best_dist )
