@@ -634,6 +634,15 @@ def smoke_hud_resources(source: Path, res: int = SMOKE_HUD_RES) -> tuple[str, ..
 	"""Collect HUD and weapon sprite files for the smoke-test resolution."""
 	resources: set[str] = set(SMOKE_HUD_SPRITES)
 	sprites_dir = source / "sprites"
+	# MOHAA's retail compass and health/ammo HUD are converted into their own
+	# sprite namespace; preserve those files in MOHAA smoke discs as well.
+	mohaa_sprites = sprites_dir / "mohaa"
+	if mohaa_sprites.is_dir():
+		resources.update(
+			f"sprites/mohaa/{path.name}"
+			for path in mohaa_sprites.glob("*.spr")
+			if path.is_file()
+		)
 
 	hud_txt = sprites_dir / "hud.txt"
 	resources.update(_sprite_txt_sheet_paths(hud_txt, res))

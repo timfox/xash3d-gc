@@ -84,6 +84,13 @@ fi
 HLSDK_GAMEDIR="$(gamecube_normalize_profile "${GAME_PROFILE:-valve}")"
 export HLSDK_GAMECUBE_GAMEDIR="$HLSDK_GAMEDIR"
 DOL_NAME="$(gamecube_dol_basename "$HLSDK_GAMEDIR")"
+# MOHAA's GameCube HLSDK archive uses the compact 256/32 playermove_t layout.
+# Keep the engine ABI aligned by default while retaining explicit overrides.
+if [ "$HLSDK_GAMEDIR" = "mohaa" ]; then
+	export XASH_GC_PM_MAX_PHYSENTS="${XASH_GC_PM_MAX_PHYSENTS:-256}"
+	export XASH_GC_PM_MAX_MOVEENTS="${XASH_GC_PM_MAX_MOVEENTS:-32}"
+	echo "MOHAA player-move layout: ${XASH_GC_PM_MAX_PHYSENTS}/${XASH_GC_PM_MAX_MOVEENTS}"
+fi
 # DoD online / dual-guest path needs libbba (eth2sp1/BBA). Default on for dod.
 if [ "$HLSDK_GAMEDIR" = "dod" ] || [ "$HLSDK_GAMEDIR" = "mohaa" ]; then
 	export XASH_GAMECUBE_LINK_BBA="${XASH_GAMECUBE_LINK_BBA:-1}"
