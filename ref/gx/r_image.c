@@ -20,11 +20,70 @@ GNU General Public License for more details.
 #endif
 
 #if XASH_GAMECUBE
-/* Keep a few 64x64 HUD/effect sprites resident when the general MEM1 heap
- * is fragmented late in a map load.  Smaller textures still share these
- * slots; the 8 KiB stride covers the common HUD/lightning sprite sizes. */
-static byte gc_tiny_pixels[8][8192] __attribute__((aligned(32)));
-static unsigned gc_tiny_pixels_used;
+/* Keep small HUD/effect texture mips when the general MEM1 heap is fragmented.
+ * A packed 64 KiB arena serves the same total capacity as the old eight 8 KiB
+ * slots, but does not waste a full slot on each 1–2 KiB compass animation frame. */
+#define GC_TINY_PIXELS_BYTES ( 64u * 1024u )
+#define GC_TINY_PIXELS_UNITS ( GC_TINY_PIXELS_BYTES / 32u )
+static byte gc_tiny_pixels[GC_TINY_PIXELS_BYTES] __attribute__((aligned(32)));
+/* 0 free, 4 allocation head, 1 interior, 2 allocation tail, 3 one-unit block. */
+static byte gc_tiny_pixels_map[GC_TINY_PIXELS_UNITS];
+
+static byte *R_GCAllocTinyMip( size_t bytes )
+{
+	const size_t units = ( bytes + 31u ) / 32u;
+	size_t start, i;
+
+	if( !units || units > GC_TINY_PIXELS_UNITS )
+		return NULL;
+	for( start = 0; start + units <= GC_TINY_PIXELS_UNITS; start++ )
+	{
+		for( i = 0; i < units && gc_tiny_pixels_map[start + i] == 0; i++ )
+			;
+		if( i != units )
+		{
+			start += i;
+			continue;
+		}
+		if( units == 1 )
+			gc_tiny_pixels_map[start] = 3;
+		else
+		{
+			gc_tiny_pixels_map[start] = 4;
+			memset( gc_tiny_pixels_map + start + 1, 1, units - 2 );
+			gc_tiny_pixels_map[start + units - 1] = 2;
+		}
+		memset( gc_tiny_pixels + start * 32u, 0, units * 32u );
+		return gc_tiny_pixels + start * 32u;
+	}
+	return NULL;
+}
+
+static qboolean R_GCFreeTinyMip( void *ptr )
+{
+	const uintptr_t p = (uintptr_t)ptr;
+	const uintptr_t base = (uintptr_t)gc_tiny_pixels;
+	size_t start, i;
+
+	if( !ptr || p < base || p - base >= sizeof( gc_tiny_pixels ) || ( p - base ) % 32u )
+		return false;
+	start = ( p - base ) / 32u;
+	if( gc_tiny_pixels_map[start] == 3 )
+	{
+		gc_tiny_pixels_map[start] = 0;
+		return true;
+	}
+	if( gc_tiny_pixels_map[start] != 4 )
+		return false;
+	for( i = start; i < GC_TINY_PIXELS_UNITS; i++ )
+	{
+		byte state = gc_tiny_pixels_map[i];
+		gc_tiny_pixels_map[i] = 0;
+		if( i > start && state == 2 )
+			return true;
+	}
+	return false;
+}
 /* Late native studio skins can arrive after the compact studio arena has
  * become contiguous-full.  Keep a bounded overflow window for base planes;
  * this avoids pushing small skin allocations back through fragmented MEM1.
@@ -238,14 +297,15 @@ static pixel_t *R_GCAllocMip( image_t *tex, uint level, size_t bytes )
 		}
 	}
 	byte *base = (byte *)Mem_TryCalloc( r_temppool, bytes + ( level == 0 ? 31 : 0 ));
-	if( !base && level == 0 && bytes <= sizeof( gc_tiny_pixels[0] ))
+	if( !base && level == 0 )
 	{
-		for( unsigned i = 0; i < ARRAYSIZE( gc_tiny_pixels ); i++ )
+		base = R_GCAllocTinyMip( bytes );
+		if( base )
 		{
-			if( gc_tiny_pixels_used & (1u << i) ) continue;
-			gc_tiny_pixels_used |= 1u << i;
-			tex->gc_pixels_base = gc_tiny_pixels[i];
-			return (pixel_t *)gc_tiny_pixels[i];
+			tex->gc_pixels_base = base;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: packed emergency mip %s bytes=%s\n",
+				tex->name, Q_memprint( bytes ));
+			return (pixel_t *)base;
 		}
 	}
 	if( !base && level == 0 )
@@ -280,14 +340,10 @@ void R_GCFreeMip( image_t *tex, uint level )
 	}
 	if( level == 0 && tex->gc_pixels_base )
 	{
-		for( unsigned i = 0; i < ARRAYSIZE( gc_tiny_pixels ); i++ )
+		if( R_GCFreeTinyMip( tex->gc_pixels_base ))
 		{
-			if( tex->gc_pixels_base == gc_tiny_pixels[i] )
-			{
-				gc_tiny_pixels_used &= ~(1u << i);
-				tex->gc_pixels_base = NULL;
-				return;
-			}
+			tex->gc_pixels_base = NULL;
+			return;
 		}
 		if( R_GCIsStudioSkinOverflow( tex->gc_pixels_base ))
 		{
