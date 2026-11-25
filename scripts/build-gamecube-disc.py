@@ -751,6 +751,7 @@ SMOKE_PRECACHE_MODELS = (
 )
 
 SMOKE_CASE_ALIASES = (
+	("models/human/german_afrika_privatet.mdl", "models/human/german_afrika_privateT.mdl"),
 	("models/p_9mmar.mdl", "models/p_9mmAR.mdl"),
 	("models/v_9mmar.mdl", "models/v_9mmAR.mdl"),
 	("models/w_9mmar.mdl", "models/w_9mmAR.mdl"),
@@ -4085,6 +4086,44 @@ def smoke_map_resources(map_path: Path) -> set[str]:
 	return resources
 
 
+def smoke_script_model_resources(source: Path, map_name: str) -> set[str]:
+	"""Resolve the selected MOHAA map's scripted-model manifest and sidecars."""
+	map_stem = Path(map_name).stem.lower()
+	manifest_relative = f"maps/{map_stem}.models"
+	manifest = source / manifest_relative
+	if not manifest.is_file():
+		return set()
+
+	resources = {manifest_relative}
+	model_paths = []
+	for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+		value = line.strip().replace("\\", "/")
+		if not value or value.startswith("#"):
+			continue
+		relative = Path(value)
+		if relative.is_absolute() or ".." in relative.parts or not value.lower().startswith("models/"):
+			continue
+		if (source / relative).is_file():
+			resources.add(relative.as_posix())
+			model_paths.append(relative)
+
+	for relative in model_paths:
+		texture_relative = relative.with_name(relative.stem + "T.mdl")
+		if (source / texture_relative).is_file():
+			resources.add(texture_relative.as_posix())
+		model_data = (source / relative).read_bytes()
+		for match in re.finditer(rb"[A-Za-z0-9_./-]+[.](?:gca|gcm)", model_data, re.IGNORECASE):
+			name = match.group(0).decode("ascii", errors="ignore").replace("\\", "/")
+			candidate = Path(name)
+			if not name.lower().startswith("models/"):
+				candidate = relative.parent / candidate.name
+			if candidate.is_absolute() or ".." in candidate.parts:
+				continue
+			if (source / candidate).is_file():
+				resources.add(candidate.as_posix())
+	return resources
+
+
 def stage_smoke_data(
 	source: Path,
 	output: Path,
@@ -4196,6 +4235,14 @@ def stage_smoke_data(
 		copy_if_present(source, output, relative)
 	for relative in SMOKE_PRECACHE_MODELS:
 		copy_if_present(source, output, relative)
+	script_model_resources = smoke_script_model_resources(source, smoke_map)
+	for relative in sorted(script_model_resources):
+		copy_if_present(source, output, relative)
+	if script_model_resources:
+		print(
+			f"  MOHAA script models: staged {len(script_model_resources) - 1} model/sidecar asset(s) "
+			f"for {Path(smoke_map).stem}"
+		)
 	for relative in SMOKE_SOUND_DIRS:
 		copy_tree_if_present(source, output, relative)
 	# G278/G91 lean New Game: shallow media/ VO + button10 SFX. Retail overlays
