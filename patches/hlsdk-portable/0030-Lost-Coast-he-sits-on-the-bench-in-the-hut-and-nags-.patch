@@ -1,0 +1,242 @@
+From 0b6c0748fc0978d16379ae86bbe1a698978651a3 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 17:33:52 -0800
+Subject: [PATCH] Lost Coast: he sits on the bench in the hut, and nags at the
+ open gate
+
+A sequence waits for the walk the scene set him on before it, and the
+scene's next walk takes over from an unfinished one: he used to sit down
+short of the bench. The map's env_speaker nag (GoThruGateNag) plays while
+the player stands in its trigger. Every scene of the talker's concepts
+now loads (28 scenes, 176 events), and the node graph is used in the
+file's own buffer instead of 8 KB of static arrays.
+
+---
+ dlls/lostcoast_npcs.cpp | 148 ++++++++++++++++++++++++++++++++--------
+ 1 file changed, 120 insertions(+), 28 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 59b705cd..66b19694 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -297,10 +297,10 @@ void CLCSeagull::GullThink( void )
+ //    pose parameters, baked as GoldSrc bone controllers 0..3
+ //=========================================================
+ #define LC_MAX_EVENTS	40	// in one scene
+-#define LC_EVENT_POOL	144	// in all of them
+-#define LC_MAX_SCENES	10
+-#define LC_MAX_NODES	448	// the map has 438
+-#define LC_MAX_LINKS	736	// and 724
++#define LC_EVENT_POOL	176	// in all of them
++#define LC_MAX_SCENES	28	// intro, keys and every scene of the talker's concepts
++#define LC_MAX_NODES	448	// the map has 438 (the route search keeps 11 bytes a node)
++#define LC_MAX_LINKS	4096
+ #define LC_MAX_ROUTE	64
+ 
+ enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE, LCE_HINGE, LCE_BODY };
+@@ -335,8 +335,12 @@ static lc_scene_t	g_lcScenes[LC_MAX_SCENES];
+ static lc_event_t	g_lcEvents[LC_EVENT_POOL];
+ static int		g_lcNumEvents;
+ static int		g_lcNumScenes;
+-static float		g_lcNodes[LC_MAX_NODES][3];
+-static unsigned short	g_lcLinks[LC_MAX_LINKS][2];
++// The node graph is used where its file was loaded: arrays of their own
++// were 8 KB more of static data beside the 8 KB file, and the GameCube heap
++// has not had both since the talker's scenes grew (the file's floats and
++// shorts are big-endian, the console's own order; other hosts swap in place).
++static float		(*g_lcNodes)[3];
++static unsigned short	(*g_lcLinks)[2];
+ static int		g_lcNumNodes, g_lcNumLinks;
+ 
+ static float LC_Approach( float target, float value, float speed )
+@@ -456,41 +460,45 @@ static void LC_LoadNodes( const char *file )
+ 	d = LOAD_FILE_FOR_ME( (char *)file, &len );
+ 	if( !d )
+ 		return;
+-	if( len >= 8 && !memcmp( d, "LCNG", 4 ))
++	if( len >= 8 && !memcmp( d, "LCNG", 4 ) && !((size_t)d & 3 ))
+ 	{
+ 		int nn = ( d[4] << 8 ) | d[5], nl = ( d[6] << 8 ) | d[7];
+-		const byte *p = d + 8;
+ 
+-		if( nn > LC_MAX_NODES ) nn = LC_MAX_NODES;
+-		if( 8 + nn * 12 + nl * 4 <= len )
++		if( nn <= LC_MAX_NODES && nl <= LC_MAX_LINKS && 8 + nn * 12 + nl * 4 <= len )
+ 		{
+-			for( i = 0; i < nn; i++, p += 12 )
++			const unsigned short one = 1;
++			byte *p = d + 8;
++
++			if( *(const byte *)&one ) // a little-endian host
+ 			{
+-				for( int k = 0; k < 3; k++ )
++				for( i = 0; i < nn * 3; i++, p += 4 )
+ 				{
+-					unsigned int u = ( p[k * 4] << 24 ) | ( p[k * 4 + 1] << 16 ) | ( p[k * 4 + 2] << 8 ) | p[k * 4 + 3];
+-					float f;
++					byte t0 = p[0], t1 = p[1];
+ 
+-					memcpy( &f, &u, 4 );
+-					g_lcNodes[i][k] = f;
++					p[0] = p[3]; p[1] = p[2]; p[2] = t1; p[3] = t0;
+ 				}
+-			}
+-			p = d + 8 + ((( d[4] << 8 ) | d[5] ) * 12 );
+-			for( i = 0; i < nl && g_lcNumLinks < LC_MAX_LINKS; i++, p += 4 )
+-			{
+-				int a = ( p[0] << 8 ) | p[1], b = ( p[2] << 8 ) | p[3];
+-
+-				if( a < nn && b < nn )
++				for( i = 0; i < nl * 2; i++, p += 2 )
+ 				{
+-					g_lcLinks[g_lcNumLinks][0] = a;
+-					g_lcLinks[g_lcNumLinks][1] = b;
+-					g_lcNumLinks++;
++					byte t0 = p[0];
++
++					p[0] = p[1]; p[1] = t0;
+ 				}
+ 			}
++			g_lcNodes = (float (*)[3])( d + 8 );
++			g_lcLinks = (unsigned short (*)[2])( d + 8 + nn * 12 );
++			for( i = 0; i < nl; i++ )
++			{
++				// a link to a node that is not there goes nowhere
++				if( g_lcLinks[i][0] >= nn || g_lcLinks[i][1] >= nn )
++					g_lcLinks[i][0] = g_lcLinks[i][1] = 0;
++			}
+ 			g_lcNumNodes = nn;
++			g_lcNumLinks = nl;
++			d = NULL; // kept for the level
+ 		}
+ 	}
+-	FREE_FILE( d );
++	if( d )
++		FREE_FILE( d );
+ 	ALERT( at_console, "Lost Coast: AI node graph %s: %d nodes, %d links\n", file, g_lcNumNodes, g_lcNumLinks );
+ }
+ 
+@@ -613,6 +621,14 @@ private:
+ 	// opening it, sitting down), and the trigger volume that starts it.
+ 	float		m_gate[6];
+ 	BOOL		m_bHaveGate, m_bGateDone;
++	// The map's nag once the gate is open: a trigger that turns an
++	// env_speaker on while the player stands in it. m_nagDelay: seconds
++	// after the gate scene, the speaker's shortest and longest gap, the
++	// trigger's wait.
++	float		m_nag[6], m_nagDelay[4];
++	BOOL		m_bHaveNag;
++	string_t	m_iszNagConcept;
++	float		m_flNagFrom, m_flNagNext, m_flNagTouch;
+ 	string_t	m_iszGateScene;
+ 	// A whole-body sequence in flight: he stands where he is until it ends.
+ 	// m_pszPost: the idle that takes over and loops when it does.
+@@ -673,6 +689,22 @@ void CLCFisherman::KeyValue( KeyValueData *pkvd )
+ 			&m_trigger[2], &m_trigger[3], &m_trigger[4], &m_trigger[5] ) == 6;
+ 		pkvd->fHandled = TRUE;
+ 	}
++	else if( FStrEq( pkvd->szKeyName, "lc_nag_trigger" ))
++	{
++		m_bHaveNag = sscanf( pkvd->szValue, "%f %f %f %f %f %f", &m_nag[0], &m_nag[1],
++			&m_nag[2], &m_nag[3], &m_nag[4], &m_nag[5] ) == 6;
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_nag_concept" ))
++	{
++		m_iszNagConcept = ALLOC_STRING( pkvd->szValue );
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_nag_delay" ))
++	{
++		sscanf( pkvd->szValue, "%f %f %f %f", &m_nagDelay[0], &m_nagDelay[1], &m_nagDelay[2], &m_nagDelay[3] );
++		pkvd->fHandled = TRUE;
++	}
+ 	else if( FStrEq( pkvd->szKeyName, "lc_gate_trigger" ))
+ 	{
+ 		m_bHaveGate = sscanf( pkvd->szValue, "%f %f %f %f %f %f", &m_gate[0], &m_gate[1],
+@@ -1111,7 +1143,24 @@ void CLCFisherman::RunScene( float interval )
+ 			break;
+ 		case LCE_SEQUENCE:
+ 			if( !ev->started )
+-				PlaySequence( ev, m_flSceneStart );
++			{
++				// A scripted_sequence has him walk to its place first: it
++				// waits for the walk the scene set him on before it (to the
++				// bench, which the scene gives a second and a half).
++				BOOL walking = FALSE;
++
++				for( int j = 0; j < sc->n; j++ )
++				{
++					const lc_event_t *w = &sc->ev[j];
++
++					if( w->type == LCE_MOVETO && w->arg[0] == '@' && w->started != 2 && w->t0 <= ev->t0 )
++						walking = TRUE;
++				}
++				if( walking )
++					continue; // (not started yet)
++				// (from now: its length is the animation's, not the scene's)
++				PlaySequence( ev, gpGlobals->time - ev->t0 );
++			}
+ 			break;
+ 		case LCE_BODY:
+ 			pev->body = (int)ev->a;
+@@ -1158,6 +1207,16 @@ void CLCFisherman::RunScene( float interval )
+ 				Vector to;
+ 				float yaw = 0.0f;
+ 
++				// The scene's next walk takes over from one he has not
++				// finished (still turning to the marker's facing): both at
++				// once pulled him to and fro on the spot.
++				for( int j = 0; j < sc->n && ev->started != 2; j++ )
++				{
++					const lc_event_t *w = &sc->ev[j];
++
++					if( w != ev && w->type == LCE_MOVETO && w->arg[0] == '@' && w->t0 > ev->t0 && t >= w->t0 )
++						ev->started = 2;
++				}
+ 				if( ev->started == 2 || gpGlobals->time < m_flSeqEnd
+ 					|| sscanf( ev->arg, "@%f,%f,%f,%f", &to.x, &to.y, &to.z, &yaw ) != 4 )
+ 					break;
+@@ -1330,6 +1389,39 @@ void CLCFisherman::FishThink( void )
+ 			StartScene( LC_LoadScene( STRING( m_iszGateScene )));
+ 		}
+ 	}
++	// The nag at the open gate. The trigger fires on entry and again every
++	// wait seconds while the player stays; each firing turns the speaker on,
++	// which speaks a moment later and then at its own gap (env_speaker).
++	if( m_bHaveNag && m_bGateDone && !FStringNull( m_iszNagConcept ) && m_state == FS_DONE )
++	{
++		if( m_flNagFrom == 0.0f )
++		{
++			m_flNagFrom = gpGlobals->time + m_nagDelay[0];
++			ALERT( at_console, "Lost Coast: fisherman nags (%s) from %.1f s on, every %.0f to %.0f s\n", STRING( m_iszNagConcept ), m_nagDelay[0], m_nagDelay[1], m_nagDelay[2] );
++		}
++		if( pl && gpGlobals->time >= m_flNagFrom )
++		{
++			const Vector &o = pl->pev->origin;
++
++			// (the gate probe has no player at the controls: as if he stood there)
++			if( m_flGateTest > 0 || ( o.x >= m_nag[0] && o.y >= m_nag[1] && o.z >= m_nag[2] - 36
++				&& o.x <= m_nag[3] && o.y <= m_nag[4] && o.z <= m_nag[5] + 36 ))
++			{
++				if( gpGlobals->time >= m_flNagTouch )
++				{
++					m_flNagTouch = gpGlobals->time + ( m_nagDelay[3] > 0 ? m_nagDelay[3] : 1.0f );
++					m_flNagNext = gpGlobals->time + 0.1f;
++				}
++				if( m_flNagNext > 0 && gpGlobals->time >= m_flNagNext )
++				{
++					m_flNagNext = gpGlobals->time + RANDOM_FLOAT( m_nagDelay[1], m_nagDelay[2] );
++					Concept( STRING( m_iszNagConcept ));
++				}
++			}
++			else
++				m_flNagNext = 0; // OnEndTouch: the speaker is turned off
++		}
++	}
+ 	switch( m_state )
+ 	{
+ 	case FS_WAIT:
+-- 
+2.53.0
+

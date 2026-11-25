@@ -1,0 +1,51 @@
+From 4b719297083d066791eeeffe3923801e7e0106bc Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 20:02:46 -0800
+Subject: [PATCH] Lost Coast: scene tables cut to what the map uses
+
+24 scenes and 120 events (the map has 21 and 109), and a scene's file
+name in the engine's string pool: 3 KB of static data back to the heap,
+which the engine needs 8 KB of to spawn the map's actors at all.
+
+---
+ dlls/lostcoast_npcs.cpp | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index e7b8ab59..6b084b54 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -297,8 +297,10 @@ void CLCSeagull::GullThink( void )
+ //    pose parameters, baked as GoldSrc bone controllers 0..3
+ //=========================================================
+ #define LC_MAX_EVENTS	40	// in one scene
+-#define LC_EVENT_POOL	176	// in all of them
+-#define LC_MAX_SCENES	28	// intro, keys and every scene of the talker's concepts
++// (the map has 21 scenes of 109 events: static data is heap on the GameCube,
++// and the engine spawns no actor at all once less than 8 KB of it is left)
++#define LC_EVENT_POOL	120	// in all of them
++#define LC_MAX_SCENES	24	// intro, keys and every scene of the talker's concepts
+ #define LC_MAX_NODES	448	// the map has 438 (the route search keeps 11 bytes a node)
+ #define LC_MAX_LINKS	4096
+ #define LC_MAX_ROUTE	64
+@@ -321,7 +323,7 @@ typedef struct
+ 
+ typedef struct
+ {
+-	char		file[48];
++	const char	*file;	// in the engine's string pool
+ 	int		n;
+ 	float		end;
+ 	lc_event_t	*ev;	// in g_lcEvents
+@@ -414,7 +416,7 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 	}
+ 	sc = &g_lcScenes[g_lcNumScenes++];
+ 	memset( sc, 0, sizeof( *sc ));
+-	strncpy( sc->file, file, sizeof( sc->file ) - 1 );
++	sc->file = STRING( ALLOC_STRING( file ));
+ 	sc->ev = &g_lcEvents[g_lcNumEvents];
+ 	for( p = data; p < data + len; )
+ 	{
+-- 
+2.53.0
+

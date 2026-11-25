@@ -27,7 +27,16 @@ from pathlib import Path
 PROP_CLASSES = ("env_model", "dod_object")
 GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 7
+# Piece header byte 1: the piece's vertices carry baked light (13 bytes:
+# position, RGB8, s, t) instead of a normal. The light is MOHAA's own, one
+# overbright bit down; the engine doubles it.
+GC_PR_PIECE_LIT = 1
+GC_PR_VERSION_CELLS = 9	# v7, plus far cells (hdr word 2 low half: cell count) and a per-instance scale (model word high byte)
+GC_PR_VERSION_VIS = 10	# v9, plus a u16 per instance after the cells: its PVS cluster (leaf - 1), 0xffff = always drawn
+GC_PR_VIS_ALL = 0xFFFF
 GC_PR_MAX_INST = 512
+GC_PR_MAX_INST_BIG = 4096  # a converted map's pack: the engine moves its tables to the map arena
+GC_PR_FIXED_INST = 512  # the engine's fixed tables; past them the pack is written nearest a player start first
 GC_PR_MAX_MODELS = 192
 GC_PR_MAX_MAT = 127
 GC_PR_PIECE_BYTES = 15360	# piece body cap: header + body fit the engine's 16 KB bounce
@@ -158,13 +167,28 @@ class StudioModel:
 			if comp.is_file():
 				self.tex = StudioModel(comp)
 
+	def sequence_index(self, name: str) -> int:
+		"""LookupSequence: the index of a sequence by its label, or -1."""
+		want = name.strip().lower()
+		for i in range(self.numseq):
+			so = self.seqindex + i * SEQ_SZ
+			label = self.data[so:so + 32].split(b"\0", 1)[0].decode("latin1", "replace")
+			if label.lower() == want:
+				return i
+		return -1
+
 	def bone_matrices(self, sequence: int):
 		"""World matrices of the bones at frame 0 of a sequence (the bind
 		pose when the sequence is not in this file)."""
 		d = self.data
 		anim = None
+		motiontype, motionbone = 0, -1
 		if 0 <= sequence < self.numseq:
 			so = self.seqindex + sequence * SEQ_SZ
+			# The engine holds the motion bone at zero on the axes the
+			# sequence moves along (R_StudioCalcRotations): that travel is
+			# the entity's, not the mesh's.
+			motiontype, motionbone = struct.unpack_from("<ii", d, so + 68)
 			animindex, = struct.unpack_from("<i", d, so + 124)
 			seqgroup, = struct.unpack_from("<i", d, so + 156)
 			if seqgroup == 0 and 0 < animindex < len(d):
@@ -183,6 +207,10 @@ class StudioModel:
 						vo = ao + offs[j]
 						if offs[j] and vo + 4 <= len(d) and d[vo] > 0:
 							value[j] += struct.unpack_from("<h", d, vo + 2)[0] * scale[j]
+			if b == motionbone:
+				for j in range(3):
+					if motiontype & (1 << j):
+						value[j] = 0.0
 			local = _mat_quat_origin(_quat(value[3:6]), value[0:3])
 			mats.append(local if parent < 0 or parent >= len(mats) else _mat_concat(mats[parent], local))
 		return mats
@@ -306,12 +334,29 @@ def _floats(s: str, n: int):
 def static_props(ents: list[dict]) -> list[dict]:
 	"""The entities SV_GCTryStaticProp consumes, with the keys it reads."""
 	out = []
+	named_ord = -1
+	# A dod_object whose object_group a dod_capture_area asks for is a satchel a player carries: the game spawns it as an
+	# entity (SV_GCFunctionalObject, sv_game.c), so it is not part of the prop pack.
+	area_groups = {e.get("area_object_group") for e in ents
+		if e.get("classname") == "dod_capture_area" and e.get("area_object_group")}
 	for ent_index, e in enumerate(ents):
-		if e.get("classname") not in PROP_CLASSES or e.get("targetname"):
+		if e.get("classname") not in PROP_CLASSES:
+			continue
+		if e.get("classname") == "dod_object" and e.get("object_group") in area_groups:
 			continue
 		model = e.get("model", "").replace("\\", "/")
 		if not model.lower().endswith(".mdl"):
 			continue
+		# Named props keep their edict (Use, env_render, killtarget) and the
+		# pack draws them while that edict is drawable.  The ordinal counts
+		# every named prop in lump order, as the server counts its edicts
+		# (SV_GCIndexNamedProps, sv_game.c).
+		ordinal = 0
+		if e.get("targetname"):
+			named_ord += 1
+			ordinal = named_ord + 1
+			if ordinal > 255:
+				continue
 		angles = _floats(e.get("angles", "0 0 0"), 3)
 		if "angle" in e and "angles" not in e:
 			a = _floats(e["angle"], 1)[0]
@@ -323,8 +368,9 @@ def static_props(ents: list[dict]) -> list[dict]:
 				angles[1] = a
 		rendermode = int(_floats(e.get("rendermode", "0"), 1)[0])
 		renderamt = int(_floats(e.get("renderamt", "255"), 1)[0])
-		if rendermode != 0 and renderamt <= 0:
-			continue	# invisible in the retail game too
+		spawnflags = int(_floats(e.get("spawnflags", "0"), 1)[0])
+		if rendermode != 0 and renderamt <= 0 and not ordinal:
+			continue	# invisible in the retail game too (env_render may show a named one later)
 		out.append({
 			"model": model.lower(),
 			"origin": _floats(e.get("origin", "0 0 0"), 3),
@@ -334,17 +380,59 @@ def static_props(ents: list[dict]) -> list[dict]:
 			# is a sprite key. Baking it made charlie's hedgehogs 2.5x too big.
 			"scale": 1.0,
 			"sequence": int(_floats(e.get("sequence", "0"), 1)[0]),
+			# env_model names its sequence: m_iszSequence_On, or _Off when
+			# spawnflag 1 starts it off (the retail class follows Spirit's
+			# env_model). ouitz_tree1 has one sequence per origin height
+			# ("tree_high_origin"), so sequence 0 left those trees in the air.
+			"sequence_name": (e.get("m_iszSequence_Off", "") if spawnflags & 1
+				else e.get("m_iszSequence_On", "")) if e.get("classname") == "env_model" else "",
 			"skin": int(_floats(e.get("skin", "0"), 1)[0]),
 			"body": int(_floats(e.get("body", "0"), 1)[0]),
-			"additive": rendermode == 5,
+			# A named prop's rendermode 5 without an amount is its hidden state.
+			"additive": rendermode == 5 and not ordinal,
 			# env_model spawnflag 2: the game drops the model onto the floor
 			# at spawn (charlie's hedgehogs and wire sit 16-36 units up).
-			"drop": bool(int(_floats(e.get("spawnflags", "0"), 1)[0]) & 2),
+			"drop": bool(spawnflags & 2) and e.get("classname") == "env_model",
+			# dod_object is the item a player picks up: it never calls the
+			# floor drop, it falls like any tossed item once the map runs
+			# (every unnamed one on charlie and caen hung 5 to 32 units up).
+			"toss": e.get("classname") == "dod_object",
 			# Lump position: the game spawns entities in this order, and a
 			# prop dropping to the floor only meets what already spawned.
 			"ent": ent_index,
+			"named": ordinal,
 		})
 	return out
+
+
+def prop_sequence(mdl, prop: dict) -> int:
+	"""The sequence the game poses a prop in: the named one when the model
+	has it (CEnvModel::SetSequence falls back to 0), else the number."""
+	name = prop.get("sequence_name", "")
+	if name:
+		return max(0, mdl.sequence_index(name))
+	return prop["sequence"]
+
+
+def drop_like_the_game(floor, prop: dict):
+	"""CEnvModel::Spawn with spawnflag 2: lift the origin one unit, then
+	DROP_TO_FLOOR. A prop resting less than a unit inside the floor is lifted
+	out and lands on it; when the drop finds nothing, or still starts in
+	solid, the lift stays. Moves prop["origin"]; returns the floor z or None."""
+	x, y, z = prop["origin"][0], prop["origin"][1], prop["origin"][2] + 1.0
+	hit = floor.drop((x, y, z), before=prop.get("ent"))
+	prop["origin"] = [x, y, z if hit is None else hit]
+	return hit
+
+
+def fall_like_the_game(floor, prop: dict):
+	"""A tossed item (dod_object) falls until it meets solid. That happens
+	in play, after every entity spawned, so all solid brush entities count."""
+	x, y, z = prop["origin"]
+	hit = floor.drop((x, y, z), reach=2048.0, before=None)
+	if hit is not None:
+		prop["origin"] = [x, y, hit]
+	return hit
 
 
 def sun_direction(ents: list[dict]):
@@ -532,7 +620,7 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 	w, h = tex["w"], tex["h"]
 	masked = bool(tex["flags"] & STUDIO_NF_MASKED)
 	pal = np.frombuffer(tex["palette"], np.uint8).reshape(256, 3)
-	if not masked:
+	if not masked and tex.get("texgamma", True):
 		# GoldSrc's texture gamma, as the stock loader applies to an
 		# unmasked studio skin (imagelib LUMP_TEXGAMMA, texgamma 2.0 over
 		# gamma 2.5).
@@ -553,6 +641,14 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 		plain = big_c.reshape(th, 4, tw, 4, 3).mean((1, 3))
 		rgb = np.where(a[..., None] > 0, c / np.maximum(a[..., None], 1e-6), plain)
 		cov = a / 16.0
+	return (tw, th) + encode_rgb_cov(rgb, cov, encode_blocks)
+
+
+def encode_rgb_cov(rgb, cov, encode_blocks) -> tuple[int, bytes]:
+	"""(levels, CMPR mip chain) for float RGB (h, w, 3) and coverage (h, w) with power-of-two sides.
+	Each smaller level averages the colour over covered texels only."""
+	import numpy as np
+
 	body = bytearray()
 	levels = 0
 	while True:
@@ -566,7 +662,7 @@ def encode_texture(tex: dict, encode_blocks) -> tuple[int, int, int, bytes]:
 		plain = rgb.reshape(ch // 2, 2, cw // 2, 2, 3).mean((1, 3))
 		rgb = np.where(a[..., None] > 0, c / np.maximum(a[..., None], 1e-6), plain)
 		cov = a / 4.0
-	return tw, th, levels, bytes(body)
+	return levels, bytes(body)
 
 
 def grey_texture(encode_blocks) -> tuple[int, int, int, bytes]:
@@ -581,10 +677,13 @@ def _clamp16(v: float) -> int:
 	return int(max(-32767, min(32767, round(v))))
 
 
-def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
+def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray, lit: bool = False):
 	"""Append a model's piece chain: per material, GX draw commands (strips
 	and fans as the model stores them) of 11-byte vertices. Returns
-	(offset, bytes of the first piece, triangles) or None."""
+	(offset, bytes of the first piece, triangles) or None. lit: the vertices
+	are (pos, normal, s, t, rgb) with the light baked in (a MOHAA world mesh);
+	they are written as 13-byte position, RGB8 light, s, t and the pieces
+	flagged GC_PR_PIECE_LIT, which the engine draws with that light x 2."""
 	pieces = []
 	for mid in sorted(cmds_by_mat):
 		body, nv, nt = bytearray(), 0, 0
@@ -594,7 +693,10 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 			# A strip longer than a command holds is cut on an even vertex so
 			# the winding carries on; a fan restarts from its hub.
 			runs = []
-			if len(verts) <= GC_PR_CMD_VERTS:
+			if fan == 2:  # GX quads: whole quads per command
+				step = GC_PR_CMD_VERTS - GC_PR_CMD_VERTS % 4
+				runs = [verts[k:k + step] for k in range(0, len(verts), step)]
+			elif len(verts) <= GC_PR_CMD_VERTS:
 				runs.append(verts)
 			elif fan:
 				k = 1
@@ -607,8 +709,18 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 					runs.append(verts[k:k + GC_PR_CMD_VERTS])
 					k += GC_PR_CMD_VERTS - 2
 			for run in runs:
-				cb = bytearray(struct.pack(">BH", 0xA0 if fan else 0x98, len(run)))
-				for pos, nrm, s, t in run:
+				cb = bytearray(struct.pack(">BH", 0x80 if fan == 2 else 0xA0 if fan else 0x98, len(run)))
+				for vert in run:
+					pos, nrm, s, t = vert[:4]
+					if lit:
+						rgb = vert[4]
+						cb += struct.pack(
+							">hhh3Bhh",
+							_clamp16(pos[0] * q), _clamp16(pos[1] * q), _clamp16(pos[2] * q),
+							*rgb,
+							_clamp16((s - su) * 256.0), _clamp16((t - sv) * 256.0),
+						)
+						continue
 					cb += struct.pack(
 						">hhhBhh",
 						_clamp16(pos[0] * q), _clamp16(pos[1] * q), _clamp16(pos[2] * q),
@@ -621,7 +733,7 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 					body, nv, nt = bytearray(), 0, 0
 				body += cb
 				nv += len(run)
-				nt += len(run) - 2
+				nt += len(run) // 2 if fan == 2 else len(run) - 2
 		if body:
 			body += b"\0" * (-len(body) % 32)
 			pieces.append((mid, nv, bytes(body), nt))
@@ -631,10 +743,109 @@ def emit_pieces(cmds_by_mat: dict[int, list], q: float, blob: bytearray):
 	ofs, total = len(blob), 0
 	for n, (mid, nverts, body, ntris) in enumerate(pieces):
 		nxt = (32 + len(pieces[n + 1][2])) if n + 1 < len(pieces) else 0
-		blob += struct.pack(">BBHIIH", mid, 0, min(65535, nverts), len(body), nxt, min(65535, ntris)) + b"\0" * 18
+		blob += struct.pack(">BBHIIH", mid, GC_PR_PIECE_LIT if lit else 0, min(65535, nverts), len(body), nxt,
+			min(65535, ntris)) + b"\0" * 18
 		blob += body
 		total += ntris
 	return ofs, 32 + len(pieces[0][2]), total
+
+
+def _a16(deg: float) -> int:
+	return ((int(round(deg * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
+
+
+def instance_record(floor, mi: int, tris: int, mins, maxs, origin, angles, named: int = 0) -> tuple[bytes, bytes]:
+	"""One 32-byte instance and its 12-byte light, as R_GXPropLoad reads them.
+	angles are the draw angles (pitch already as the renderer wants it)."""
+	# GoldSrc lights a studio model from the floor under it: an ambient
+	# part on every face and the rest by N.L.
+	c = None
+	if floor is not None:
+		# Half the footprint's shorter side, between 16 and 48 units.
+		reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
+		# The floor under the origin. Only when there is none there, or
+		# only a face with no light at all, try the middle and then the
+		# top of the bounds: dod_caen's far King Tiger stands over
+		# nothing but its own unlit collision brush. Taking the
+		# brightest of the three instead lit indoor sandbags from the
+		# sunlit top of their collision brush.
+		mid = (0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), 0.5 * (mins[2] + maxs[2]))
+		for at in (
+			(origin[0], origin[1], origin[2] + 8.0),
+			mid,
+			(mid[0], mid[1], maxs[2]),
+		):
+			g = floor.footprint(at, reach)
+			if g is not None and max(g) >= 4:
+				c = g
+				break
+	if c is None:
+		c = (150, 150, 150)
+	# Props read darker than the lightmapped walls beside them at 0.6 +
+	# 0.4 (Dolphin, charlie beach): the shaded side keeps 0.75 and the
+	# lit side may reach 1.2, which GX clamps per channel.
+	c = [max(40, v) for v in c]
+	base = [int(v * 0.75) for v in c]
+	direct = [min(255, int(v * 0.45)) for v in c]
+	light = bytes(base + [0, 0, 0] + direct + [0, 0, 0])
+	rec = struct.pack(
+		">HH3h3h3h3hI",
+		mi | (named << 8), min(65535, tris),
+		*[_clamp16(math.floor(v)) for v in mins], *[_clamp16(math.ceil(v)) for v in maxs],
+		*[_clamp16(v) for v in origin],
+		_a16(angles[0]), _a16(angles[1]), _a16(angles[2]),
+		(c[0] << 24) | (c[1] << 16) | (c[2] << 8) | 1,
+	)
+	return rec, light
+
+
+def write_pack(out_gcp: Path, out_gct: Path, model_recs, chains, inst_blob: bytearray, light_blob: bytearray,
+		sun, n_inst: int, piece_blob: bytearray, far_blob: bytes = b"", cells=(), version: int = GC_PR_VERSION,
+		vis=None) -> bytearray:
+	"""Write media/gp_<map>.gcp and media/pt_<map>.gct. Returns the texture blob."""
+	inst_blob = bytearray(inst_blob)
+	model_blob = bytearray()
+	for r in model_recs:
+		# No far level (a 4-tuple): a far instance draws the full chain (the
+		# engine keeps it resident), so the far fields stay empty.
+		dl_ofs, first_bytes, tris, frac = r[:4]
+		far_ofs, far_first, far_tris = r[4:7] if len(r) > 4 else (0, 0, 0)
+		model_blob += struct.pack(">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0,
+			far_ofs, far_first, min(65535, far_tris), 0)
+	model_blob += b"\0" * (-len(model_blob) % 32)
+	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, v)) * 32767.0)) for v in sun]).ljust(32, b"\0")
+	inst_blob += light_blob
+	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	# v9: the far cells (cell instance, first member, members), right after the light
+	for cell_inst, first, count in cells:
+		inst_blob += struct.pack(">HHHH", cell_inst, first, count, 0)
+	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	# v10: each instance's PVS cluster, right after the cells
+	if vis is not None:
+		inst_blob += struct.pack(f">{len(vis)}H", *vis)
+		inst_blob += b"\0" * (-len(inst_blob) % 32)
+	inst_ofs = 32
+	models_ofs = inst_ofs + len(inst_blob)
+	dl_base = models_ofs + len(model_blob)
+	hdr = struct.pack(
+		">4sHHHHIIII",
+		GC_PR_MAGIC, version, n_inst, len(model_recs), len(cells),
+		inst_ofs, models_ofs, dl_base, 0xFFFFFFFF,
+	)
+	hdr += struct.pack(">I", dl_base + len(piece_blob))	# far region: the far chains, at the end
+	hdr = hdr.ljust(32, b"\0")
+	out_gcp.parent.mkdir(parents=True, exist_ok=True)
+	out_gcp.write_bytes(hdr + inst_blob + model_blob + piece_blob + bytes(far_blob))
+
+	entries, blob = [], bytearray()
+	for name, tw, th, lv, flag, body in chains:
+		entries.append(GC_WT_ENTRY.pack(name.encode("latin-1"), tw, th, lv, flag, 0, len(blob)))
+		blob += body
+		blob += bytes(-len(blob) & 31)
+	head = b"GCWT" + struct.pack(">II", len(entries), len(blob)) + b"".join(entries)
+	out_gct.write_bytes(head + bytes(-len(head) & 31) + bytes(blob))
+
+	return blob
 
 
 def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, encode_blocks, log=print) -> dict | None:
@@ -654,11 +865,14 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	if floor is not None:
 		floor.add_brush_entities(ents)
 		for prop in props:
+			if prop.get("toss"):
+				if fall_like_the_game(floor, prop) is not None:
+					dropped += 1
+				continue
 			if not prop["drop"]:
 				continue
-			z = floor.drop(prop["origin"], before=prop.get("ent"))
+			z = drop_like_the_game(floor, prop)
 			if z is not None:
-				prop["origin"] = [prop["origin"][0], prop["origin"][1], z]
 				dropped += 1
 		if dropped:
 			log(f"  props: {bsp_path.name}: {dropped} dropped to the floor")
@@ -707,7 +921,8 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		return mat_of[key]
 
 	def model_index(prop: dict) -> int | None:
-		key = (prop["model"], prop["body"], prop["skin"], prop["sequence"], round(prop["scale"], 3), prop["additive"])
+		key = (prop["model"], prop["body"], prop["skin"], prop["sequence"], prop.get("sequence_name", "").lower(),
+			round(prop["scale"], 3), prop["additive"])
 		if key in models:
 			return models[key]
 		models[key] = None
@@ -725,7 +940,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 		if len(model_recs) >= GC_PR_MAX_MODELS:
 			return None
 		try:
-			cmds, textures = model_triangles(mdl, prop["body"], prop["skin"], prop["sequence"], prop["scale"])
+			cmds, textures = model_triangles(mdl, prop["body"], prop["skin"], prop_sequence(mdl, prop), prop["scale"])
 		except (struct.error, IndexError) as error:
 			log(f"  props: {rel}: {error}")
 			return None
@@ -762,7 +977,6 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	inst_blob = bytearray()
 	light_blob = bytearray()
 	n_inst = placed_tris = 0
-	a16 = lambda deg: ((int(round(deg * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
 	for prop in props:
 		if n_inst >= GC_PR_MAX_INST:
 			log(f"  props: {bsp_path.name}: more than {GC_PR_MAX_INST} instances, rest dropped")
@@ -783,45 +997,10 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 					for a in range(3):
 						mins[a] = min(mins[a], w[a] + prop["origin"][a])
 						maxs[a] = max(maxs[a], w[a] + prop["origin"][a])
-		# GoldSrc lights a studio model from the floor under it: an ambient
-		# part on every face and the rest by N.L.
-		c = None
-		if floor is not None:
-			# Half the footprint's shorter side, between 16 and 48 units.
-			reach = max(16.0, min(48.0, 0.25 * min(maxs[0] - mins[0], maxs[1] - mins[1])))
-			# The floor under the origin. Only when there is none there, or
-			# only a face with no light at all, try the middle and then the
-			# top of the bounds: dod_caen's far King Tiger stands over
-			# nothing but its own unlit collision brush. Taking the
-			# brightest of the three instead lit indoor sandbags from the
-			# sunlit top of their collision brush.
-			mid = (0.5 * (mins[0] + maxs[0]), 0.5 * (mins[1] + maxs[1]), 0.5 * (mins[2] + maxs[2]))
-			for at in (
-				(prop["origin"][0], prop["origin"][1], prop["origin"][2] + 8.0),
-				mid,
-				(mid[0], mid[1], maxs[2]),
-			):
-				g = floor.footprint(at, reach)
-				if g is not None and max(g) >= 4:
-					c = g
-					break
-		if c is None:
-			c = (150, 150, 150)
-		# Props read darker than the lightmapped walls beside them at 0.6 +
-		# 0.4 (Dolphin, charlie beach): the shaded side keeps 0.75 and the
-		# lit side may reach 1.2, which GX clamps per channel.
-		c = [max(40, v) for v in c]
-		base = [int(v * 0.75) for v in c]
-		direct = [min(255, int(v * 0.45)) for v in c]
-		light_blob += bytes(base + [0, 0, 0] + direct + [0, 0, 0])
-		inst_blob += struct.pack(
-			">HH3h3h3h3hI",
-			mi, min(65535, model_recs[mi][2]),
-			*[_clamp16(math.floor(v)) for v in mins], *[_clamp16(math.ceil(v)) for v in maxs],
-			*[_clamp16(v) for v in prop["origin"]],
-			a16(pitch), a16(yaw), a16(roll),
-			(c[0] << 24) | (c[1] << 16) | (c[2] << 8) | 1,
-		)
+		rec, light = instance_record(floor, mi, model_recs[mi][2], mins, maxs, prop["origin"], (pitch, yaw, roll),
+			prop.get("named", 0))
+		inst_blob += rec
+		light_blob += light
 		n_inst += 1
 		placed_tris += model_recs[mi][2]
 	if not n_inst:
@@ -829,35 +1008,7 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 			log(f"  props: {bsp_path.name}: no model file for {rel} ({n} placed)")
 		return None
 
-	model_blob = bytearray()
-	for dl_ofs, first_bytes, tris, frac in model_recs:
-		# No far level: a far instance draws the full chain (the engine
-		# keeps it resident), so the far fields stay empty.
-		model_blob += struct.pack(">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0, 0, 0, 0, 0)
-	model_blob += b"\0" * (-len(model_blob) % 32)
-	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, v)) * 32767.0)) for v in sun]).ljust(32, b"\0")
-	inst_blob += light_blob
-	inst_blob += b"\0" * (-len(inst_blob) % 32)
-	inst_ofs = 32
-	models_ofs = inst_ofs + len(inst_blob)
-	dl_base = models_ofs + len(model_blob)
-	hdr = struct.pack(
-		">4sHHHHIIII",
-		GC_PR_MAGIC, GC_PR_VERSION, n_inst, len(model_recs), 0,
-		inst_ofs, models_ofs, dl_base, 0xFFFFFFFF,
-	)
-	hdr += struct.pack(">I", dl_base + len(piece_blob))	# far region: empty, at the end
-	hdr = hdr.ljust(32, b"\0")
-	out_gcp.parent.mkdir(parents=True, exist_ok=True)
-	out_gcp.write_bytes(hdr + inst_blob + model_blob + piece_blob)
-
-	entries, blob = [], bytearray()
-	for name, tw, th, lv, flag, body in chains:
-		entries.append(GC_WT_ENTRY.pack(name.encode("latin-1"), tw, th, lv, flag, 0, len(blob)))
-		blob += body
-		blob += bytes(-len(blob) & 31)
-	head = b"GCWT" + struct.pack(">II", len(entries), len(blob)) + b"".join(entries)
-	out_gct.write_bytes(head + bytes(-len(head) & 31) + bytes(blob))
+	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob)
 
 	for rel, n in sorted(missing.items()):
 		log(f"  props: {bsp_path.name}: no model file for {rel} ({n} placed)")
@@ -875,13 +1026,489 @@ def bake(bsp_path: Path, model_roots: list[Path], out_gcp: Path, out_gct: Path, 
 	return stats
 
 
+# ---- MOHAA static models (.mprop from timfox/mohaa-gc tools/props_models.py) ----
+
+MPROP_MAGIC = b"MPRP"
+# A prop's scale is baked into its model (an instance has no scale), so
+# instances share a model per 5 % step of scale.
+MPROP_SCALE_STEP = 1.05
+MPROP_MODEL_LIT = 1	# mohaa-gc props_models.MODEL_LIT: v3 vertices carry RGBA light after the 8 floats
+MPROP_WORLD_PREFIX = "*world/"	# mohaa-gc props_models.WORLD_PREFIX: a world mesh (terrain) in map units
+
+
+def read_mprop(data: bytes) -> dict:
+	"""{"textures": [{name, w, h, flags, palette (RGB 768), pixels}], "models": [{name, mins, maxs,
+	surfaces: [(texture, verts [(pos, normal, s, t)], tris)]}], "instances": [(model, origin, angles, scale)]}."""
+	magic, ver, ntex, nmod, ninst = struct.unpack_from("<4s4i", data, 0)
+	if magic != MPROP_MAGIC or ver not in (2, 3):
+		raise ValueError(f"not an MPRP v2/v3 pack (got {magic!r} v{ver})")
+	at = 20
+	textures, models, instances = [], [], []
+	for _ in range(ntex):
+		name = data[at:at + 32].split(b"\0", 1)[0].decode("latin-1")
+		w, h, flags = struct.unpack_from("<2HI", data, at + 32)
+		rgba = data[at + 40:at + 40 + 1024]
+		pixels = data[at + 1064:at + 1064 + w * h]
+		pal = b"".join(rgba[i * 4:i * 4 + 3] for i in range(256))
+		textures.append({"name": name, "w": w, "h": h, "flags": STUDIO_NF_MASKED if flags & 1 else 0,
+			"palette": pal, "pixels": pixels, "texgamma": False})
+		at += 1064 + w * h
+	for _ in range(nmod):
+		name = data[at:at + 64].split(b"\0", 1)[0].decode("latin-1")
+		vals = struct.unpack_from("<6fi", data, at + 64)
+		flags = struct.unpack_from("<i", data, at + 92)[0] if ver >= 3 else 0
+		at += 64 + (32 if ver >= 3 else 28)
+		lit = bool(flags & MPROP_MODEL_LIT)
+		vsz = 36 if lit else 32
+		surfs = []
+		for _ in range(vals[6]):
+			ti, nv, nt = struct.unpack_from("<3i", data, at)
+			at += 12
+			verts = []
+			for k in range(nv):
+				x, y, z, nx, ny, nz, s_, t_ = struct.unpack_from("<8f", data, at + vsz * k)
+				if lit:
+					verts.append(((x, y, z), (nx, ny, nz), s_, t_, struct.unpack_from("<3B", data, at + vsz * k + 32)))
+				else:
+					verts.append(((x, y, z), (nx, ny, nz), s_, t_))
+			at += vsz * nv
+			tris = [struct.unpack_from("<3H", data, at + 6 * k) for k in range(nt)]
+			at += 6 * nt
+			surfs.append((ti, verts, tris))
+		models.append({"name": name, "mins": vals[0:3], "maxs": vals[3:6], "surfaces": surfs, "lit": lit})
+	for _ in range(ninst):
+		mi, *f = struct.unpack_from("<i7f", data, at)
+		instances.append((mi, tuple(f[0:3]), tuple(f[3:6]), f[6]))
+		at += 32
+	if at != len(data):
+		raise ValueError(f"MPRP pack has {len(data) - at} bytes past its end")
+	return {"textures": textures, "models": models, "instances": instances}
+
+
+# ---- far trees: impostors and cells ---------------------------------------
+
+IMPOSTOR_MIN_TRIS = 40	# smaller models draw whole far away
+IMPOSTOR_W, IMPOSTOR_H = 32, 64	# texels per view; the two views share one 64 x 64 texture
+IMPOSTOR_SS = 4	# supersampling of the render
+CELL_MIN_MEMBERS = 3
+CELL_FULL_TRIS = 48	# a model without an impostor joins a cell whole up to this many triangles
+CELL_SIDE = 1024.0	# first grid tried; grown until the cells fit the model table
+
+
+def render_impostor(tris, textures, lo, hi):
+	"""Two orthographic views of a model, front (along +y) and side (along +x), side by side:
+	(rgb float (H, 2W, 3), coverage (H, 2W)). tris: [((p, n, s, t) x 3, texture index)]."""
+	import numpy as np
+
+	W, H, S = IMPOSTOR_W * IMPOSTOR_SS, IMPOSTOR_H * IMPOSTOR_SS, IMPOSTOR_SS
+	tex_cache = {}
+
+	def tex_arrays(ti):
+		if ti not in tex_cache:
+			if 0 <= ti < len(textures):
+				t = textures[ti]
+				pal = np.frombuffer(t["palette"], np.uint8).reshape(256, 3).astype(np.float32)
+				idx = np.frombuffer(t["pixels"], np.uint8).reshape(t["h"], t["w"])
+				tex_cache[ti] = (pal, idx, bool(t["flags"] & STUDIO_NF_MASKED))
+			else:
+				tex_cache[ti] = None
+		return tex_cache[ti]
+
+	views = []
+	for ua, da in ((0, 1), (1, 0)):	# image u axis, depth axis; v is always z (up)
+		span_u = max(hi[ua] - lo[ua], 1e-3)
+		span_v = max(hi[2] - lo[2], 1e-3)
+		rgb = np.zeros((H, W, 3), np.float32)
+		cov = np.zeros((H, W), np.float32)
+		depth = np.full((H, W), np.inf, np.float32)
+		for verts, ti in tris:
+			px = np.array([(v[0][ua] - lo[ua]) / span_u * W for v in verts])
+			py = np.array([(hi[2] - v[0][2]) / span_v * H for v in verts])
+			pz = np.array([v[0][da] for v in verts])
+			x0, x1 = max(int(np.floor(px.min())), 0), min(int(np.ceil(px.max())), W - 1)
+			y0, y1 = max(int(np.floor(py.min())), 0), min(int(np.ceil(py.max())), H - 1)
+			if x1 < x0 or y1 < y0:
+				continue
+			area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0])
+			if abs(area) < 1e-9:
+				continue
+			gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+			w0 = ((px[1] - gx) * (py[2] - gy) - (px[2] - gx) * (py[1] - gy)) / area
+			w1 = ((px[2] - gx) * (py[0] - gy) - (px[0] - gx) * (py[2] - gy)) / area
+			w2 = 1.0 - w0 - w1
+			inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+			if not inside.any():
+				continue
+			z = w0 * pz[0] + w1 * pz[1] + w2 * pz[2]
+			sub = depth[y0:y1 + 1, x0:x1 + 1]
+			ok = inside & (z < sub)
+			ta = tex_arrays(ti)
+			if ta is not None:
+				pal, idx, masked = ta
+				th, tw = idx.shape
+				su = w0 * verts[0][2] + w1 * verts[1][2] + w2 * verts[2][2]
+				sv = w0 * verts[0][3] + w1 * verts[1][3] + w2 * verts[2][3]
+				tx = (np.floor((su % 1.0) * tw).astype(np.int64)) % tw
+				ty = (np.floor((sv % 1.0) * th).astype(np.int64)) % th
+				texel = idx[ty, tx]
+				if masked:
+					ok &= texel != 255
+				col = pal[texel]
+			else:
+				col = np.full(z.shape + (3,), 150.0, np.float32)
+			if not ok.any():
+				continue
+			# a little shape from the normals: the engine lights the quads as if facing up
+			nz = [v[1][2] for v in verts]
+			shade = 0.8 + 0.2 * np.clip(w0 * nz[0] + w1 * nz[1] + w2 * nz[2], -1.0, 1.0)
+			sub[ok] = z[ok]
+			rgb[y0:y1 + 1, x0:x1 + 1][ok] = (col * shade[..., None])[ok]
+			cov[y0:y1 + 1, x0:x1 + 1][ok] = 1.0
+		# box down to the texture, colour averaged over covered samples only
+		a = cov.reshape(IMPOSTOR_H, S, IMPOSTOR_W, S).sum((1, 3))
+		c = (rgb * cov[..., None]).reshape(IMPOSTOR_H, S, IMPOSTOR_W, S, 3).sum((1, 3))
+		views.append((c / np.maximum(a[..., None], 1e-6), a / float(S * S)))
+	rgb = np.concatenate([views[0][0], views[1][0]], axis=1)
+	cov = np.concatenate([views[0][1], views[1][1]], axis=1)
+	# fill the colour of empty texels from covered neighbours so mips and filtering don't go dark at the edges
+	for _ in range(4):
+		empty = cov <= 0.0
+		if not empty.any():
+			break
+		acc = np.zeros_like(rgb)
+		n = np.zeros(cov.shape, np.float32)
+		for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+			sh_c = np.roll(cov > 0, (dy, dx), (0, 1))
+			acc += np.roll(rgb, (dy, dx), (0, 1)) * sh_c[..., None]
+			n += sh_c
+		fill = empty & (n > 0)
+		rgb[fill] = acc[fill] / n[fill][..., None]
+		cov = np.where(fill, 1e-6, cov)
+	return rgb, np.where(cov > 1e-5, cov, 0.0)
+
+
+def impostor_quads(lo, hi):
+	"""Two crossed upright quads through the middle of the bounds, as GX quad vertices
+	(pos, normal, s, t): the front view on the x-z quad, the side view on the y-z quad."""
+	cx, cy = 0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])
+	up = (0.0, 0.0, 1.0)
+	z0, z1 = lo[2], hi[2]
+	return [
+		((lo[0], cy, z0), up, 0.0, 1.0), ((lo[0], cy, z1), up, 0.0, 0.0),
+		((hi[0], cy, z1), up, 0.5, 0.0), ((hi[0], cy, z0), up, 0.5, 1.0),
+		((cx, lo[1], z0), up, 0.5, 1.0), ((cx, lo[1], z1), up, 0.5, 0.0),
+		((cx, hi[1], z1), up, 1.0, 0.0), ((cx, hi[1], z0), up, 1.0, 1.0),
+	]
+
+
+def _unit3(v):
+	n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+	return (v[0] / n, v[1] / n, v[2] / n) if n > 1e-9 else (0.0, 0.0, 1.0)
+
+
+def box_cluster(bsp, mins, maxs) -> int:
+	"""The one PVS cluster (leaf - 1, as the world DL numbers them) whose space holds the box, or
+	GC_PR_VIS_ALL when the box reaches into more than one open leaf (or none): drawn whatever the PVS."""
+	found = set()
+	stack = [0] if bsp is not None and bsp.nodes else []
+	while stack:
+		idx = stack.pop()
+		if idx < 0:
+			leaf = -1 - idx
+			if 0 < leaf < len(bsp.leaves) and bsp.leaves[leaf][0] != -2:	# CONTENTS_SOLID holds nothing seen
+				found.add(leaf - 1)
+				if len(found) > 1:
+					return GC_PR_VIS_ALL
+			continue
+		planenum, c0, c1 = bsp.nodes[idx][0], bsp.nodes[idx][1], bsp.nodes[idx][2]
+		nx, ny, nz, dist = bsp.planes[planenum]
+		# the box's nearest and farthest corner along the plane normal
+		lo = sum(n * (mn if n > 0 else mx) for n, mn, mx in zip((nx, ny, nz), mins, maxs)) - dist
+		hi = sum(n * (mx if n > 0 else mn) for n, mn, mx in zip((nx, ny, nz), mins, maxs)) - dist
+		if hi >= 0.0:
+			stack.append(c0)
+		if lo < 0.0:
+			stack.append(c1)
+	return found.pop() if len(found) == 1 else GC_PR_VIS_ALL
+
+
+def plan_cells(members, max_cells: int):
+	"""Group far-drawable instances into square grid cells: {cell key: [member indices]}, cell side.
+	members: [(index, origin)]. The side grows until the cells (with at least CELL_MIN_MEMBERS
+	members) number at most max_cells."""
+	side = CELL_SIDE
+	while True:
+		grid = {}
+		for k, org in members:
+			grid.setdefault((math.floor(org[0] / side), math.floor(org[1] / side)), []).append(k)
+		cells = {c: m for c, m in grid.items() if len(m) >= CELL_MIN_MEMBERS}
+		if len(cells) <= max_cells or side > 65536.0:
+			return cells, side
+		side *= 1.5
+
+
+def bake_mprop(mprop_path: Path, out_gcp: Path, out_gct: Path, encode_blocks, bsp_path: Path | None = None,
+		log=print, impostor: bool = True, cells: bool = True) -> dict | None:
+	"""The prop pack for a converted MOHAA map, from its .mprop. With the
+	converted BSP the props are lit from the floor under them and, past the
+	engine's instance limit, the ones nearest a player start are kept."""
+	pack = read_mprop(Path(mprop_path).read_bytes())
+	ents = parse_entities(Path(bsp_path).read_bytes()) if bsp_path else []
+	floor = None
+	if bsp_path:
+		try:
+			floor = FloorLight(bsp_path)
+			floor.add_brush_entities(ents)
+		except (Exception, SystemExit) as error:  # lighting is optional; geometry is not
+			log(f"  props: {Path(bsp_path).name}: no floor light ({error})")
+			floor = None
+	sun = sun_direction(ents)
+	insts = list(pack["instances"])
+	dropped = 0
+	if len(insts) > GC_PR_FIXED_INST:
+		starts = [_floats(e.get("origin", "0 0 0"), 3) for e in ents
+			if e.get("classname", "").startswith("info_player")]
+		if starts:  # if the engine can't grow its tables it keeps the head
+			insts.sort(key=lambda i: min(sum((i[1][a] - s_[a]) ** 2 for a in range(3)) for s_ in starts))
+		if len(insts) > GC_PR_MAX_INST_BIG:
+			dropped = len(insts) - GC_PR_MAX_INST_BIG
+			insts = insts[:GC_PR_MAX_INST_BIG]
+			log(f"  props: {Path(mprop_path).name}: {dropped} of {len(pack['instances'])} instances past the engine's "
+				f"{GC_PR_MAX_INST_BIG} left out" + (" (kept the ones nearest a player start)" if starts else ""))
+
+	chains, mat_of = [], {}
+
+	def material(ti: int) -> int:
+		if ti in mat_of:
+			return mat_of[ti]
+		if len(chains) >= GC_PR_MAX_MAT:
+			return 0
+		if 0 <= ti < len(pack["textures"]):
+			tex = pack["textures"][ti]
+			tw, th, lv, body = encode_texture(tex, encode_blocks)
+			flag = GC_WT_FLAG_ALPHA if tex["flags"] & STUDIO_NF_MASKED else 0
+		else:
+			tw, th, lv, body = grey_texture(encode_blocks)
+			flag = 0
+		mat_of[ti] = len(chains)
+		chains.append((f"p{len(chains):03d}", tw, th, lv, flag, body))
+		return mat_of[ti]
+
+	models, model_recs, model_bounds = {}, [], []
+	model_tris, model_quads = [], []	# per baked model: its triangles (pos, normal, s, t) x 3 + material; its impostor quads or None
+	piece_blob, far_blob = bytearray(), bytearray()
+	impostors = 0
+	model_lit = set()	# baked models whose pieces carry their own light: never merged into a cell
+
+	def model_index(mi: int) -> int | None:
+		"""The baked model of an .mprop model, at its own size: v9 scales each instance at draw time."""
+		nonlocal impostors
+		key = mi
+		if key in models:
+			return models[key]
+		models[key] = None
+		if len(model_recs) >= GC_PR_MAX_MODELS or not 0 <= mi < len(pack["models"]):
+			return None
+		q_scale = 1.0
+		by_mat, ext = {}, 1.0
+		lo, hi = [1e30] * 3, [-1e30] * 3
+		render, tris_out = [], []
+		lit = bool(pack["models"][mi].get("lit"))
+		for ti, verts, tris in pack["models"][mi]["surfaces"]:
+			mid = material(ti)
+			runs = by_mat.setdefault(mid, [])
+			for tri in tris:
+				vs = []
+				for k in tri:
+					pos, nrm, s_, t_ = verts[k][:4]
+					p = (pos[0] * q_scale, pos[1] * q_scale, pos[2] * q_scale)
+					vs.append((p, nrm, s_, t_) + ((verts[k][4],) if lit else ()))
+					for a in range(3):
+						lo[a] = min(lo[a], p[a])
+						hi[a] = max(hi[a], p[a])
+						ext = max(ext, abs(p[a]))
+				runs.append((False, vs))	# a 3-vertex strip is one triangle
+				render.append((vs, ti))
+				tris_out.append((vs, mid))
+		if not any(by_mat.values()):
+			return None
+		frac = 0
+		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
+			frac += 1
+		got = emit_pieces({k: v for k, v in by_mat.items() if v}, float(1 << frac), piece_blob, lit)
+		if got is None:
+			return None
+		rec = (got[0], got[1], got[2], frac)
+		if lit:
+			model_lit.add(len(model_recs))
+		quads = None
+		# Far away the model is two crossed cut-out quads showing it from the front and the side.
+		world = pack["models"][mi]["name"].startswith(MPROP_WORLD_PREFIX)	# terrain: drawn whole, never a cut-out
+		if impostor and not world and got[2] >= IMPOSTOR_MIN_TRIS and len(chains) < GC_PR_MAX_MAT \
+				and min(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) > 1.0:
+			rgb, cov = render_impostor(render, pack["textures"], lo, hi)
+			if (cov >= 0.5).any():
+				levels, body = encode_rgb_cov(rgb, cov, encode_blocks)
+				imid = len(chains)
+				chains.append((f"i{imid:03d}", rgb.shape[1], rgb.shape[0], levels, GC_WT_FLAG_ALPHA, body))
+				quads = (imid, impostor_quads(lo, hi))
+				far = emit_pieces({imid: [(2, quads[1])]}, float(1 << frac), far_blob)
+				if far is not None:
+					rec = rec + far
+					impostors += 1
+		models[key] = len(model_recs)
+		model_recs.append(rec)
+		model_bounds.append((lo, hi))
+		model_tris.append(tris_out)
+		model_quads.append(quads)
+		return models[key]
+
+	placed = []	# per instance: model, origin, matrix, mins, maxs, record, light
+	missing = 0
+	for mi, origin, angles, scale in insts:
+		gi = model_index(mi)
+		if gi is None:
+			missing += 1
+			continue
+		# Drawn like a studio model at these entity angles: pitch negated.
+		pitch, yaw, roll = -angles[0], angles[1], angles[2]
+		code = max(-127, min(127, int(round(math.log(max(scale, 1e-4)) / math.log(MPROP_SCALE_STEP)))))
+		sc = MPROP_SCALE_STEP ** code
+		m = [[v * sc for v in row] for row in angle_matrix(pitch, yaw, roll)]
+		lo, hi = model_bounds[gi]
+		mins, maxs = [1e30] * 3, [-1e30] * 3
+		for cx in (lo[0], hi[0]):
+			for cy in (lo[1], hi[1]):
+				for cz in (lo[2], hi[2]):
+					w = _rotate(m, (cx, cy, cz))
+					for a in range(3):
+						mins[a] = min(mins[a], w[a] + origin[a])
+						maxs[a] = max(maxs[a], w[a] + origin[a])
+		rec, light = instance_record(floor, gi, model_recs[gi][2], mins, maxs, origin, (pitch, yaw, roll),
+			named=code + 128)	# v9: the high byte of the model word is the scale, 1.05 ^ (byte - 128)
+		placed.append((gi, origin, m, mins, maxs, rec, light))
+	if not placed:
+		return None
+
+	# Far cells: the instances that can draw far away (an impostor, or a few triangles) are
+	# grouped by grid cell and each cell is baked into one chain in world space. The engine
+	# draws a cell's chain while the cell is far and its members one by one while it is near.
+	cells_out, order = [], list(range(len(placed)))
+	if cells:
+		members = [(k, p[1]) for k, p in enumerate(placed) if p[0] not in model_lit
+			and (model_quads[p[0]] is not None or model_recs[p[0]][2] <= CELL_FULL_TRIS)]
+		grid, side = plan_cells(members, max(0, GC_PR_MAX_MODELS - len(model_recs)))
+		in_cell = {k for ks in grid.values() for k in ks}
+		starts = [_floats(e.get("origin", "0 0 0"), 3) for e in ents if e.get("classname", "").startswith("info_player")]
+
+		def near_start(key):
+			if not starts:
+				return 0.0
+			c = ((key[0] + 0.5) * side, (key[1] + 0.5) * side)
+			return min((c[0] - s_[0]) ** 2 + (c[1] - s_[1]) ** 2 for s_ in starts)
+
+		order = [k for k in range(len(placed)) if k not in in_cell]
+		groups = []
+		for key in sorted(grid, key=near_start):
+			ks = sorted(grid[key], key=lambda k: placed[k][0])	# by model: one texture bind serves a run
+			groups.append((key, len(order), ks))
+			order += ks
+		cell_recs = []
+		for key, _first, ks in groups:
+			by_mat = {}
+			ctr = [sum(placed[k][1][a] for k in ks) / len(ks) for a in range(3)]
+			mins, maxs = [1e30] * 3, [-1e30] * 3
+			ext = 1.0
+			for k in ks:
+				gi, origin, m, imins, imaxs = placed[k][:5]
+				for a in range(3):
+					mins[a] = min(mins[a], imins[a])
+					maxs[a] = max(maxs[a], imaxs[a])
+
+				def world(p):
+					w = _rotate(m, p)
+					return tuple(w[a] + origin[a] - ctr[a] for a in range(3))
+
+				if model_quads[gi] is not None:
+					imid, quads = model_quads[gi]
+					vs = [(world(p), n, s_, t_) for p, n, s_, t_ in quads]
+					lst = by_mat.setdefault(imid, [])
+					if lst and lst[-1][0] == 2:
+						lst[-1][1].extend(vs)
+					else:
+						lst.append((2, vs))
+				else:
+					for tri, mid in model_tris[gi]:
+						vs = [(world(p), _unit3(_rotate(m, n)), s_, t_) for p, n, s_, t_ in tri]
+						by_mat.setdefault(mid, []).append((False, vs))
+				for a in range(3):
+					ext = max(ext, abs(imins[a] - ctr[a]), abs(imaxs[a] - ctr[a]))
+			frac = 0
+			while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
+				frac += 1
+			if ext > 32000.0 or len(model_recs) >= GC_PR_MAX_MODELS:
+				order = [k for k in order if k not in ks] + ks	# stays a plain run of instances
+				continue
+			full = emit_pieces(by_mat, float(1 << frac), piece_blob)
+			far = emit_pieces(by_mat, float(1 << frac), far_blob)
+			if full is None or far is None:
+				continue
+			gi = len(model_recs)
+			model_recs.append(full + (frac,) + far)
+			cell_recs.append((gi, ctr, mins, maxs, ks))
+		# instance order is final now: the plain ones, the cells' members, then the cell instances
+		pos = {k: n for n, k in enumerate(order)}
+		for gi, ctr, mins, maxs, ks in cell_recs:
+			rec, light = instance_record(None, gi, model_recs[gi][2], mins, maxs, ctr, (0.0, 0.0, 0.0), named=128)
+			# lit like its members: their light and colour averaged
+			lights = [placed[k][6] for k in ks]
+			light = bytes(sum(l_[b] for l_ in lights) // len(lights) for b in range(12))
+			cols = [struct.unpack_from(">I", placed[k][5], 28)[0] for k in ks]
+			col = 1
+			for sh in (24, 16, 8):
+				col |= (sum((c >> sh) & 255 for c in cols) // len(cols)) << sh
+			rec = rec[:28] + struct.pack(">I", col)
+			first = min(pos[k] for k in ks)
+			cells_out.append((len(order), first, len(ks)))
+			placed.append((gi, ctr, None, mins, maxs, rec, light))
+			order.append(len(placed) - 1)
+	if len(placed) > 65535:
+		raise ValueError("too many instances")
+	inst_blob = bytearray(b"".join(placed[k][5] for k in order))
+	light_blob = bytearray(b"".join(placed[k][6] for k in order))
+	n_inst = len(order)
+	placed_tris = sum(model_recs[placed[k][0]][2] for k in order[:n_inst - len(cells_out)])
+	# the PVS cluster of each instance (cells span many: always drawn while far)
+	vis, version = None, GC_PR_VERSION_CELLS
+	if floor is not None:
+		vis = [GC_PR_VIS_ALL if placed[k][2] is None else box_cluster(floor.bsp, placed[k][3], placed[k][4])
+			for k in order]
+		version = GC_PR_VERSION_VIS
+	blob = write_pack(out_gcp, out_gct, model_recs, chains, inst_blob, light_blob, sun, n_inst, piece_blob,
+		far_blob, cells_out, version, vis)
+	stats = {
+		"instances": n_inst, "models": len(model_recs), "materials": len(chains),
+		"model_tris": sum(r[2] for r in model_recs), "placed_tris": placed_tris,
+		"missing": missing, "dropped": dropped, "chain_bytes": len(piece_blob), "tex_bytes": len(blob),
+		"impostors": impostors, "cells": len(cells_out), "cell_members": sum(c[2] for c in cells_out),
+		"far_bytes": len(far_blob),
+		"vis_placed": sum(v != GC_PR_VIS_ALL for v in vis) if vis else 0,
+		"lit_models": len(model_lit),
+	}
+	log(f"  props: {out_gcp.name} instances={n_inst} models={len(model_recs)} tris={stats['model_tris']} "
+		f"(placed {placed_tris}) chains={len(piece_blob)} B far={len(far_blob)} B impostors={impostors} "
+		f"cells={len(cells_out)} ({stats['cell_members']} members) pvs={stats['vis_placed']} lit={len(model_lit)}, {out_gct.name} materials={len(chains)} {len(blob)} B")
+	return stats
+
+
 def main() -> int:
 	import argparse
 	import importlib.util
 
 	ap = argparse.ArgumentParser(description=__doc__)
-	ap.add_argument("--map", type=Path, required=True)
-	ap.add_argument("--src", type=Path, action="append", required=True, help="gamedir root with models/ (repeatable)")
+	ap.add_argument("--map", type=Path, required=True, help="the map's BSP (with --mprop: the converted MOHAA map, for light)")
+	ap.add_argument("--src", type=Path, action="append", help="gamedir root with models/ (repeatable)")
+	ap.add_argument("--mprop", type=Path, help="a converted MOHAA map's static props (mohaa-gc tools/props_models.py)")
 	ap.add_argument("--out", type=Path, required=True, help="output directory (media/)")
 	args = ap.parse_args()
 	spec = importlib.util.spec_from_file_location("build_gamecube_disc", Path(__file__).with_name("build-gamecube-disc.py"))
@@ -889,6 +1516,12 @@ def main() -> int:
 	sys.modules["build_gamecube_disc"] = disc
 	spec.loader.exec_module(disc)
 	stem = args.map.stem.lower()
+	if args.mprop:
+		got = bake_mprop(args.mprop, args.out / f"gp_{stem}.gcp", args.out / f"pt_{stem}.gct", disc.gx_cmpr_encode_blocks,
+			args.map if args.map.is_file() else None)
+		return 0 if got else 1
+	if not args.src:
+		ap.error("--src is needed without --mprop")
 	got = bake(args.map, args.src, args.out / f"gp_{stem}.gcp", args.out / f"pt_{stem}.gct", disc.gx_cmpr_encode_blocks)
 	return 0 if got else 1
 

@@ -92,6 +92,19 @@ static void CL_GameCubeApplySmokeClientBudgets( void )
 	if( Sys_CheckParm( "-gcfullphysics" ))
 		particles = Q_max( particles, 96 );
 
+	/* -gccapture films a battle: tracers, blood and dirt streaks all draw from this
+	 * pool, and the lean 16-24 starved the tracers. 256 particles are 14 Kb; the
+	 * capture has no HUD and frame rate matters less than what is drawn. */
+	if( Sys_CheckParm( "-gccapture" ))
+	{
+		/* The capture particle pool is GC_PARTICLES_CAPTURE (cl_efx.c); CL_InitParticles
+		 * takes the smaller of it and GI->max_particles, so a 256 cap here kept the pool
+		 * at 256 and the tracers starved. Temp ents: shell bursts, smoke, muzzle flashes
+		 * and gibs all want one; CL_GCEnsureTempEntPool sizes the real pool. */
+		particles = Q_max( particles, 512 );
+		tents = Q_max( tents, 64 );
+	}
+
 	if( GI )
 	{
 		mutable_gi = (gameinfo_t *)GI;
@@ -1291,7 +1304,9 @@ static qboolean CL_GameCubeUseStaticGcmapBootstrapEdicts( int maxclients )
 	 * free (ceres fsb). The static table holds 460 ents whatever maxclients
 	 * is, and cl_parse caps the map route to it, so nothing under-allocs;
 	 * maps over 460 take the map-arena path first. */
-	if( maxclients > 8 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
+	/* 16, not 8: the table does not depend on maxclients, and an 8-bot match is 9 clients (the heap table
+	 * of 744 KB then fails: "mem FAIL Client Edicts Zone"). */
+	if( maxclients > 16 || clgame.maxEntities > GC_GCMAP_STATIC_CLIENT_EDICTS )
 		return false;
 
 	if( GC_MapLoadMemoryOpt()
@@ -1442,7 +1457,25 @@ void CL_InitEdicts( int maxclients )
 		 * (the server sized its own copy there first); the 128-entry static
 		 * table could not even hold one frame of c1a2a. DoD matches too. */
 #if XASH_DODGC_NETWORK
-		if( true )
+		/* A match hosted here: the server sized this ring with its own, so
+		 * both hold the same count, and a second call for the same map
+		 * (connect, then the map name arrives) gets the same ring back. */
+		{
+			extern entity_state_t *SV_GCLocalClientRing( int *entries );
+			int entries = 0;
+			entity_state_t *ring = SV_GCLocalClientRing( &entries );
+
+			if( ring )
+			{
+				memset( ring, 0, sizeof( entity_state_t ) * (size_t)entries );
+				cls.packet_entities = ring;
+				cl_gc_arena_packet_entities = ring;
+				cls.num_client_entities = entries;
+				Con_Reportf( "Xash3D GameCube: client packet entities map=%s share the server block, %d entries\n",
+					clgame.mapname, entries );
+			}
+		}
+		if( !cl_gc_arena_packet_entities && !SV_Active( ))
 #else
 		if( GC_MenuRunsServer( ))
 #endif
@@ -1470,10 +1503,6 @@ void CL_InitEdicts( int maxclients )
 			}
 			if( !cl_gc_arena_packet_entities )
 			{
-				extern int sv_gc_visible_cap;
-
-				/* The local server must not send more than this ring holds. */
-				sv_gc_visible_cap = 128;
 				Con_Reportf( S_WARN "Xash3D GameCube: REDUCED client packet entities map=%s 128 entries (static fallback, arena_tail_left=%s)\n",
 					clgame.mapname, Q_memprint( GC_MapArenaLargestGap()));
 			}
@@ -2021,6 +2050,16 @@ static qboolean CL_LoadHudSprite( const char *szSpriteName, model_t *m_pSprite, 
 			{
 				Image_GCPurgeDecodeScratch();
 				buf = CL_GCLoadHudSpriteBss( loadname, &size );
+			/* An effect sprite larger than the 128 KiB staging buffer (puff and smoke sprites, 190-215 KiB) never fits
+			 * as a whole file: the pool request below fails (a "mem FAIL FileSystem Pool" line and a texture-mip trim
+			 * on every map that loads one) and the streaming shrink at the end of the ladder is what serves it.
+			 * Take the shrink first for those. */
+			if( buf == NULL && gc_sprite_effect_load && type == SPR_CLIENT && GC_MapLoadMemoryOpt()
+				&& FS_FileSize( loadname, false ) > (fs_offset_t)( 128 * 1024 ))
+			{
+				buf = CL_GCLoadEffectSpriteShrunk( loadname, &size, &gc_sprite_fx_prescale );
+				used_sys = buf != NULL;
+			}
 			}
 			if( buf == NULL )
 				buf = FS_LoadFile( loadname, &size, false );
@@ -5139,6 +5178,64 @@ static int pfnStudio_IsHardware( void )
 	return 1;
 }
 
+#if XASH_GAMECUBE
+/* The client DLL's studio renderer asks for a sequence's animation here when its seqgroup file is an animation pack. */
+void *R_StudioGetAnim( studiohdr_t *m_pStudioHeader, model_t *m_pSubModel, mstudioseqdesc_t *pseqdesc );
+
+static void *pfnStudio_GCGetAnim( void *phdr, void *submodel, void *pseqdesc )
+{
+	return R_StudioGetAnim( (studiohdr_t *)phdr, (model_t *)submodel, (mstudioseqdesc_t *)pseqdesc );
+}
+#endif
+
+/* The studio renderer asks for a player's weapon model by index (StudioDrawPlayer, pplayer->weaponmodel). On the GameCube the bots' third-person
+ * weapon models (p_enfield.mdl, ...) are named in the model table but never loaded, because nothing client side references them: the header
+ * came back NULL and StudioMergeBones read through it (a guest data fault that froze the match). Load such a model on demand, once, into
+ * the studio arena (never the heap), and let the DLL's own check skip the weapon if that fails. */
+#if XASH_GAMECUBE
+extern const char *CL_GCServerModelName( int modelindex );
+static model_t *CL_GCStudioModelByIndex( int modelindex )
+{
+	static const model_t *tried[32];
+	static int ntried;
+	model_t *m = CL_ModelHandle( modelindex );
+	int i;
+
+	/* The client's own table has no entry for a model the server precached late (the last index of the weapon set): look it up by the
+	 * server's name, which finds the resident model without a disc read and fills the slot. */
+	if( !m && modelindex > 0 && modelindex < MAX_MODELS && CL_GCServerModelName( modelindex )
+		&& Q_stristr( CL_GCServerModelName( modelindex ), ".mdl" ))
+	{
+		m = Mod_ForName( CL_GCServerModelName( modelindex ), false, false );
+		if( m )
+		{
+			cl.models[modelindex] = m;
+			Con_Reportf( "Xash3D GameCube: client model slot %d filled from the server table: %s (%s)\n", modelindex, m->name,
+				m->cache.data ? "resident" : "not loaded" );
+		}
+		return m;
+	}
+	if( !m || m->cache.data || !m->name[0] || !Q_stristr( m->name, ".mdl" ))
+		return m;
+	for( i = 0; i < ntried; i++ )
+		if( tried[i] == m )
+			return m;
+	if( ntried < (int)ARRAYSIZE( tried ))
+		tried[ntried++] = m;
+	{
+		model_t *loaded = Mod_ForName( m->name, false, false );
+
+		Con_Reportf( "Xash3D GameCube: weapon model %d %s loaded on demand: %s\n", modelindex, m->name,
+			loaded && loaded->cache.data ? "ok" : "failed" );
+		if( loaded )
+			m = loaded;
+	}
+	return m;
+}
+#else
+#define CL_GCStudioModelByIndex CL_ModelHandle
+#endif
+
 static engine_studio_api_t gStudioAPI =
 {
 	.Mem_Calloc              = Mod_Calloc,
@@ -5146,13 +5243,16 @@ static engine_studio_api_t gStudioAPI =
 	.LoadCacheFile           = Mod_LoadCacheFile,
 	.Mod_ForName             = pfnStudio_Mod_ForName,
 	.Mod_Extradata           = pfnStudio_Mod_Extradata,
-	.GetModelByIndex         = CL_ModelHandle,
+	.GetModelByIndex         = CL_GCStudioModelByIndex,
 	.GetCvar                 = CL_CvarGetPointer,
 	.GetChromeSprite         = pfnStudio_GetChromeSprite,
 	.GetAliasScale           = pfnStudio_GetAliasScale,
 	.StudioGetAliasTransform = pfnStudio_GetAliasTransform,
 	.GetViewEntity           = CL_GetViewModel,
 	.IsHardware              = pfnStudio_IsHardware,
+#if XASH_GAMECUBE
+	.GCGetAnim               = pfnStudio_GCGetAnim,
+#endif
 };
 
 static void CL_InitStudioAPI( void )

@@ -22,6 +22,15 @@ GNU General Public License for more details.
 #include "studio.h"
 
 #if XASH_GAMECUBE
+qboolean R_GXCaptureMode( void );
+/* -gccapture: no tracer is drawn nearer the lens than this (units along the view). */
+#define GC_TRACER_NEAR 96.0f
+/* -gccapture: a tracer is at most this wide per unit of depth at its near end (about
+ * six pixels across a 640-wide frame), so a round fired past the lens stays a streak. */
+#define GC_TRACER_WIDTH_PER_DEPTH 0.012f
+#endif
+
+#if XASH_GAMECUBE
 /* Bounded per-particle trace for the first live EFX passes. */
 static int gc_part_trace = 48;
 #endif
@@ -249,6 +258,14 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 	// pglDepthMask( GL_FALSE );
 
 	int vis = GC_GetVisualQuality();
+#if XASH_GAMECUBE
+	/* -gccapture: a tracer must read in the film. The low-memory halving of
+	 * width and brightness left beach rounds under a pixel wide and dim, and a
+	 * capture frame is downscaled after, so draw them half again as wide. */
+	const qboolean capture = R_GXCaptureMode();
+	if( capture )
+		vis = 2;
+#endif
 
 	float gravity = frametime * gp_movevars->gravity;
 	float scale = 1.0 - ( frametime * 0.9 );
@@ -289,6 +306,26 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 		VectorAdd( p->org, delta, end );
 		VectorCopy( p->org, start );
 
+#if XASH_GAMECUBE
+		/* -gccapture: a round that passes by the lens is drawn at its world width, so a
+		 * tracer starting beside the camera filled a beach shot's top with an orange wedge.
+		 * Clip the segment to start at least GC_TRACER_NEAR in front of the eye. */
+		float near_depth = 0.0f;
+		if( capture )
+		{
+			const float ds = DotProduct( start, RI.vforward ) - DotProduct( RI.rvp.vieworigin, RI.vforward );
+			const float de = DotProduct( end, RI.vforward ) - DotProduct( RI.rvp.vieworigin, RI.vforward );
+
+			near_depth = Q_max( GC_TRACER_NEAR, Q_min( ds, de ));
+
+			if( ds < GC_TRACER_NEAR && de < GC_TRACER_NEAR )
+				continue;
+			if( ds < GC_TRACER_NEAR )
+				VectorLerp( start, ( GC_TRACER_NEAR - ds ) / ( de - ds ), end, start );
+			else if( de < GC_TRACER_NEAR )
+				VectorLerp( end, ( GC_TRACER_NEAR - de ) / ( ds - de ), start, end );
+		}
+#endif
 		if( !CL_CullTracer( p, start, end ))
 		{
 			vec3_t verts[4], tmp2;
@@ -316,6 +353,15 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 				tracer_size *= 0.5f;
 			else if( vis == 1 )
 				tracer_size *= 0.75f;
+#if XASH_GAMECUBE
+			if( capture )
+			{
+				tracer_size *= 1.5f;
+				/* Every s66 round crosses the camera plane between the two lines: one
+				 * passing 20-100 units off the lens drew as an orange cone over the frame. */
+				tracer_size = Q_min( tracer_size, GC_TRACER_WIDTH_PER_DEPTH * near_depth );
+			}
+#endif
 
 			// build point along noraml line (normal is -y, x)
 			VectorScale( RI.cull_vup, tmp[0] * tracer_size, normal );
@@ -325,8 +371,20 @@ void GAME_EXPORT CL_DrawTracers( double frametime, particle_t *cl_active_tracers
 			// compute four vertexes
 			VectorSubtract( start, normal, verts[0] );
 			VectorAdd( start, normal, verts[1] );
+#if XASH_GAMECUBE
+			/* The far corners from the (possibly clipped) end, not start + delta: with
+			 * delta the near-lens clip moved only the start and the quad still ran past the lens. */
+			{
+				vec3_t seg;
+
+				VectorSubtract( end, start, seg );
+				VectorAdd( verts[0], seg, verts[2] );
+				VectorAdd( verts[1], seg, verts[3] );
+			}
+#else
 			VectorAdd( verts[0], delta, verts[2] );
 			VectorAdd( verts[1], delta, verts[3] );
+#endif
 
 			if( p->color < 0 || p->color >= sizeof( gTracerColors ) / sizeof( gTracerColors[0] ))
 			{

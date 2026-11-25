@@ -662,6 +662,7 @@ void SV_QueueChangeLevel( const char *level, const char *landname );
 #if XASH_GAMECUBE
 void SV_GCCampaignScanEntities( const char *mapname, const char *entities );
 void SV_GCCampaignFrame( void );
+void SV_GCLiveMapFrame( void ); // dev: Maya bridge live-map poll (sv_gc_campaign.c)
 qboolean SV_GCAutoCampaignActive( void );
 #endif
 void SV_WriteEntityPatch( const char *filename );
@@ -761,6 +762,18 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed );
 // sv_world.c
 //
 void SV_ClearWorld( void );
+#if XASH_GAMECUBE
+/* static func_wall records (sv_world.c) */
+int SV_GCStaticWallCount( void );
+void SV_GCStaticWallsClear( void );
+qboolean SV_GCStaticWallAdd( int modelindex, const vec3_t origin, const vec3_t mins, const vec3_t maxs );
+void SV_GCStaticWallTrace( int i, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );
+void SV_GCStaticWallBounds( int i, vec3_t absmin, vec3_t absmax, int *modelindex );
+void SV_GCStaticWallInfo( int i, vec3_t origin, vec3_t mins, vec3_t maxs, int *modelindex );
+int SV_GCStaticWallsMode( void );
+void SV_GCLazyLogicTick( void );
+void SV_GCStaticWallSetSkip( int i, qboolean skip );
+#endif
 void SV_UnlinkEdict( edict_t *ent );
 void SV_ClipMoveToEntity( edict_t *ent, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );
 void SV_CustomClipMoveToEntity( edict_t *ent, const vec3_t start, vec3_t mins, vec3_t maxs, const vec3_t end, trace_t *trace );

@@ -174,12 +174,19 @@ static void CL_ParseSoundPacket( sizebuf_t *msg, qboolean restore )
 	}
 
 #if XASH_GAMECUBE
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+#define CL_GCLocalSoundNames()	( true )
+#else
+#define CL_GCLocalSoundNames()	GC_MenuRunsServer()
+#endif
 	/* The local map route skips the resource list (SV_ActivateServer), so
 	 * this client never learned the map's sound names and dropped every
 	 * positional sound: the announcer, NPCs, the tram. Take the name from
 	 * the local server on first use and register it then; loads still go
 	 * through the gameplay sound budget, announcer lines are streamed. */
-	if( GC_MenuRunsServer() && !FBitSet( flags, SND_SENTENCE )
+	/* A DoD match skips the list the same way and is not the menu route:
+	 * rifles, footsteps, pickups and doors were all dropped here. */
+	if( CL_GCLocalSoundNames() && !FBitSet( flags, SND_SENTENCE )
 		&& sound > 0 && sound < MAX_SOUNDS && !cl.sound_precache[sound][0] )
 	{
 		extern const char *SV_GCSoundPrecacheName( int index );
@@ -192,7 +199,7 @@ static void CL_ParseSoundPacket( sizebuf_t *msg, qboolean restore )
 			Con_Reportf( "Xash3D GameCube: sound %d registered late %s handle=%d\n", sound, name, handle );
 		}
 	}
-	if( GC_MenuRunsServer() && cls.state == ca_active && !cl.audio_prepped )
+	if( CL_GCLocalSoundNames() && cls.state == ca_active && !cl.audio_prepped )
 	{
 		cl.audio_prepped = true;
 		Con_Reportf( "Xash3D GameCube: audio prepped for local map route\n" );

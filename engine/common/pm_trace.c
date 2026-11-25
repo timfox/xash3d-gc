@@ -20,8 +20,10 @@ GNU General Public License for more details.
 #include "enginefeatures.h"
 #include "studio.h"
 #include "world.h"
+#include "mcol.h"
 #if XASH_GAMECUBE
 #include "platform/platform.h"
+#include "gamecube/mem_gamecube.h"
 #endif
 
 #define PM_AllowHitBoxTrace( model, hull ) ( model && model->type == mod_studio && ( FBitSet( model->flags, STUDIO_TRACE_HITBOX ) || hull == 2 ))
@@ -49,6 +51,177 @@ static const vec3_t pm_hullmaxs[MAX_MAP_HULLS] =
 {   0,   0,   0 },
 {  32,  32,  32 },
 };
+
+/*
+===============================================================================
+
+	WORLD BRUSH MESH (maps/<map>.mcol)
+
+	Converted MOHAA maps keep angled detail out of the clipnode hulls and ship
+	it as convex brushes instead (see mcol.h). Box traces against the world
+	sweep these too; point traces don't, the drawn detail already has hull 0.
+
+===============================================================================
+*/
+static struct
+{
+	string	name;	// world the cache belongs to
+	byte	*buf;	// heap copy, or NULL when the file lives in the map arena
+	mcol_t	mesh;
+	qboolean	ok;
+} pm_worldmesh;
+
+// the map arena is about to be reused for another map: our copy in it is gone
+static void PM_WorldMeshArenaReset( void )
+{
+	if( pm_worldmesh.ok && !pm_worldmesh.buf )
+		memset( &pm_worldmesh, 0, sizeof( pm_worldmesh ));
+}
+
+/*
+The file goes into a free gap of the map arena when there is one (the BSP of a
+converted MOHAA map leaves most of the 3 MiB arena unused, while MEM1 has well
+under 1 MB free after a map loads), else onto the heap.
+*/
+static byte *PM_WorldMeshRead( const char *path, size_t *outlen, qboolean *in_arena )
+{
+	byte header[44], *buf = NULL;
+	file_t *f;
+	size_t need, total = 0;
+	fs_offset_t got;
+
+	*in_arena = false;
+	if( !( f = FS_Open( path, "rb", false )))
+		return NULL;
+
+	if( FS_Read( f, header, sizeof( header )) != sizeof( header ) || !( need = MCol_Size( header, sizeof( header ))))
+	{
+		Con_Printf( S_WARN "%s: %s is not a version %d collision file, ignored\n", __func__, path, MCOL_VERSION );
+		FS_Close( f );
+		return NULL;
+	}
+
+#if XASH_GAMECUBE
+	{
+		const size_t at = GC_MapArenaFind( need );
+
+		if( at != (size_t)-1 && ( buf = (byte *)GC_MapLoadBufferTailAlloc( at, need )) != NULL )
+		{
+			*in_arena = true;
+			GC_SetMapArenaResetHook( PM_WorldMeshArenaReset );
+		}
+	}
+#endif
+	if( !buf )
+		buf = (byte *)Mem_Malloc( host.mempool, need );
+	if( !buf )
+	{
+		/* Mem_Malloc soft-fails on GameCube when MEM1 is short (m1l1 with
+		 * its own textures: 380 KB asked, 292 KB free, then a write to
+		 * address 4). Without the mesh, box traces use the BSP hulls only. */
+		Con_Printf( S_WARN "%s: no room for %s (%lu bytes): collision mesh left out\n", __func__, path, (unsigned long)need );
+		FS_Close( f );
+		return NULL;
+	}
+
+	memcpy( buf, header, sizeof( header ));
+	total = sizeof( header );
+	while( total < need && ( got = FS_Read( f, buf + total, need - total )) > 0 )
+		total += (size_t)got;
+	FS_Close( f );
+
+	if( total < need )
+	{
+		Con_Printf( S_WARN "%s: %s is truncated, ignored\n", __func__, path );
+		if( !*in_arena )
+			Mem_Free( buf );
+		return NULL;
+	}
+	*outlen = need;
+	return buf;
+}
+
+const mcol_t *PM_WorldMesh( const struct model_s *world )
+{
+	if( !world || !world->name[0] || world->type != mod_brush )
+		return NULL;
+
+	if( Q_stricmp( pm_worldmesh.name, world->name ))
+	{
+		string path;
+		size_t len = 0;
+		qboolean in_arena = false;
+		byte *buf;
+
+		if( pm_worldmesh.buf )
+			Mem_Free( pm_worldmesh.buf );
+		memset( &pm_worldmesh, 0, sizeof( pm_worldmesh ));
+		Q_strncpy( pm_worldmesh.name, world->name, sizeof( pm_worldmesh.name ));
+		Q_strncpy( path, world->name, sizeof( path ));
+		COM_ReplaceExtension( path, ".mcol", sizeof( path ));
+
+		if( !FS_FileExists( path, false ))
+			return NULL;
+
+		buf = PM_WorldMeshRead( path, &len, &in_arena );
+		if( buf && MCol_Parse( &pm_worldmesh.mesh, buf, len ))
+		{
+			pm_worldmesh.ok = true;
+			pm_worldmesh.buf = in_arena ? NULL : buf;
+			Con_Reportf( "%s: %s, %d brushes, %d terrain patches, %d patch triangles, %lu bytes in the %s\n", __func__, path,
+				pm_worldmesh.mesh.numbrushes, pm_worldmesh.mesh.numterrain, pm_worldmesh.mesh.numtris, (unsigned long)len,
+				in_arena ? "map arena" : "heap" );
+		}
+		else if( buf )
+		{
+			Con_Printf( S_WARN "%s: %s is malformed, ignored\n", __func__, path );
+			if( !in_arena )
+				Mem_Free( buf );
+		}
+	}
+
+	return pm_worldmesh.ok ? &pm_worldmesh.mesh : NULL;
+}
+
+/*
+==================
+PM_ClipToWorldMesh
+
+Merges the world mesh sweep into a world hull trace, before endpos and
+plane.dist are derived from the fraction. Like Quake 3's pmove, a box that
+starts slightly inside a brush but moves out of it isn't held: only allsolid
+counts as stuck, so prediction rounding can't pin the player.
+==================
+*/
+void PM_ClipToWorldMesh( const struct model_s *world, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end, pmtrace_t *trace )
+{
+	const mcol_t *mesh;
+	mcol_trace_t tr;
+
+	if( VectorIsNull( mins ) && VectorIsNull( maxs ))
+		return;
+	if( trace->allsolid || !( mesh = PM_WorldMesh( world )))
+		return;
+
+	MCol_TraceBox( mesh, start, mins, maxs, end, &tr );
+
+	if( tr.allsolid )
+	{
+		trace->allsolid = true;
+		trace->startsolid = true;
+		trace->fraction = 0.0f;
+		VectorCopy( start, trace->endpos );
+		return;
+	}
+
+	if( tr.fraction < trace->fraction )
+	{
+		trace->fraction = tr.fraction;
+		VectorCopy( tr.normal, trace->plane.normal );
+		VectorLerp( start, tr.fraction, end, trace->endpos );
+		trace->plane.dist = DotProduct( trace->endpos, trace->plane.normal );
+	}
+}
 
 void Pmove_Init( void )
 {
@@ -586,6 +759,9 @@ pmtrace_t PM_PlayerTraceExt( playermove_t *pmove, vec3_t start, vec3_t end, int 
 			trace_bbox.hitgroup = Mod_HitgroupForStudioHull( last_hitgroup );
 		}
 
+		if( i == 0 && pe->model )
+			PM_ClipToWorldMesh( pe->model, start, host.player_mins[pmove->usehull], host.player_maxs[pmove->usehull], end, &trace_bbox );
+
 		if( trace_bbox.allsolid )
 			trace_bbox.startsolid = true;
 
@@ -724,6 +900,16 @@ int PM_TestPlayerPosition( playermove_t *pmove, vec3_t pos, pmtrace_t *ptrace, p
 		{
 			if( PM_HullPointContents( hull, hull->firstclipnode, pos_l ) == CONTENTS_SOLID )
 				return i;
+
+			if( i == 0 && pe->model )
+			{
+				pmtrace_t	trace;
+
+				PM_InitPMTrace( &trace, pos );
+				PM_ClipToWorldMesh( pe->model, pos, host.player_mins[pmove->usehull], host.player_maxs[pmove->usehull], pos, &trace );
+				if( trace.allsolid )
+					return i;
+			}
 		}
 		else
 		{

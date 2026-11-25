@@ -1,0 +1,30 @@
+From 39eea7d19420141601c6dde0ae82355eae51084a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 09:28:58 -0800
+Subject: [PATCH] gamecube: build without DWARF unwind tables (-fno-exceptions,
+ nothing catches)
+
+---
+ wscript | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/wscript b/wscript
+index 3fc69fe3..5c030030 100644
+--- a/wscript
++++ b/wscript
+@@ -255,6 +255,12 @@ def configure(conf):
+ 		pass
+ 	else:
+ 		conf.env.append_unique('CXXFLAGS', ['-Wno-invalid-offsetof', '-fno-exceptions'])
++		if conf.env.DEST_OS == 'gamecube':
++			# Built with -fno-exceptions and nothing catches, so the DWARF unwind
++			# tables are never read; they cost ~200 KiB of the MEM1 image.
++			nounwind = ['-fno-asynchronous-unwind-tables', '-fno-unwind-tables']
++			conf.env.append_unique('CFLAGS', nounwind)
++			conf.env.append_unique('CXXFLAGS', nounwind)
+ 		conf.define('stricmp', 'strcasecmp', quote=False)
+ 		conf.define('strnicmp', 'strncasecmp', quote=False)
+ 		conf.define('_snprintf', 'snprintf', quote=False)
+-- 
+2.53.0
+

@@ -214,6 +214,16 @@ qboolean R_OpaqueEntity( cl_entity_t *ent )
 	if( sw_noalphabrushes.value && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
 		return true;
 
+#if XASH_GAMECUBE
+	/* On the Flipper a see-through brush (rendermode 4: lattices, netting,
+	 * fences) is alpha-tested, never blended, so it draws with the solid
+	 * brush entities. The translucent pass never reached it on the capture
+	 * route: dod_charlie's radio tower (func_wall *178, {tension6 lattice)
+	 * was missing and the control-point flag on it hung in the sky. */
+	if( GC_UseGxWorldDraw() && ent->model && ent->model->type == mod_brush && rendermode == kRenderTransAlpha )
+		return true;
+#endif
+
 	return false;
 }
 
@@ -444,10 +454,34 @@ qboolean GAME_EXPORT R_AddEntity( struct cl_entity_s *clent, int type )
 R_GetFarClip
 ===============
 */
+qboolean R_GXCaptureMode( void );
+
 static float R_GetFarClip( void )
 {
 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
-		return gp_movevars->zmax * 1.73f;
+	{
+		extern float R_GXMapFarplane( void );
+		float zfar = gp_movevars->zmax * 1.73f;
+		const float farplane = R_GXMapFarplane();
+
+		/* A MOHAA far plane: the fog is solid there, so nothing past it is drawn. */
+		if( farplane > 0.0f && zfar > farplane + 256.0f )
+			zfar = farplane + 256.0f;
+
+		/* -gccapture: a film camera out at sea must still see the far end
+		 * of the beach, whatever sv_zmax the map was built with. */
+		if( R_GXCaptureMode())
+		{
+			vec3_t span;
+			float diag;
+
+			VectorSubtract( WORLDMODEL->maxs, WORLDMODEL->mins, span );
+			diag = VectorLength( span ) + 512.0f;
+			if( zfar < diag )
+				zfar = diag;
+		}
+		return zfar;
+	}
 	return 2048.0f;
 }
 
@@ -914,7 +948,9 @@ static void R_DrawEntitiesOnList( void )
 			|| gEngfuncs.Sys_CheckParm( "-gcworldrender" ));
 	int lean_brushes = 0;
 	int lean_studios = 0;
-	const int lean_max_brushes = gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 48 : 6;
+	/* -gccapture films the map: every brush in view draws (a capture has no frame rate to keep). */
+	const int lean_max_brushes = gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 256
+		: gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 48 : 6;
 	const int lean_max_studios = (int)GC_EntCap( &gc_max_studios, gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 24 : 1 );
 
 	if( GC_UseGxWorldDraw() && gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
@@ -980,14 +1016,16 @@ static void R_DrawEntitiesOnList( void )
 #if XASH_GAMECUBE
 			/* Lean: brush ents only (tram/doors). Studios deferred — MEM1 /
 			 * TriAPI hangs on early frames (20260807-162747). */
+			/* Cull first, then count: brush ents out of view used to take cap slots, and on a
+			 * 49-brush beach the sea (func_water, listed last) was the one cut in every shot. */
+			if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
+				break;
 			if( lean_ents )
 			{
 				if( lean_brushes >= lean_max_brushes )
 					break;
 				lean_brushes++;
 			}
-			if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
-				break;
 #endif
 			R_DrawBrushModel( RI.currententity );
 			break;
@@ -1177,7 +1215,27 @@ static void R_DrawEntitiesOnList( void )
 					if( GC_IsLowMemoryMode() && GC_UseGxWorldDraw() && !R_GXWorldDLActive())
 						break;
 					if( GC_UseGxWorldDraw() && !R_GXBrushEntityVisible( RI.currententity ))
+					{
+						/* -gccapture: name each see-through brush culled here once
+						 * (the solid pass logs its own). */
+						if( R_GXCaptureMode())
+						{
+							static const model_t *tculled[32];
+							static int ntculled;
+							int ci;
+
+							for( ci = 0; ci < ntculled && tculled[ci] != RI.currentmodel; ci++ )
+								;
+							if( ci == ntculled && ntculled < 32 )
+							{
+								tculled[ntculled++] = RI.currentmodel;
+								gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled trans rm=%d amt=%d\n",
+									RI.currentmodel->name, RI.currententity->curstate.rendermode,
+									RI.currententity->curstate.renderamt );
+							}
+						}
 						break;
+					}
 					R_DrawBrushModel( RI.currententity );
 					break;
 				}
@@ -1311,7 +1369,9 @@ static void R_DrawEntitiesOnList( void )
 
 			/* Landmark crowbar is bound on viewent; do not require world NPC
 			 * studios (lean_studios) or tip-safe maps never reach G155/G164. */
-			if( Q_stricmp( XASH_GAMEDIR, "lostcoast" )
+			/* -gccapture films through a cinematic camera: the player's gun is not in the shot
+			 * (a Garand barrel showed in a beach shot's corner). */
+			if( Q_stricmp( XASH_GAMEDIR, "lostcoast" ) && !R_GXCaptureMode()
 				&& tr.viewent && tr.viewent->model
 				&& tr.viewent->model->type == mod_studio
 				&& tr.viewent->model->cache.data
@@ -1342,6 +1402,10 @@ static void R_DrawEntitiesOnList( void )
 						&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" ))))
 			{
 				R_AllowFog( false );
+				{
+					extern void R_GXDecalRingDraw( void );
+					R_GXDecalRingDraw();
+				}
 				gEngfuncs.CL_DrawEFX( tr.frametime, true );
 				R_AllowFog( true );
 				if( !lean_efx_draw_logged )
@@ -2025,8 +2089,41 @@ static void R_EdgeDrawingGcmapProbe( void )
 					continue;
 				if( be->model->nummodelsurfaces <= 0 )
 					continue;
+				/* -gccapture: each brush model on the solid brush list, once. */
+				if( R_GXCaptureMode())
+				{
+					static const model_t *listed[96];
+					static int nlisted;
+					int li;
+
+					for( li = 0; li < nlisted && listed[li] != be->model; li++ )
+						;
+					if( li == nlisted && nlisted < 96 )
+					{
+						listed[nlisted++] = be->model;
+						gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush list %s rm=%d of %d\n",
+							be->model->name, be->curstate.rendermode, bn );
+					}
+				}
 				if( !R_GXBrushEntityVisible( be ))
 				{
+					/* -gccapture: name each brush model culled here once. */
+					if( R_GXCaptureMode())
+					{
+						static const model_t *culled[64];
+						static int nculled;
+						int ci;
+
+						for( ci = 0; ci < nculled && culled[ci] != be->model; ci++ )
+							;
+						if( ci == nculled && nculled < 64 )
+						{
+							culled[nculled++] = be->model;
+							gEngfuncs.Con_Reportf( "Xash3D GameCube: capture brush %s culled %s rm=%d org=%.0f %.0f %.0f\n",
+								be->model->name, r_gx_last_cull_was_pvs ? "pvs" : "frustum",
+								be->curstate.rendermode, be->origin[0], be->origin[1], be->origin[2] );
+						}
+					}
 					if( r_gx_last_cull_was_pvs )
 						cull_pvs++;
 					else
@@ -2330,6 +2427,9 @@ static qboolean R_GCMarkLiveBspPVS( void )
 R_MarkLeaves
 ===============
 */
+#if XASH_GAMECUBE
+qboolean R_GXCaptureMode( void );
+#endif
 static void R_MarkLeaves( void )
 {
 #if XASH_GAMECUBE
@@ -2342,9 +2442,11 @@ static void R_MarkLeaves( void )
 
 	/* Low-res without visdata: mark every leaf. New Game with prepare-time
 	 * FatPVS cache applies that mark below (not full-vis). */
-	if( GC_UseLowResWorldProbe() && !( WORLDMODEL && WORLDMODEL->visdata )
+	/* -gccapture marks every leaf too: a film capture draws all the map in view. */
+	if( GC_UseLowResWorldProbe() && ( R_GXCaptureMode()
+		|| ( !( WORLDMODEL && WORLDMODEL->visdata )
 		&& !gEngfuncs.Sys_CheckParm( "-gcnewgame" )
-		&& !gEngfuncs.Sys_CheckParm( "-gcmenuplaystart" ))
+		&& !gEngfuncs.Sys_CheckParm( "-gcmenuplaystart" ))))
 	{
 		int i;
 
@@ -2366,7 +2468,8 @@ static void R_MarkLeaves( void )
 				WORLDMODEL->surfaces[i].visframe = tr.framecount;
 		}
 		if( tr.framecount <= 1 )
-			gEngfuncs.Con_Reportf( "Xash3D GameCube: full-vis leaf mark active (low-res no visdata)\n" );
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: full-vis leaf mark active (%s)\n",
+				R_GXCaptureMode() ? "capture mode" : "low-res no visdata" );
 		return;
 	}
 
@@ -2607,6 +2710,13 @@ void GAME_EXPORT R_RenderScene( void )
 #endif
 	// R_PushDlights (r_worldmodel); ??
 	// R_DrawWorld();
+#if XASH_GAMECUBE
+	{
+		extern void R_GXFogSceneBegin( void );
+
+		R_GXFogSceneBegin();
+	}
+#endif
 	R_EdgeDrawing();
 #if XASH_GAMECUBE
 	GC_WatchdogMark( "R_EdgeDrawing (world)" );
@@ -2631,6 +2741,11 @@ void GAME_EXPORT R_RenderScene( void )
 		/* Lean DrawEntities: brushes + studio + viewmodel + EFX + solid/trans
 		 * client tris (gated after world studio). */
 		R_DrawEntitiesOnList();
+		{
+			extern void R_GXFogSceneEnd( void );
+
+			R_GXFogSceneEnd();
+		}
 		/* Bloom after the world is in the EFB. The kernel is a few texels
 		 * wide so bright edges glow without a second copy of the mesh. */
 		{
@@ -2664,6 +2779,11 @@ void GAME_EXPORT R_RenderScene( void )
 		if( tr.framecount <= 1 )
 			gEngfuncs.Con_Reportf( "Xash3D GameCube: R_RenderScene gcmap route complete worldrender=%d\n",
 				GC_UseLowResWorldProbe() ? 1 : 0 );
+		{
+			extern void R_GXFogSceneEnd( void );
+
+			R_GXFogSceneEnd();
+		}
 		return;
 	}
 #endif
@@ -2671,6 +2791,13 @@ void GAME_EXPORT R_RenderScene( void )
 	gEngfuncs.CL_ExtraUpdate(); // don't let sound get messed up if going slow
 
 	R_DrawEntitiesOnList();
+#if XASH_GAMECUBE
+	{
+		extern void R_GXFogSceneEnd( void );
+
+		R_GXFogSceneEnd();
+	}
+#endif
 
 #if XASH_GAMECUBE
 	if( tr.framecount <= 32 )

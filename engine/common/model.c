@@ -1246,6 +1246,21 @@ static byte *Mod_GCLoadStudioFile( const char *model_path, fs_offset_t *length, 
 	}
 	*length = 0;
 
+	/* The mirror exists but could not be read into memory: the retail file is 3-5x bigger and fails the same way
+	 * (zalec: v_bren 525 KB after the 125 KB mirror). The slot path loads the weapon when it is equipped. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	if( FS_FileExists( mirror, false )) /* every DoD match: one started from the menu has no -gclistenserver */
+#else
+	if( Sys_CheckParm( "-gclistenserver" ) && FS_FileExists( mirror, false ))
+#endif
+	{
+		static int skip_logs;
+
+		if( skip_logs++ < 8 )
+			Con_Reportf( "Xash3D GameCube: no retail fallback for '%s' (gc_studio mirror exists), loads when used\n", model_path );
+		return NULL;
+	}
+
 	buf = FS_LoadFileMalloc( model_path, length, false );
 	if( buf && *length >= (fs_offset_t)sizeof( studiohdr_t ))
 	{
@@ -1643,6 +1658,41 @@ void Mod_GCPromoteMapModels( void )
 	 * stay in the 184 KiB studio BSS. */
 	FS_ClearFindMissCache();
 	Image_GCPurgeDecodeScratch();
+	/* The team body cores (models/player/<team>/<team>.mdl, ~79 KB each) first, while the spill and heap are still one
+	 * piece: loaded lazily on first draw they hit "spill alloc miss" + a malloc that fails on a fragmented heap that
+	 * reports 300 KB free (caen: brit-inf, zalec: us-para), and that side's bots have no body. */
+	{
+		int n_pre = 0, n_player = 0;
+
+		for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+		{
+			n_pre++;
+			if( Q_stristr( sv.model_precache[i], "models/player" ))
+			{
+				n_player++;
+				Con_Reportf( "Xash3D GameCube: precache list has %s (index %d)\n", sv.model_precache[i], i );
+			}
+		}
+		Con_Reportf( "Xash3D GameCube: early body promote: %d precached models, %d player\n", n_pre, n_player );
+	}
+	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
+	{
+		const char *name = sv.model_precache[i];
+		qboolean is_view = false;
+
+		if( !name || !Q_stristr( name, "models/player/" ) || !Q_stristr( name, ".mdl" ))
+			continue;
+		if( !Mod_GCStudioNameAllowed( name, &is_view ))
+			continue;
+		tried++;
+		if( Mod_GCPromoteStudioPath( name ))
+		{
+			ok++;
+			Con_Reportf( "Xash3D GameCube: early player body promote '%s' ok (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+		}
+		else
+			Con_Reportf( S_WARN "Xash3D GameCube: early player body promote '%s' FAILED (heap %s)\n", name, Q_memprint( GC_MemHeapFreeBytes() ));
+	}
 	for( i = 1; i < MAX_MODELS && sv.model_precache[i][0]; i++ )
 	{
 		const char *name = sv.model_precache[i];
@@ -1664,6 +1714,10 @@ void Mod_GCPromoteMapModels( void )
 			if( mod && mod->cache.data )
 				Mod_GCAttachStudioSkins( mod );
 		}
+	}
+	{
+		extern void SV_GCStaticWallsSelfTest( void );
+		SV_GCStaticWallsSelfTest();
 	}
 	Mod_GCRebindPromotedStudios();
 	Con_Reportf( "Xash3D GameCube: mapmodel studios promote ok=%d/%d budget=%s tip=%s\n",
@@ -1718,11 +1772,16 @@ static qboolean Mod_GCMapNeedsStudio( const char *path )
 		}
 		return false;
 	}
-	/* Lost Coast: a viewmodel no map entity names (the grenades the HL1 game
-	 * code precaches with every weapon) waits until it is held, like the ones
-	 * above. Preloading v_grenade took 133 KB of the studio arena at spawn,
-	 * room the prop chain cache needs in the harbor. */
-	if( Sys_CheckParm( "-gccapfacessmoke" ) && !Q_strnicmp( path, "models/v_", 9 ))
+	/* A viewmodel no map entity names waits until it is held, like the ones
+	 * above. Lost Coast: preloading v_grenade took 133 KB of the studio arena
+	 * at spawn, room the prop chain cache needs in the harbor. DoD: the game
+	 * precaches its whole gun table (18 viewmodels, 30-120 KB each plus a
+	 * 30-86 KB *t skin scratch), and on dod_avalanche that ran the heap from
+	 * 96 KB to 2.4 KB during entity spawn, so the grenade world models, later
+	 * entities and listenserver.cfg failed to load (ceres 59f4f145). Only the
+	 * held gun is ever drawn, and it loads on demand (V_SetupViewModel and the
+	 * lean listen route in cl_frame.c). */
+	if( !Q_strnicmp( path, "models/v_", 9 ))
 		return false;
 	return true;	/* unknown model: keep the old behaviour */
 }
@@ -2456,10 +2515,19 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		{
 			file_t *f = FS_Open( loadname, "rb", false );
 			dheader_t hdr;
-			int light_ofs = 0, light_len = 0;
+			int light_ofs = 0, light_len = 0, tex_ofs = 0, tex_len = 0;
 			size_t compact_need = (size_t)filesize;
 			size_t light_align_pad = 0;
 			qboolean prefer_compact = false;
+			/* Byte ranges of the file left out of (or replaced in) the
+			 * buffer, in file order: the lighting lump (G154 reads it from
+			 * disc) and the miptex pixels when the world texture pack owns
+			 * the world's textures. */
+			struct { int ofs, len; const byte *rep; size_t replen; } cut[2];
+			int ncut = 0, c;
+			byte *tex_blob = NULL;
+			size_t tex_blob_len = 0;
+			qboolean light_cut = false;
 
 			if( f && FS_Read( f, &hdr, sizeof( hdr )) == (fs_offset_t)sizeof( hdr ))
 			{
@@ -2469,6 +2537,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				{
 					light_ofs = LittleLong( hdr.lumps[LUMP_LIGHTING].fileofs );
 					light_len = LittleLong( hdr.lumps[LUMP_LIGHTING].filelen );
+					tex_ofs = LittleLong( hdr.lumps[LUMP_TEXTURES].fileofs );
+					tex_len = LittleLong( hdr.lumps[LUMP_TEXTURES].filelen );
 				}
 			}
 
@@ -2481,9 +2551,102 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				&& (size_t)light_ofs + (size_t)light_len <= (size_t)filesize )
 			{
 				light_align_pad = (size_t)light_len & 3u;
-				compact_need = (size_t)filesize - (size_t)light_len + light_align_pad;
-				prefer_compact = compact_need < (size_t)filesize;
+				cut[ncut].ofs = light_ofs;
+				cut[ncut].len = light_len;
+				cut[ncut].rep = NULL;	/* zeros */
+				cut[ncut].replen = light_align_pad;
+				ncut++;
+				light_cut = true;
 			}
+
+			/* A world drawn from its texture pack (media/wt_<map>.gct) never
+			 * reads the miptex pixels: Mod_LoadTextureData takes the pack's
+			 * texture before looking at them. Converted MOHAA maps embed their
+			 * own images (m1l1: 1.2 MB of the 3 MB BSP), and keeping them in
+			 * the map arena left no room for the collision mesh (mcol), whose
+			 * heap fallback then failed. Keep only the lump header and each
+			 * mip header, with the mip offsets zeroed (no embedded data). */
+			if( f && tex_len > 64 * 1024 && tex_ofs > 0
+				&& (size_t)tex_ofs + (size_t)tex_len <= (size_t)filesize
+				&& !( light_len > 0 && tex_ofs < light_ofs + light_len && light_ofs < tex_ofs + tex_len )
+				&& !Sys_CheckParm( "-gcnotexpacks" ) && !Sys_CheckParm( "-gckeepmiptex" ))
+			{
+				string stem, pack;
+				int n = 0;
+
+				COM_FileBase( loadname, stem, sizeof( stem ));
+				Q_strnlwr( stem, stem, sizeof( stem ));
+				Q_snprintf( pack, sizeof( pack ), "media/wt_%s.gct", stem );
+				FS_Seek( f, tex_ofs, SEEK_SET );
+				if( FS_FileExists( pack, false ) && FS_Read( f, &n, 4 ) == 4
+					&& ( n = LittleLong( n )) > 0 && n <= 4096 && 4 + 4 * n <= tex_len )
+				{
+					int *offs = (int *)Mem_Malloc( host.mempool, 4 * n );
+					int k, valid = 0;
+
+					if( FS_Read( f, offs, 4 * n ) == 4 * n )
+					{
+						for( k = 0; k < n; k++ )
+						{
+							offs[k] = LittleLong( offs[k] );
+							if( offs[k] >= 0 && offs[k] + (int)sizeof( mip_t ) <= tex_len )
+								valid++;
+							else
+								offs[k] = -1;
+						}
+						tex_blob_len = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
+						tex_blob = (byte *)Mem_Malloc( host.mempool, tex_blob_len );
+						*(int *)tex_blob = LittleLong( n );
+						for( k = 0, valid = 0; k < n && tex_blob; k++ )
+						{
+							const size_t at = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
+							mip_t *mt = (mip_t *)( tex_blob + at );
+
+							if( offs[k] < 0 )
+							{
+								((int *)tex_blob)[1 + k] = LittleLong( -1 );
+								continue;
+							}
+							FS_Seek( f, tex_ofs + offs[k], SEEK_SET );
+							if( FS_Read( f, mt, sizeof( mip_t )) != (fs_offset_t)sizeof( mip_t ))
+							{
+								Mem_Free( tex_blob );
+								tex_blob = NULL;
+								break;
+							}
+							memset( mt->offsets, 0, sizeof( mt->offsets ));
+							((int *)tex_blob)[1 + k] = LittleLong( (int)at );
+							valid++;
+						}
+					}
+					Mem_Free( offs );
+				}
+				if( tex_blob )
+				{
+					/* Later lumps keep their 4-byte alignment: the cut is a
+					 * multiple of 4 (the replacement takes the remainder). */
+					cut[ncut].ofs = tex_ofs;
+					cut[ncut].len = tex_len;
+					cut[ncut].rep = tex_blob;
+					cut[ncut].replen = tex_blob_len + (((size_t)tex_len - tex_blob_len ) & 3u );
+					ncut++;
+				}
+			}
+			if( ncut == 2 && cut[1].ofs < cut[0].ofs )
+			{
+				const int o = cut[0].ofs, l = cut[0].len;
+				const byte *r = cut[0].rep;
+				const size_t rl = cut[0].replen;
+
+				cut[0] = cut[1];
+				cut[1].ofs = o;
+				cut[1].len = l;
+				cut[1].rep = r;
+				cut[1].replen = rl;
+			}
+			for( c = 0; c < ncut; c++ )
+				compact_need -= (size_t)cut[c].len - cut[c].replen;
+			prefer_compact = ncut > 0 && compact_need < (size_t)filesize;
 
 			if( f && prefer_compact
 				&& ( buf = GC_BorrowMapLoadBuffer( compact_need )) != NULL )
@@ -2495,33 +2658,32 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				int i;
 
 				FS_Seek( f, 0, SEEK_SET );
+				c = 0;
 				while( pos < filesize && ok )
 				{
 					size_t want;
 					fs_offset_t got;
 
-					if( light_len > 0 && pos >= light_ofs
-						&& pos < (fs_offset_t)( light_ofs + light_len ))
+					if( c < ncut && pos >= cut[c].ofs )
 					{
-						if( light_align_pad )
+						if( out + cut[c].replen > compact_need )
 						{
-							if( out + light_align_pad > compact_need )
-							{
-								ok = false;
-								break;
-							}
-							memset( buf + out, 0, light_align_pad );
-							out += light_align_pad;
+							ok = false;
+							break;
 						}
-						pos = (fs_offset_t)( light_ofs + light_len );
+						memset( buf + out, 0, cut[c].replen );
+						if( cut[c].rep )
+							memcpy( buf + out, cut[c].rep, tex_blob_len );
+						out += cut[c].replen;
+						pos = (fs_offset_t)( cut[c].ofs + cut[c].len );
 						FS_Seek( f, pos, SEEK_SET );
+						c++;
 						continue;
 					}
 
 					want = sizeof( chunk );
-					if( light_len > 0 && pos < light_ofs
-						&& pos + (fs_offset_t)want > light_ofs )
-						want = (size_t)( light_ofs - pos );
+					if( c < ncut && pos + (fs_offset_t)want > cut[c].ofs )
+						want = (size_t)( cut[c].ofs - pos );
 					if( pos + (fs_offset_t)want > filesize )
 						want = (size_t)( filesize - pos );
 					if( out + want > compact_need )
@@ -2544,22 +2706,33 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				if( ok && out == compact_need && out >= sizeof( dheader_t ))
 				{
 					dheader_t *dh = (dheader_t *)buf;
-					const int shrink = light_len - (int)light_align_pad;
 
-					dh->lumps[LUMP_LIGHTING].fileofs = 0;
-					dh->lumps[LUMP_LIGHTING].filelen = 0;
 					for( i = 0; i < HEADER_LUMPS; i++ )
 					{
 						const int ofs = LittleLong( dh->lumps[i].fileofs );
 						const int len = LittleLong( dh->lumps[i].filelen );
+						int shift = 0;
 
-						if( i == LUMP_LIGHTING || len <= 0 )
+						if( i == LUMP_LIGHTING && light_cut )
+						{
+							dh->lumps[i].fileofs = 0;
+							dh->lumps[i].filelen = 0;
 							continue;
-						if( ofs > light_ofs )
-							dh->lumps[i].fileofs = LittleLong( ofs - shrink );
+						}
+						if( len <= 0 )
+							continue;
+						for( c = 0; c < ncut; c++ )
+						{
+							if( cut[c].ofs < ofs )
+								shift += cut[c].len - (int)cut[c].replen;
+						}
+						dh->lumps[i].fileofs = LittleLong( ofs - shift );
+						if( i == LUMP_TEXTURES && tex_blob )
+							dh->lumps[i].filelen = LittleLong( (int)tex_blob_len );
 					}
 					length = (fs_offset_t)out;
-					Con_Reportf( "Xash3D GameCube: map load compact (no lighting) %s → %s (G154 disc LM)%s\n",
+					Con_Reportf( "Xash3D GameCube: map load compact (%s%s) %s → %s (G154 disc LM)%s\n",
+						light_cut ? "no lighting" : "", tex_blob ? ( light_cut ? ", miptex headers only" : "miptex headers only" ) : "",
 						Q_memprint( (size_t)filesize ), Q_memprint( out ),
 						light_align_pad ? " +align" : "" );
 				}
@@ -2589,6 +2762,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 				}
 			}
 
+			if( tex_blob )
+				Mem_Free( tex_blob );
 			if( f )
 				FS_Close( f );
 		}
@@ -2653,7 +2828,7 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 		Mod_LoadSpriteModel( mod, buf, length, &loaded );
 		break;
 	case LittleLong( IDALIASHEADER ):
-		Mod_LoadAliasModel( mod, buf, &loaded );
+		Mod_LoadAliasModel( mod, buf, length, &loaded );
 		break;
 	case LittleLong( Q1BSP_VERSION ):
 	case LittleLong( HLBSP_VERSION ):
@@ -2907,6 +3082,93 @@ void Mod_FreeUnused( void )
 	}
 }
 
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/*
+================
+GC_StaticBrushes
+
+media/wd_<map>_sb.gcd (scripts/bake_worlddl_goldsrc.py): the brush entities
+whose faces are baked into the world DL because nothing can ever change them
+(unnamed opaque func_wall / func_illusionary at the lump origin).  The server
+keeps them out of the packets (dod_avalanche has 252 entities in view and
+190 of them are such walls), the client collides with them from this list.
+Entry: model number of "*N", bit 15 set when solid.  The list only counts
+when the world DL on the disc is the one it was baked with.
+================
+*/
+#define GC_SB_MAX	256
+#define GC_SB_MODELS	1024
+#define GC_SB_SOLID	0x8000
+
+static word gc_sb_list[GC_SB_MAX];
+static byte gc_sb_bits[GC_SB_MODELS / 8];
+static int gc_sb_count;
+static int gc_sb_serial;
+static char gc_sb_map[64];
+
+const word *GC_StaticBrushes( const char *mapname, int *count, int *serial )
+{
+	char base[64];
+
+	if( mapname && mapname[0] )
+	{
+		COM_FileBase( mapname, base, sizeof( base ));
+		if( Q_stricmp( base, gc_sb_map ))
+		{
+			char path[MAX_SYSPATH];
+			fs_offset_t len = 0;
+			byte *buf;
+
+			Q_strncpy( gc_sb_map, base, sizeof( gc_sb_map ));
+			memset( gc_sb_bits, 0, sizeof( gc_sb_bits ));
+			gc_sb_count = 0;
+			gc_sb_serial++;
+
+			Q_snprintf( path, sizeof( path ), "media/wd_%s_sb.gcd", base );
+			buf = FS_LoadFile( path, &len, false );
+			if( buf )
+			{
+				if( len >= 12 && !memcmp( buf, "GCsb", 4 ) && (( buf[4] << 8 ) | buf[5] ) == 1 )
+				{
+					const int n = ( buf[6] << 8 ) | buf[7];
+					const fs_offset_t wd_want = ((fs_offset_t)buf[8] << 24 ) | ( buf[9] << 16 ) | ( buf[10] << 8 ) | buf[11];
+					fs_offset_t wd_have;
+
+					Q_snprintf( path, sizeof( path ), "media/wd_%s.gcd", base );
+					wd_have = FS_FileSize( path, false );
+					if( wd_have == wd_want && n <= GC_SB_MAX && len >= 12 + n * 2 )
+					{
+						for( int i = 0; i < n; i++ )
+						{
+							const word v = (word)(( buf[12 + i * 2] << 8 ) | buf[13 + i * 2] );
+							const int num = v & ~GC_SB_SOLID;
+
+							if( num < 1 || num >= GC_SB_MODELS )
+								continue;
+							gc_sb_bits[num >> 3] |= (byte)( 1 << ( num & 7 ));
+							gc_sb_list[gc_sb_count++] = v;
+						}
+					}
+					Con_Reportf( "Xash3D GameCube: static brushes map=%s listed=%d used=%d world DL %d of %d bytes\n",
+						base, n, gc_sb_count, (int)wd_have, (int)wd_want );
+				}
+				Mem_Free( buf );
+			}
+		}
+	}
+	if( count ) *count = gc_sb_count;
+	if( serial ) *serial = gc_sb_serial;
+	return gc_sb_list;
+}
+
+qboolean GC_StaticBrushModel( int num )
+{
+	if( num < 1 || num >= GC_SB_MODELS )
+		return false;
+	return ( gc_sb_bits[num >> 3] & ( 1 << ( num & 7 ))) != 0;
+}
+#endif
+
 #if XASH_GAMECUBE
 /*
 ================
@@ -2985,6 +3247,9 @@ void Mod_GCReleaseStudioArena( void )
 	gc_seqgroup_slot[0].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	gc_seqgroup_slot[1].buf = Mod_GCStudioBssAlloc( GC_SEQGROUP_SLOT_SIZE );
 	Con_Reportf( "Xash3D GameCube: studio arena released models=%d bytes=%u\n", freed, (uint)before );
+#if XASH_DODGC_NETWORK
+	GC_PrefetchReleaseForMatch();
+#endif
 	GC_AramReport( "studio-release" );
 }
 

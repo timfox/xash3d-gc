@@ -13,7 +13,9 @@ glue that owns the real 16 MiB of ARAM lives in mem_gamecube.c.
 #include <stdint.h>
 
 #define GC_ARAM_ALIGN      32u
-#define GC_ARAM_MAX_SEGS   64
+/* 64 filled on dod_charlie (25 WAD directory streams plus the map's packs
+ * and the holes between): every later request was refused whatever was free. */
+#define GC_ARAM_MAX_SEGS   128
 #define GC_ARAM_TAG_LEN    12
 #define GC_ARAM_CACHE_MAX  48
 #define GC_ARAM_NAME_LEN   48

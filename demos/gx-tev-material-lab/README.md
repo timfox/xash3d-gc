@@ -84,6 +84,32 @@ the DumpFrames capture reel so you stay in control.
 | VELVET | Soft wrap nap + rim sheen IndTex |
 | CARBON | Dual-scale weave × metal IndTex glints |
 | PEARL | Soft body + animated nacre Fresnel coat |
+| CONCRETE | Cool aggregate tint × scrolled pebble + rough IndTex |
+| WOOD PLANK | Warm oak tint × anisotropic grain scroll + soft sheen |
+| BRICK | Fired clay tint × AO×2 mortar + IndTex bumps |
+| CERAMIC TILE | Cool glaze × tile grid detail + sharp dielectric coat |
+| OLED VOID | Near-black OLED × dual dark KONST IndTex |
+| ANODIZED MG | Dyed Mg metal × dual cool-green KONST IndTex |
+| FROST POLY | Frosted polycarb × dual cool KONST IndTex |
+| HOLO VINYL | Peel holo vinyl × dual chroma KONST IndTex |
+| TUNGSTEN FOAM | Dense dark porous W × dual cool gray KONST IndTex |
+| ALGAE GLASS | Soft green translucency × dual kelp KONST IndTex |
+| OBSIDIAN WOOL | Near-black loft × dual deep KONST IndTex |
+| TOPAZ DUST | Warm gold grit × dual amber KONST IndTex |
+| ASPHALT | Dark road body + sparse wet IndTex glints |
+| RUBBER | Soft wrap tire rubber, muted Fresnel |
+| PLASTIC ABS | Cool-tinted injection plastic + soft dielectric coat |
+| LEATHER | Warm hide grain + soft sheen IndTex |
+| NEON RIM | Solid albedo×AO body + thin KONST Fresnel accent (not force-field) |
+| THIN FILM OIL | Dark body + low-sat rainbow on Fresnel only (not IRIDESCENT bloom) |
+| BRUSHED TITANIUM | Cool Ti tint + directional IndTex brush streaks (not ANISO FLAKE) |
+| STAINED GLASS | Cobalt-tinted panes × AO + sharp Fresnel IndTex coat |
+| LED MATRIX | Pixel-grid panel × metal-gated KONST emissive (no force-field shell) |
+| OIL SLICK | Dark wet body + rainbow Fresnel film (≠ IRIDESCENT / thin-film oil) |
+| TOON INK RIM | Cel body + KONST ink rim (≠ TOON RAMP / force field) |
+| LIQUID MERCURY | Cool chrome fluid × metal IndTex |
+| JADE GLAZE | Soft wrap jade body + dielectric glaze |
+| HOLO FOIL | Foil base + metal IndTex × rainbow KONST |
 | MOD2X DETAIL | albedo × detail `GX_CS_SCALE_2` |
 | SPEC MASK ADD | albedo + specular-lobe add |
 | FOG HAZE | denser `GX_FOG_PERSP_LIN` |
@@ -91,7 +117,7 @@ the DumpFrames capture reel so you stay in control.
 | ALPHA CLIP | `GX_SetAlphaCompare` |
 
 Maps import at **192²** (TCom) / **256²** (rust·damascus); emboss heights **64²**;
-HDRI sky faces + IBL matcaps **256² CMPR** (gxbake equirect→sides) — DOL ~15MB MEM1-safe.
+HDRI sky faces **512² CMPR** + IBL matcaps **256²** (gxbake equirect→sides) — DOL ~≤16MB MEM1-safe.
 
 ### HDRI / FX
 

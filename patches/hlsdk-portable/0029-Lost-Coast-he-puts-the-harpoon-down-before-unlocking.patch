@@ -1,0 +1,48 @@
+From e25dc3ca1ba8498ec31896cb461b41d84546b3e7 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 16:49:47 -0800
+Subject: [PATCH] Lost Coast: he puts the harpoon down before unlocking the
+ gate
+
+Scenes gain 'body' events (the map's relay that kills his weapon): the
+actor mesh's equipment batches stop drawing.
+
+---
+ dlls/lostcoast_npcs.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 8d415a92..59b705cd 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -303,7 +303,7 @@ void CLCSeagull::GullThink( void )
+ #define LC_MAX_LINKS	736	// and 724
+ #define LC_MAX_ROUTE	64
+ 
+-enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE, LCE_HINGE };
++enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE, LCE_HINGE, LCE_BODY };
+ 
+ typedef struct
+ {
+@@ -413,6 +413,8 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 			ev->type = LCE_SEQUENCE; // a whole-body animation: "seq_Name" or "seq_Name>seq_PostIdle:seconds"
+ 		else if( !strcmp( kind, "hinge" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 3 )
+ 			ev->type = LCE_HINGE; // a hinged prop pushed open: "@x,y,z,degrees a second,stop angle"
++		else if( !strcmp( kind, "body" ) && sscanf( line, "%*s %f %f %f", &t0, &t1, &a ) >= 3 )
++			ev->type = LCE_BODY; // what he carries leaves his hand (the model's equipment batches)
+ 		else if( !strcmp( kind, "gesture" ))
+ 		{
+ 			float tg[8];
+@@ -1111,6 +1113,9 @@ void CLCFisherman::RunScene( float interval )
+ 			if( !ev->started )
+ 				PlaySequence( ev, m_flSceneStart );
+ 			break;
++		case LCE_BODY:
++			pev->body = (int)ev->a;
++			break;
+ 		case LCE_HINGE:
+ 			if( !ev->started )
+ 			{
+-- 
+2.53.0
+

@@ -24,6 +24,9 @@ what is playing on an entity when it sets up its bones.
 #include "common.h"
 #include "client.h"
 #include "server.h"
+#if XASH_GAMECUBE
+#include "mem_gamecube.h"
+#endif
 
 #if XASH_GAMECUBE
 
@@ -37,11 +40,22 @@ typedef struct
 	char	name[28];
 	float	t0, t1;		/* client time */
 	int	ntags;
+	int	flags;		/* GC_SEQ_*: a whole-body sequence, 0 = a gesture */
 	float	play[GC_GESTURE_TAGS];	/* fraction of the event */
 	float	orig[GC_GESTURE_TAGS];	/* fraction of the sequence */
 } gc_gesture_t;
 
 static gc_gesture_t gc_gestures[GC_GESTURE_MAX];
+
+/* A whole-body sequence played through the gesture table (a scripted_sequence
+ * of the map: the fisherman opening the gate, sitting down). The track is a
+ * gesture like any other, streamed from ARAM two frames at a time; what
+ * differs is the end: it can hold its last frame or loop instead of fading
+ * out, until the next sequence on the same actor takes over. */
+#define GC_SEQ_ON	1	/* a sequence: one at a time on an actor */
+#define GC_SEQ_HOLD	2	/* keep the last frame after the end */
+#define GC_SEQ_LOOP	4	/* start over at the end */
+#define GC_SEQ_NOFADE	8	/* no fade in: it starts where the one before ended */
 
 /* A pose the game code holds on an actor (Source pose parameters: where the
  * head, spine and body are turned). The game sets it at think rate; the value
@@ -113,12 +127,13 @@ void GC_ActorGesture( int ent, const char *name, float start, float end, int nta
 	{
 		gc_gesture_t *c = &gc_gestures[i];
 
-		if( !c->ent || c->t1 < (float)cl.time )
+		if( !c->ent || ( c->t1 < (float)cl.time && !( c->flags & ( GC_SEQ_HOLD | GC_SEQ_LOOP )))
+			|| (( c->flags & 16 ) && c->play[0] < (float)cl.time ))
 		{
 			g = c;
 			break;
 		}
-		if( c->t1 < g->t1 )
+		if( c->t1 < g->t1 && !( c->flags & ( GC_SEQ_HOLD | GC_SEQ_LOOP )))
 			g = c;
 	}
 	memset( g, 0, sizeof( *g ));
@@ -131,6 +146,126 @@ void GC_ActorGesture( int ent, const char *name, float start, float end, int nta
 	{
 		g->play[i] = tags[i * 2];
 		g->orig[i] = tags[i * 2 + 1];
+	}
+}
+
+/* start and end are server times; flags: 2 hold the last frame, 4 loop,
+ * 8 no fade in. The sequence playing on the actor before it fades out, or
+ * ends at once when this one starts without a fade. An empty name only ends
+ * what is playing. */
+/* A game data file kept in ARAM. MEM1 no longer has 8 KB in one piece when
+ * the Lost Coast fisherman spawns, so his AI node graph could not be loaded
+ * as a file (he walked every route in a straight line). It goes to ARAM a
+ * kilobyte at a time through the stack, and the game code reads it back
+ * into a buffer of its own when it works out a route. Returns the ARAM
+ * address, 0 on failure; *len is the file's length. */
+unsigned int GC_GameFileToAram( const char *path, int *len )
+{
+#if XASH_GAMECUBE
+	byte buf[1024] __attribute__(( aligned( 32 )));
+	unsigned int aram, done = 0;
+	fs_offset_t size;
+	file_t *f = FS_Open( path, "rb", false );
+
+	if( len )
+		*len = 0;
+	if( !f )
+		return 0;
+	size = FS_FileLength( f );
+	aram = size > 0 ? GC_AramAllocTagged((unsigned int)(( size + 31 ) & ~31 ), false, "gamefile" ) : 0;
+	while( aram && done < (unsigned int)size )
+	{
+		fs_offset_t n = FS_Read( f, buf, Q_min( sizeof( buf ), (size_t)size - done ));
+
+		if( n <= 0 )
+		{
+			GC_AramFree( aram );
+			aram = 0;
+			break;
+		}
+		GC_AramTransfer( aram + done, buf, (unsigned int)(( n + 31 ) & ~31 ), true );
+		done += (unsigned int)n;
+	}
+	FS_Close( f );
+	if( aram && len )
+		*len = (int)size;
+	return aram;
+#else
+	if( len )
+		*len = 0;
+	return 0;
+#endif
+}
+
+/* A small game data file read straight into the caller's buffer (a scene
+ * script onto the stack): FS_LoadFile wants the whole file from a heap that
+ * has run out of two-kilobyte pieces by the time the map's actors spawn.
+ * Returns the bytes read, 0 when the file is missing or does not fit. */
+int GC_GameFileRead( const char *path, void *dst, int max )
+{
+	file_t *f = FS_Open( path, "rb", false );
+	fs_offset_t size, n = 0;
+
+	if( !f )
+		return 0;
+	size = FS_FileLength( f );
+	if( size > 0 && size <= max )
+		n = FS_Read( f, dst, (size_t)size );
+	FS_Close( f );
+	return n == size ? (int)n : 0;
+}
+
+/* dst: 32-byte aligned, with room for bytes rounded up to 32. */
+void GC_GameAramRead( unsigned int aram, void *dst, int bytes )
+{
+#if XASH_GAMECUBE
+	if( aram && bytes > 0 )
+		GC_AramTransfer( aram, dst, (unsigned int)(( bytes + 31 ) & ~31 ), false );
+#endif
+}
+
+void GC_ActorSequence( int ent, const char *name, float start, float end, int flags )
+{
+	const float now = (float)cl.time;
+	int i;
+
+	if( ent <= 0 )
+		return;
+	for( i = 0; i < GC_GESTURE_MAX; i++ )
+	{
+		gc_gesture_t *c = &gc_gestures[i];
+
+		if( c->ent != ent || !( c->flags & GC_SEQ_ON ))
+			continue;
+		if( flags & GC_SEQ_NOFADE )
+			c->ent = 0;
+		else
+		{
+			/* from where it is: hold that frame and fade */
+			float cyc = c->t1 > c->t0 ? ( now - c->t0 ) / ( c->t1 - c->t0 ) : 1.0f;
+
+			if( c->flags & 16 )
+				continue;	/* already on its way out */
+			if( cyc >= 1.0f )
+				cyc = ( c->flags & GC_SEQ_LOOP ) ? cyc - (float)(int)cyc : 1.0f;
+			c->flags = GC_SEQ_ON | GC_SEQ_HOLD | 16;
+			c->play[0] = now + GC_GESTURE_FADE;	/* gone by then */
+			c->play[1] = cyc < 0.0f ? 0.0f : cyc;
+		}
+	}
+	if( !name || !name[0] || end <= start )
+		return;
+	GC_ActorGesture( ent, name, start, end, 0, NULL );
+	for( i = 0; i < GC_GESTURE_MAX; i++ )
+	{
+		gc_gesture_t *c = &gc_gestures[i];
+
+		if( c->ent == ent && !c->flags && !Q_strcmp( c->name, name ) && c->ntags == 0
+			&& c->t1 == end + (float)( cl.time - sv.time ))
+		{
+			c->flags = GC_SEQ_ON | ( flags & ( GC_SEQ_HOLD | GC_SEQ_LOOP | GC_SEQ_NOFADE ));
+			break;
+		}
 	}
 }
 
@@ -273,7 +408,44 @@ int GC_ActorGesturesAt( int ent, float time, const char **names, float *cycles, 
 		const gc_gesture_t *g = &gc_gestures[i];
 		float p, p0 = 0.0f, o0 = 0.0f, p1 = 1.0f, o1 = 1.0f, w;
 
-		if( g->ent != ent || time < g->t0 || time >= g->t1 )
+		if( g->ent != ent || time < g->t0 )
+			continue;
+		if( g->flags & GC_SEQ_ON )
+		{
+			float w = 1.0f, cyc;
+
+			if( g->flags & 16 )
+			{
+				/* fading out from the frame it was on (play[1] holds it) */
+				w = ( g->play[0] - time ) / GC_GESTURE_FADE;
+				if( w <= 0.0f )
+					continue;
+				cyc = g->play[1];
+			}
+			else
+			{
+				cyc = ( time - g->t0 ) / ( g->t1 - g->t0 );
+				if( cyc >= 1.0f )
+				{
+					if( g->flags & GC_SEQ_LOOP )
+						cyc -= (float)(int)cyc;
+					else if( g->flags & GC_SEQ_HOLD )
+						cyc = 1.0f;
+					else
+						continue;
+				}
+				if( !( g->flags & GC_SEQ_NOFADE ))
+					w = ( time - g->t0 ) / GC_GESTURE_FADE;
+				if( !( g->flags & ( GC_SEQ_HOLD | GC_SEQ_LOOP )))
+					w = Q_min( w, ( g->t1 - time ) / GC_GESTURE_FADE );
+			}
+			names[n] = g->name;
+			cycles[n] = cyc;
+			weights[n] = bound( 0.0f, w, 1.0f );
+			n++;
+			continue;
+		}
+		if( time >= g->t1 )
 			continue;
 		p = ( time - g->t0 ) / ( g->t1 - g->t0 );
 		/* CChoreoEvent::GetOriginalPercentageFromPlaybackPercentage: straight

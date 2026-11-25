@@ -685,8 +685,11 @@ static qboolean S_GCStreamVoice( const sfx_t *sfx, int flags )
 {
 	char path[MAX_QPATH];
 
+	/* A DoD match is not the menu route, and it is the one with the fanfares. */
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
 	if( !GC_MenuRunsServer( ))
 		return false;
+#endif
 	if( Q_strnicmp( sfx->name, "tride/", 6 ))
 	{
 		const char *name = sfx->name[0] == '*' ? sfx->name + 1 : sfx->name;
@@ -2264,6 +2267,13 @@ qboolean S_Init( void )
 	}
 #if XASH_GAMECUBE
 	Con_Reportf( "Xash3D GameCube: sound dma init ready\n" );
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	{
+		extern void S_GCSoundStoreClaimEarly( void );
+
+		S_GCSoundStoreClaimEarly();
+	}
+#endif
 #endif
 
 	snd.soundtime = 0;

@@ -31,7 +31,11 @@ typedef struct
 #define GC_LF_SKY   1
 #define GC_LF_TILED 2
 #define GC_LF_NOLIGHT 0xFFFFFFu
+/* The light a model gets when its light trace hits no BSP face at all. */
+#define GC_LIGHTVEC_MISS 128
 int R_GXLightFacesCount( void );
+qboolean R_GXLightFacesLit( void );
+qboolean R_GXLightGridSample( const float *org, byte *rgb );
 qboolean R_GXLightFacesRead( int first, int num, void *out );
 qboolean R_GXLightSamplesRead( unsigned int ofs, void *out, unsigned int len );
 /* Last sky trace of R_EntityDynamicLight: 0 no surface, 1 not sky, 2 sky. */
@@ -62,8 +66,10 @@ void CL_RunLightStyles( lightstyle_t *ls )
 	qboolean have_light = world->lightdata != NULL;
 #if XASH_GAMECUBE
 	/* On the world DL route the lightmap lives in the baked light faces; the
-	 * light styles still scale it (65536 saturated every light point). */
-	have_light = have_light || R_GXLightFacesCount() > 0;
+	 * light styles still scale it (65536 saturated every light point). A map
+	 * compiled without light (converted MOHAA maps: 0-byte lighting lump)
+	 * still has light faces but no samples; it stays fullbright, as GoldSrc. */
+	have_light = have_light || R_GXLightFacesLit();
 #endif
 
 	if( r_fullbright->value || !have_light )
@@ -543,7 +549,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 	if( !gp_cl->models[1] || ( !gp_cl->models[1]->lightdata
 #if XASH_GAMECUBE
 		&& !Mod_GCAramLightmapActive() && !Mod_GCLightPointsActive( gp_cl->models[1] )
-		&& !( !gp_cl->models[1]->surfaces && R_GXLightFacesCount() > 0 )
+		&& !( !gp_cl->models[1]->surfaces && R_GXLightFacesLit())
 #endif
 		))
 		return (colorVec){ 255, 255, 255, 0 };
@@ -551,6 +557,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 	float last_fraction = 1.0f;
 	int max_ents = r_lighting_extended.value ? MAX_PHYSENTS : 1; // get light from bmodels too
 	colorVec light = { 0 };
+	qboolean hit = false;
 
 	// check all the bsp-models
 	for( int i = 0; i < max_ents; i++ )
@@ -587,6 +594,7 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 		colorVec cv;
 		if( !R_RecursiveLightPoint( pe->model, pnodes, 0.0f, 1.0f, &cv, start_l, end_l ))
 			continue;	// didn't hit anything
+		hit = true;
 
 		if( g_trace_fraction < last_fraction )
 		{
@@ -603,6 +611,14 @@ static colorVec R_LightVecInternal( const vec3_t start, const vec3_t end, vec3_t
 		}
 	}
 
+#if XASH_GAMECUBE
+	/* Nothing lit under the point. Converted MOHAA maps put their ground in
+	 * terrain and patch meshes outside the BSP, so a soldier standing on them
+	 * traces down through clip brushes to nothing and drew black (ambient 1,
+	 * shade 0). A miss is not darkness: give it a middle light. */
+	if( !hit )
+		light = (colorVec){ GC_LIGHTVEC_MISS, GC_LIGHTVEC_MISS, GC_LIGHTVEC_MISS, 0 };
+#endif
 	return light;
 }
 
@@ -615,6 +631,23 @@ check bspmodels to get light from
 */
 colorVec R_LightVec( const vec3_t start, const vec3_t end, vec3_t lspot, vec3_t lvec )
 {
+#if XASH_GAMECUBE
+	/* A converted MOHAA map carries MOHAA's light grid: retail lights models
+	 * from it, not from the floor under them (terrain is not BSP here, so the
+	 * floor trace missed on half of m1l1). */
+	{
+		byte rgb[3];
+
+		if( R_GXLightGridSample( start, rgb ))
+		{
+			if( lspot )
+				VectorCopy( start, lspot );
+			if( lvec )
+				VectorClear( lvec );
+			return (colorVec){ rgb[0], rgb[1], rgb[2], 0 };
+		}
+	}
+#endif
 	colorVec light = R_LightVecInternal( start, end, lspot, lvec );
 
 	if( r_lighting_extended.value && lspot != NULL && lvec != NULL )

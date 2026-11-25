@@ -190,6 +190,12 @@ qboolean Mod_GCIsRetainedBspScratch( const void *buf );
 /* True when the world keeps real hull0 clipnodes (WorldDL pack present), so
  * point traces are safe on the CapFaces (-gcworldrender) route. */
 qboolean Mod_GCWorldTraceReady( const model_t *world );
+#if XASH_GAMECUBE && defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+/* Brush entities baked into the world DL (model.c): list of "*N" numbers
+ * (bit 15: solid) for this map, and the test the server packs with. */
+const word *GC_StaticBrushes( const char *mapname, int *count, int *serial );
+qboolean GC_StaticBrushModel( int num );
+#endif
 void Mod_GCClearRetainedBspScratch( void );
 #if XASH_GAMECUBE
 /* G154: when LUMP_LIGHTING lives in ARAM (c5a1 tip/scratch OOM), CapFaces/G180
@@ -216,6 +222,7 @@ byte *Mod_GCStudioArenaLoadFile( const char *path, fs_offset_t *length );
 byte *Mod_GCSeqGroupLoad( const char *path, cache_user_t *cu, fs_offset_t *length );
 void Mod_GCAnimPackReset( void ); /* mod_studio.c: split-model animation packs */
 void Mod_GCAnimPackSpillReset( void );
+void Mod_GCAnimPackNewOwner( void ); /* mod_studio.c: a bone setup starts; earlier ones' animation blocks may go */
 byte *Mod_GCStudioMeshBase( studiohdr_t *phdr, mstudiomodel_t *pmodel ); /* mod_studio.c: streamed body meshes */
 byte *Mod_GCStudioBssGrowLast( void *ptr, size_t old_size, size_t new_size );
 void Mod_GCStudioBssTrimLast( void *ptr, size_t kept );
@@ -225,7 +232,7 @@ void Mod_GCUploadDeferredStudioSkins( void ); /* post-MAP_READY companion/view s
 //
 // mod_alias.c
 //
-void Mod_LoadAliasModel( model_t *mod, const void *buffer, qboolean *loaded );
+void Mod_LoadAliasModel( model_t *mod, const void *buffer, size_t buffersize, qboolean *loaded );
 
 //
 // mod_bmodel.c

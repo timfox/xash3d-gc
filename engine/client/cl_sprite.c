@@ -349,7 +349,14 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 					(const byte *)pin + sizeof( dspriteframe_t ), hud_rgba )) >= 0;
 			/* With the ARAM copy the resident texture is never sampled
 			 * (R_GXHudHiBind draws cells), so it only needs to exist. */
+			/* Day of Defeat: its HUD sheets are drawn from full-size cells
+			 * too (no cell was refused in any measured match), and five
+			 * 64 px fallback copies held 41 KiB of heap for nothing. 32 px
+			 * (2 KiB each) still reads as the icon if a cell is ever
+			 * refused. The muzzle flash is drawn in the world from its
+			 * resident copy and keeps 64. */
 			const int cap = ( hires && GC_HUD_SHEETS_IN_ARAM ) ? 8
+				: ( hires && !gc_sprite_effect_load && !Q_stristr( texname, "muzzleflash" )) ? 32
 				: ( hires || Sys_CheckParm( "-gchudspr64" ) || GC_MemHeapFreeBytes() < 256 * 1024 ) ? 64 : 128;
 			int f = 1;
 

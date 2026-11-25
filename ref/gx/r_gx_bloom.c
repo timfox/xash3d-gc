@@ -26,6 +26,7 @@ Enabled for -gccapfacessmoke (Lost Coast) or -gcbloom; -gcnobloom disables.
 #include <ogc/gx.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 #define GC_BLOOM_MAX_BYTES ( 96u * 1024u )
 #define GC_BLOOM_TAPS 6
@@ -44,7 +45,11 @@ static GXTexObj gc_bloom_tex;
 #define GC_BLOOM_TINT_A 120    /* lift tower/sky glow; taps stay tight */
 
 static int gc_bloom_enabled = -1;
+float R_GXMapFarplane( void );
 
+/* Off on maps with a MOHAA far plane: everything past it is the dark fog
+ * colour, which the auto-exposure (Lost Coast's tonemap data) lifted to
+ * white in about 5 s, and the fog already sets the look. */
 qboolean R_GXBloomEnabled( void )
 {
 	if( gc_bloom_enabled < 0 )
@@ -57,6 +62,8 @@ qboolean R_GXBloomEnabled( void )
 				|| gEngfuncs.Sys_CheckParm( "-gcvst" )))
 			gc_bloom_enabled = 1;
 	}
+	if( gc_bloom_enabled && R_GXMapFarplane() > 0.0f )
+		return false;
 	return gc_bloom_enabled ? true : false;
 }
 
@@ -83,9 +90,9 @@ qboolean R_GXBloomEnabled( void )
  * scale, which is why it blows out white behind dark cliffs and goes deep
  * blue over a sunlit yard.
  *
- * Samples at full white are left out of the histogram, as in Source, whose
- * luminance buckets end at 1: what is already blown out has no say. Without
- * that the sun's glare alone holds the scale at its minimum.
+ * The sky and whatever is blown out count in the top bucket: Source's frame
+ * is clamped at white before it is measured, so a bright sky holds the scale
+ * down. That is retail's look in the cove (a white sky over dark ground).
  */
 #define GC_EXPO_MAX_VOLUMES 16
 
@@ -245,11 +252,15 @@ static float R_GXExposureUpdate( const u8 *buf, int bw, int bh )
 					if( gc_expo_zbuf && bw == 320 && zx >= 0 && zy >= 0 && zx < GC_EXPO_ZW && zy < GC_EXPO_ZH
 						&& gc_expo_zbuf[(( zy >> 2 ) * ( GC_EXPO_ZW >> 3 ) + ( zx >> 3 )) * 32 + ( zy & 3 ) * 8 + ( zx & 7 )] == 0xff )
 					{
-						nsky++;
-						continue;	/* sky */
+						/* The sky counts, like any other pixel. Left out
+						 * (as blown-out samples were too), the ground alone
+						 * set the exposure and the cove sat at the map's
+						 * maximum of 3: pale sand, a rusty hull at 82 of 255
+						 * where retail has 33, a grey sky. Retail's frame
+						 * there is a white sky over dark ground: the bright
+						 * sky holds the scale down. */
+						nsky++;	/* counted below, at what it is drawn at */
 					}
-					if( l >= 250 )
-						continue;	/* blown out: above the top bucket */
 				}
 				hist[l >> 3]++;
 				n++;
@@ -366,6 +377,187 @@ static void R_GXExposureApply( GXRModeObj *rmode, float gain, qboolean sky )
 	GX_End();
 	GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+}
+
+/*
+ * The wide glow. The bloom below is six taps inside three pixels: a rim on
+ * what is bright. Source's bloom is a blurred copy of the bright parts of the
+ * frame added back over it, wide enough that the sky around the sun washes
+ * over the cliff and the towers in front of it.
+ *
+ * Before the scene is drawn, last frame's half-res luma (still in the bloom
+ * buffer) is drawn 64 x 48 into the corner of the EFB through the threshold,
+ * four taps a texel and a quarter apart, and copied out as I8 (3 KB). Each of
+ * its texels is ten pixels of the frame; R_GXBloomApply adds it over the
+ * finished frame with four bilinear taps a texel apart. One frame late, which
+ * a glow does not show.
+ */
+#define GC_GLOW_W 64
+#define GC_GLOW_H 48
+#define GC_GLOW_THRESHOLD 196	/* of 255: the sky by the sun, sunlit plaster, glints */
+#define GC_GLOW_STRENGTH 150	/* of 255, of the tint */
+static u8 gc_glow_buf[GC_GLOW_W * GC_GLOW_H] __attribute__(( aligned( 32 )));
+static GXTexObj gc_glow_tex;
+static qboolean gc_glow_ready;
+static u8 *gc_glow_src;		/* last frame's luma copy */
+static u16 gc_glow_src_w, gc_glow_src_h;
+
+void R_GXBloomGlowPrepass( void )
+{
+	static const f32 taps[4][2] = { { -1.25f, -1.25f }, { 1.25f, -1.25f }, { 1.25f, 1.25f }, { -1.25f, 1.25f } };
+	static const f32 corner[4][2] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	Mtx44 ortho;
+	Mtx ident;
+	GXTexObj src;
+	GXColor thresh = { GC_GLOW_THRESHOLD, GC_GLOW_THRESHOLD, GC_GLOW_THRESHOLD, 0 };
+	GXColor zero = { 0, 0, 0, 0 };
+	f32 du, dv;
+	int i, c;
+
+	gc_glow_ready = false;
+	if( !gc_glow_src || !R_GXBloomEnabled())
+		return;
+	/* One glow texel covers five source texels across: step the taps so
+	 * the four of them cover it. */
+	du = (f32)gc_glow_src_w / (f32)GC_GLOW_W * 0.25f / (f32)gc_glow_src_w;
+	dv = (f32)gc_glow_src_h / (f32)GC_GLOW_H * 0.25f / (f32)gc_glow_src_h;
+	GX_InitTexObj( &src, gc_glow_src, gc_glow_src_w, gc_glow_src_h, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjLOD( &src, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1 );
+	GX_InvalidateTexAll();
+	GX_LoadTexObj( &src, GX_TEXMAP0 );
+	GX_SetViewport( 0.0f, 0.0f, (f32)GC_GLOW_W, (f32)GC_GLOW_H, 0.0f, 1.0f );
+	GX_SetScissor( 0, 0, GC_GLOW_W, GC_GLOW_H );
+	guOrtho( ortho, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f );
+	GX_LoadProjectionMtx( ortho, GX_ORTHOGRAPHIC );
+	guMtxIdentity( ident );
+	GX_LoadPosMtxImm( ident, GX_PNMTX0 );
+	GX_SetCurrentMtx( GX_PNMTX0 );
+	GX_SetZMode( GX_FALSE, GX_ALWAYS, GX_FALSE );
+	GX_SetCullMode( GX_CULL_NONE );
+	GX_SetColorUpdate( GX_TRUE );
+	GX_SetAlphaCompare( GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0 );
+	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
+	GX_SetNumChans( 0 );
+	GX_SetNumIndStages( 0 );
+	GX_SetNumTexGens( 4 );
+	GX_SetTevColor( GX_TEVREG0, thresh );
+	GX_SetTevColor( GX_TEVREG2, zero );
+	GX_SetNumTevStages( 9 );
+	for( i = 0; i < 4; i++ )
+	{
+		const u8 sub = (u8)( GX_TEVSTAGE0 + i * 2 ), acc = (u8)( sub + 1 );
+
+		GX_SetTexCoordGen( GX_TEXCOORD0 + i, GX_TG_MTX2x4, GX_TG_TEX0 + i, GX_IDENTITY );
+		GX_SetTevDirect( sub );
+		GX_SetTevOrder( sub, GX_TEXCOORD0 + i, GX_TEXMAP0, GX_COLORNULL );
+		GX_SetTevColorIn( sub, GX_CC_C0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC );
+		GX_SetTevColorOp( sub, GX_TEV_SUB, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( sub, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+		GX_SetTevAlphaOp( sub, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevDirect( acc );
+		GX_SetTevOrder( acc, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+		GX_SetTevKColorSel( acc, GX_TEV_KCSEL_1_4 );
+		GX_SetTevColorIn( acc, GX_CC_ZERO, GX_CC_CPREV, GX_CC_KONST, GX_CC_C2 );
+		GX_SetTevColorOp( acc, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVREG2 );
+		GX_SetTevAlphaIn( acc, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+		GX_SetTevAlphaOp( acc, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	}
+	/* What is over the threshold spans 0 to 59 of 255: x4 to use the byte. */
+	GX_SetTevDirect( GX_TEVSTAGE8 );
+	GX_SetTevOrder( GX_TEVSTAGE8, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+	GX_SetTevColorIn( GX_TEVSTAGE8, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_C2 );
+	GX_SetTevColorOp( GX_TEVSTAGE8, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_4, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE8, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE8, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT7, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	for( i = 0; i < 4; i++ )
+	{
+		GX_SetVtxDesc( GX_VA_TEX0 + i, GX_DIRECT );
+		GX_SetVtxAttrFmt( GX_VTXFMT7, GX_VA_TEX0 + i, GX_TEX_ST, GX_F32, 0 );
+	}
+	GX_InvVtxCache();
+	GX_Begin( GX_QUADS, GX_VTXFMT7, 4 );
+	for( c = 0; c < 4; c++ )
+	{
+		GX_Position3f32( corner[c][0], corner[c][1], 0.0f );
+		for( i = 0; i < 4; i++ )
+			GX_TexCoord2f32( corner[c][0] + taps[i][0] * du, corner[c][1] + taps[i][1] * dv );
+	}
+	GX_End();
+	GX_SetTexCopySrc( 0, 0, GC_GLOW_W, GC_GLOW_H );
+	GX_SetTexCopyDst( GC_GLOW_W, GC_GLOW_H, GX_TF_I8, GX_FALSE );
+	DCInvalidateRange( gc_glow_buf, sizeof( gc_glow_buf ));
+	GX_CopyTex( gc_glow_buf, GX_FALSE );
+	GX_PixModeSync();
+	GX_InitTexObj( &gc_glow_tex, gc_glow_buf, GC_GLOW_W, GC_GLOW_H, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE );
+	GX_InitTexObjLOD( &gc_glow_tex, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1 );
+	gc_glow_ready = true;
+	GX_SetNumTevStages( 1 );
+	GX_SetNumTexGens( 1 );
+	GX_SetNumChans( 1 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+	for( i = 0; i < 9; i++ )
+		GX_SetTevKColorSel( (u8)( GX_TEVSTAGE0 + i ), GX_TEV_KCSEL_1 );
+	GX_ClearVtxDesc();
+	GX_InvalidateTexAll();
+}
+
+/* The glow over the finished frame: four bilinear taps, a texel apart. */
+static void R_GXBloomGlowAdd( f32 fb_w, f32 fb_h )
+{
+	static const f32 taps[4][2] = { { -1.0f, -0.5f }, { 1.0f, 0.5f }, { 0.5f, -1.0f }, { -0.5f, 1.0f } };
+	static const f32 corner[4][2] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	GXColor tint;
+	int i, c;
+
+	if( !gc_glow_ready )
+		return;
+	tint.r = (u8)(( GC_BLOOM_TINT_R * GC_GLOW_STRENGTH ) / 255 );
+	tint.g = (u8)(( GC_BLOOM_TINT_G * GC_GLOW_STRENGTH ) / 255 );
+	tint.b = (u8)(( GC_BLOOM_TINT_B * GC_GLOW_STRENGTH ) / 255 );
+	tint.a = 255;
+	GX_LoadTexObj( &gc_glow_tex, GX_TEXMAP1 );
+	GX_SetBlendMode( GX_BM_BLEND, GX_BL_ONE, GX_BL_ONE, GX_LO_NOOP );
+	GX_SetNumChans( 0 );
+	GX_SetNumTexGens( 4 );
+	GX_SetTevColor( GX_TEVREG1, tint );
+	GX_SetNumTevStages( 5 );
+	for( i = 0; i < 4; i++ )
+	{
+		GX_SetTexCoordGen( GX_TEXCOORD0 + i, GX_TG_MTX2x4, GX_TG_TEX0 + i, GX_IDENTITY );
+		GX_SetTevDirect( GX_TEVSTAGE0 + i );
+		GX_SetTevOrder( GX_TEVSTAGE0 + i, GX_TEXCOORD0 + i, GX_TEXMAP1, GX_COLORNULL );
+		GX_SetTevKColorSel( GX_TEVSTAGE0 + i, GX_TEV_KCSEL_1_4 );
+		GX_SetTevColorIn( GX_TEVSTAGE0 + i, GX_CC_ZERO, GX_CC_TEXC, GX_CC_KONST, i ? GX_CC_CPREV : GX_CC_ZERO );
+		GX_SetTevColorOp( GX_TEVSTAGE0 + i, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+		GX_SetTevAlphaIn( GX_TEVSTAGE0 + i, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+		GX_SetTevAlphaOp( GX_TEVSTAGE0 + i, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	}
+	GX_SetTevDirect( GX_TEVSTAGE4 );
+	GX_SetTevOrder( GX_TEVSTAGE4, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLORNULL );
+	GX_SetTevColorIn( GX_TEVSTAGE4, GX_CC_ZERO, GX_CC_CPREV, GX_CC_C1, GX_CC_ZERO );
+	GX_SetTevColorOp( GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_SetTevAlphaIn( GX_TEVSTAGE4, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO );
+	GX_SetTevAlphaOp( GX_TEVSTAGE4, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV );
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc( GX_VA_POS, GX_DIRECT );
+	GX_SetVtxAttrFmt( GX_VTXFMT7, GX_VA_POS, GX_POS_XYZ, GX_F32, 0 );
+	for( i = 0; i < 4; i++ )
+	{
+		GX_SetVtxDesc( GX_VA_TEX0 + i, GX_DIRECT );
+		GX_SetVtxAttrFmt( GX_VTXFMT7, GX_VA_TEX0 + i, GX_TEX_ST, GX_F32, 0 );
+	}
+	GX_InvVtxCache();
+	GX_Begin( GX_QUADS, GX_VTXFMT7, 4 );
+	for( c = 0; c < 4; c++ )
+	{
+		GX_Position3f32( corner[c][0] * fb_w, corner[c][1] * fb_h, 0.0f );
+		for( i = 0; i < 4; i++ )
+			GX_TexCoord2f32( corner[c][0] + taps[i][0] / (f32)GC_GLOW_W, corner[c][1] + taps[i][1] / (f32)GC_GLOW_H );
+	}
+	GX_End();
 }
 
 /*
@@ -539,6 +731,11 @@ qboolean R_GXBloomApply( void *rmode_ptr )
 		GX_End();
 	}
 
+	R_GXBloomGlowAdd( fb_w, fb_h );
+	gc_glow_src = gc_bloom_buf;
+	gc_glow_src_w = bw;
+	gc_glow_src_h = bh;
+
 	/* Leave a sane default blend/TEV for whoever draws next. */
 	GX_SetBlendMode( GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP );
 	GX_SetNumTevStages( 1 );
@@ -659,6 +856,88 @@ qboolean R_GXBloomDrawSun( void *rmode_ptr )
  */
 static qboolean gc_fog_on;
 
+/* A converted MOHAA map's far plane (worldspawn "farplane", already in map
+ * units, and "farplane_color", 0..1): retail fogs to that colour and draws
+ * nothing past it, which is how its forests stay dense. 0 = none. */
+static char gc_mapfog_name[64];
+static float gc_mapfog_end;
+static GXColor gc_mapfog_col = { 51, 51, 77, 255 };
+
+static const char *R_GXWorldspawnValue( const char *ents, const char *end, const char *key )
+{
+	char quoted[40];
+	const char *p;
+	size_t n;
+
+	Q_snprintf( quoted, sizeof( quoted ), "\"%s\"", key );
+	n = Q_strlen( quoted );
+	p = Q_strstr( ents, quoted );
+	if( !p || p + n >= end )
+		return NULL;
+	p += n;
+	while( p < end && *p != '"' )
+		p++;
+	return p < end ? p + 1 : NULL;
+}
+
+float R_GXMapFarplane( void )
+{
+	const model_t *world = WORLDMODEL;
+
+	if( !world || !world->name[0] )
+		return 0.0f;
+	if( Q_stricmp( world->name, gc_mapfog_name ))
+	{
+		const char *ents = world->entities;
+		const char *end = ents ? Q_strchr( ents, '}' ) : NULL;	/* worldspawn comes first */
+		const char *v;
+
+		Q_strncpy( gc_mapfog_name, world->name, sizeof( gc_mapfog_name ));
+		gc_mapfog_end = 0.0f;
+		if( end && ( v = R_GXWorldspawnValue( ents, end, "farplane" )) != NULL )
+		{
+			const float fp = (float)strtod( v, NULL );
+
+			if( fp >= 64.0f )
+			{
+				float rgb[3] = { 0.2f, 0.2f, 0.3f };
+				int k;
+
+				gc_mapfog_end = fp;
+				if(( v = R_GXWorldspawnValue( ents, end, "farplane_color" )) != NULL )
+				{
+					char *next = (char *)v;
+
+					for( k = 0; k < 3; k++ )
+						rgb[k] = (float)strtod( next, &next );
+				}
+				gc_mapfog_col.r = (u8)( bound( 0.0f, rgb[0], 1.0f ) * 255.0f + 0.5f );
+				gc_mapfog_col.g = (u8)( bound( 0.0f, rgb[1], 1.0f ) * 255.0f + 0.5f );
+				gc_mapfog_col.b = (u8)( bound( 0.0f, rgb[2], 1.0f ) * 255.0f + 0.5f );
+				gEngfuncs.Con_Reportf( "Xash3D GameCube: map farplane %.0f colour %u %u %u\n", fp,
+					gc_mapfog_col.r, gc_mapfog_col.g, gc_mapfog_col.b );
+			}
+		}
+	}
+	return gc_mapfog_end;
+}
+
+/* The far plane fog colour as 0xRRGGBBAA (the clear colour past the plane). */
+u32 R_GXMapFogRGBA( void )
+{
+	return ((u32)gc_mapfog_col.r << 24 ) | ((u32)gc_mapfog_col.g << 16 ) | ((u32)gc_mapfog_col.b << 8 ) | 0xffu;
+}
+
+/* Arms the map's far plane fog for a projection with these planes; false
+ * when the map has none. */
+qboolean R_GXMapFogSet( f32 z_near, f32 z_far )
+{
+	if( R_GXMapFarplane() <= 0.0f )
+		return false;
+	GX_SetFog( GX_FOG_PERSP_LIN, 0.0f, gc_mapfog_end, z_near, z_far, gc_mapfog_col );
+	return true;
+}
+
 void R_GXFogBegin( void )
 {
 	const GXColor fog = { 151, 166, 181, 255 };
@@ -668,6 +947,22 @@ void R_GXFogBegin( void )
 
 	if( gc_fog_on )
 		return;
+	if( R_GXMapFarplane() > 0.0f )
+	{
+		/* MOHAA's far plane: linear from the eye to the plane. */
+		static qboolean map_logged;
+
+		zfar = Q_max( 256.0f, RI.farClip > 1.0f ? RI.farClip : 4096.0f );
+		R_GXMapFogSet( znear, zfar );
+		gc_fog_on = true;
+		if( !map_logged )
+		{
+			map_logged = true;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: fog map farplane colour=%u,%u,%u end=%.0f zfar=%.0f\n",
+				gc_mapfog_col.r, gc_mapfog_col.g, gc_mapfog_col.b, gc_mapfog_end, zfar );
+		}
+		return;
+	}
 	/* nearZ/farZ MUST match guFrustum from R_GXBuildWorldProjection.
 	 * fogstart/fogend stay at map values (1600/50000) even when zfar is
 	 * shorter — density just never reaches 1.0 inside the frustum. */
@@ -684,11 +979,33 @@ void R_GXFogBegin( void )
 	}
 }
 
+/* Held for the whole 3D scene on a map with a far plane: the world, its
+ * brush entities (converted detail walls and terrain are func_walls), the
+ * props and the characters all fog alike. The passes' own begin/end pairs
+ * leave it on meanwhile. */
+static qboolean gc_fog_scene;
+
+void R_GXFogSceneBegin( void )
+{
+	if( R_GXMapFarplane() <= 0.0f )
+		return;
+	R_GXFogBegin();
+	gc_fog_scene = true;
+}
+
+void R_GXFogSceneEnd( void )
+{
+	extern void R_GXFogEnd( void );
+
+	gc_fog_scene = false;
+	R_GXFogEnd();
+}
+
 void R_GXFogEnd( void )
 {
 	const GXColor none = { 0, 0, 0, 0 };
 
-	if( !gc_fog_on )
+	if( !gc_fog_on || gc_fog_scene )
 		return;
 	GX_SetFog( GX_FOG_NONE, 0.0f, 1.0f, 0.1f, 1.0f, none );
 	gc_fog_on = false;

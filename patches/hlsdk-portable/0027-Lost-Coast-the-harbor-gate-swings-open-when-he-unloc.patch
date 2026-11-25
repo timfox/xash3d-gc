@@ -1,0 +1,74 @@
+From eb6ec549b6173a3f760c4be1fac97c898129cbb0 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 16:22:45 -0800
+Subject: [PATCH] Lost Coast: the harbor gate swings open when he unlocks it
+
+Scenes gain 'hinge' events: the map's env_physexplosion on its phys_hinge
+props, worked out by the bake, handed to the renderer's GC_PropHinge.
+
+---
+ dlls/lostcoast_npcs.cpp | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index bbcaeee8..1a442b0e 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -303,7 +303,7 @@ void CLCSeagull::GullThink( void )
+ #define LC_MAX_LINKS	736	// and 724
+ #define LC_MAX_ROUTE	64
+ 
+-enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE };
++enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE, LCE_HINGE };
+ 
+ typedef struct
+ {
+@@ -411,6 +411,8 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 			ev->type = LCE_FLEX; // the scene's facial track (brows, eyelids): a baked file
+ 		else if( !strcmp( kind, "sequence" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 3 )
+ 			ev->type = LCE_SEQUENCE; // a whole-body animation: "seq_Name" or "seq_Name>seq_PostIdle:seconds"
++		else if( !strcmp( kind, "hinge" ) && sscanf( line, "%*s %f %f %63s", &t0, &t1, arg ) >= 3 )
++			ev->type = LCE_HINGE; // a hinged prop pushed open: "@x,y,z,degrees a second,stop angle"
+ 		else if( !strcmp( kind, "gesture" ))
+ 		{
+ 			float tg[8];
+@@ -431,7 +433,7 @@ static lc_scene_t *LC_LoadScene( const char *file )
+ 		ev->a = a;
+ 		ev->b = b;
+ 		// (a moveto keeps its target when it is a place, "@x,y,z,yaw"; "!player" needs none)
+-		ev->arg = ( ev->type == LCE_SPEAK || ev->type == LCE_GESTURE || ev->type == LCE_FLEX || ev->type == LCE_SEQUENCE
++		ev->arg = ( ev->type == LCE_SPEAK || ev->type == LCE_GESTURE || ev->type == LCE_FLEX || ev->type == LCE_SEQUENCE || ev->type == LCE_HINGE
+ 			|| ( ev->type == LCE_MOVETO && arg[0] == '@' )) ? STRING( ALLOC_STRING( arg )) : "";
+ 		sc->n++;
+ 		g_lcNumEvents++;
+@@ -820,6 +822,7 @@ Vector CLCFisherman::PlayerPos( void )
+ extern "C" void GC_ActorPose( int ent, const char *name, float cycle ) __attribute__(( weak ));
+ extern "C" void GC_ActorFace( int ent, const char *track, float start, float end ) __attribute__(( weak ));
+ // flags: 2 hold the last frame, 4 loop, 8 no fade in
++extern "C" void GC_PropHinge( const float *pivot, float speed, float drag, float stop, float start ) __attribute__(( weak ));
+ extern "C" void GC_ActorSequence( int ent, const char *name, float start, float end, int flags ) __attribute__(( weak ));
+ #endif
+ 
+@@ -1060,6 +1063,19 @@ void CLCFisherman::RunScene( float interval )
+ 			if( !ev->started )
+ 				PlaySequence( ev, m_flSceneStart );
+ 			break;
++		case LCE_HINGE:
++			if( !ev->started )
++			{
++				// The map's env_physexplosion on its phys_hinge props (the
++				// gate he has just unlocked). The props are the renderer's;
++				// the bake worked the swing out of the same entities.
++				float pv[3], speed = 0.0f, stop = 0.0f;
++
++				ev->started = 1;
++				if( GC_PropHinge && sscanf( ev->arg, "@%f,%f,%f,%f,%f", &pv[0], &pv[1], &pv[2], &speed, &stop ) == 5 )
++					GC_PropHinge( pv, speed, 0.0f, stop, gpGlobals->time );
++			}
++			break;
+ 		case LCE_MOVETO:
+ 			// walks on past the event's end until he gets there
+ 			if( ev->arg[0] == '@' )
+-- 
+2.53.0
+

@@ -35,12 +35,21 @@ extern int gc_menu_step_frames;
 extern qboolean UI_UsingBuiltInFallbackMenu( void );
 void UI_GameCubeLeaveMenuOnlyBootstrap( void );
 static qboolean gc_menu_music_started;
+/* Day of Defeat or a game built on it: a game folder whose fallback_dir is dod
+ * (mohaa-gc's mohaa runs the DoD game code over dod/). */
+static qboolean CL_GameIsDoDFamily( void )
+{
+	const gameinfo_t *gi = ( FI && FI->GameInfo ) ? FI->GameInfo : NULL;
+
+	return gi && ( !Q_stricmp( gi->gamefolder, "dod" ) || !Q_stricmp( gi->falldir, "dod" ));
+}
+
 static void CL_GameCubeStartDoDMenuMusic( void )
 {
 	if( gc_menu_music_started || !snd.initialized )
 		return;
 	gc_menu_music_started = true;
-	if( FI && FI->GameInfo && !Q_stricmp( FI->GameInfo->gamefolder, "dod" ))
+	if( CL_GameIsDoDFamily( ))
 	{
 		S_StartBackgroundTrack( "media/gamestartup.wav", "media/gamestartup.wav", 0, false );
 		Con_Reportf( "Xash3D GameCube: DoD main-menu music start requested\n" );
@@ -48,6 +57,8 @@ static void CL_GameCubeStartDoDMenuMusic( void )
 }
 void GC_DrawLoadingStatus( const char *message, const char *details );
 void GC_SetLoadingProgress( float progress );
+void GC_LoadingSetStage( float fraction );
+void GC_LoadingOverlayPulse( void );
 void GC_ArmPostMapFrameBudgetSamples( void );
 qboolean GC_IsNewGameG36Done( void );
 qboolean GC_IsNewGameWorldReady( void );
@@ -2195,7 +2206,7 @@ static void CL_QueryServer_f( void )
 	}
 
 	if( adr.port == 0 )
-		adr.port = PORT_SERVER;
+		adr.port = MSG_BigShort( PORT_SERVER );
 
 	if( !CL_StringToProtocol( Cmd_Argv( 2 ), &proto ))
 		return;
@@ -3859,6 +3870,9 @@ static qboolean CL_ShouldRescanFilesystem( void )
 qboolean CL_PrecacheResources( void )
 {
 	resource_t	*pRes;
+#if XASH_GAMECUBE
+	int		gc_prec_total, gc_prec_done;
+#endif
 
 	// if we downloaded new WAD files or any other archives they must be added to searchpath
 	if( CL_ShouldRescanFilesystem( ))
@@ -3907,11 +3921,24 @@ qboolean CL_PrecacheResources( void )
 	if( cls.state != ca_active )
 		S_BeginRegistration();
 
+#if XASH_GAMECUBE
+	// the load bar follows the precache: count what is left, then step through it
+	for( pRes = cl.resourcesonhand.pNext, gc_prec_total = 0; pRes && pRes != &cl.resourcesonhand; pRes = pRes->pNext )
+		if( !FBitSet( pRes->ucFlags, RES_PRECACHED ))
+			gc_prec_total++;
+	gc_prec_done = 0;
+#endif
+
 	// precache all the remaining resources where order is doesn't matter
 	for( pRes = cl.resourcesonhand.pNext; pRes && pRes != &cl.resourcesonhand; pRes = pRes->pNext )
 	{
 		if( FBitSet( pRes->ucFlags, RES_PRECACHED ))
 			continue;
+
+#if XASH_GAMECUBE
+		GC_LoadingSetStage( 0.75f + 0.2f * (float)gc_prec_done++ / (float)gc_prec_total );
+		GC_LoadingOverlayPulse();
+#endif
 
 		switch( pRes->type )
 		{
@@ -4673,7 +4700,7 @@ void CL_Init( void )
 			S_Init();
 			Voice_Init( VOICE_DEFAULT_CODEC, 3, true );
 			Con_Reportf( "Xash3D GameCube: menu-only sound init ready\n" );
-			if( FI && FI->GameInfo && !Q_stricmp( FI->GameInfo->gamefolder, "dod" ))
+			if( CL_GameIsDoDFamily( ))
 			{
 				S_StartBackgroundTrack( "media/gamestartup.wav", "media/gamestartup.wav", 0, false );
 				Con_Reportf( "Xash3D GameCube: DoD main-menu music started\n" );
@@ -4781,7 +4808,7 @@ qboolean CL_GameCubeEnsureClientReady( void )
 			map = worldbase;
 		}
 		if(( map && map[0] && !Q_strnicmp( map, "dod_", 4 ))
-			|| ( FI && FI->GameInfo && !Q_stricmp( FI->GameInfo->gamefolder, "dod" )))
+			|| CL_GameIsDoDFamily( ))
 		{
 			Cvar_Set( "gc_quality", "0" );
 			Con_Reportf( "Xash3D GameCube: DoD deferred client lean HUD (tip-safe)\n" );

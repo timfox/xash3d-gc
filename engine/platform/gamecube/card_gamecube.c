@@ -77,6 +77,7 @@ static const char *const gc_card_text[] =
 };
 
 static CVAR_DEFINE_AUTO( gc_card_status, "", FCVAR_READ_ONLY, "memory card: result of the last save / load" );
+static CVAR_DEFINE_AUTO( gc_ach, "", 0, "DoD achievement progress as hex (written by the game DLL, saved with the settings)" );
 static qboolean gc_card_silent;           // gc_card_load silent: no result text for "no card" / "no file" (start-up load)
 static qboolean gc_card_format_allowed; // set only by a NEEDS_FORMAT answer, consumed by gc_card_format
 static unsigned char *gc_card_work;      // 40 KiB work area, allocated while mounted only
@@ -154,7 +155,7 @@ static void GC_CardSetStatus( card_file *file )
 
 static gc_card_status_t GC_CardSave( void )
 {
-	gc_setting_t items[16];
+	gc_setting_t items[8];
 	unsigned char blob[GC_SETTINGS_MAX_BLOB];
 	unsigned char *sector = NULL;
 	card_file file;
@@ -165,7 +166,7 @@ static gc_card_status_t GC_CardSave( void )
 
 	if( st != GC_CARD_OK )
 		return st;
-	for( i = 0, n = 0; i < gc_settings_key_count && n < 16; i++ )
+	for( i = 0, n = 0; i < gc_settings_key_count && n < 8; i++ )
 	{
 		items[n].key = gc_settings_keys[i];
 		Q_strncpy( items[n].value, Cvar_VariableString( gc_settings_keys[i] ), sizeof( items[n].value ));
@@ -208,7 +209,7 @@ static gc_card_status_t GC_CardSave( void )
 
 static gc_card_status_t GC_CardLoad( void )
 {
-	gc_setting_t items[16];
+	gc_setting_t items[8];
 	unsigned char *sector = NULL;
 	card_file file;
 	u32 sect_size = 0;
@@ -244,7 +245,7 @@ static gc_card_status_t GC_CardLoad( void )
 		free( sector );
 		return GC_CARD_ERROR;
 	}
-	n = GC_SettingsUnpack( sector + GC_CARD_OFF_BLOB, GC_SETTINGS_MAX_BLOB, items, 16 );
+	n = GC_SettingsUnpack( sector + GC_CARD_OFF_BLOB, GC_SETTINGS_MAX_BLOB, items, 8 );
 	free( sector );
 	if( n < 0 )
 		return GC_CARD_BAD_SAVE;
@@ -324,6 +325,7 @@ void GC_CardInit( void )
 		CARD_Init( game, maker );
 	}
 	Cvar_RegisterVariable( &gc_card_status );
+	Cvar_RegisterVariable( &gc_ach );
 	Cmd_AddCommand( "gc_card_save", GC_CardSave_f, "save name and settings to the memory card in slot A" );
 	Cmd_AddCommand( "gc_card_load", GC_CardLoad_f, "load name and settings from the memory card in slot A" );
 	Cmd_AddCommand( "gc_card_format", GC_CardFormat_f, "format the card after the player confirmed (gc_card_format confirmed)" );

@@ -14,6 +14,7 @@ Copyright (C) 2026 xash3d-gc contributors
 #include <ogc/system.h>
 #include <ogc/aram.h>
 #include <ogc/cache.h>
+#include <ogc/lwp_watchdog.h>
 
 void *R_GCBorrowMapLoadStaticArena( size_t size, size_t *capacity );
 qboolean R_GCReleaseMapLoadStaticArena( void *ptr );
@@ -230,7 +231,13 @@ qboolean GC_HeapCheck( const char *tag )
 	}
 	__malloc_unlock( _REENT );
 	if( ok )
-		Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p\n", tag, chunks, (void *)top );
+	{
+		/* ~10 of these a frame: the first 40 and every 5000th are enough, and keep a long run under the host log cap. */
+		static unsigned ok_logs;
+
+		if( ok_logs++ < 40 || !( ok_logs % 5000 ))
+			Con_Reportf( "Xash3D GameCube: heap check ok %s chunks=%d top=%p (#%u)\n", tag, chunks, (void *)top, ok_logs );
+	}
 	else
 	{
 		failures++;
@@ -263,6 +270,127 @@ size_t GC_MemHeapFreeBytes( void )
 	return free_in_heap + unclaimed;
 }
 
+/*
+ * Heap pressure with hysteresis, for the takers that size themselves to the free heap during play (texture heap
+ * slots, the lightmap store's second chunk). One signal for all of them, so they do not each read a different
+ * moment of the heap and flap: a taker grows only after the heap has stayed comfortable for a while, and gives
+ * back as soon as it is tight. mallinfo() walks the bins, so the heap is read every 8th update (about 7.5 Hz).
+ */
+#define GC_MEMP_TIGHT_ENTER	( 128u * 1024u )	/* under this the heap is tight: takers give back */
+#define GC_MEMP_TIGHT_LEAVE	( 192u * 1024u )	/* and stays tight until it has this much ... */
+#define GC_MEMP_LEAVE_MS	1000u			/* ... for this long */
+#define GC_MEMP_CALM_MS		8000u			/* no growing this soon after the heap was tight */
+#define GC_MEMP_RESERVE		( 256u * 1024u )	/* a grow leaves this much free, at the lowest point lately */
+#define GC_MEMP_BUCKET_MS	1000u
+#define GC_MEMP_BUCKETS		4			/* lowest free heap over the last 3 to 4 seconds */
+
+static struct
+{
+	qboolean tight;
+	qboolean seen;
+	u64 last_tight;		/* last update that found the heap tight */
+	u64 leave_start;	/* first update at or over GC_MEMP_TIGHT_LEAVE while tight, 0 = none */
+	u64 bucket_start;
+	size_t bucket_low[GC_MEMP_BUCKETS];
+	int bucket;
+	size_t free_now;
+	unsigned tick;
+} gc_memp;
+
+void GC_MemPressureUpdate( void )
+{
+	u64 now;
+	size_t heap, low;
+	int i;
+
+	if(( gc_memp.tick++ & 7u ) && gc_memp.seen )
+		return;
+	now = gettime();
+	heap = GC_MemHeapFreeBytes();
+	gc_memp.free_now = heap;
+	if( !gc_memp.seen )
+	{
+		gc_memp.seen = true;
+		gc_memp.bucket_start = now;
+		gc_memp.last_tight = now;	/* a fresh map starts calm only after GC_MEMP_CALM_MS */
+		for( i = 0; i < GC_MEMP_BUCKETS; i++ )
+			gc_memp.bucket_low[i] = heap;
+	}
+	if( diff_msec( gc_memp.bucket_start, now ) >= GC_MEMP_BUCKET_MS )
+	{
+		gc_memp.bucket = ( gc_memp.bucket + 1 ) % GC_MEMP_BUCKETS;
+		gc_memp.bucket_low[gc_memp.bucket] = heap;
+		gc_memp.bucket_start = now;
+	}
+	else if( heap < gc_memp.bucket_low[gc_memp.bucket] )
+		gc_memp.bucket_low[gc_memp.bucket] = heap;
+
+	if( !gc_memp.tight )
+	{
+		if( heap < GC_MEMP_TIGHT_ENTER )
+		{
+			gc_memp.tight = true;
+			gc_memp.leave_start = 0;
+			Con_Reportf( "Xash3D GameCube: heap pressure: tight at %s\n", Q_memprint( heap ));
+		}
+	}
+	else if( heap >= GC_MEMP_TIGHT_LEAVE )
+	{
+		if( !gc_memp.leave_start )
+			gc_memp.leave_start = now;
+		else if( diff_msec( gc_memp.leave_start, now ) >= GC_MEMP_LEAVE_MS )
+		{
+			gc_memp.tight = false;
+			low = GC_MemPressureLowBytes();
+			Con_Reportf( "Xash3D GameCube: heap pressure: eased at %s (low %s)\n", Q_memprint( heap ), Q_memprint( low ));
+		}
+	}
+	else
+		gc_memp.leave_start = 0;
+	if( gc_memp.tight )
+		gc_memp.last_tight = now;
+}
+
+/* A level change: the next map's loads move the heap a long way, so start over. */
+void GC_MemPressureReset( void )
+{
+	memset( &gc_memp, 0, sizeof( gc_memp ));
+}
+
+qboolean GC_MemPressureTight( void )
+{
+	return gc_memp.tight;
+}
+
+/* Lowest free heap seen over the last few seconds. */
+size_t GC_MemPressureLowBytes( void )
+{
+	size_t low = gc_memp.free_now;
+	int i;
+
+	for( i = 0; i < GC_MEMP_BUCKETS; i++ )
+		if( gc_memp.bucket_low[i] < low )
+			low = gc_memp.bucket_low[i];
+	return low;
+}
+
+/* May a taker add `bytes` from the heap now? Only when the heap has not been tight for GC_MEMP_CALM_MS and
+ * GC_MEMP_RESERVE stays free after it, also at the lowest point of the last few seconds. */
+qboolean GC_MemPressureCanGrow( size_t bytes )
+{
+	if( !gc_memp.seen || gc_memp.tight )
+		return false;
+	if( diff_msec( gc_memp.last_tight, gettime()) < GC_MEMP_CALM_MS )
+		return false;
+	return GC_MemPressureLowBytes() >= bytes + GC_MEMP_RESERVE && gc_memp.free_now >= bytes + GC_MEMP_RESERVE;
+}
+
+/* A taker just took or gave back heap: read it again on the next update rather than up to 8 updates later. */
+void GC_MemPressureNoteChange( void )
+{
+	gc_memp.tick = 0;
+}
+
 /* Tip pressure for menu/client bring-up — unclaimed MEM1 above the arena can
  * look "fat" while fordblks is already < few KiB (DoD menu boot). */
 size_t GC_MemArenaFreeBytes( void )
@@ -279,8 +407,15 @@ void GC_HeapCensusReport( const char *stage );
 
 void GC_MapLoadBufferWorldSettled( qboolean settled );
 void GC_TexRegionReport( const char *stage );
+#ifdef XASH_GC_MALLOC_TRACE
+void GC_MallocTraceFlush( void );
+#endif
+
 void GC_MemSample( const char *stage )
 {
+#ifdef XASH_GC_MALLOC_TRACE
+	GC_MallocTraceFlush();
+#endif
 	size_t total = Mem_TotalRealSize();
 	size_t delta = (total >= gc_mem_last) ? (total - gc_mem_last) : 0;
 
@@ -289,6 +424,13 @@ void GC_MemSample( const char *stage )
 	/* Per-map budget: spawning is done, so move map-lifetime heap blocks into
 	 * the map's leftover memory (runs every map, unchanged totals or not).
 	 * From here on, arena carves must avoid the world's arrays. */
+	if( !Q_strcmp( stage, "bsp-buffer-release" ) || !Q_strcmp( stage, "entity spawn" ) || !Q_strcmp( stage, "pre-SV_Init" ))
+		GC_HeapCensusReport( stage );
+	if( !Q_strcmp( stage, "entity spawn" ))
+	{
+		extern void SV_GCParityReport( void );
+		SV_GCParityReport();
+	}
 	if( !Q_strcmp( stage, "map active" ))
 	{
 		extern void Mod_GCMoveWorldEntitiesToArena( void );
@@ -1236,10 +1378,47 @@ qboolean GC_MapLoadBufferIsWorldSettled( void )
 	return gc_mapload_world_settled;
 }
 
+#define GC_MAPLOAD_RESET_HOOKS 8
+static void (*gc_mapload_reset_hooks[GC_MAPLOAD_RESET_HOOKS])( void );
+
+/* Several owners (client temp entities, the view model skin window, the world
+ * mesh, the game DLL's MOHAA script pool) may hold
+ * post-load claims at once; registering the same hook twice keeps one entry. */
+void GC_SetMapArenaResetHook( void (*hook)( void ))
+{
+	int i, free_slot = -1;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		if( gc_mapload_reset_hooks[i] == hook )
+			return;
+		if( !gc_mapload_reset_hooks[i] && free_slot < 0 )
+			free_slot = i;
+	}
+	if( free_slot >= 0 )
+		gc_mapload_reset_hooks[free_slot] = hook;
+}
+
+/* Run once and forget: each owner registers again with its next claim. */
+static void GC_RunMapArenaResetHook( void )
+{
+	int i;
+
+	for( i = 0; i < GC_MAPLOAD_RESET_HOOKS; i++ )
+	{
+		void (*hook)( void ) = gc_mapload_reset_hooks[i];
+
+		gc_mapload_reset_hooks[i] = NULL;
+		if( hook )
+			hook();
+	}
+}
+
 void *GC_BorrowMapLoadBuffer( size_t size )
 {
 	if( size == 0 )
 		return NULL;
+	GC_RunMapArenaResetHook();
 	gc_mapload_world_settled = false;
 	/* Entity private objects may still point into this map's arena. */
 	if( SV_GCPrivateOverflowPinsMapArena() )
@@ -1376,11 +1555,16 @@ static size_t gc_texreg_live;
  * return the size a map load may use. */
 size_t GC_TexRegionNoteArena( byte *base, size_t capacity )
 {
+	/* Blocks are carved down from the top in 32-byte multiples behind a 32-byte header, so their data is
+	 * 32-aligned only when the top is: an arena ending 8 past a boundary put a carried rifle's CMPR skin at
+	 * +8, GX drew it as 16-bit texels (striped red, white and green guns). */
+	const uintptr_t top = ((uintptr_t)base + capacity ) & ~(uintptr_t)31u;
+
 	gc_texreg_base = base;
-	gc_texreg_cap = capacity;
-	if( gc_texreg_bytes > capacity )
+	gc_texreg_cap = top > (uintptr_t)base ? (size_t)( top - (uintptr_t)base ) : 0;
+	if( gc_texreg_bytes > gc_texreg_cap )
 		gc_texreg_bytes = 0;
-	return capacity - gc_texreg_bytes;
+	return gc_texreg_cap - gc_texreg_bytes;
 }
 
 qboolean GC_TexRegionOwns( const void *p )
@@ -1650,6 +1834,7 @@ void GC_DiscardMapLoadBuffer( void )
 	if( gc_mapload_buf_in_use )
 		return;
 
+	GC_RunMapArenaResetHook();
 	if( gc_mapload_buf )
 	{
 		if( R_GCReleaseMapLoadStaticArena( gc_mapload_buf ))
@@ -1884,10 +2069,19 @@ unsigned int GC_AramAllocTagged( unsigned int size, qboolean stream, const char 
 			stream ? "stream" : "reserve", tag ? tag : "?", Q_memprint( size ), base,
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )));
 	else
-		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s\n",
+	{
+		int i;
+
+		Con_Reportf( S_WARN "Xash3D GameCube: ARAM %s refused %s need=%s free=%s largest=%s segs=%d/%d\n",
 			tag ? tag : "?", stream ? "stream" : "reserve", Q_memprint( size ),
 			Q_memprint( GC_AramHeapFreeBytes( &gc_aram_heap )),
-			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )));
+			Q_memprint( GC_AramHeapLargestFree( &gc_aram_heap )), (int)gc_aram_heap.count, GC_ARAM_MAX_SEGS );
+		/* Say what fragments it: the whole segment table, once per refusal. */
+		for( i = 0; i < gc_aram_heap.count; i++ )
+			Con_Reportf( "Xash3D GameCube: ARAM map 0x%08x %s %s%s\n", gc_aram_heap.segs[i].offset,
+				Q_memprint( gc_aram_heap.segs[i].size ), gc_aram_heap.segs[i].used ? gc_aram_heap.segs[i].tag : "FREE",
+				gc_aram_heap.segs[i].used ? ( gc_aram_heap.segs[i].cls == GC_ARAM_STREAM ? " (stream)" : " (session)" ) : "" );
+	}
 	return base;
 }
 
@@ -2234,6 +2428,25 @@ void GC_PrefetchResetForMenu( void )
 	gc_prefetch_used = 0;
 	gc_prefetch_manifest_ready = false;
 	gc_prefetch_initialized = false;
+}
+
+/* The menu-idle first-map prefetch window is dead weight once the map is loaded (1 MiB of ARAM
+ * in a DoD match). Drop its entries first so no reader can see freed ARAM, then free the block;
+ * the next menu idle reserves a fresh one (GC_PrefetchResetForMenu clears the init flag). */
+void GC_PrefetchReleaseForMatch( void )
+{
+	unsigned int base = gc_prefetch_aram;
+
+	if( !base )
+		return;
+	memset( gc_prefetch, 0, sizeof( gc_prefetch ));
+	gc_prefetch_count = 0;
+	gc_prefetch_next = 0;
+	gc_prefetch_used = 0;
+	gc_prefetch_capacity = 0;
+	gc_prefetch_manifest_ready = true;
+	gc_prefetch_aram = 0;
+	GC_AramFree( base );
 }
 
 void GC_PrefetchStats( unsigned int *used, unsigned int *capacity, unsigned int *entries )

@@ -61,6 +61,17 @@ static qboolean s_registering = false;
 #define GC_SFX_MENU_HEAP_FLOOR	(16u * 1024u)
 #define GC_SFX_BUDGET		( GC_MenuRunsServer() ? GC_SFX_MENU_BUDGET_BYTES : GC_SFX_BUDGET_BYTES )
 #define GC_SFX_MAX_FILE		( GC_MenuRunsServer() ? GC_SFX_MENU_MAX_FILE_BYTES : GC_SFX_MAX_FILE_BYTES )
+/* The ARAM sound store and the rule that a match never drops a sound were
+ * tied to the menu route (GC_MenuRunsServer), which a DoD match is not: its
+ * rifles (garand_shoot.wav, 122 KiB), explosions and ricochets asked the
+ * 192 KiB file pool for one buffer, were refused and stayed silent.  A DoD
+ * match takes the same paths; its MEM1 budget and per-file cap stay the lean
+ * ones above, so anything larger than 20 KiB plays from ARAM. */
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+#define S_GCMatchSounds()	( true )
+#else
+#define S_GCMatchSounds()	GC_MenuRunsServer()
+#endif
 /* G124: gentle reclaim for small footsteps; hard retry drops one fire WAV. */
 #define GC_SFX_LOAD_HEADROOM_SOFT	(4u * 1024u)
 #define GC_SFX_LOAD_HEADROOM_HARD	(8u * 1024u)
@@ -85,7 +96,7 @@ static unsigned s_gc_snd_restores;
 
 static void S_GCSfxCooldown( const sfx_t *sfx, uint32_t tenths )
 {
-	if( GC_MenuRunsServer() && sfx )
+	if( S_GCMatchSounds() && sfx )
 		s_gc_sfx_cooldown[sfx - s_knownSfx] = (uint32_t)( host.realtime * 10.0 ) + tenths;
 }
 
@@ -205,7 +216,7 @@ static size_t S_GCMakeRoomForBudgetedLoad( const sfx_t *keep, size_t want, size_
 		want = GC_SFX_LOAD_HEADROOM_SOFT;
 	/* Menu route: evict only when the budget is actually short, not before
 	 * every load (two footsteps evicted each other on every step). */
-	if( GC_MenuRunsServer( ))
+	if( S_GCMatchSounds())
 	{
 		if( s_gc_sfx_budget_used + want <= GC_SFX_BUDGET )
 			return 0;
@@ -280,6 +291,48 @@ typedef struct
 
 static gc_snd_stored_t s_gc_snd_store[GC_SND_ARAM_ENTRIES];
 static uint32_t s_gc_snd_base, s_gc_snd_head, s_gc_snd_next;
+static uint32_t s_gc_snd_bytes;
+
+/* Claim the store on first use.  A DoD map has already given most of ARAM
+ * to the world, textures and props by then (charlie: largest hole 1.2 MiB),
+ * so take the largest ring that fits rather than none. */
+static qboolean S_GCSoundStoreReady( void )
+{
+#if defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK
+	/* Claimed at sound init, before the map's streams.  A 2 MiB ring there
+	 * cost charlie its 1.9 MiB light-face stream; 1 MiB leaves every stream
+	 * what it had. */
+	static const uint32_t sizes[] = { GC_SND_ARAM_BYTES / 2, GC_SND_ARAM_BYTES / 4, GC_SND_ARAM_BYTES / 8 };
+#else
+	static const uint32_t sizes[] = { GC_SND_ARAM_BYTES, GC_SND_ARAM_BYTES / 2, GC_SND_ARAM_BYTES / 4 };
+#endif
+	static uint32_t retry_at;
+
+	if( s_gc_snd_base )
+		return true;
+	if( (uint32_t)( host.realtime * 10.0 ) < retry_at )
+		return false;
+	for( size_t i = 0; i < ARRAYSIZE( sizes ); i++ )
+	{
+		s_gc_snd_base = GC_AramReserveTagged( sizes[i], "sfx" );
+		if( s_gc_snd_base )
+		{
+			s_gc_snd_bytes = sizes[i];
+			Con_Reportf( "Xash3D GameCube: ARAM sound store %u KiB\n", (uint)( sizes[i] / 1024u ));
+			return true;
+		}
+	}
+	retry_at = (uint32_t)( host.realtime * 10.0 ) + 100;
+	Con_Reportf( "Xash3D GameCube: ARAM sound store refused, no %u KiB hole\n", (uint)( sizes[ARRAYSIZE( sizes ) - 1] / 1024u ));
+	return false;
+}
+
+/* Sound init: ARAM is still empty.  Asked on the first shot instead, the
+ * ring met a full segment table on charlie and was refused for the match. */
+void S_GCSoundStoreClaimEarly( void )
+{
+	(void)S_GCSoundStoreReady();
+}
 
 static uint32_t S_GCSoundHash( const char *name )
 {
@@ -311,11 +364,9 @@ static void S_GCSoundStorePut( const sfx_t *sfx, wavdata_t *sc )
 	gc_snd_stored_t *e;
 	int i;
 
-	if( S_GCSoundStored( sfx ) || bytes > GC_SND_ARAM_BYTES )
+	if( S_GCSoundStored( sfx ) || !S_GCSoundStoreReady() || bytes > s_gc_snd_bytes )
 		return;
-	if( !s_gc_snd_base )
-		s_gc_snd_base = GC_AramReserveTagged( GC_SND_ARAM_BYTES, "sfx" );
-	if( s_gc_snd_head + bytes > GC_SND_ARAM_BYTES )
+	if( s_gc_snd_head + bytes > s_gc_snd_bytes )
 		s_gc_snd_head = 0;
 	for( i = 0; i < GC_SND_ARAM_ENTRIES; i++ )
 	{
@@ -466,9 +517,7 @@ static wavdata_t *S_GCStreamSoundToAram( sfx_t *sfx )
 		if( hdr.size == stored->bytes - sizeof( wavdata_t ))
 			return S_GCAramBackedHeader( &hdr, s_gc_snd_base + stored->aram + sizeof( wavdata_t ));
 	}
-	if( !s_gc_snd_base )
-		s_gc_snd_base = GC_AramReserveTagged( GC_SND_ARAM_BYTES, "sfx" );
-	if( !s_gc_snd_base )
+	if( !S_GCSoundStoreReady( ))
 		return NULL;
 
 	/* Sentence words name the file without its extension. */
@@ -535,11 +584,11 @@ static wavdata_t *S_GCStreamSoundToAram( sfx_t *sfx )
 	hdr.type = WF_PCMDATA;
 	hdr.size = hdr.samples * hdr.width * hdr.channels;
 	bytes = (uint32_t)( sizeof( wavdata_t ) + hdr.size );
-	if( bytes > GC_SND_ARAM_BYTES / 2 )
+	if( bytes > s_gc_snd_bytes / 2 )
 		goto fail;
 
 	/* Claim ring space the way S_GCSoundStorePut does. */
-	if( s_gc_snd_head + bytes > GC_SND_ARAM_BYTES )
+	if( s_gc_snd_head + bytes > s_gc_snd_bytes )
 		s_gc_snd_head = 0;
 	for( i = 0; i < GC_SND_ARAM_ENTRIES; i++ )
 	{
@@ -773,7 +822,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		return NULL;
 	/* Streamed to ARAM before (sentence words are freed after each
 	 * sentence): take the header again, no disc read or MEM1 attempt. */
-	if( GC_MenuRunsServer() && s_gc_snd_base && Q_stricmp( sfx->name, "*default" ))
+	if( S_GCMatchSounds() && s_gc_snd_base && Q_stricmp( sfx->name, "*default" ))
 	{
 		const gc_snd_stored_t *e = S_GCSoundStored( sfx );
 		wavdata_t hdr;
@@ -786,7 +835,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		}
 	}
 	/* Larger than a MEM1 sound may be: play it from ARAM at full length. */
-	if( GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" )
+	if( S_GCMatchSounds() && Q_stricmp( sfx->name, "*default" )
 		&& FS_FileSize( va( "sound/%s%s", sfx->name[0] == '*' ? sfx->name + 1 : sfx->name,
 			COM_FileExtension( sfx->name )[0] ? "" : ".wav" ), false ) > GC_SFX_MAX_FILE + 1024 )
 	{
@@ -803,7 +852,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		/* In a match with the MEM1 budget full, retail would still play
 		 * it: take it from the ARAM store (or stream it there) rather than
 		 * drop it. Registration and map load stay lean. */
-		if( GC_MenuRunsServer() && cls.state == ca_active && !s_registering )
+		if( S_GCMatchSounds() && cls.state == ca_active && !s_registering )
 		{
 			if(( sfx->cache = S_GCSoundFromStore( sfx )) != NULL )
 				return sfx->cache;
@@ -821,7 +870,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		s_gcmapSoundSkips++;
 		return NULL;
 	}
-	if( GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" ))
+	if( S_GCMatchSounds() && Q_stricmp( sfx->name, "*default" ))
 	{
 		if(( sfx->cache = S_GCSoundFromStore( sfx )) != NULL )
 			return sfx->cache;
@@ -901,7 +950,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		}
 		/* No MEM1 block for the file buffer (ttrain_start1 needs 29 KiB on
 		 * a fragmented heap): the ARAM path reads it in 2 KiB blocks. */
-		if( !sc && GC_MenuRunsServer() && Q_stricmp( sfx->name, "*default" )
+		if( !sc && S_GCMatchSounds() && Q_stricmp( sfx->name, "*default" )
 			&& ( sfx->cache = S_GCStreamSoundToAram( sfx )) != NULL )
 			return sfx->cache;
 		if( !sc && GC_MapLoadMemoryOpt() && Q_stricmp( sfx->name, "*default" ))
@@ -931,19 +980,19 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		int peak = 0;
 
 		/* Only now is the size known: the room made before the load was a guess. */
-		if( GC_MenuRunsServer() && sc->size <= GC_SFX_MAX_FILE )
+		if( S_GCMatchSounds() && sc->size <= GC_SFX_MAX_FILE )
 			S_GCMakeRoomForBudgetedLoad( sfx, sc->size, 0 );
 
 		if( sc->size > GC_SFX_MAX_FILE
 			|| s_gc_sfx_budget_used + sc->size > GC_SFX_BUDGET
-			|| ( GC_MenuRunsServer() && GC_MemHeapFreeBytes() < GC_SFX_MENU_HEAP_FLOOR ))
+			|| ( S_GCMatchSounds() && GC_MemHeapFreeBytes() < GC_SFX_MENU_HEAP_FLOOR ))
 		{
 			S_GCSfxCooldown( sfx, GC_SFX_REFUSE_COOLDOWN );
 			Con_Reportf( "Xash3D GameCube: gameplay sfx budget refused name=%s size=%u used=%u cap=%u\n",
 				sfx->name, (uint)sc->size, (uint)s_gc_sfx_budget_used, (uint)GC_SFX_BUDGET );
 			FS_FreeSound( sc );
 			/* Out of MEM1 budget: still play it, from ARAM. */
-			if( GC_MenuRunsServer( ))
+			if( S_GCMatchSounds())
 			{
 				sfx->cache = S_GCStreamSoundToAram( sfx );
 				if( sfx->cache )
@@ -956,7 +1005,7 @@ wavdata_t *S_LoadSound( sfx_t *sfx )
 		s_gc_sfx_budget_used += sc->size;
 		SetBits( sc->flags, GC_SOUND_RUNTIME_BUDGETED );
 		S_GCTouchBudgetedLru( sfx );
-		if( GC_MenuRunsServer( ))
+		if( S_GCMatchSounds())
 			S_GCSoundStorePut( sfx, sc );
 
 		if( sc->width == 2 )
@@ -1192,7 +1241,7 @@ sound_t S_RegisterSound( const char *name )
 	/* G126: only ric1 is preloaded; alias ric2–5 so dynamic Find/FS never runs.
 	 * A match (menu runs the server) has the ARAM sound store, so it plays
 	 * all five ricochets as retail does. */
-	if( GC_MapLoadMemoryOpt() && !GC_MenuRunsServer()
+	if( GC_MapLoadMemoryOpt() && !S_GCMatchSounds()
 		&& !Q_strnicmp( name, "weapons/ric", 11 )
 		&& Q_stricmp( name, "weapons/ric1.wav" ))
 		name = "weapons/ric1.wav";

@@ -1,0 +1,113 @@
+From 1b784321983b0fc6c2d236c634fce6ffd085a110 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 19 Nov 2026 16:33:05 -0800
+Subject: [PATCH] Lost Coast: the shut gate stands in the player's way
+
+The gate leaves are renderer props without collision. Each 'hinge' event
+now carries the shut leaf's box; a solid lc_blocker stands there from
+spawn and goes when the leaf swings.
+
+---
+ dlls/lostcoast_npcs.cpp | 70 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 1a442b0e..8d415a92 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -638,6 +638,31 @@ private:
+ 
+ LINK_ENTITY_TO_CLASS( monster_lc_fisherman, CLCFisherman )
+ 
++// A box that stands where a shut gate leaf does. The props are the
++// renderer's and have no collision; the leaf's box comes with its 'hinge'
++// event, and the box goes when the leaf swings.
++class CLCBlocker : public CBaseEntity
++{
++public:
++	void Spawn( void ) { pev->solid = SOLID_BBOX; pev->movetype = MOVETYPE_NONE; pev->effects |= EF_NODRAW; }
++	int ObjectCaps( void ) { return FCAP_DONT_SAVE; }
++};
++LINK_ENTITY_TO_CLASS( lc_blocker, CLCBlocker )
++
++static void LC_BlockerTrace( const char *when, const float *b, edict_t *skip )
++{
++	// across the leaf, through the thin way, at standing height
++	Vector a( ( b[0] + b[3] ) * 0.5f, ( b[1] + b[4] ) * 0.5f, b[2] + 60.0f ), c = a;
++	TraceResult tr;
++	int k = ( b[3] - b[0] < b[4] - b[1] ) ? 0 : 1;
++
++	a[k] -= 64.0f;
++	c[k] += 64.0f;
++	UTIL_TraceHull( a, c, dont_ignore_monsters, human_hull, skip, &tr );
++	ALERT( at_console, "Lost Coast: gate leaf %s: a player gets %d%% of the way through (start %d all %d hit %s)\n", when,
++		(int)( tr.flFraction * 100.0f ), tr.fStartSolid, tr.fAllSolid, tr.pHit ? STRING( tr.pHit->v.classname ) : "-" );
++}
++
+ void CLCFisherman::KeyValue( KeyValueData *pkvd )
+ {
+ 	if( FStrEq( pkvd->szKeyName, "lc_trigger" ))
+@@ -744,6 +769,29 @@ void CLCFisherman::Precache( void )
+ void CLCFisherman::Spawn( void )
+ {
+ 	Precache();
++	// The leaves his gate scene will swing stand shut until then.
++	if( !FStringNull( m_iszGateScene ))
++	{
++		lc_scene_t *sc = LC_LoadScene( STRING( m_iszGateScene ));
++
++		for( int i = 0; sc && i < sc->n; i++ )
++		{
++			float pv[3], speed, stop, b[6];
++			lc_event_t *ev = &sc->ev[i];
++
++			if( ev->type != LCE_HINGE || ev->a > 0 || sscanf( ev->arg, "@%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f", &pv[0], &pv[1], &pv[2],
++				&speed, &stop, &b[0], &b[1], &b[2], &b[3], &b[4], &b[5] ) != 11 )
++				continue;
++			CLCBlocker *bl = GetClassPtr( (CLCBlocker *)NULL );
++
++			bl->pev->classname = MAKE_STRING( "lc_blocker" );
++			bl->Spawn();
++			UTIL_SetOrigin( bl->pev, Vector(( b[0] + b[3] ) * 0.5f, ( b[1] + b[4] ) * 0.5f, b[2] ));
++			UTIL_SetSize( bl->pev, Vector(( b[0] - b[3] ) * 0.5f, ( b[1] - b[4] ) * 0.5f, 0 ),
++				Vector(( b[3] - b[0] ) * 0.5f, ( b[4] - b[1] ) * 0.5f, b[5] - b[2] ));
++			ev->a = (float)ENTINDEX( bl->edict());
++		}
++	}
+ 	SET_MODEL( ENT( pev ), STRING( pev->model ));
+ 	UTIL_SetSize( pev, Vector( -13, -13, 0 ), Vector( 13, 13, 72 ));
+ 	pev->solid = SOLID_BBOX;
+@@ -1071,9 +1119,29 @@ void CLCFisherman::RunScene( float interval )
+ 				// the bake worked the swing out of the same entities.
+ 				float pv[3], speed = 0.0f, stop = 0.0f;
+ 
++				float b[6];
++				int got = sscanf( ev->arg, "@%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f", &pv[0], &pv[1], &pv[2], &speed, &stop,
++					&b[0], &b[1], &b[2], &b[3], &b[4], &b[5] );
++
+ 				ev->started = 1;
+-				if( GC_PropHinge && sscanf( ev->arg, "@%f,%f,%f,%f,%f", &pv[0], &pv[1], &pv[2], &speed, &stop ) == 5 )
++				if( GC_PropHinge && got >= 5 )
+ 					GC_PropHinge( pv, speed, 0.0f, stop, gpGlobals->time );
++				if( ev->a > 0 )
++				{
++					edict_t *e = INDEXENT( (int)ev->a );
++
++					if( got == 11 )
++						LC_BlockerTrace( "shut", b, ENT( pev ));
++					if( e && !e->free && FClassnameIs( e, "lc_blocker" ))
++					{
++						e->v.solid = SOLID_NOT;
++						UTIL_SetOrigin( &e->v, e->v.origin );
++						UTIL_Remove( CBaseEntity::Instance( e ));
++					}
++					ev->a = 0;
++					if( got == 11 )
++						LC_BlockerTrace( "open", b, ENT( pev ));
++				}
+ 			}
+ 			break;
+ 		case LCE_MOVETO:
+-- 
+2.53.0
+
