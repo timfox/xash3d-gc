@@ -4244,6 +4244,25 @@ def stage_smoke_data(
 		for resource in sorted(smoke_map_resources(dest_source)):
 			copy_if_present(source, output, resource)
 
+	# Smoke ISOs only stage the selected map and its direct resources. Carry the
+	# native GX CMPR faces for every staged map skyname as well; otherwise the
+	# renderer's early sky prefetch runs before a loose ISO directory scan can
+	# find these long media filenames, leaving a fog-colour/black clear instead.
+	sky_names = map_sky_names(output)
+	sky_faces = 0
+	for sky_name in sorted(sky_names):
+		for suffix in GC_SKY_SUFFIXES:
+			relative = f"media/sky_{sky_name}{suffix}.cmp"
+			if (output / relative).is_file():
+				continue
+			for candidate_root in (source, *fallback_sources):
+				if (candidate_root / relative).is_file():
+					copy_if_present(candidate_root, output, relative)
+					sky_faces += 1
+					break
+	if sky_faces:
+		print(f"  skyboxes: staged {sky_faces} map-selected GX CMPR face(s) ({', '.join(sorted(sky_names))})")
+
 	# Keep smoke probes on the same ARAM-backed world-texture path as retail.
 	# Without these derived packs, embedded BSP textures fall back to MEM1
 	# uploads and produce misleading transition-pressure failures.

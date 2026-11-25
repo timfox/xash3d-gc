@@ -4870,10 +4870,11 @@ static void R_GXSetupWorld3DState( void )
 	R_GXBuildWorldModelview( mv );
 	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
 
-	/* Real 6-face cube is mandatory outdoors. CMPR sides live in BSS (48 KiB)
+	/* Real 6-face cube is mandatory outdoors, including maps with a fog far
+	 * plane: that plane clips/fogs the world, not the sky shell. CMPR sides live in BSS (48 KiB)
 	 * so draw never needs tip — tip-gating left WorldDL on solid clear + the
 	 * single-side Flipper backdrop forever (ava-prop-2 tip≈26 Kb). */
-	if( R_GXSkyVisible( ) && R_GXMapFarplane() <= 0.0f )
+	if( R_GXSkyVisible( ))
 	{
 		R_GXDrawSkyBox();
 		/* Full restore after NumChans(0)+REPLACE — incomplete state left
