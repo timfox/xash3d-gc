@@ -5078,6 +5078,15 @@ def main() -> None:
 				# (probe 20261104-042155). GI->startmap still defaults to c0a0;
 				# stage the smoke BSP under that name when needed.
 				menu_lines = ["menunewgame"]
+				probe_cvar = os.environ.get("XASH_GC_PROBE_CVAR", "").strip()
+				if probe_cvar:
+					name, sep, value = probe_cvar.partition("=")
+					if (not sep or not re.fullmatch(r"[A-Za-z0-9_]+", name)
+							or not re.fullmatch(r"[A-Za-z0-9_.+-]+", value)):
+						parser.error("XASH_GC_PROBE_CVAR must be NAME=VALUE using simple cvar tokens")
+					# The engine applies gamecube.cfg cvar directives after Cvar_Init,
+					# before the retail menu can launch New Game and load the mission script.
+					menu_lines.append(f"cvar {name} {value}")
 				if args.probe_fullphysics:
 					menu_lines.append("fullphysics")
 				if args.probe_dumpframes:
