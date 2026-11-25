@@ -6875,7 +6875,7 @@ static byte *R_GXPropCacheGet( unsigned model )
 	const int generation = GC_GetNewGameCapGeneration();
 
 	/* A new generation (map load, cap faces rewrite) releases the memory the
-	 * cache lived in. From Codex's prop-coalesce work. */
+	 * cache lived in. From the prop-coalescing implementation. */
 	if( generation != gc_prop_cache_generation && gc_prop_map_owned )
 		gc_prop_cache_generation = generation;	/* its block is the spill's: R_GXPropMapCheck drops it */
 	if( generation != gc_prop_cache_generation )

@@ -1,9 +1,0 @@
-{
-  "schema": "xash3d-gc-experiment-manifest-pointer/v1",
-  "manifest": ".ai/logs/goal-evidence/g4v-swiss-ingest/packet/experiment/manifest.json",
-  "stamp": "20261108-155045",
-  "hypothesis": "Swiss FAT + return-to-loader with Dolphin continuity",
-  "commit": "4c88dda519",
-  "tier": "complete",
-  "ogc_stack": "libogc"
-}

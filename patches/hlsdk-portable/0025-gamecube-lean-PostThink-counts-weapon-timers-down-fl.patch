@@ -11,7 +11,6 @@ m_flNextAttack stayed above zero for good and ItemPostFrame returned
 before ImpulseCommands: impulse 100 (Y, flashlight) and 201 (spray) did
 nothing. The lean branch now finishes through pt_end, as retail does.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  dlls/player.cpp | 8 ++++++--
  1 file changed, 6 insertions(+), 2 deletions(-)

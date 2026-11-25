@@ -6,7 +6,6 @@ Subject: [PATCH 06/14] feat: draw lean New Game suit digits from gc_320hud2
 Expose battery for readback and clip for optional ammo digits so the
 q0 HUD shows suit icon+numbers alongside health without VidInit.
 
-Co-authored-by: Cursor <cursoragent@cursor.com>
 ---
  cl_dll/hud.h          |  6 ++++--
  cl_dll/hud_redraw.cpp | 36 +++++++++++++++++++++++++++++++++---

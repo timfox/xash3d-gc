@@ -7,7 +7,6 @@ Avoid clamping GetSpriteRes to sprites/0_*.spr when VidInit has not set
 m_iMaxRes, set 320 caps on quality-0 VidInit, and draw a single bootstrap
 pain sheet instead of the full hud.txt list that stalls New Game frames.
 
-Co-authored-by: Cursor <cursoragent@cursor.com>
 ---
  cl_dll/cl_util.h      |   7 ++-
  cl_dll/hud.cpp        | 105 ++++++++++++++++++++++++++++++++++++++++++

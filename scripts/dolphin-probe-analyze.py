@@ -386,7 +386,7 @@ def write_harness_latest(
 			memory = json.loads(memory_path.read_text(encoding="utf-8"))
 		except json.JSONDecodeError:
 			memory = {}
-	memory.setdefault("purpose", "Persistent Dolphin run memory for Qwable/Codex porting feedback.")
+	memory.setdefault("purpose", "Persistent Dolphin run memory for automated porting feedback.")
 	memory["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 	run = {
 		"goal": goal,

@@ -7,7 +7,6 @@ Subject: [PATCH 03/14] feat: draw lean New Game train HUD sprite with CHud
 Quality-0 Redraw now paints pain+train sheets and keeps the OSReport
 once-flag on CHud so GameCube BSS packing cannot re-spam every frame.
 
-Co-authored-by: Cursor <cursoragent@cursor.com>
 ---
  cl_dll/hud.cpp        |  1 +
  cl_dll/hud.h          |  5 ++++

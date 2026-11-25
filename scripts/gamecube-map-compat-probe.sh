@@ -121,7 +121,7 @@ for bsp in "${map_files[@]}"; do
 	printf '%s\n' "$PROBE_OUTPUT" > "$PROBE_OUTPUT_LOG"
 	
 	# Use the log directory reported by this probe. Falling back to "latest"
-	# is unsafe when the GUI/Aider/Codex can run Dolphin probes concurrently.
+	# is unsafe when the development tools can run Dolphin probes concurrently.
 	PROBE_LOG_DIR=$(printf "%s\n" "$PROBE_OUTPUT" | awk '/^Logs: / {print $2; found=1} END {exit found ? 0 : 1}' || true)
 	
 	STATUS="INCONCLUSIVE"

@@ -7,6 +7,32 @@ Xash3D ([pronounced](https://ipa-reader.com/?text=ks%C9%91%CA%82) `[ksɑʂ]`) FW
 
 Xash3D FWGS is a heavily modified fork of an original [Xash3D Engine](https://www.moddb.com/engines/xash3d-engine) by Unkle Mike.
 
+## Bring your own data (BYOD)
+
+This repository provides engine source and conversion tools. Supply your own legally
+acquired game installation. Game maps, models, textures, sounds, fonts, videos,
+menu artwork and their converted exports are not included as redistributable content.
+Existing source copyright and license notices remain applicable; owning a game
+copy does not grant permission to redistribute its assets.
+
+Build an engine and private disc from your installation:
+
+```bash
+bash scripts/build-gamecube-byod.sh /path/to/Half-Life/valve
+```
+
+Or package an already-built engine:
+
+```bash
+python3 scripts/build-gamecube-disc.py --data /path/to/Half-Life/valve --no-auto-extra-gamedirs --dol OUT/bin/boot.dol --output OUT/my-private-game.iso
+```
+
+The tools convert your supplied assets locally. Keep the resulting disc, extracted
+files and exports private. `OUT/`, `assets-local/`, `exports/`, runtime captures and
+game asset formats are ignored. Run `python3 scripts/check-byod-repository.py`
+before committing; it checks the staged/tracked tree, including force-added files.
+See [asset policy](docs/BYOD.md) for scope and historical-content limitations.
+
 ## Donate
 [![Donate to FWGS button](https://img.shields.io/badge/Donate_to_FWGS-%3C3-magenta)](Documentation/donate.md) \
 If you like Xash3D FWGS, consider supporting individual engine maintainers. By supporting us, you help to continue developing this game engine further. The sponsorship links are available in [documentation](Documentation/donate.md).

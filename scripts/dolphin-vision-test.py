@@ -443,7 +443,7 @@ def write_memory(root: Path, run: dict[str, object]) -> None:
 			memory = {}
 	else:
 		memory = {}
-	memory.setdefault("purpose", "Persistent Dolphin run memory for Qwable/Codex porting feedback.")
+	memory.setdefault("purpose", "Persistent Dolphin run memory for automated porting feedback.")
 	memory["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
 	runs = memory.setdefault("runs", [])
 	runs.insert(0, run)

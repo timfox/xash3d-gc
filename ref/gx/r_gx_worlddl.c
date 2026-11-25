@@ -1246,7 +1246,7 @@ static void R_GXWorldDLLoad( const char *mapbase )
 	gc_wd_spill_mark = Mod_GCWorldArraySpillUsed();
 	gc_wd_spill_gen = Mod_GCWorldArraySpillGeneration();
 
-	/* Lazy policy (Codex's pvs-lazy work), opt in with -gclazyworld: keep
+	/* Lazy policy (the lazy PVS implementation), opt in with -gclazyworld: keep
 	 * tree/PVS and lightmaps in ARAM and pull the geometry chunks from the
 	 * open world pack on the disc, which frees about 1.4 MB of ARAM. Off by
 	 * default: in the Lost Coast harbor it costs about 16 fps (40 -> 24 in a

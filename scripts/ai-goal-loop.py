@@ -2452,7 +2452,7 @@ def main() -> int:
 				attempts[goal.goal_id] > args.max_attempts_per_goal:
 			write_state(state_file, state="review-required", pass_index=pass_index,
 				goal=asdict(goal), attempt=attempts[goal.goal_id],
-				message="G36+ attempt limit reached; run RC gate and Codex/review LLM before more edits")
+				message="G36+ attempt limit reached; run RC gate and code review before more edits")
 			print(
 				f"{goal.goal_id}: reached {args.max_attempts_per_goal} automated attempts; "
 				"stopping for RC gate and review.",

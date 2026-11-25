@@ -1,0 +1,15 @@
+name: BYOD content boundary
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  content-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Reject tracked game data and exports
+        run: python3 scripts/check-byod-repository.py
+      - name: Exercise policy with synthetic files only
+        run: python3 tests/test_byod_repository.py

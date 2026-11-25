@@ -9,7 +9,6 @@ this checkout: lean HUD/input, lean New Game spawn paths (static actors,
 weapons, effects, sound, nodes), player and gamerules hooks, and the
 GameCube waf cross-compile support. No functional change in this commit.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
  .../gradle/wrapper/gradle-wrapper.properties  |   4 +-
  cl_dll/cdll_int.cpp                           |  12 ++

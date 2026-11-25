@@ -6,7 +6,6 @@ Subject: [PATCH 14/14] gamecube: commit remaining GameCube game-code edits
 Commit the uncommitted client/monsters/sound/world/pm_shared edits from
 the Expansion drive working tree.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  dlls/client.cpp       | 10 ++++-----
  dlls/enginecallback.h | 11 +++++++---

@@ -28,7 +28,6 @@ campaign rides): no freeze on suit pickup; health/armor/ammo, weapon
 buckets, pickup history, flashlight, crosshair and the death HUD match
 retail at 640x480.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  cl_dll/hud.cpp        |  98 +------------------
  cl_dll/hud.h          |   2 -

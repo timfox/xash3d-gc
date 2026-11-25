@@ -1,6 +1,6 @@
 # Shelved: edict-table hold for retail New Game (cold route)
 
-Status: not applied. Memory is owned by the Cursor agent; this records the
+Status: not applied. Memory is owned by the maintainer; this records the
 findings for whoever picks it up. Patch: `gamecube-edict-hold-shelved.patch`
 (against 1b2758072f, before 56f7be4c5b moved edicts/baselines/statics to BSS).
 

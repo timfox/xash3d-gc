@@ -11,7 +11,6 @@ arrays; monster AI then called FindNearestNode and dereferenced m_di
 the failure path so the level runs without a graph, as when the .nod is
 missing.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  dlls/nodes.cpp | 7 +++++++
  1 file changed, 7 insertions(+)

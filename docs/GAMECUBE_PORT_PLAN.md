@@ -14,12 +14,12 @@ compiles the production C player with AddressSanitizer and UBSan. All five tests
 pass, covering mixed button/stick segments, final-frame consumption, physical
 action labels, reset, and the complete shipped smoke trace. The same tests
 reproduced seven assertion failures before the fix. Logs are in
-`.ai/logs/codex-tas-20261108/{before,after}.log`. `scripts/ai-verify.sh` now runs
+`.ai/logs/maintainer-tas-20261108/{before,after}.log`. `scripts/ai-verify.sh` now runs
 this native suite before either its host-only or GameCube build gate.
 
 The changed module also compiles with devkitPPC GCC 16.1.0 using the recorded
 HL1 compilation command and a private output object; the command, dependencies,
-and object are preserved in `.ai/logs/codex-tas-20261108/`. Shared Waf outputs
+and object are preserved in `.ai/logs/maintainer-tas-20261108/`. Shared Waf outputs
 were not used as compilation targets while Grok works on NPC loading and skins.
 This is native replay and cross-compilation evidence. Next: replay the corrected
 script from a matching DOL/ISO in Dolphin, verify processed attack/jump/use and
@@ -140,7 +140,7 @@ Each run also writes `.ai/logs/dolphin-vision-*/result.json` and updates the
 run-local Dolphin memory palace at `.ai/state/dolphin-harness-memory.json` plus
 `.ai/state/dolphin-harness-latest.md`. These files summarize bootstrap,
 engine-ready, map-ready, input, visual, audio, and guest-error markers so
-Qwable/Codex can reason from the last Dolphin attempt even when screenshots or
+Qwable/maintainer can reason from the last Dolphin attempt even when screenshots or
 vision inference are unavailable. The GUI telemetry panel shows the latest
 harness status, visual classification, and next debugging action.
 Useful controls: `DOLPHIN_VISION_RUNTIME`,
@@ -826,7 +826,7 @@ DOLPHIN_TIMEOUT=120 scripts/dolphin-boot-probe.sh
 Evidence: `.ai/logs/dolphin-probe-20260623-024230/stderr.log` (`audio backend ready`,
 `sound effects init ready`, `MAP_READY`).
 
-Codex follow-up on 2026-06-24 adds ASND submission telemetry in
+maintainer follow-up on 2026-06-24 adds ASND submission telemetry in
 `engine/platform/gamecube/snddma_gamecube.c`. Runtime logs now distinguish voice
 startup from actual mixed PCM delivery:
 
@@ -2390,7 +2390,7 @@ support.
 
 **Command:**
 ```sh
-scripts/gamecube-content-format-audit.py --log-dir .ai/logs/content-format-g67-codex
+scripts/gamecube-content-format-audit.py --log-dir .ai/logs/content-format-g67-maintainer
 ```
 
 **Result:** required failures: 0. The audit passed BSP, WAD, MDL, SPR, WAV,
@@ -2402,8 +2402,8 @@ asset tree. It recorded the largest tested samples, including
 `resource/TrackerScheme.res`.
 
 **Evidence:**
-- Summary: `.ai/logs/content-format-g67-codex/summary.md`
-- JSON report: `.ai/logs/content-format-g67-codex/report.json`
+- Summary: `.ai/logs/content-format-g67-maintainer/summary.md`
+- JSON report: `.ai/logs/content-format-g67-maintainer/report.json`
 - RC gate: `scripts/gamecube-rc-check.sh` now runs `GoldSrc content format
   audit` and fails release-candidate status when a required format has a source
   or sample validation failure.

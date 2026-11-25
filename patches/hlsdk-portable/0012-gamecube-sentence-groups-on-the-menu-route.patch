@@ -5,7 +5,6 @@ Subject: [PATCH 12/14] gamecube: sentence groups on the menu route
 
 SENTENCEG_Init runs from GameDLLInit while the heap has room for the file.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
  dlls/game.cpp  |  4 ++++
  dlls/sound.cpp | 15 ++++++++++-----

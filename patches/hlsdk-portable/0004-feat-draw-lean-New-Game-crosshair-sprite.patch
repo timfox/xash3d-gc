@@ -5,7 +5,6 @@ Subject: [PATCH 04/14] feat: draw lean New Game crosshair sprite
 
 Center-screen crosshairs.spr joins pain/train on the quality-0 HUD path.
 
-Co-authored-by: Cursor <cursoragent@cursor.com>
 ---
  cl_dll/hud_redraw.cpp | 23 ++++++++++++++++++++---
  1 file changed, 20 insertions(+), 3 deletions(-)

@@ -11,7 +11,6 @@ run the stock GoldSrc Spawn: MonsterInit, AI schedules, scripted walks
 and animation. GC_FullActors() picks the route at runtime; the lean
 routes keep the static actors.
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
  dlls/barney.cpp         | 36 ++++++++++++-----------
  dlls/enginecallback.h   | 12 ++++++++

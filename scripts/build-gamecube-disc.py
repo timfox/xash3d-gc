@@ -4501,7 +4501,8 @@ def main() -> None:
 	# XASH_GC_OUT: private install tree (scripts/build-gamecube.sh), default OUT.
 	gc_out = Path(os.environ.get("XASH_GC_OUT", "OUT"))
 	parser.add_argument("--dol", type=Path, default=gc_out / "bin" / "boot.dol")
-	parser.add_argument("--data", type=Path, default=Path("Half-Life/valve"))
+	parser.add_argument("--data", type=Path, required=True,
+		help="BYOD: path to your own legally acquired game data; no game content is supplied")
 	parser.add_argument(
 		"--gamedir",
 		default="valve",

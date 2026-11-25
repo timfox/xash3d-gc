@@ -6,7 +6,6 @@ Subject: [PATCH 05/14] feat: draw lean New Game health digits from gc_320hud2
 Quality-0 HUD paints a top-left health cross and three-digit value from
 the bootstrap number sheet.
 
-Co-authored-by: Cursor <cursoragent@cursor.com>
 ---
  cl_dll/hud_redraw.cpp | 59 ++++++++++++++++++++++++++++++++++++++++---
  1 file changed, 56 insertions(+), 3 deletions(-)
