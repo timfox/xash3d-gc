@@ -186,8 +186,10 @@ static void SV_AddEntitiesToPacket( edict_t *pViewEnt, edict_t *pClient, client_
 		 * (tram/doors/buttons share *N models). Classname string compares
 		 * for door admit hung WriteEntities even when unused — keep this
 		 * path to precache[0]=='*' only. Fullphysics keeps G319 studios. */
-		qboolean	lean_player_only = ( post_g36 && !Sys_CheckParm( "-gcfullphysics" ))
-			|| listen_mp;
+		/* Listen-server boots use the same studio-capable snapshot when fullphysics
+		 * is requested. The lean listen profile remains available without it. */
+		qboolean	lean_player_only = ( post_g36 || listen_mp )
+			&& !Sys_CheckParm( "-gcfullphysics" );
 		qboolean	lean_brush_pack = lean_player_only
 			&& ( GC_IsLeanPlayerPhysicsArmed() || listen_mp );
 		int		brush_budget = post_g36 ? 6 : 64;

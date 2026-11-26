@@ -93,10 +93,85 @@ static qboolean Mod_GCIsWeaponModelPath( const char *path )
 	return false;
 }
 
+#if defined( XASH_MOHAA_GAMECUBE ) && XASH_MOHAA_GAMECUBE
+/* MOHAA script models (vehicles, the human cast, and whatever the map's
+ * maps/<map>.models manifest lists) are driven by the mission script for the
+ * whole map, so they stay resident instead of being treated as static props.
+ * The manifest is one model path per line, '#' comments allowed. */
+static char mohaa_manifest_map[64];
+static char mohaa_manifest[4096];
+
+static void Mod_GCMohaaLoadManifest( void )
+{
+	char path[96];
+	fs_offset_t len = 0;
+	byte *data;
+
+	if( !Q_stricmp( mohaa_manifest_map, sv.name ))
+		return;
+	Q_strncpy( mohaa_manifest_map, sv.name, sizeof( mohaa_manifest_map ));
+	mohaa_manifest[0] = '\0';
+	if( !sv.name[0] )
+		return;
+	Q_snprintf( path, sizeof( path ), "maps/%s.models", sv.name );
+	data = FS_LoadFile( path, &len, false );
+	if( !data )
+		return;
+	if( len >= (fs_offset_t)sizeof( mohaa_manifest ))
+	{
+		Con_Reportf( "Xash3D GameCube: %s is %d bytes, keeping the first %d\n",
+			path, (int)len, (int)sizeof( mohaa_manifest ) - 1 );
+		len = sizeof( mohaa_manifest ) - 1;
+	}
+	memcpy( mohaa_manifest, data, len );
+	mohaa_manifest[len] = '\0';
+	Mem_Free( data );
+}
+
+static qboolean Mod_GCMohaaManifestLists( const char *model_path )
+{
+	const char *line = mohaa_manifest;
+	size_t want = Q_strlen( model_path );
+
+	Mod_GCMohaaLoadManifest();
+	while( *line )
+	{
+		const char *end = line;
+		size_t n;
+
+		while( *end && *end != '\n' && *end != '\r' )
+			end++;
+		n = end - line;
+		while( n && ( line[n - 1] == ' ' || line[n - 1] == '\t' ))
+			n--;
+		if( n == want && *line != '#' && !Q_strnicmp( line, model_path, n ))
+			return true;
+		line = *end ? end + 1 : end;
+	}
+	return false;
+}
+
+static qboolean Mod_GCMohaaKeepsStudio( const char *model_path )
+{
+	if( !model_path || !model_path[0] )
+		return false;
+	return Q_stristr( model_path, "models/vehicles/" ) != NULL
+		|| Q_stristr( model_path, "models/human/" ) != NULL
+		|| Mod_GCMohaaManifestLists( model_path );
+}
+#else
+static qboolean Mod_GCMohaaKeepsStudio( const char *model_path )
+{
+	(void)model_path;
+	return false;
+}
+#endif
+
 static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
 {
 	return Q_stristr( model_path, "mapmodels/" ) != NULL
-		|| Q_stristr( model_path, "models/player" ) != NULL;
+		|| Q_stristr( model_path, "models/player" ) != NULL
+		|| Mod_GCMohaaKeepsStudio( model_path );
 }
 
 /* Real MDLs live in the 1 MiB studio BSS arena (lean meshes + viewweapons).
@@ -862,6 +937,8 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 	if( !name || !name[0] )
 		return false;
 	if( Mod_GCIsWeaponModelPath( name ))
+		return true;
+	if( Mod_GCMohaaKeepsStudio( name ))
 		return true;
 
 	COM_FileBase( name, bare, sizeof( bare ));
@@ -2584,7 +2661,9 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 					int *offs = (int *)Mem_Malloc( host.mempool, 4 * n );
 					int k, valid = 0;
 
-					if( FS_Read( f, offs, 4 * n ) == 4 * n )
+					/* This is optional texture-lump compaction. Under MEM1 pressure
+					 * keep the original lump instead of passing NULL to FS_Read. */
+					if( offs && FS_Read( f, offs, 4 * n ) == 4 * n )
 					{
 						for( k = 0; k < n; k++ )
 						{
@@ -2596,7 +2675,8 @@ static model_t *Mod_LoadModel( model_t *mod, qboolean crash )
 						}
 						tex_blob_len = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;
 						tex_blob = (byte *)Mem_Malloc( host.mempool, tex_blob_len );
-						*(int *)tex_blob = LittleLong( n );
+						if( tex_blob )
+							*(int *)tex_blob = LittleLong( n );
 						for( k = 0, valid = 0; k < n && tex_blob; k++ )
 						{
 							const size_t at = 4 + 4 * (size_t)n + sizeof( mip_t ) * (size_t)valid;

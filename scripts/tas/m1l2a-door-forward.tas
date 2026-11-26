@@ -1,0 +1,9 @@
+# Reproduce the verified manual approach path from m1l2a spawn toward the gate.
+# Main-stick Y=+127 maps to positive GoldSrc forward movement.
+# Prior controller log held forward for ~15s, then turned right and used B.
+# Format: frames buttons stickX stickY cstickX cstickY
+210 - 0 127 0 0
+8 - 0 0 127 0
+70 - 0 0 0 0
+1 B 0 0 0 0
+120 - 0 0 0 0

@@ -1812,6 +1812,94 @@ static qboolean SV_IsNewGameInteractClass( const char *classname )
 	return false;
 }
 
+/* MOHAA (gamedir "mohaa", mohaa-gc): USE reaches any trigger_use or
+ * trigger_multiple brush within this many units of the player, measured to
+ * the nearest point of the brush. Retail door triggers are elongated brushes
+ * whose centre can sit outside the USE radius while the doorway touches it. */
+#define GC_MOHAA_USE_RADIUS 128.0f
+
+static qboolean SV_GCMohaaUseRules( void )
+{
+	return GI && !Q_stricmp( GI->gamefolder, "mohaa" );
+}
+
+static qboolean SV_GCMohaaUseClass( const char *classname )
+{
+	return classname && ( !Q_stricmp( classname, "trigger_use" )
+		|| !Q_stricmp( classname, "trigger_multiple" ));
+}
+
+static float SV_GCDistanceToBounds( const edict_t *ent, const edict_t *player )
+{
+	vec3_t closest, delta;
+	int axis;
+
+	if( VectorIsNull( ent->v.absmin ) && VectorIsNull( ent->v.absmax ))
+		VectorCopy( ent->v.origin, closest );
+	else
+	{
+		for( axis = 0; axis < 3; axis++ )
+			closest[axis] = bound( ent->v.absmin[axis], player->v.origin[axis], ent->v.absmax[axis] );
+	}
+	VectorSubtract( closest, player->v.origin, delta );
+	return VectorLength( delta );
+}
+
+/* One USE press reaches the nearest MOHAA use trigger. Unlike the c0a0 proof
+ * below this runs on every fresh press, so a locked door can show its hint
+ * again and a later trigger_use further into the map still answers. */
+static void SV_GCMohaaWorldUse( edict_t *player )
+{
+	static qboolean use_held;
+	edict_t *best = NULL;
+	const char *best_class = NULL;
+	float best_dist = GC_MOHAA_USE_RADIUS;
+	qboolean pressed = FBitSet( player->v.button, IN_USE ) != 0;
+	int i;
+
+	if( !pressed || use_held )
+	{
+		use_held = pressed;
+		return;
+	}
+	use_held = true;
+
+	for( i = svs.maxclients + 1; i < svgame.numEntities; i++ )
+	{
+		edict_t *ent = SV_EdictNum( i );
+		const char *classname;
+		float dist;
+
+		if( !SV_IsValidEdict( ent ))
+			continue;
+		classname = SV_ClassName( ent );
+		if( !SV_GCMohaaUseClass( classname ))
+			continue;
+		dist = SV_GCDistanceToBounds( ent, player );
+		if( dist > best_dist )
+			continue;
+		best = ent;
+		best_class = classname;
+		best_dist = dist;
+	}
+
+	if( !best )
+	{
+		Con_Reportf( "Xash3D GameCube: MOHAA USE no trigger within %.0f of (%.0f,%.0f,%.0f)\n",
+			GC_MOHAA_USE_RADIUS, player->v.origin[0], player->v.origin[1], player->v.origin[2] );
+		return;
+	}
+
+	/* trigger_use answers Use; trigger_multiple fires on Touch. */
+	if( !Q_stricmp( best_class, "trigger_use" ))
+		svgame.dllFuncs.pfnUse( best, player );
+	else
+		svgame.dllFuncs.pfnTouch( best, player );
+	Con_Reportf( "Xash3D GameCube: MOHAA USE %s targetname=%s dist=%.0f map=%s\n",
+		best_class, best->v.targetname ? SV_GetString( best->v.targetname ) : "",
+		best_dist, sv.name );
+}
+
 static void SV_TryNewGameWorldInteraction( edict_t *player )
 {
 	static qboolean gc_interact_done;
@@ -1821,7 +1909,14 @@ static void SV_TryNewGameWorldInteraction( edict_t *player )
 	int i;
 	qboolean used_touch = false;
 
-	if( gc_interact_done || !player || !SV_IsValidEdict( player ))
+	if( !player || !SV_IsValidEdict( player ))
+		return;
+	if( SV_GCMohaaUseRules( ))
+	{
+		SV_GCMohaaWorldUse( player );
+		return;
+	}
+	if( gc_interact_done )
 		return;
 
 	for( i = svs.maxclients + 1; i < svgame.numEntities; i++ )

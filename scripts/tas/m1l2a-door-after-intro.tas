@@ -1,0 +1,9 @@
+# Wait for the m1l2a intro to finish, then approach the retail locked gate.
+# TAS frame durations are 50 ms on the GameCube command path.
+# Format: frames buttons stickX stickY cstickX cstickY
+1000 - 0 0 0 0
+210 - 0 127 0 0
+8 - 0 0 127 0
+70 - 0 0 0 0
+1 B 0 0 0 0
+120 - 0 0 0 0

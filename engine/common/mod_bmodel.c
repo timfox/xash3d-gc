@@ -449,7 +449,13 @@ qboolean GC_CapFacesLeanSurfaces( void )
 /* 800 KiB total: last 32 KiB reserved for CapFaces CMPR bounce so tip-tight
  * maps (dod_donner) still texture CapFaces after listen spawn. */
 /* Faces+surfedges+medges (~785 KiB) must coexist for FULL surface high-slot. */
+#if defined(XASH_MOHAA_GAMECUBE)
+/* m1l1 holds two opening vehicles and a mission-long scripted actor alongside
+ * the ordinary world arrays; keep the larger reserve MOHAA-only. */
+#define GC_WORLD_ARRAY_SPILL_BYTES (1024u * 1024u)
+#else
 #define GC_WORLD_ARRAY_SPILL_BYTES (900u * 1024u)
+#endif
 #define GC_WORLD_ARRAY_SPILL_BOUNCE_RESERVE (32u * 1024u)
 #define GC_WORLD_ARRAY_SPILL_USABLE \
 	( GC_WORLD_ARRAY_SPILL_BYTES - GC_WORLD_ARRAY_SPILL_BOUNCE_RESERVE )

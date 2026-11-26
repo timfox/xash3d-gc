@@ -2483,6 +2483,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			float dist;
 			qboolean allow;
 			qboolean is_film;
+			qboolean mohaa_script_asset;
 
 			if( !SV_IsValidEdict( ed ) || !ed->v.modelindex )
 				continue;
@@ -2622,6 +2623,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			}
 			if( !mod || mod->type != mod_studio )
 				continue;
+#if defined( XASH_MOHAA_GAMECUBE ) && XASH_MOHAA_GAMECUBE
+			mohaa_script_asset = Q_stristr( mod->name, "models/vehicles/" )
+				|| Q_stristr( mod->name, "models/human/" )
+				|| Q_stristr( mod->name, "models/animal/" );
+#else
+			mohaa_script_asset = false;
+#endif
 			/* A weapon a player carries keeps its w_ model at the player's
 			 * origin; it drew as a white rifle lying at the bot's feet
 			 * (ceres 18e0d6f). Carried items belong to the player model. */
@@ -2665,6 +2673,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
 					allow = true;
 				else if( Q_stristr( mod->name, "mapmodels/" )
+					|| mohaa_script_asset
 					|| Q_stristr( mod->name, "hk_satchel" )
 					|| Q_stristr( mod->name, "sandbags" )
 					|| Q_stristr( mod->name, "by_rubble" )
@@ -2719,7 +2728,13 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 					VectorSet( bmin, ed->v.origin[0] - 48.0f, ed->v.origin[1] - 48.0f, ed->v.origin[2] );
 					VectorSet( bmax, ed->v.origin[0] + 48.0f, ed->v.origin[1] + 48.0f, ed->v.origin[2] + 80.0f );
 				}
-				if( !R_GXWorldDLEntityVisible( e, bmin, bmax ))
+				/* These are moving MOHAA script models. Their GoldSrc edict bounds
+				 * are placeholder-sized (2x2x2 for the m1l1 GMC), so WorldDL's
+				 * static-world PVS rejects the truck even with the rider inside it.
+				 * Keep the distance and renderer budgets, but let the GX frustum test
+				 * the authored vehicle/actor model itself. */
+				if( !mohaa_script_asset
+					&& !R_GXWorldDLEntityVisible( e, bmin, bmax ))
 				{
 					scan_studio_skip++;
 					continue;

@@ -679,6 +679,18 @@ int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, c
 	return handle;
 }
 
+int R_GXHudHiRegisterRGBA( const char *texname, int w, int h, const byte *rgba_pixels )
+{
+	int handle;
+
+	if( !R_GXHudHiEnsure() || w < 1 || h < 1 || w > GC_HUDHI_MAX_DIM || h > GC_HUDHI_MAX_DIM )
+		return -1;
+	handle = GC_HudHiRegisterRGBA( &r_hudhi, texname, (uint16_t)w, (uint16_t)h, rgba_pixels );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res %s %dx%d RGBA %s (sheet %d)\n",
+		texname, w, h, handle >= 0 ? "kept in ARAM" : "refused", handle );
+	return handle;
+}
+
 static qboolean R_GXHudHiArena( void );
 
 void R_GXHudHiSetTexnum( int handle, int texnum )
@@ -710,7 +722,7 @@ static qboolean r_hudhi_arena_lent;	/* the arena is the borrowed decode buffer *
 /* Half-Life's 640 HUD: cells in the lent decode buffer, token resident
  * copies (never drawn). Day of Defeat keeps its heap arena and 64 px
  * fallback copies. */
-#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK ) || ( defined( XASH_MOHAA_GAMECUBE ) && XASH_MOHAA_GAMECUBE )
 #define GC_HUDHI_LEND_DECODE 1
 #else
 #define GC_HUDHI_LEND_DECODE 0
@@ -4918,10 +4930,11 @@ static void R_GXSetupWorld3DState( void )
 	R_GXBuildWorldModelview( mv );
 	GX_LoadPosMtxImm( mv, GX_PNMTX0 );
 
-	/* Real 6-face cube is mandatory outdoors. CMPR sides live in BSS (48 KiB)
+	/* Real 6-face cube is mandatory outdoors, including maps with a fog far
+	 * plane: that plane clips/fogs the world, not the sky shell. CMPR sides live in BSS (48 KiB)
 	 * so draw never needs tip — tip-gating left WorldDL on solid clear + the
 	 * single-side Flipper backdrop forever (ava-prop-2 tip≈26 Kb). */
-	if( R_GXSkyVisible( ) && R_GXMapFarplane() <= 0.0f )
+	if( R_GXSkyVisible( ))
 	{
 		R_GXDrawSkyBox();
 		/* Full restore after NumChans(0)+REPLACE — incomplete state left

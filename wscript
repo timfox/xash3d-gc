@@ -643,6 +643,11 @@ def configure(conf):
 		# mohaa (mohaa-gc) is DoD-GC's game code with MOHAA content: same tables and limits.
 		if conf.options.GAMEDIR in ('dod', 'mohaa'):
 			conf.define('XASH_DODGC_NETWORK', 1)
+			if conf.options.GAMEDIR == 'mohaa':
+				# MOHAA shares DoD's network profile, but keeps a larger world-array
+				# spill for its script models, a 320-wide XFB, and retail RGBA HUD
+				# sprite sheets in ARAM.
+				conf.define('XASH_MOHAA_GAMECUBE', 1)
 			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
 			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
 			# screen) can be built with a bigger table: XASH_GC_MAX_EDICTS=560 costs about
