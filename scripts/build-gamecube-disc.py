@@ -1326,6 +1326,28 @@ def _stage_gc_menu_btn_strips(source: Path, menu_dir: Path) -> None:
 		written += 1
 	print(f"GameCube menu buttons: baked {written} retail strips from {btns_path.name}")
 
+	# Story mode (skill 0) has no retail button. Set "Story" from retail
+	# btns_main glyphs so it matches Easy/Medium/Difficult in all three states:
+	# (button id, source x0, source x1, x in the new strip). Crops overlap
+	# into the gaps between letters so the glow states have no seams.
+	story_pieces = (
+		(42, 0, 13, 0),    # "S" and its hotkey underline, from "Search"
+		(31, 30, 46, 12),  # "to", from "Customize"
+		(42, 30, 37, 27),  # "r", from "Search"
+		(9, 29, 46, 34),   # "y", from "Easy"
+	)
+	if all((btn_id + 1) * cell <= h for btn_id, _, _, _ in story_pieces):
+		from PIL import ImageChops
+
+		story = Image.new("RGB", (w, cell))
+		for btn_id, x0, x1, dst in story_pieces:
+			source_strip = extract_btn(btn_id)
+			layer = Image.new("RGB", (w, cell))
+			layer.paste(source_strip.crop((x0, 0, x1, cell)), (dst, 0))
+			story = ImageChops.lighter(story, layer)
+		_thicken_orange(story).save(menu_dir / "btn_story.tga", format="TGA")
+		print("GameCube menu buttons: set btn_story.tga from retail glyphs")
+
 	# Slim New Game banner (extras head_newgame.tga is 460×80 — fine for MEM1).
 	banner_candidates = [
 		source / "gfx" / "shell" / "head_newgame.tga",
