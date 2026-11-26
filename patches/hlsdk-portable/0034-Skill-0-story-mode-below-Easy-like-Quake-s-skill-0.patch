@@ -1,0 +1,225 @@
+From f29c2def29aef26d362dfb96ffbeebc4b469cf11 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 00:05:46 +0000
+Subject: [PATCH] Skill 0: story mode below Easy, like Quake's skill 0
+
+skill 0 used to be clamped to skill 1 values while g_iSkillLevel stayed
+0, so it played as Easy without Easy's autoaim crosshair or the Apache's
+easy-mode rocket hold. It is now a real difficulty: it reads the skill 1
+(Easy) values from skill.cfg, keeps Easy behaviour, and then softens it:
+
+- hostile monster health x0.6 (Big Momma's node factor too)
+- all non-drowning damage the player takes x0.5
+- health kits, batteries, chargers and scientist heals x2
+
+Player weapon damage and ally health stay at Easy. Skills 1-3 load and
+behave exactly as before (plrDmgTakenScale is 1.0 there).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PNJFXLzbuqw57CShCkgMNL
+---
+ dlls/apache.cpp               |  2 +-
+ dlls/gamerules.cpp            | 85 ++++++++++++++++++++++++++++++++---
+ dlls/player.cpp               |  7 ++-
+ dlls/singleplay_gamerules.cpp |  2 +-
+ dlls/skill.h                  |  7 +++
+ 5 files changed, 94 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/apache.cpp b/dlls/apache.cpp
+index f37f8cb1..26aaf457 100644
+--- a/dlls/apache.cpp
++++ b/dlls/apache.cpp
+@@ -530,7 +530,7 @@ void CApache::HuntThink( void )
+ 		}
+ 
+ 		// don't fire rockets and gun on easy mode
+-		if( g_iSkillLevel == SKILL_EASY )
++		if( g_iSkillLevel <= SKILL_EASY )
+ 			m_flNextRocket = gpGlobals->time + 10.0f;
+ 	}
+ 
+diff --git a/dlls/gamerules.cpp b/dlls/gamerules.cpp
+index 0b5800dd..a29c978c 100644
+--- a/dlls/gamerules.cpp
++++ b/dlls/gamerules.cpp
+@@ -116,6 +116,68 @@ BOOL CGameRules::CanHavePlayerItem( CBasePlayer *pPlayer, CBasePlayerItem *pWeap
+ 	return TRUE;
+ }
+ 
++//=========================================================
++// Story mode (skill 0): Easy, softened for playing through
++// the story. Hostile monsters have less health, the player
++// takes half damage, and health and armor pickups give twice
++// as much. Player weapons and allies keep their Easy values.
++//=========================================================
++#define STORY_MONSTER_HEALTH_SCALE	0.6f
++#define STORY_PLAYER_DAMAGE_SCALE	0.5f
++#define STORY_PICKUP_SCALE		2.0f
++
++static void StorySkillData( void )
++{
++	float *const monsterHealth[] =
++	{
++		&gSkillData.agruntHealth,
++		&gSkillData.apacheHealth,
++		&gSkillData.bullsquidHealth,
++		&gSkillData.gargantuaHealth,
++		&gSkillData.hassassinHealth,
++		&gSkillData.headcrabHealth,
++		&gSkillData.hgruntHealth,
++		&gSkillData.houndeyeHealth,
++		&gSkillData.slaveHealth,
++		&gSkillData.ichthyosaurHealth,
++		&gSkillData.leechHealth,
++		&gSkillData.controllerHealth,
++		&gSkillData.nihilanthHealth,
++		&gSkillData.snarkHealth,
++		&gSkillData.zombieHealth,
++		&gSkillData.turretHealth,
++		&gSkillData.miniturretHealth,
++		&gSkillData.sentryHealth,
++	};
++	float *const pickups[] =
++	{
++		&gSkillData.suitchargerCapacity,
++		&gSkillData.batteryCapacity,
++		&gSkillData.healthchargerCapacity,
++		&gSkillData.healthkitCapacity,
++		&gSkillData.scientistHeal,
++	};
++	unsigned int i;
++
++	for( i = 0; i < ARRAYSIZE( monsterHealth ); i++ )
++	{
++		// Whole hit points, at least 1.
++		float health = (float)(int)( *monsterHealth[i] * STORY_MONSTER_HEALTH_SCALE + 0.5f );
++		*monsterHealth[i] = health > 1.0f ? health : 1.0f;
++	}
++
++	// The Big Momma value scales each of her path nodes' health, not hit points.
++	gSkillData.bigmommaHealthFactor *= STORY_MONSTER_HEALTH_SCALE;
++
++	for( i = 0; i < ARRAYSIZE( pickups ); i++ )
++		*pickups[i] = (float)(int)( *pickups[i] * STORY_PICKUP_SCALE + 0.5f );
++
++	gSkillData.plrDmgTakenScale = STORY_PLAYER_DAMAGE_SCALE;
++
++	ALERT( at_console, "GAME SKILL LEVEL 0: story mode (Easy values, monster health x%.1f, player damage x%.1f, pickups x%.1f)\n",
++		STORY_MONSTER_HEALTH_SCALE, STORY_PLAYER_DAMAGE_SCALE, STORY_PICKUP_SCALE );
++}
++
+ //=========================================================
+ // load the SkillData struct with the proper values based on the skill level.
+ //=========================================================
+@@ -124,21 +186,27 @@ void CGameRules::RefreshSkillData ( void )
+ 	int iSkill;
+ 
+ 	iSkill = (int)CVAR_GET_FLOAT( "skill" );
+-	g_iSkillLevel = iSkill;
+ 
+-	if( iSkill < 1 )
++	if( iSkill < SKILL_STORY )
+ 	{
+-		iSkill = 1;
++		iSkill = SKILL_STORY;
+ 	}
+-	else if( iSkill > 3 )
++	else if( iSkill > SKILL_HARD )
+ 	{
+-		iSkill = 3; 
++		iSkill = SKILL_HARD;
+ 	}
+ 
+-	gSkillData.iSkillLevel = iSkill;
++	g_iSkillLevel = iSkill;
+ 
+ 	ALERT( at_console, "\nGAME SKILL LEVEL:%d\n",iSkill );
+ 
++	// Story mode has no sk_*0 cvars of its own: it reads the skill 1 (Easy)
++	// values from skill.cfg and softens them at the end of this function.
++	if( iSkill == SKILL_STORY )
++		iSkill = SKILL_EASY;
++
++	gSkillData.iSkillLevel = iSkill;
++
+ 	//Agrunt		
+ 	gSkillData.agruntHealth = GetSkillCvar( "sk_agrunt_health" );
+ 	gSkillData.agruntDmgPunch = GetSkillCvar( "sk_agrunt_dmg_punch" );
+@@ -319,6 +387,11 @@ void CGameRules::RefreshSkillData ( void )
+ 	gSkillData.plrStomach = GetSkillCvar( "sk_player_stomach" );
+ 	gSkillData.plrLeg = GetSkillCvar( "sk_player_leg" );
+ 	gSkillData.plrArm = GetSkillCvar( "sk_player_arm" );
++
++	gSkillData.plrDmgTakenScale = 1.0f;
++
++	if( g_iSkillLevel == SKILL_STORY && !IsMultiplayer() )
++		StorySkillData();
+ }
+ 
+ void CGameRules::ClientUserInfoChanged( CBasePlayer *pPlayer, char *infobuffer )
+diff --git a/dlls/player.cpp b/dlls/player.cpp
+index 21a9c706..ca5c3f15 100644
+--- a/dlls/player.cpp
++++ b/dlls/player.cpp
+@@ -458,6 +458,11 @@ int CBasePlayer::TakeDamage( entvars_t *pevInflictor, entvars_t *pevAttacker, fl
+ 		return 0;
+ 	}
+ 
++	// Story mode (skill 0) softens what the player takes. Drowning is left
++	// alone because the air the player gets back restores exactly what it took.
++	if( !( bitsDamageType & DMG_DROWN ))
++		flDamage *= gSkillData.plrDmgTakenScale;
++
+ 	// keep track of amount of damage last sustained
+ 	m_lastDamageAmount = (int)flDamage;
+ 
+@@ -4521,7 +4526,7 @@ Vector CBasePlayer::GetAutoaimVector( float flDelta )
+ 
+ 	// always use non-sticky autoaim
+ 	// UNDONE: use sever variable to chose!
+-	if( 0 || g_iSkillLevel == SKILL_EASY )
++	if( 0 || g_iSkillLevel <= SKILL_EASY )
+ 	{
+ 		m_vecAutoAim = m_vecAutoAim * 0.67f + angles * 0.33f;
+ 	}
+diff --git a/dlls/singleplay_gamerules.cpp b/dlls/singleplay_gamerules.cpp
+index 74cca845..4afedf26 100644
+--- a/dlls/singleplay_gamerules.cpp
++++ b/dlls/singleplay_gamerules.cpp
+@@ -229,7 +229,7 @@ void CHalfLifeRules::PlayerSpawn( CBasePlayer *pPlayer )
+ //=========================================================
+ BOOL CHalfLifeRules::AllowAutoTargetCrosshair( void )
+ {
+-	return ( g_iSkillLevel == SKILL_EASY );
++	return ( g_iSkillLevel <= SKILL_EASY );
+ }
+ 
+ //=========================================================
+diff --git a/dlls/skill.h b/dlls/skill.h
+index 3b95e8a3..f6f6add8 100644
+--- a/dlls/skill.h
++++ b/dlls/skill.h
+@@ -141,6 +141,10 @@ struct skilldata_t
+ 	float plrStomach;
+ 	float plrLeg;
+ 	float plrArm;
++
++	// story mode (skill 0): scale on all non-drowning damage the player takes.
++	// 1.0 on skills 1-3, so retail difficulties are unchanged.
++	float plrDmgTakenScale;
+ };
+ 
+ extern	DLL_GLOBAL	skilldata_t	gSkillData;
+@@ -148,6 +152,9 @@ float GetSkillCvar( const char *pName );
+ 
+ extern DLL_GLOBAL int		g_iSkillLevel;
+ 
++// Skill 0 is a story mode below Easy, like Quake's skill 0. It plays with the
++// skill 1 (Easy) values and Easy behaviour, then softens them further.
++#define SKILL_STORY		0
+ #define SKILL_EASY		1
+ #define SKILL_MEDIUM	2
+ #define SKILL_HARD		3
+-- 
+2.43.0
+

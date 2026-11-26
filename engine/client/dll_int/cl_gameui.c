@@ -81,12 +81,14 @@ static const gc_menu_item_t gc_menu_items[] =
 /* In-game pause page (Start during a match). Page 1 is the difficulty list. */
 #define GC_MENU_PAGE_PAUSE 2
 static const char *const gc_pause_items[] = { "Resume", "Options", "Leave match" };
+/* Difficulty rows are the skill values: 0 is story mode, then Easy/Medium/Hard. */
+#define GC_MENU_SKILL_COUNT 4
 
 static int UI_GCMenuItemCount( void )
 {
 	if( gc_menu_page == GC_MENU_PAGE_PAUSE )
 		return ARRAYSIZE( gc_pause_items );
-	return gc_menu_page ? 3 : (int)ARRAYSIZE( gc_menu_items );
+	return gc_menu_page ? GC_MENU_SKILL_COUNT : (int)ARRAYSIZE( gc_menu_items );
 }
 
 static qboolean UI_GCFallbackMenuCommandsSafe( void )
@@ -464,8 +466,9 @@ static void UI_GCDrawFallbackMenu( void )
 	}
 	if( difficulty_menu )
 	{
-		static const char *difficulty_names[] = { "Easy", "Medium", "Hard" };
-		static const char *difficulty_help[] = {
+		static const char *difficulty_names[GC_MENU_SKILL_COUNT] = { "Story", "Easy", "Medium", "Hard" };
+		static const char *difficulty_help[GC_MENU_SKILL_COUNT] = {
+			"For the story: half damage, weaker enemies.",
 			"Recommended for new players.",
 			"The standard Half-Life experience.",
 			"For experienced players."
@@ -473,15 +476,15 @@ static void UI_GCDrawFallbackMenu( void )
 
 			UI_GCDrawMenuString( base_x, base_y - row_h, "DIFFICULTY",
 			255, 214, 48, true );
-		for( int i = 0; i < 3; i++ )
+		for( int i = 0; i < GC_MENU_SKILL_COUNT; i++ )
 		{
 			qboolean selected = ( i == gc_menu_selection );
 			int y = base_y + i * row_h;
 			UI_GCDrawMenuString( base_x, y, difficulty_names[i],
 				255, selected ? 214 : 184, selected ? 48 : 0, true );
 		}
-		UI_GCDrawMenuString( base_x, base_y + 3 * row_h + row_h,
-			difficulty_help[bound( 0, gc_menu_selection, 2 )], 112, 112, 112, false );
+		UI_GCDrawMenuString( base_x, base_y + GC_MENU_SKILL_COUNT * row_h + row_h,
+			difficulty_help[bound( 0, gc_menu_selection, GC_MENU_SKILL_COUNT - 1 )], 112, 112, 112, false );
 		return;
 	}
 	if( !gc_menu_reported_button_ready )
@@ -534,9 +537,10 @@ static void UI_GCActivateFallbackMenuItem( void )
 
 	if( gc_menu_page != 0 )
 	{
-		Con_Reportf( "Xash3D GameCube: fallback difficulty selected skill=%d\n",
-			gc_menu_selection + 1 );
-		Cvar_SetValue( "skill", (float)( gc_menu_selection + 1 ));
+		const int skill_level = bound( 0, gc_menu_selection, GC_MENU_SKILL_COUNT - 1 );
+
+		Con_Reportf( "Xash3D GameCube: fallback difficulty selected skill=%d\n", skill_level );
+		Cvar_SetValue( "skill", (float)skill_level );
 		Cbuf_AddText( "gc_playstart\n" );
 		Cbuf_Execute();
 		gc_menu_page = 0;
