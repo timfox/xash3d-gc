@@ -587,6 +587,7 @@ void GL_UpdateCinematicTexture( int texnum, int width, int height, const byte *b
 	const uint16_t *dirty_tiles, uint dirty_count, qboolean full_upload );
 void R_GXReleaseCinematicTexture( unsigned int texnum );
 void R_GXReleaseMenuBackgroundTexture( unsigned int texnum );
+void R_GXForgetTexnum( unsigned int texnum );
 void R_GXReleaseHudPoolForMapLoad( void );
 pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes );
 void R_GXReleaseCinematicSoftwarePixels( void );
