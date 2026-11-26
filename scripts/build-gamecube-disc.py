@@ -4265,6 +4265,11 @@ def stage_smoke_data(
 					continue
 				if name.startswith(f"{stem}.") or name == f"{stem}_precache.scr":
 					copy_if_present(source, output, f"maps/{name}")
+		# The converter's per-map media packs: static props and terrain (gp_),
+		# the light grid models light from (lg_) and prop textures (pt_).
+		# Without gp_ the terrain the m1l1 ride drives over is not drawn.
+		for prefix, ext in (("gp", "gcp"), ("lg", "gcg"), ("pt", "gct")):
+			copy_if_present(source, output, f"media/{prefix}_{stem}.{ext}")
 	if has_mission_script:
 		global_scripts = sorted((source / "global").glob("*.scr")) if (source / "global").is_dir() else []
 		for script in global_scripts:
@@ -5159,6 +5164,11 @@ def main() -> None:
 					menu_lines.append(f"cvar {name} {value}")
 				if args.probe_fullphysics:
 					menu_lines.append("fullphysics")
+				# Like the play disc: without it the menu New Game route never runs
+				# the lean entity emit, so no studio model (actors, m1l1's trucks)
+				# reaches the renderer.
+				if args.world_render:
+					menu_lines.append("gcworldrender")
 				if args.probe_tas:
 					menu_lines.append(f"tas {args.probe_tas}")
 					stage_probe_tas(smoke_data, args.probe_tas, scripts_root=script_dir)
