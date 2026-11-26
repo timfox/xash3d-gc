@@ -17,6 +17,7 @@ Ported from Division-Zero-GX/xash3d-wii with libogc GX output for GameCube.
 #include "mod_local.h"
 #include "sound.h"
 #include "gamecube/mem_gamecube.h"
+#include "gamecube/gc_cam_cmd.h"
 #include "cl_tent.h"
 #include "platform/gamecube/tas_gamecube.h"
 
@@ -17819,6 +17820,12 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 		}
 	}
 
+	/* gc_cam: a GxBake camera clip owns the view while it runs. */
+	if( GC_CamApplyView( rvp.vieworigin, rvp.viewangles, &rvp.fov_x ))
+	{
+		rvp.fov_x = bound( 10.0f, rvp.fov_x, 150.0f );
+		rvp.fov_y = rvp.fov_x * 0.75f;
+	}
 	{
 		static int render_log;
 

@@ -11,6 +11,12 @@ Copyright (C) 2026 Xash3D GameCube port contributors
 #include "platform/platform.h"
 #if XASH_GAMECUBE
 #include "../../platform/gamecube/mem_gamecube.h"
+#include "../../platform/gamecube/gc_thp.h"
+#include <malloc.h>
+#include <asndlib.h>
+#include <ogc/cache.h>
+#include <ogc/gx.h>
+#include <ogc/irq.h>
 #endif
 
 static qboolean avi_initialized;
@@ -117,6 +123,11 @@ static qboolean AVI_UsesStaticFrameBuffer( const movie_state_t *Avi )
 {
 	return Avi && Avi->frame && GC_BootArenaOwns( Avi->frame );
 }
+
+static qboolean AVI_THPPath( const char *filename, char *path, size_t size );
+static qboolean AVI_OpenTHP( movie_state_t *Avi, const char *filename );
+static void AVI_THPRelease( movie_state_t *Avi );
+static qboolean AVI_THPThink( movie_state_t *Avi );
 #endif
 
 static void AVI_RGB24ToBGRA( const byte *src, int src_stride, byte *dst, int width, int height )
@@ -1110,6 +1121,8 @@ byte *AVI_GetVideoFrame( movie_state_t *Avi, int frame )
 {
 	if( !Avi || !Avi->active || frame < 0 || (uint)frame >= Avi->frame_count )
 		return NULL;
+	if( Avi->thp )
+		return NULL;	/* THP pictures go straight to the GX texture */
 
 	if((uint)frame != Avi->current_frame && !AVI_DecodeFrame( Avi, frame, true ))
 		return NULL;
@@ -1321,6 +1334,531 @@ qboolean AVI_IsSoundtrackActive( void )
 #endif
 }
 
+/*
+==============================================================================
+
+GxBake THP movies (media/<name>.thp, `gxbake video`)
+
+Preferred over .gcvid when present. gc_thp.c does the parsing, decoding and
+picture timing; here is the I/O, the ASND voice and the upload. One movie at
+a time (the startup intro / `movie`), synchronous reads: each Think reads at
+most the frames it needs, so one frame buffer is enough (the cue's picture
+stays in it until it is shown or skipped, and its sound is decoded at once).
+
+Clock: with sound, sample pairs played on ASND voice GC_THP_VOICE (the
+mixer keeps voice 0); without, milliseconds since the first Think. Sound
+goes through a small ring of fixed 32-byte-multiple chunks fed to ASND from
+its voice callback, so frame-sized blocks never need padding. If the voice
+clock stops moving for a second (no DSP, or a stuck emulator voice) the
+movie falls back to the wall clock rather than freezing.
+==============================================================================
+*/
+#if XASH_GAMECUBE
+#define GC_THP_VOICE		1
+#define GC_THP_CHUNK_SAMPLES	1024		/* sample pairs: 4 KiB, a multiple of 32 bytes */
+#define GC_THP_CHUNKS		6
+#define GC_THP_STALL_SECONDS	1.0
+#define GC_THP_READAHEAD	3		/* frames read ahead of the picture on screen, for their sound */
+
+qboolean S_GCAsndReady( void );
+
+typedef struct
+{
+	int16_t	*pcm;			/* GC_THP_CHUNK_SAMPLES pairs, 32-byte aligned */
+	uint32_t	start;		/* clock (sample pairs) of its first sample */
+	uint32_t	len;		/* sample pairs in it; the rest is silence */
+} gc_thp_chunk_t;
+
+typedef struct
+{
+	movie_state_t	*owner;
+	gc_thp_t	thp;
+	gc_thp_player_t	pl;
+	gc_thp_cue_t	cue[GC_THP_READAHEAD];	/* read, picture not yet shown or skipped */
+	byte		*frame_buf[GC_THP_READAHEAD];	/* the frame each cue points into */
+	uint		cue_head, cue_count;
+	qboolean	ended;		/* gc_thp_player_next said 0 */
+	qboolean	started;
+	qboolean	shown_any;
+	qboolean	audio;		/* the movie has sound and ASND is up */
+	qboolean	wall_clock;	/* audio clock gave up: pace by Platform_DoubleTime */
+	qboolean	voice_started;
+	size_t		frame_cap;
+	byte		*planes;	/* y, then cb, then cr */
+	uint16_t	*tex;		/* GX_TF_RGB565, 4x4 tiles */
+	size_t		tex_bytes;
+	int16_t		*scratch;	/* one frame's sound, before it goes into chunks */
+	uint32_t	scratch_len, scratch_pos;
+	byte		*chunk_mem;
+	gc_thp_chunk_t	chunk[GC_THP_CHUNKS];
+	volatile uint32_t	filled;	/* chunks committed by the main thread */
+	volatile uint32_t	submitted;	/* chunks handed to ASND (callback or restart) */
+	volatile uint32_t	submitted_end;	/* clock at the end of the last submitted chunk */
+	volatile uint32_t	silence;	/* sample pairs of silence the callback queued */
+	int16_t		*zero_pcm;	/* one chunk of silence for the callback */
+	uint32_t	fill_len;	/* pairs in chunk[filled % N] so far */
+	uint32_t	content_end;	/* clock at the end of the movie's sound */
+	uint32_t	voice_base;	/* clock at the chunk SetVoice started */
+	uint32_t	last_clock;
+	double		last_clock_move;
+	double		wall_start;	/* wall time at clock 0 (wall-clock mode) */
+	uint32_t	rate;		/* clock ticks per second */
+	uint32_t	asnd_rate;
+	uint32_t	last_until;
+	size_t		mem_bytes;
+	uint		shown, skipped;
+	volatile uint	underruns;	/* silence chunks queued before the movie's end */
+	volatile uint	cb_calls, cb_adds;	/* voice callback: calls, chunks it added */
+} gc_avi_thp_t;
+
+static gc_avi_thp_t gc_thp_state;
+
+static void *AVI_THPAlloc( size_t bytes )
+{
+	void *p;
+
+	bytes = ( bytes + 31u ) & ~(size_t)31u;
+	p = GC_BootArenaAlloc( bytes );
+	if( !p )
+		p = memalign( 32, bytes );
+	if( p )
+		gc_thp_state.mem_bytes += bytes;
+	return p;
+}
+
+static void AVI_THPFree( void *p )
+{
+	if( p && !GC_BootArenaFree( p ))
+		free( p );
+}
+
+static qboolean AVI_THPPath( const char *filename, char *path, size_t size )
+{
+	char *dot, *slash;
+
+	if( !filename || !filename[0] )
+		return false;
+	Q_strncpy( path, filename, size );
+	COM_FixSlashes( path );
+	dot = strrchr( path, '.' );
+	slash = strrchr( path, '/' );
+	if( dot && ( !slash || dot > slash ))
+		*dot = '\0';
+	Q_strncat( path, ".thp", size );
+	return true;
+}
+
+/* IRQ: ASND wants the voice's next buffer. Always give it one: an ASND voice
+ * left without a next buffer stops, so when the movie's sound is late it gets
+ * a chunk of silence, which the clock does not count. */
+static void AVI_THPVoiceCallback( s32 voice )
+{
+	gc_avi_thp_t *t = &gc_thp_state;
+
+	t->cb_calls++;
+	if( t->submitted < t->filled )
+	{
+		gc_thp_chunk_t *c = &t->chunk[t->submitted % GC_THP_CHUNKS];
+
+		if( ASND_AddVoice( voice, c->pcm, GC_THP_CHUNK_SAMPLES * 4 ) == SND_OK )
+		{
+			t->submitted_end = c->start + GC_THP_CHUNK_SAMPLES;
+			t->submitted++;
+			t->cb_adds++;
+		}
+		return;
+	}
+	if( ASND_AddVoice( voice, t->zero_pcm, GC_THP_CHUNK_SAMPLES * 4 ) == SND_OK )
+	{
+		t->silence += GC_THP_CHUNK_SAMPLES;
+		if( !t->ended )
+			t->underruns++;
+	}
+}
+
+static uint32_t AVI_THPClock( gc_avi_thp_t *t )
+{
+	const double now = Platform_DoubleTime();
+	uint32_t clock;
+
+	if( !t->audio || t->wall_clock )
+		clock = (uint32_t)(( now - t->wall_start ) * (double)t->rate );
+	else if( !t->voice_started )
+		clock = t->voice_base;
+	else
+	{
+		const uint64_t ticks = ASND_GetTickCounterVoice( GC_THP_VOICE );
+		/* Queued silence is subtracted when it is queued, so the clock holds
+		 * (monotonic, below) until that silence has played. */
+		clock = t->voice_base + (uint32_t)( ticks * t->rate / t->asnd_rate ) - t->silence;
+		/* Never ahead of what ASND was given (a waiting voice may keep counting). */
+		if((int32_t)( clock - t->submitted_end ) > 0 )
+			clock = t->submitted_end;
+	}
+	if((int32_t)( clock - t->last_clock ) < 0 )
+		clock = t->last_clock;	/* monotonic across restarts */
+
+	if( clock != t->last_clock )
+	{
+		t->last_clock = clock;
+		t->last_clock_move = now;
+	}
+	else if( t->audio && !t->wall_clock && t->started && now - t->last_clock_move > GC_THP_STALL_SECONDS )
+	{
+		t->wall_clock = true;
+		t->wall_start = now - (double)clock / (double)t->rate;
+		if( t->voice_started )
+			ASND_StopVoice( GC_THP_VOICE );
+		Con_Reportf( "Xash3D GameCube: THP audio clock stalled at %u (chunks=%u/%u end=%u silence=%u status=%d ticks=%u cb=%u/%u), pacing by wall clock\n",
+			clock, t->submitted, t->filled, t->submitted_end, t->silence,
+			(int)ASND_StatusVoice( GC_THP_VOICE ), (unsigned)ASND_GetTickCounterVoice( GC_THP_VOICE ),
+			t->cb_calls, t->cb_adds );
+	}
+	return clock;
+}
+
+/* Move decoded sound into chunks and keep the voice fed. */
+static void AVI_THPPumpAudio( gc_avi_thp_t *t, uint32_t clock )
+{
+	if( !t->audio )
+		return;
+	if( t->wall_clock )
+	{
+		t->scratch_pos = t->scratch_len;	/* sound is off: drop it */
+		return;
+	}
+
+	for( ;; )
+	{
+		gc_thp_chunk_t *c;
+		uint32_t n;
+
+		/* Flush a partial chunk at the end of the movie (silence after). */
+		if( t->scratch_pos >= t->scratch_len )
+		{
+			if( !( t->ended && t->fill_len ))
+				break;
+		}
+		c = &t->chunk[t->filled % GC_THP_CHUNKS];
+		if( t->fill_len == 0 )
+		{
+			/* Reuse only a chunk that has been submitted and played. */
+			if( t->filled >= GC_THP_CHUNKS )
+			{
+				if( t->submitted + GC_THP_CHUNKS <= t->filled )
+					break;
+				if((int32_t)( clock - ( c->start + GC_THP_CHUNK_SAMPLES )) < 0 )
+					break;
+			}
+			c->start = t->content_end - ( t->scratch_len - t->scratch_pos );
+		}
+		n = Q_min( t->scratch_len - t->scratch_pos, GC_THP_CHUNK_SAMPLES - t->fill_len );
+		if( n )
+		{
+			memcpy( c->pcm + t->fill_len * 2, t->scratch + t->scratch_pos * 2, n * 4 );
+			t->fill_len += n;
+			t->scratch_pos += n;
+		}
+		if( t->fill_len == GC_THP_CHUNK_SAMPLES || ( t->ended && t->scratch_pos >= t->scratch_len ))
+		{
+			if( t->fill_len < GC_THP_CHUNK_SAMPLES )
+				memset( c->pcm + t->fill_len * 2, 0, ( GC_THP_CHUNK_SAMPLES - t->fill_len ) * 4 );
+			c->len = t->fill_len;
+			DCFlushRange( c->pcm, GC_THP_CHUNK_SAMPLES * 4 );
+			t->fill_len = 0;
+			t->filled++;	/* the callback may take it from here */
+		}
+		else
+			break;
+	}
+
+	/* Start the voice once two chunks are ready (or the movie is over); from
+	 * then on the callback feeds it. */
+	if( !t->voice_started && t->submitted < t->filled &&
+		( t->filled - t->submitted >= 2 || t->ended ))
+	{
+		gc_thp_chunk_t *c = &t->chunk[t->submitted % GC_THP_CHUNKS];
+		const u32 level = IRQ_Disable();
+		s32 status;
+
+		t->voice_base = c->start;
+		t->submitted_end = c->start + GC_THP_CHUNK_SAMPLES;
+		t->submitted++;
+		status = ASND_SetVoice( GC_THP_VOICE, VOICE_STEREO_16BIT_BE, (s32)t->thp.audio_rate, 0,
+			c->pcm, GC_THP_CHUNK_SAMPLES * 4, MAX_VOLUME, MAX_VOLUME, AVI_THPVoiceCallback );
+		t->voice_started = status == SND_OK;
+		IRQ_Restore( level );
+		if( !t->voice_started )
+		{
+			Con_Reportf( "Xash3D GameCube: THP voice start failed (%d), pacing by wall clock\n", (int)status );
+			t->wall_clock = true;
+			t->wall_start = Platform_DoubleTime() - (double)t->last_clock / (double)t->rate;
+			return;
+		}
+		if( ASND_Is_Paused( ))
+			ASND_Pause( 0 );
+		Con_Reportf( "Xash3D GameCube: THP voice %d started at %u Hz (ASND %u Hz)\n",
+			GC_THP_VOICE, t->thp.audio_rate, t->asnd_rate );
+	}
+}
+
+static void AVI_THPRelease( movie_state_t *Avi )
+{
+	gc_avi_thp_t *t = &gc_thp_state;
+	int i;
+
+	if( !Avi || !Avi->thp || t->owner != Avi )
+		return;
+	if( t->voice_started )
+		ASND_StopVoice( GC_THP_VOICE );
+	if( t->tex && ref.initialized && ref.dllFuncs.GL_UpdateCinematicTexture )
+		ref.dllFuncs.GL_UpdateCinematicTexture( Avi->texture > 0 ? Avi->texture : SCR_GetCinematicTexture(),
+			0, 0, NULL, NULL, REF_CINEMATIC_PRETILED, true );	/* the renderer forgets t->tex */
+	Con_Reportf( "Xash3D GameCube: THP closed shown=%u skipped=%u underruns=%u clock=%u chunks=%u cb=%u/%u%s\n",
+		t->shown, t->skipped, t->underruns, t->last_clock, t->submitted, t->cb_calls, t->cb_adds,
+		t->wall_clock ? " (wall clock)" : "" );
+	for( i = 0; i < GC_THP_READAHEAD; i++ )
+		AVI_THPFree( t->frame_buf[i] );
+	AVI_THPFree( t->planes );
+	AVI_THPFree( t->tex );
+	AVI_THPFree( t->scratch );
+	AVI_THPFree( t->chunk_mem );
+	memset( t, 0, sizeof( *t ));
+	Avi->thp = false;
+}
+
+static qboolean AVI_OpenTHP( movie_state_t *Avi, const char *filename )
+{
+	gc_avi_thp_t *t = &gc_thp_state;
+	byte header[GC_THP_HEADER_BYTES] __attribute__((aligned( 32 )));
+	char path[MAX_SYSPATH];
+	fs_offset_t got;
+	size_t plane_bytes;
+	int i;
+
+	if( !Avi || !AVI_THPPath( filename, path, sizeof( path )))
+		return false;
+	if( t->owner )
+	{
+		Con_Reportf( "Xash3D GameCube: THP %s skipped, another movie is playing\n", path );
+		return false;
+	}
+	Avi->file = FS_Open( path, "rb", false );
+	if( !Avi->file )
+		return false;
+
+	memset( header, 0, sizeof( header ));
+	got = FS_Read( Avi->file, header, sizeof( header ));
+	memset( t, 0, sizeof( *t ));
+	if( got < 0x50 || gc_thp_parse( header, (size_t)got, &t->thp ) != 0 ||
+		gc_thp_player_init( &t->pl, &t->thp, 0 ) != 0 )
+	{
+		Con_Printf( S_ERROR "%s is not a THP movie this player reads\n", path );
+		FS_Close( Avi->file );
+		Avi->file = NULL;
+		return false;
+	}
+
+	t->owner = Avi;
+	Avi->thp = true;
+	t->frame_cap = ( t->thp.max_frame_bytes + 31u ) & ~31u;
+	for( i = 0; i < GC_THP_READAHEAD; i++ )
+		if( !( t->frame_buf[i] = AVI_THPAlloc( t->frame_cap )))
+			goto fail;
+	plane_bytes = (size_t)t->thp.width * t->thp.height * 3 / 2;
+	t->planes = AVI_THPAlloc( plane_bytes );
+	t->tex_bytes = (size_t)t->thp.width * t->thp.height * 2;
+	t->tex = AVI_THPAlloc( t->tex_bytes );
+	if( !t->planes || !t->tex )
+		goto fail;
+
+	t->audio = t->thp.audio_channels == 2 && t->thp.audio_rate && S_GCAsndReady();
+	if( t->audio )
+	{
+		t->scratch = AVI_THPAlloc( (size_t)t->thp.max_audio_samples * 4 );
+		t->chunk_mem = AVI_THPAlloc( (size_t)( GC_THP_CHUNKS + 1 ) * GC_THP_CHUNK_SAMPLES * 4 );
+		if( !t->scratch || !t->chunk_mem )
+		{
+			Con_Reportf( "Xash3D GameCube: THP sound buffers unavailable, playing silent\n" );
+			AVI_THPFree( t->scratch );
+			AVI_THPFree( t->chunk_mem );
+			t->scratch = NULL;
+			t->chunk_mem = NULL;
+			t->audio = false;
+		}
+		else
+		{
+			for( i = 0; i < GC_THP_CHUNKS; i++ )
+				t->chunk[i].pcm = (int16_t *)( t->chunk_mem + (size_t)i * GC_THP_CHUNK_SAMPLES * 4 );
+			t->zero_pcm = (int16_t *)( t->chunk_mem + (size_t)GC_THP_CHUNKS * GC_THP_CHUNK_SAMPLES * 4 );
+			memset( t->zero_pcm, 0, GC_THP_CHUNK_SAMPLES * 4 );
+			DCFlushRange( t->zero_pcm, GC_THP_CHUNK_SAMPLES * 4 );
+			t->asnd_rate = (uint32_t)ASND_GetAudioRate();
+			if( !t->asnd_rate )
+				t->asnd_rate = 48000;
+		}
+	}
+	/* The player's clock: sample pairs with sound, else milliseconds. A movie
+	 * whose sound we cannot play keeps those units, paced by the wall clock. */
+	t->rate = gc_thp_player_rate( &t->pl );
+	memset( t->tex, 0, t->tex_bytes );
+	DCFlushRange( t->tex, t->tex_bytes );
+
+	Avi->raw_video = true;
+	Avi->raw_rgb565 = true;
+	Avi->width = Avi->upload_width = (int)t->thp.width;
+	Avi->height = Avi->upload_height = (int)t->thp.height;
+	Avi->frame_count = t->thp.frames;
+	/* fps as a ratio for AVI_GetVideoInfo's duration */
+	Avi->fps_num = (uint)( t->thp.fps * 1000.0f + 0.5f );
+	Avi->fps_den = 1000;
+	Avi->decode_scale = 1;
+
+	Con_Reportf( "Xash3D GameCube: THP opened %s (%ux%u, %.3f fps, %u frames, %s, max frame %u) player memory %s\n",
+		path, t->thp.width, t->thp.height, (double)t->thp.fps, t->thp.frames,
+		t->audio ? va( "%u Hz stereo", t->thp.audio_rate ) : "silent", t->thp.max_frame_bytes,
+		Q_memprint( t->mem_bytes ));
+	return true;
+
+fail:
+	Con_Printf( S_ERROR "THP %s: out of memory (%ux%u needs %s)\n", path, t->thp.width, t->thp.height,
+		Q_memprint( t->frame_cap + plane_bytes + t->tex_bytes ));
+	AVI_THPRelease( Avi );
+	FS_Close( Avi->file );
+	Avi->file = NULL;
+	return false;
+}
+
+static qboolean AVI_THPShow( movie_state_t *Avi, gc_avi_thp_t *t, const gc_thp_cue_t *cue )
+{
+	const int w = (int)t->thp.width, h = (int)t->thp.height;
+	byte *y = t->planes, *cb = y + (size_t)w * h, *cr = cb + (size_t)( w / 2 ) * ( h / 2 );
+
+	if( gc_thp_jpeg( cue->fr.video, cue->fr.video_bytes, w, h, y, cb, cr ) != 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: THP frame %u picture undecodable, kept the last one\n", cue->index );
+		return false;
+	}
+	/* Flipper may still be sampling the last picture. */
+	if( t->shown_any )
+		GX_DrawDone();
+	gc_thp_rgb565_tiled( y, cb, cr, w, h, t->tex );
+	DCFlushRange( t->tex, t->tex_bytes );
+	if( ref.dllFuncs.GL_UpdateCinematicTexture )
+		ref.dllFuncs.GL_UpdateCinematicTexture( Avi->texture > 0 ? Avi->texture : SCR_GetCinematicTexture(),
+			w, h, (const byte *)t->tex, NULL, REF_CINEMATIC_PRETILED, true );
+	t->shown_any = true;
+	t->shown++;
+	Avi->current_frame = cue->index;
+	Avi->frame_on_gpu = true;
+	if( t->shown == 1 )
+	{
+		Con_Reportf( "Xash3D GameCube: THP first picture up\n" );
+		GC_ReportBootPhase( GC_BOOT_INTRO );
+	}
+	else if( !( t->shown % 60 ))
+		Con_Reportf( "Xash3D GameCube: THP frame=%u/%u shown=%u skipped=%u clock=%u underruns=%u chunks=%u cb=%u/%u%s\n",
+			cue->index, t->thp.frames, t->shown, t->skipped, t->last_clock, t->underruns,
+			t->submitted, t->cb_calls, t->cb_adds, t->wall_clock ? " wall" : "" );
+	return true;
+}
+
+static qboolean AVI_THPThink( movie_state_t *Avi )
+{
+	gc_avi_thp_t *t = &gc_thp_state;
+	uint32_t clock;
+	int guard;
+
+	if( t->owner != Avi )
+		return false;
+	if( !t->started )
+	{
+		t->started = true;
+		t->wall_start = Platform_DoubleTime();
+		t->last_clock_move = t->wall_start;
+	}
+
+	clock = AVI_THPClock( t );
+
+	/* Read ahead: frames come in order with their sound, which must reach
+	 * ASND before the picture before them is due. Stop when the cue ring is
+	 * full or the sound chunks have no room for another frame's. */
+	while( !t->ended && t->cue_count < GC_THP_READAHEAD && !( t->audio && t->scratch_pos < t->scratch_len ))
+	{
+		const uint slot = ( t->cue_head + t->cue_count ) % GC_THP_READAHEAD;
+		gc_thp_cue_t *cue = &t->cue[slot];
+		uint32_t offset, bytes;
+
+		if( !gc_thp_player_next( &t->pl, &offset, &bytes ))
+		{
+			t->ended = true;
+			break;
+		}
+		if( bytes > t->frame_cap || FS_Seek( Avi->file, offset, SEEK_SET ) == -1 ||
+			FS_Read( Avi->file, t->frame_buf[slot], bytes ) != (fs_offset_t)bytes ||
+			gc_thp_player_take( &t->pl, t->frame_buf[slot], bytes, cue ) != 0 )
+		{
+			Con_Reportf( "Xash3D GameCube: THP read/split failed at offset %u (%u bytes), ending\n", offset, bytes );
+			t->ended = true;
+			break;
+		}
+		t->cue_count++;
+		t->last_until = cue->until;
+		if( t->audio && cue->fr.audio )
+		{
+			t->scratch_len = gc_thp_audio( cue->fr.audio, cue->fr.audio_bytes,
+				t->scratch, t->thp.max_audio_samples );
+			/* Keep chunk times on the player's clock even past a bad block. */
+			if( t->scratch_len < cue->samples && cue->samples <= t->thp.max_audio_samples )
+			{
+				memset( t->scratch + t->scratch_len * 2, 0, ( cue->samples - t->scratch_len ) * 4 );
+				t->scratch_len = cue->samples;
+			}
+			t->scratch_pos = 0;
+		}
+		t->content_end += cue->samples;
+		AVI_THPPumpAudio( t, clock );
+	}
+	AVI_THPPumpAudio( t, clock );
+
+	/* At most one picture decoded per call; late ones are skipped. */
+	for( guard = 0; guard < GC_THP_READAHEAD && t->cue_count; guard++ )
+	{
+		const gc_thp_cue_t *cue = &t->cue[t->cue_head];
+		const int decision = gc_thp_player_decide( cue, clock );
+
+		if( decision == GC_THP_WAIT )
+			break;
+		t->cue_head = ( t->cue_head + 1 ) % GC_THP_READAHEAD;
+		t->cue_count--;
+		if( decision == GC_THP_SKIP && t->shown_any )
+		{
+			t->skipped++;
+			continue;
+		}
+		AVI_THPShow( Avi, t, cue );	/* the first picture is shown even if late */
+		break;
+	}
+
+	if( t->ended && !t->cue_count && (int32_t)( clock - ( t->audio ? t->content_end : t->last_until )) >= 0 )
+	{
+		Con_Reportf( "Xash3D GameCube: THP reached end frames=%u shown=%u skipped=%u clock=%u\n",
+			t->thp.frames, t->shown, t->skipped, clock );
+		return false;
+	}
+
+	if( t->shown_any )
+	{
+		const int w = Avi->w >= 0 ? Avi->w : refState.width;
+		const int h = Avi->h >= 0 ? Avi->h : refState.height;
+
+		ref.dllFuncs.R_DrawStretchPic( Avi->x, Avi->y, w, h, 0, 0, 1, 1,
+			Avi->texture > 0 ? Avi->texture : SCR_GetCinematicTexture( ));
+	}
+	return true;
+}
+#endif /* XASH_GAMECUBE */
+
 void AVI_OpenVideo( movie_state_t *Avi, const char *filename, qboolean load_audio, int quiet )
 {
 	string safe_filename;
@@ -1345,6 +1883,38 @@ void AVI_OpenVideo( movie_state_t *Avi, const char *filename, qboolean load_audi
 
 	safe_filename[0] = '\0';
 	Q_strncpy( safe_filename, filename, sizeof( safe_filename ));
+
+#if XASH_GAMECUBE
+	/* A GxBake THP (picture and sound in one file) wins over .gcvid/.avi. The
+	 * UI logo movie keeps its own path. */
+	if( load_audio && !Sys_CheckParm( "-gcnothp" ))
+	{
+		qboolean opened = AVI_OpenTHP( Avi, safe_filename );
+
+		if( !opened && !Q_strncmp( safe_filename, "media/", 6 ))
+		{
+			Q_snprintf( gc_fallback, sizeof( gc_fallback ), "valve/%s", safe_filename );
+			opened = AVI_OpenTHP( Avi, gc_fallback );
+		}
+		if( opened )
+		{
+			Avi->x = 0;
+			Avi->y = 0;
+			Avi->w = -1;
+			Avi->h = -1;
+			Avi->texture = 0;
+			Avi->current_frame = (uint)-1;
+			Avi->start_time = 0;
+			Avi->playback_started = false;
+			Avi->audio_playback_started = false;
+			Avi->frame_on_gpu = false;
+			Avi->debug_think_calls = 0;
+			Avi->paused = false;
+			Avi->active = true;
+			return;
+		}
+	}
+#endif
 
 	/* Static-hold .gcvid companions are the lean MEM1 path. Native Cinepak AVI
 	 * remains supported as fallback when no companion is present. */
@@ -1445,6 +2015,10 @@ void AVI_CloseVideo( movie_state_t *Avi )
 	if( !Avi )
 		return;
 
+#if XASH_GAMECUBE
+	if( Avi->thp )
+		AVI_THPRelease( Avi );
+#endif
 	if( Avi->file )
 		FS_Close( Avi->file );
 	if( Avi->audio_file )
@@ -1511,6 +2085,8 @@ qboolean AVI_Think( movie_state_t *Avi )
 		return true;
 
 #if XASH_GAMECUBE
+	if( Avi->thp )
+		return AVI_THPThink( Avi );
 	Avi->debug_think_calls++;
 #endif
 

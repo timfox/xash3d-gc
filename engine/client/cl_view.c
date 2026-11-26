@@ -28,6 +28,7 @@ GNU General Public License for more details.
 #if XASH_GAMECUBE
 #include "studio.h"
 #include "gc_vmanim.h"
+#include "gamecube/gc_cam_cmd.h"
 
 static qboolean gc_loading_feedback_logged;
 
@@ -618,6 +619,15 @@ static void V_GetRefParams( ref_params_t *fd, ref_viewpass_t *rvp )
 	// adjust FOV for widescreen
 	if( refState.wideScreen && r_adjust_fov.value )
 		V_AdjustFov( &rvp->fov_x, &rvp->fov_y, clgame.viewport[2], clgame.viewport[3], false );
+
+#if XASH_GAMECUBE
+	/* gc_cam: a GxBake camera clip owns the view while it runs. */
+	if( GC_CamApplyView( rvp->vieworigin, rvp->viewangles, &rvp->fov_x ))
+	{
+		rvp->fov_x = bound( 10.0f, rvp->fov_x, 150.0f );
+		rvp->fov_y = V_CalcFov( &rvp->fov_x, clgame.viewport[2], clgame.viewport[3] );
+	}
+#endif
 
 	rvp->flags = 0;
 

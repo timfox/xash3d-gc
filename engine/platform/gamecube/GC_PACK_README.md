@@ -2,7 +2,7 @@
 
 `gc_pack.h` / `gc_pack.c` are drop-in C for the Xash3D GameCube port (or any GameCube program) that read what `gxbake squeeze --emit`, `gxbake adpcm` and `gxbake yaz0` write. They are plain C89 with byte-wise big-endian reads and bounds checks. GxBake's tests (`tests/test_port_c.py`) compile them on the host with `-Werror` and check that they decode GxBake's output bit-exactly. The GX calls (`gc_gsk_bind`) sit behind `GC_PACK_GX`.
 
-Copy both files into `engine/platform/gamecube/`, add `gc_pack.c` to the GameCube sources in `engine/wscript`, and define `GC_PACK_GX` for the renderer build.
+Copy both files into `engine/platform/gamecube/` (every `.c` there is built for the GameCube), add `gc_pack.c` to the GameCube sources in `engine/wscript`, and define `GC_PACK_GX` for the renderer build.
 
 `gc_thp.h` / `gc_thp.c` are the same kind of drop-in for THP movies from `gxbake video` (see [THP movies](#thp-movies-thp) below). Add `gc_thp.c` to the sources the same way; it needs nothing else.
 
@@ -50,6 +50,12 @@ A player in `engine/client/avi/avi_gc.c`, next to the GCVID path, when `media/<n
 5. When decoding time per frame is known, the CPU colour conversion can be dropped: upload Y, Cb and Cr with `gc_thp_i8_tiled` as three `GX_TF_I8` textures (the chroma ones at half size, sampled with linear filtering) and do the YCbCr→RGB matrix in three or four TEV stages with konstant colours. That removes a per-pixel loop and a 16-bit write per pixel.
 
 `gc_thp_jpeg` keeps its ~6 KiB of Huffman and quantisation tables in a static, so it is not reentrant: decode on one thread. It reads only what `gxbake video` writes (and what Nintendo's THPConv wrote): 4:2:0, baseline, no restart markers.
+
+**Wired in (2026-11-26).** `AVI_OpenVideo` tries `media/<name>.thp` (and `valve/media/…`) before `.gcvid`/`.avi` for any movie with sound, so `media/valve.thp` replaces the startup intro and `movie <name>` plays one; `-gcnothp` turns it off. The player (`AVI_THP*` in `avi_gc.c`) reads synchronously, three frames ahead of the picture on screen (each frame's sound has to reach ASND before the picture before it is due), decodes the picture straight into a 32-byte aligned RGB565 texture and hands it to the renderer with `GL_UpdateCinematicTexture( …, NULL, REF_CINEMATIC_PRETILED, … )`: `ref/gx` draws it in place (no copy, and its own 150 KiB cinematic buffer is freed while a THP is up). Sound goes on ASND voice 1 (the mixer keeps voice 0) through six 4 KiB chunks fed from the voice callback. The callback always queues something (a voice left without a next buffer stops for good), so when sound is late it queues a chunk of silence that the clock does not count. The clock is the voice's tick counter minus that silence, held to what has been queued; it falls back to the wall clock if it stops moving for a second. Memory at 320×240 with sound: about 333 KiB (texture 150 KiB, planes 113 KiB, three 13 KiB frame buffers, sound 32 KiB), from the boot arena when it has room. Checked in Dolphin (retail boot, 5 s 320×240 test movie as `media/valve.thp`): 150/150 pictures shown on the sound's clock, none skipped, and the 440 Hz test tone in Dolphin's DSP dump for the whole movie. Stage movies with `build-gamecube-disc.py --gxbake-packs DIR` (copies `DIR/media/*.thp`).
+
+### Camera paths (`.gcam`)
+
+`gc_cam.c` (GxBake's, unchanged) plus `gc_cam_cmd.c`: the console command `gc_cam <file> <clip>` loads `<file>.gcam` (also tried under `media/`) whole and plays the clip from `cl.time`; `gc_cam <file>` lists its clips; `gc_cam stop` ends it. While a clip runs it overwrites `vieworigin`, `viewangles` and `fov_x` after `V_CalcRefdef` (`V_GetRefParams` in `cl_view.c`) and on the New Game bounded camera (`GC_RenderNewGameWorldFrames`). `-gccam <file>:<clip>` (gamecube.cfg `gccam <file>:<clip>`, or `XASH_GC_PROBE_GCCAM` for the probe discs) reads the file at init, while the heap has room, and starts the clip at the first rendered view. The engine keeps its own near/far and the PVS stays the player's, so a clip that flies far from the player can show culled world. Stage `.gcam` files with `--gxbake-packs DIR` (`DIR/media/*.gcam`).
 
 ### Materials and TPL textures (`.tpl`, `.gxm`)
 

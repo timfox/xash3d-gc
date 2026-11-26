@@ -155,6 +155,9 @@ typedef struct
 
 static gc_gx_tex_t r_gx_tex[GC_GX_TEX_SLOTS];
 static gc_gx_tex_t r_gx_cinematic_tex;
+/* r_gx_cinematic_tex.tiled is the engine's (a THP player's pre-tiled RGB565
+ * frame, REF_CINEMATIC_PRETILED): never freed here, only forgotten. */
+static qboolean r_gx_cinematic_external;
 static qboolean r_gx_cinematic_ready;
 static unsigned r_gx_cinematic_updates;
 static gc_gx_tex_t r_gx_menu_bg_tex;
@@ -1651,7 +1654,7 @@ void R_GXDropBootPadCinematic( void )
 		r_gx_tex_linear = r_gx_tex_linear_small;
 		r_gx_tex_linear_cap = GC_GX_TEX_WORLD_MAX_DIM * GC_GX_TEX_WORLD_MAX_DIM;
 	}
-	if( !GC_BootArenaOwns( r_gx_cinematic_tex.tiled ))
+	if( r_gx_cinematic_external || !GC_BootArenaOwns( r_gx_cinematic_tex.tiled ))
 		return;
 	R_GXReleaseCinematicSoftwarePixels();
 	GC_BootArenaFree( r_gx_cinematic_tex.tiled );
@@ -1664,11 +1667,79 @@ void R_GXDropBootPadCinematic( void )
 	r_gx_cinematic_ready = false;
 }
 
+/* REF_CINEMATIC_PRETILED: buffer is the caller's GX_TF_RGB565 texture (4x4
+ * tiles, native endian, 32-byte aligned, already DCFlushRange'd), drawn in
+ * place with no copy; the caller keeps it alive and unchanged while GX may
+ * read it. buffer == NULL forgets it (the caller is about to free it). */
+static void R_GXCinematicPretiled( int texnum, int width, int height, const byte *buffer )
+{
+	if( !buffer )
+	{
+		if( r_gx_cinematic_external )
+		{
+			if( r_gx_cinematic_ready )
+				GX_DrawDone();
+			if( r_gx_bound_texnum == r_gx_cinematic_tex.texnum )
+			{
+				r_gx_bound_texnum = 0;
+				r_gx_bound_fmt = 0;
+			}
+			memset( &r_gx_cinematic_tex, 0, sizeof( r_gx_cinematic_tex ));
+			r_gx_cinematic_external = false;
+			r_gx_cinematic_ready = false;
+		}
+		return;
+	}
+	if( texnum <= 0 || width <= 0 || height <= 0 || ( width & 3 ) || ( height & 3 ) ||
+		width > 1024 || height > 1024 || ((uintptr_t)buffer & 31u ))
+		return;
+	if( !r_gx_cinematic_external && r_gx_cinematic_tex.tiled )
+	{
+		/* The renderer's own 150 KiB copy is not needed while the caller's is up. */
+		if( r_gx_cinematic_ready )
+			GX_DrawDone();
+		R_GXReleaseCinematicSoftwarePixels();
+		R_GXFreeCinematicStorage( r_gx_cinematic_tex.tiled );
+		memset( &r_gx_cinematic_tex, 0, sizeof( r_gx_cinematic_tex ));
+		r_gx_cinematic_ready = false;
+	}
+	if( !r_gx_cinematic_ready || (const byte *)r_gx_cinematic_tex.tiled != buffer ||
+		r_gx_cinematic_tex.w != width || r_gx_cinematic_tex.h != height )
+	{
+		GX_InitTexObj( &r_gx_cinematic_tex.obj, (void *)buffer, width, height, GX_TF_RGB565,
+			GX_CLAMP, GX_CLAMP, GX_FALSE );
+		GX_InitTexObjFilterMode( &r_gx_cinematic_tex.obj, GX_LINEAR, GX_LINEAR );
+		if( !r_gx_cinematic_external )
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: cinematic GX pretiled %dx%d ptr=%p tex=%d\n",
+				width, height, buffer, texnum );
+	}
+	r_gx_cinematic_updates++;	/* also quiets the first-binds log */
+	r_gx_cinematic_tex.tiled = (u16 *)buffer;
+	r_gx_cinematic_tex.alloc_bytes = 0;
+	r_gx_cinematic_tex.texnum = (unsigned)texnum;
+	r_gx_cinematic_tex.w = width;
+	r_gx_cinematic_tex.h = height;
+	r_gx_cinematic_tex.fmt = GX_TF_RGB565;
+	r_gx_cinematic_tex.valid = true;
+	r_gx_cinematic_external = true;
+	r_gx_cinematic_ready = true;
+	GX_InvalidateTexAll();
+	r_gx_bound_texnum = 0;
+	r_gx_bound_fmt = 0;
+}
+
 void GL_UpdateCinematicTexture( int texnum, int width, int height, const byte *buffer,
 	const uint16_t *dirty_tiles, uint dirty_count, qboolean full_upload )
 {
 	double stage_start, stage_tiles, stage_flush;
 	unsigned update_number;
+	if( !dirty_tiles && dirty_count == REF_CINEMATIC_PRETILED )
+	{
+		R_GXCinematicPretiled( texnum, width, height, buffer );
+		return;
+	}
+	if( r_gx_cinematic_external )
+		R_GXCinematicPretiled( texnum, 0, 0, NULL );
 	if( texnum <= 0 || width != GC_GX_CINEMATIC_WIDTH || height != GC_GX_CINEMATIC_HEIGHT || !buffer )
 		return;
 	update_number = ++r_gx_cinematic_updates;
@@ -1746,6 +1817,11 @@ void R_GXReleaseCinematicTexture( unsigned int texnum )
 {
 	if( !r_gx_cinematic_tex.tiled || r_gx_cinematic_tex.texnum != texnum )
 		return;
+	if( r_gx_cinematic_external )
+	{
+		R_GXCinematicPretiled( (int)texnum, 0, 0, NULL );
+		return;
+	}
 	R_GXReleaseCinematicSoftwarePixels();
 	R_GXFreeCinematicStorage( r_gx_cinematic_tex.tiled );
 	memset( &r_gx_cinematic_tex, 0, sizeof( r_gx_cinematic_tex ));
@@ -1761,6 +1837,8 @@ pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes )
 {
 	if( bytes > GC_GX_CINEMATIC_BYTES )
 		return NULL;
+	if( r_gx_cinematic_external )
+		R_GXCinematicPretiled( 0, 0, 0, NULL );
 	if( !r_gx_cinematic_tex.tiled )
 	{
 		r_gx_cinematic_tex.tiled = R_GXAllocCinematicStorage();
@@ -1812,12 +1890,13 @@ static void R_GXTexCacheReset( void )
 	r_gx_tex_clock = 0;
 	r_gx_hud_ondemand_heap = 0;
 	{
-		u16 *tiled = r_gx_cinematic_tex.tiled;
-		const size_t alloc_bytes = r_gx_cinematic_tex.alloc_bytes;
+		u16 *tiled = r_gx_cinematic_external ? NULL : r_gx_cinematic_tex.tiled;
+		const size_t alloc_bytes = r_gx_cinematic_external ? 0 : r_gx_cinematic_tex.alloc_bytes;
 
 		memset( &r_gx_cinematic_tex, 0, sizeof( r_gx_cinematic_tex ));
 		r_gx_cinematic_tex.tiled = tiled;
 		r_gx_cinematic_tex.alloc_bytes = alloc_bytes;
+		r_gx_cinematic_external = false;
 	}
 	r_gx_cinematic_ready = false;
 	r_gx_tex_world = NULL;

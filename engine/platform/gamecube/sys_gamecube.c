@@ -1040,6 +1040,7 @@ static char gc_landmark2_name[MAX_QPATH];
 static char gc_changelevel3_map[MAX_QPATH];
 static char gc_landmark3_name[MAX_QPATH];
 static char gc_tas_name[32];
+static char gc_cam_spec[64];	/* gamecube.cfg `gccam <file>:<clip>` -> -gccam */
 static qboolean gc_smoke_map_configured;
 static qboolean gc_listenserver_configured;
 static qboolean gc_dumpeye_configured;
@@ -1167,6 +1168,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_changelevel3_map[0] = '\0';
 	gc_landmark3_name[0] = '\0';
 	gc_tas_name[0] = '\0';
+	gc_cam_spec[0] = '\0';
 
 	/* DVD is optional. Prefer FAT gamecube.cfg when a Swiss volume is ready so
 	 * an inserted disc cannot shadow sd:/ map/swissquit (HW evidence path).
@@ -1550,6 +1552,24 @@ static void GCube_LoadDiscBootOverrides( void )
 				Q_strncpy( gc_tas_name, phase, sizeof( gc_tas_name ));
 				gc_tas_configured = true;
 				SYS_Report( "Xash3D GameCube: disc boot override tas %s\n", gc_tas_name );
+			}
+			continue;
+		}
+
+		/* GxBake .gcam camera clip to play over the view once in game:
+		 * `gccam <file>:<clip>` (gc_cam_cmd.c, -gccam). */
+		if( !Q_strnicmp( cursor, "gccam", 5 ) && ( cursor[5] == ' ' || cursor[5] == '\t' ))
+		{
+			phase = cursor + 5;
+			while( *phase == ' ' || *phase == '\t' )
+				phase++;
+			len = strlen( phase );
+			while( len > 0 && ( phase[len - 1] == '\r' || phase[len - 1] == '\n' || phase[len - 1] == ' ' ))
+				phase[--len] = '\0';
+			if( len > 2 && len < sizeof( gc_cam_spec ) && strchr( phase, ':' ))
+			{
+				Q_strncpy( gc_cam_spec, phase, sizeof( gc_cam_spec ));
+				SYS_Report( "Xash3D GameCube: disc boot override gccam %s\n", gc_cam_spec );
 			}
 			continue;
 		}
@@ -2110,6 +2130,11 @@ int GCube_GetArgv( int in_argc, char **in_argv, char ***out_argv )
 	{
 		gc_argv[fake_argc++] = "-gctas";
 		gc_argv[fake_argc++] = gc_tas_name;
+	}
+	if( gc_cam_spec[0] )
+	{
+		gc_argv[fake_argc++] = "-gccam";
+		gc_argv[fake_argc++] = gc_cam_spec;
 	}
 	if( gc_dumpframes_configured )
 		gc_argv[fake_argc++] = "-gcdumpframes";

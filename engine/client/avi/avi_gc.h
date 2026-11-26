@@ -77,6 +77,7 @@ struct movie_state_s
 	uint16_t		raw_dirty_tiles[AVI_GC_MAX_TILES];
 	uint			raw_dirty_count;
 	qboolean		raw_full_upload;
+	qboolean		thp;		// GameCube: a GxBake THP movie (avi_gc.c AVI_THP*), file is the .thp
 };
 
 #endif // AVI_GC_H

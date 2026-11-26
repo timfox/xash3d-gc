@@ -58,6 +58,13 @@ void S_GCGetAudioTelemetry( unsigned int *chunks, unsigned int *nonzero_chunks,
 	}
 }
 
+/* ASND is initialised (not the null fallback): other voices (the THP movie
+ * player's) may be used. Voice 0 stays the mixer's. */
+qboolean S_GCAsndReady( void )
+{
+	return gc_audio_real && snd.initialized;
+}
+
 static qboolean GCube_NullAudioInit( void );
 static qboolean GCube_StartVoice( void );
 

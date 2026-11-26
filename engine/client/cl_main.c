@@ -29,6 +29,7 @@ GNU General Public License for more details.
 #if XASH_GAMECUBE
 #include "gamecube/mem_gamecube.h"
 #include "gamecube/storage_gamecube.h"
+#include "gamecube/gc_cam_cmd.h"
 #include "mod_local.h"
 #include <ogc/system.h>
 extern int gc_menu_step_frames;
@@ -4186,6 +4187,9 @@ static void CL_InitLocal( void )
 	Cmd_AddCommand ("startdemos", CL_StartDemos_f, "start playing back the selected demos sequentially" );
 	Cmd_AddCommand ("demos", CL_Demos_f, "restart looping demos defined by the last startdemos command" );
 	Cmd_AddCommand ("movie", CL_PlayVideo_f, "play a movie" );
+#if XASH_GAMECUBE
+	GC_CamInit();
+#endif
 	Cmd_AddCommand ("stop", CL_Stop_f, "stop playing or recording a demo" );
 	Cmd_AddCommand( "listdemo", CL_ListDemo_f, "list demo entries" );
 	Cmd_AddCommand ("info", NULL, "collect info about local servers with specified protocol" );

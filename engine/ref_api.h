@@ -83,6 +83,9 @@ GNU General Public License for more details.
 // 20. R_ClearAllDecals now accepts includePermanent argument.
 #define REF_API_VERSION 20
 
+// GL_UpdateCinematicTexture dirty_count with dirty_tiles == NULL: buffer is pre-tiled
+#define REF_CINEMATIC_PRETILED 0xFFFFFFFFu
+
 #define TF_SKY		(TF_SKYSIDE|TF_NOMIPMAP|TF_ALLOW_NEAREST)
 #define TF_FONT		(TF_NOMIPMAP|TF_CLAMP|TF_ALLOW_NEAREST)
 #define TF_IMAGE		(TF_NOMIPMAP|TF_CLAMP)
@@ -634,6 +637,8 @@ typedef struct ref_interface_s
 	void	(*R_OverrideTextureSourceSize)( unsigned int texnum, unsigned int srcWidth, unsigned int srcHeight ); // used to override decal size for texture replacement
 
 	void		(*GL_UpdateTexture)( int texnum, int cols, int rows, int width, int height, const byte *buffer, pixformat_t fmt );
+	// dirty_tiles == NULL && dirty_count == REF_CINEMATIC_PRETILED: buffer is a ready GX RGB565
+	// texture to draw in place (GameCube THP); buffer == NULL then detaches it
 	void		(*GL_UpdateCinematicTexture)( int texnum, int width, int height, const byte *buffer,
 			const uint16_t *dirty_tiles, uint dirty_count, qboolean full_upload );
 

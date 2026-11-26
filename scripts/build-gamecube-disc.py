@@ -749,8 +749,9 @@ def copy_tree_if_present(source_root: Path, output_root: Path, relative: str) ->
 
 def stage_gxbake_packs(roots: "list[Path]", output: Path) -> int:
 	"""GxBake packs next to what is staged: gc_studio/<model>.gsk skin packs
-	(`gxbake squeeze --emit`) for models on the disc, and sound/**/<name>.dsp
-	DSP ADPCM twins for staged .wav files. Roots are the data tree and any
+	(`gxbake squeeze --emit`) for models on the disc, sound/**/<name>.dsp
+	DSP ADPCM twins for staged .wav files, and media/*.thp movies and
+	media/*.gcam camera clips. Roots are the data tree and any
 	--gxbake-packs folders, later roots winning. Returns files staged."""
 	staged = 0
 	model_stems = {p.stem.lower() for p in output.rglob("*.mdl")}
@@ -776,8 +777,17 @@ def stage_gxbake_packs(roots: "list[Path]", output: Path) -> int:
 				dest.parent.mkdir(parents=True, exist_ok=True)
 				shutil.copy2(dsp, dest)
 				staged += 1
+		media = root / "media"
+		if media.is_dir():
+			# THP movies (`gxbake video`, preferred over .gcvid/.avi by
+			# avi_gc.c) and .gcam camera clips (`gxbake camera`, gc_cam).
+			for movie in sorted([*media.glob("*.thp"), *media.glob("*.gcam")]):
+				dest = output / "media" / movie.name.lower()
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				shutil.copy2(movie, dest)
+				staged += 1
 	if staged:
-		print(f"GxBake packs: staged {staged} .gsk/.dsp file(s)")
+		print(f"GxBake packs: staged {staged} .gsk/.dsp/.thp/.gcam file(s)")
 	return staged
 
 
@@ -3478,6 +3488,9 @@ def write_smoke_overrides(
 		lines.append(f"changelevel3 {Path(changelevel3).stem}")
 	elif landmark3:
 		lines.append(f"landmark3 {landmark3}")
+	if os.environ.get("XASH_GC_PROBE_GCCAM"):
+		# GxBake camera clip over the game view: `<file>:<clip>` (gc_cam_cmd.c)
+		lines.append(f"gccam {os.environ['XASH_GC_PROBE_GCCAM']}")
 	if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
 		lines.append("profile")
 	if os.environ.get("XASH_GC_PROBE_AUTOCAMPAIGN"):
@@ -3552,6 +3565,9 @@ def write_probe_newgame_override(
 		lines.append(f"changelevel3 {Path(changelevel3).stem}")
 	elif landmark3:
 		lines.append(f"landmark3 {landmark3}")
+	if os.environ.get("XASH_GC_PROBE_GCCAM"):
+		# GxBake camera clip over the game view: `<file>:<clip>` (gc_cam_cmd.c)
+		lines.append(f"gccam {os.environ['XASH_GC_PROBE_GCCAM']}")
 	if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
 		lines.append("profile")
 	if os.environ.get("XASH_GC_PROBE_AUTOCAMPAIGN"):
@@ -5012,6 +5028,8 @@ def main() -> None:
 					play_lines.append("autohop")
 				if os.environ.get("XASH_GC_PROBE_MODELTRACE") == "1":
 					play_lines.append("modeltrace")
+				if os.environ.get("XASH_GC_PROBE_GCCAM"):
+					play_lines.append(f"gccam {os.environ['XASH_GC_PROBE_GCCAM']}")
 				if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
 					play_lines.append("profile")
 				# Early BBA/eth2sp1 via gamecube.cfg → argv -net*.
@@ -5052,6 +5070,8 @@ def main() -> None:
 					menu_lines.append("autocampaign " + os.environ["XASH_GC_PROBE_AUTOCAMPAIGN"])
 				if os.environ.get("XASH_GC_PROBE_MEMREPORT") == "1":
 					menu_lines.append("memreport")
+				if os.environ.get("XASH_GC_PROBE_GCCAM"):
+					menu_lines.append(f"gccam {os.environ['XASH_GC_PROBE_GCCAM']}")
 				if os.environ.get("XASH_GC_PROBE_PROFILE") == "1":
 					menu_lines.append("profile")
 				if os.environ.get("XASH_GC_PROBE_NOLIVEPVS") == "1":
