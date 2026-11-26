@@ -802,10 +802,10 @@ void Host_ServerFrame( void )
 		SV_ReadPackets(); /* authentic HL1MP usercmd → PM_Move */
 		SV_UpdateMovevars( false );
 		/* Player motion ran in ReadPackets. Skip DoD entity-think storm. */
-		/* A film shot still needs the game's frame: its rules Think moves the
-		 * scripted actors and fires the shot's effects (StartFrame only, not
-		 * the entity walk). */
-		if( CL_CineActive() || Sys_CheckParm( "-gccapture" ))
+		/* Film shots and MOHAA mission scripts need the game's frame.
+		 * StartFrame runs their rules Think without the entity walk. */
+		if( CL_CineActive() || Sys_CheckParm( "-gccapture" )
+			|| !Q_stricmp( GI->gamefolder, "mohaa" ))
 		{
 			static int gc_film_sf_log;
 
@@ -814,7 +814,7 @@ void Host_ServerFrame( void )
 			if( gc_film_sf_log < 3 )
 			{
 				gc_film_sf_log++;
-				Con_Reportf( "Xash3D GameCube: WorldDL listen StartFrame for film time=%.2f\n", sv.time );
+				Con_Reportf( "Xash3D GameCube: WorldDL listen StartFrame for mission/film time=%.2f\n", sv.time );
 			}
 		}
 		sv.time += sv.frametime;

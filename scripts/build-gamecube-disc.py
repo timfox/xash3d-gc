@@ -634,6 +634,15 @@ def smoke_hud_resources(source: Path, res: int = SMOKE_HUD_RES) -> tuple[str, ..
 	"""Collect HUD and weapon sprite files for the smoke-test resolution."""
 	resources: set[str] = set(SMOKE_HUD_SPRITES)
 	sprites_dir = source / "sprites"
+	# MOHAA's retail compass and health/ammo HUD are converted into their own
+	# sprite namespace; preserve those files in MOHAA smoke discs as well.
+	mohaa_sprites = sprites_dir / "mohaa"
+	if mohaa_sprites.is_dir():
+		resources.update(
+			f"sprites/mohaa/{path.name}"
+			for path in mohaa_sprites.glob("*.spr")
+			if path.is_file()
+		)
 
 	hud_txt = sprites_dir / "hud.txt"
 	resources.update(_sprite_txt_sheet_paths(hud_txt, res))
@@ -742,6 +751,11 @@ SMOKE_PRECACHE_MODELS = (
 )
 
 SMOKE_CASE_ALIASES = (
+	("models/human/german_afrika_privatet.mdl", "models/human/german_afrika_privateT.mdl"),
+	# MOHAA TIKI surface aliases preserve a case-sensitive uppercase T.
+	("models/human/2nd-ranger_privatet.mdl", "models/human/2nd-ranger_privateT.mdl"),
+	("models/human/2nd-ranger_captaint.mdl", "models/human/2nd-ranger_captainT.mdl"),
+	("models/animal/german_shepherdt.mdl", "models/animal/german_shepherdT.mdl"),
 	("models/p_9mmar.mdl", "models/p_9mmAR.mdl"),
 	("models/v_9mmar.mdl", "models/v_9mmAR.mdl"),
 	("models/w_9mmar.mdl", "models/w_9mmAR.mdl"),
@@ -4113,11 +4127,50 @@ def smoke_map_resources(map_path: Path) -> set[str]:
 	return resources
 
 
+def smoke_script_model_resources(source: Path, map_name: str) -> set[str]:
+	"""Resolve the selected MOHAA map's scripted-model manifest and sidecars."""
+	map_stem = Path(map_name).stem.lower()
+	manifest_relative = f"maps/{map_stem}.models"
+	manifest = source / manifest_relative
+	if not manifest.is_file():
+		return set()
+
+	resources = {manifest_relative}
+	model_paths = []
+	for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+		value = line.strip().replace("\\", "/")
+		if not value or value.startswith("#"):
+			continue
+		relative = Path(value)
+		if relative.is_absolute() or ".." in relative.parts or not value.lower().startswith("models/"):
+			continue
+		if (source / relative).is_file():
+			resources.add(relative.as_posix())
+			model_paths.append(relative)
+
+	for relative in model_paths:
+		texture_relative = relative.with_name(relative.stem + "T.mdl")
+		if (source / texture_relative).is_file():
+			resources.add(texture_relative.as_posix())
+		model_data = (source / relative).read_bytes()
+		for match in re.finditer(rb"[A-Za-z0-9_./-]+[.](?:gca|gcm)", model_data, re.IGNORECASE):
+			name = match.group(0).decode("ascii", errors="ignore").replace("\\", "/")
+			candidate = Path(name)
+			if not name.lower().startswith("models/"):
+				candidate = relative.parent / candidate.name
+			if candidate.is_absolute() or ".." in candidate.parts:
+				continue
+			if (source / candidate).is_file():
+				resources.add(candidate.as_posix())
+	return resources
+
+
 def stage_smoke_data(
 	source: Path,
 	output: Path,
 	smoke_map: str,
 	*,
+	fallback_sources: tuple[Path, ...] = (),
 	newgame: bool = False,
 	newsaveload: bool = False,
 	configroundtrip: bool = False,
@@ -4167,16 +4220,55 @@ def stage_smoke_data(
 	output.mkdir(parents=True, exist_ok=True)
 	for relative in SMOKE_CONFIG_FILES:
 		copy_if_present(source, output, relative)
+		if not (output / relative).is_file():
+			for fallback_source in fallback_sources:
+				copy_if_present(fallback_source, output, relative)
+				if (output / relative).is_file():
+					break
 	# G296: keep gfx.wad on the smoke ISO so build_iso9660 can extract the
 	# retail CREDITSFONT into the tiny bootstrap font. .wad is excluded from
 	# the bootstrap archive, so this does not consume the runtime preload pool.
 	copy_if_present(source, output, "gfx.wad")
+	if not (output / "gfx.wad").is_file():
+		for fallback_source in fallback_sources:
+			copy_if_present(fallback_source, output, "gfx.wad")
+			if (output / "gfx.wad").is_file():
+				break
 	if destination_map_relative:
 		copy_if_present(source, output, destination_map_relative)
 	if destination2_map_relative:
 		copy_if_present(source, output, destination2_map_relative)
 	if destination3_map_relative:
 		copy_if_present(source, output, destination3_map_relative)
+	# MOHAA's mission VM loads maps/<map>.scr after the map entities spawn.
+	# Include the selected map(s) and the shared global scripts on smoke discs so
+	# direct-map and changelevel probes exercise the same mission logic as retail.
+	mission_maps = [map_name]
+	mission_maps.extend(Path(path).name for path in (
+		destination_map_relative, destination2_map_relative, destination3_map_relative
+	) if path)
+	has_mission_script = False
+	for mission_map in mission_maps:
+		stem = Path(mission_map).stem
+		script_relative = f"maps/{stem}.scr"
+		copy_if_present(source, output, script_relative)
+		has_mission_script = has_mission_script or (output / script_relative).is_file()
+		# The mission's sidecars from mohaa-gc's converter: collision (.mcol), path nodes
+		# (.nodes), sound table (.snd), cutscene tags (.tags and its .tags.NNN parts) and
+		# the precache script. Without the tags every cutscene tag sits at its entity's
+		# origin, so m1l1's opening ride never places the trucks or the player.
+		maps_dir = source / "maps"
+		if maps_dir.is_dir():
+			for sidecar in sorted(maps_dir.iterdir()):
+				name = sidecar.name
+				if not sidecar.is_file() or name.lower().endswith(".bsp"):
+					continue
+				if name.startswith(f"{stem}.") or name == f"{stem}_precache.scr":
+					copy_if_present(source, output, f"maps/{name}")
+	if has_mission_script:
+		global_scripts = sorted((source / "global").glob("*.scr")) if (source / "global").is_dir() else []
+		for script in global_scripts:
+			copy_if_present(source, output, f"global/{script.name}")
 	for relative in MENU_RESOURCE_ASSETS:
 		copy_if_present(source, output, relative)
 	for relative in MENU_RESOURCE_DIRS:
@@ -4213,6 +4305,14 @@ def stage_smoke_data(
 		copy_if_present(source, output, relative)
 	for relative in SMOKE_PRECACHE_MODELS:
 		copy_if_present(source, output, relative)
+	script_model_resources = smoke_script_model_resources(source, smoke_map)
+	for relative in sorted(script_model_resources):
+		copy_if_present(source, output, relative)
+	if script_model_resources:
+		print(
+			f"  MOHAA script models: staged {len(script_model_resources) - 1} model/sidecar asset(s) "
+			f"for {Path(smoke_map).stem}"
+		)
 	for relative in SMOKE_SOUND_DIRS:
 		copy_tree_if_present(source, output, relative)
 	# G278/G91 lean New Game: shallow media/ VO + button10 SFX. Retail overlays
@@ -4233,7 +4333,7 @@ def stage_smoke_data(
 			shutil.copy2(src, dest)
 	for source_relative, alias_relative in SMOKE_CASE_ALIASES:
 		copy_alias_if_present(output, source_relative, alias_relative)
-	extract_wad_lump(source / "gfx.wad", output, "conchars", "gfx/conchars")
+	extract_wad_lump(output / "gfx.wad", output, "conchars", "gfx/conchars")
 
 	events = source / "events"
 	if events.is_dir():
@@ -4260,6 +4360,25 @@ def stage_smoke_data(
 		copy_if_present(source, output, dest_relative)
 		for resource in sorted(smoke_map_resources(dest_source)):
 			copy_if_present(source, output, resource)
+
+	# Smoke ISOs only stage the selected map and its direct resources. Carry the
+	# native GX CMPR faces for every staged map skyname as well; otherwise the
+	# renderer's early sky prefetch runs before a loose ISO directory scan can
+	# find these long media filenames, leaving a fog-colour/black clear instead.
+	sky_names = map_sky_names(output)
+	sky_faces = 0
+	for sky_name in sorted(sky_names):
+		for suffix in GC_SKY_SUFFIXES:
+			relative = f"media/sky_{sky_name}{suffix}.cmp"
+			if (output / relative).is_file():
+				continue
+			for candidate_root in (source, *fallback_sources):
+				if (candidate_root / relative).is_file():
+					copy_if_present(candidate_root, output, relative)
+					sky_faces += 1
+					break
+	if sky_faces:
+		print(f"  skyboxes: staged {sky_faces} map-selected GX CMPR face(s) ({', '.join(sorted(sky_names))})")
 
 	# Keep smoke probes on the same ARAM-backed world-texture path as retail.
 	# Without these derived packs, embedded BSP textures fall back to MEM1
@@ -4977,10 +5096,18 @@ def main() -> None:
 	extras = args.extras if args.extras.exists() else None
 	if args.smoke_map:
 		with tempfile.TemporaryDirectory(prefix="xash3d-gc-smoke-data-") as temp:
+			fallback_sources = []
+			declared_fallback = fallback_data_dir(args.data, extra_gamedirs)
+			if declared_fallback:
+				fallback_sources.append(declared_fallback)
+			for _gamedir, fallback_path in extra_gamedirs:
+				if fallback_path not in fallback_sources:
+					fallback_sources.append(fallback_path)
 			smoke_data = stage_smoke_data(
 				args.data,
 				Path(temp) / primary_gamedir,
 				args.smoke_map,
+				fallback_sources=tuple(fallback_sources),
 				# ISO boots rebuild argv from gamecube.cfg; Dolphin -- guest
 				# args never reach the DOL. Bake newgame whenever the probe
 				# asks for it (lean New Game or fullphysics/save/config).
@@ -5021,10 +5148,26 @@ def main() -> None:
 				# (probe 20261104-042155). GI->startmap still defaults to c0a0;
 				# stage the smoke BSP under that name when needed.
 				menu_lines = ["menunewgame"]
+				probe_cvar = os.environ.get("XASH_GC_PROBE_CVAR", "").strip()
+				if probe_cvar:
+					name, sep, value = probe_cvar.partition("=")
+					if (not sep or not re.fullmatch(r"[A-Za-z0-9_]+", name)
+							or not re.fullmatch(r"[A-Za-z0-9_.+-]+", value)):
+						parser.error("XASH_GC_PROBE_CVAR must be NAME=VALUE using simple cvar tokens")
+					# The engine applies gamecube.cfg cvar directives after Cvar_Init,
+					# before the retail menu can launch New Game and load the mission script.
+					menu_lines.append(f"cvar {name} {value}")
 				if args.probe_fullphysics:
 					menu_lines.append("fullphysics")
+				if args.probe_tas:
+					menu_lines.append(f"tas {args.probe_tas}")
+					stage_probe_tas(smoke_data, args.probe_tas, scripts_root=script_dir)
 				if args.probe_dumpframes:
 					menu_lines.append("dumpframes")
+				if os.environ.get("XASH_GC_PROBE_STARTMAP"):
+					menu_lines.append("startmap " + os.environ["XASH_GC_PROBE_STARTMAP"])
+				if os.environ.get("XASH_GC_PROBE_CMD"):
+					menu_lines.extend(probe_cmd_cfg_lines(os.environ["XASH_GC_PROBE_CMD"]))
 				if os.environ.get("XASH_GC_PROBE_MEMREPORT") == "1":
 					menu_lines.append("memreport")
 				if os.environ.get("XASH_GC_PROBE_NOTEXPACKS") == "1":

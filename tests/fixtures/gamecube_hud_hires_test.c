@@ -9,6 +9,7 @@
 static unsigned char fake_aram[SIZE];
 static unsigned char arena[8 * 1024] __attribute__(( aligned( 32 )));
 static unsigned char sheet[256 * 256];
+static unsigned char rgba_sheet[8 * 4];
 static unsigned char pal[256 * 4];
 static int idles;
 
@@ -184,6 +185,40 @@ int main( void )
 			g = GC_HudHiRegister( &hc, "#HUD/sprites/640hud8(frame:00).spr", 256, 256, sheet, pal );
 			assert( g >= 0 && !GC_HudHiSheetIA8( &hc, g ));
 		}
+	}
+	/* Direct RGBA path keeps opaque black opaque, but treats fully
+	 * transparent and RGB5A3-quantized sub-1/8 alpha texels as filter holes.
+	 * Edge RGB comes from the nearest visible neighbor while alpha stays zero. */
+	{
+		static gc_hudhi_t hr;
+		const uint8_t pixels[8 * 4] = {
+			0, 0, 0, 255,       /* opaque black */
+			255, 255, 255, 0,   /* transparent white */
+			240, 20, 10, 16,    /* quantizes to transparent */
+			20, 200, 40, 255,   /* opaque green */
+			20, 200, 40, 32,    /* visible RGB5A3 alpha 1 */
+			0, 0, 0, 0,          /* transparent black */
+			255, 0, 0, 255,     /* opaque red */
+			0, 0, 0, 255         /* opaque black */
+		};
+		int rh;
+
+		memcpy( rgba_sheet, pixels, sizeof( pixels ));
+		GC_HudHiInit( &hr, &cache, gpu_idle );
+		rh = GC_HudHiRegisterRGBA( &hr, "sprites/mohaa/compass_test.spr", 8, 1, rgba_sheet );
+		assert( rh >= 0 );
+		GC_HudHiSetArena( &hr, arena, sizeof( arena ));
+		GC_HudHiBeginFrame( &hr );
+		t = GC_HudHiCell( &hr, rh, 0, 0, 8, 1, &tw, &th, &fresh );
+		assert( t && fresh && tw == 8 && th == 4 );
+		assert( texel( t, tw, 0, 0 ) == 0x8000 ); /* opaque black survives */
+		assert( texel( t, tw, 1, 0 ) == 0x0000 ); /* transparent white borrows black RGB, stays clear */
+		assert( texel( t, tw, 2, 0 ) == 0x01c2 ); /* quantized hole borrows green RGB, stays clear */
+		assert( texel( t, tw, 3, 0 ) == 0x8b25 );
+		assert( texel( t, tw, 4, 0 ) == 0x11c2 ); /* alpha 32 retains A3=1 */
+		assert( texel( t, tw, 5, 0 ) == 0x01c2 ); /* tie uses preceding RGB; alpha stays clear */
+		assert( texel( t, tw, 6, 0 ) == 0xfc00 );
+		assert( texel( t, tw, 7, 0 ) == 0x8000 );
 	}
 	GC_HudHiSetArena( &hh, NULL, 0 );
 	assert( !GC_HudHiCell( &hh, h, 0, 0, 8, 8, &tw, &th, &fresh ));

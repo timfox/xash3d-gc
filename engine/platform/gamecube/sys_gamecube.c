@@ -1195,6 +1195,7 @@ static qboolean gc_nolivepvs_configured;
 static qboolean gc_nonativetex_configured;
 static qboolean gc_nativetex_configured;
 static qboolean gc_notexpacks_configured;
+static qboolean gc_texdump_configured;
 static qboolean gc_autohop_configured;
 static qboolean gc_autocampaign_configured;
 static char gc_autocampaign_delay[16];
@@ -1266,6 +1267,7 @@ static void GCube_LoadDiscBootOverrides( void )
 	gc_nonativetex_configured = false;
 	gc_nativetex_configured = false;
 	gc_notexpacks_configured = false;
+	gc_texdump_configured = false;
 	gc_autohop_configured = false;
 	gc_autocampaign_configured = false;
 	gc_startmap_configured = false;
@@ -1491,6 +1493,13 @@ static void GCube_LoadDiscBootOverrides( void )
 		{
 			gc_notexpacks_configured = true;
 			SYS_Report( "Xash3D GameCube: disc boot override notexpacks\n" );
+			continue;
+		}
+
+		if( !Q_strnicmp( cursor, "texdump", 7 ))
+		{
+			gc_texdump_configured = true;
+			SYS_Report( "Xash3D GameCube: disc boot override gctexdump\n" );
 			continue;
 		}
 
@@ -2246,6 +2255,7 @@ static void GCube_ReinjectMissingBootArgv( void )
 	REINJECT_ARG( gc_video_mode_configured, "-gcvideo", gc_video_mode );
 	REINJECT_FLAG( gc_nativetex_configured, "-gcnativetex" );
 	REINJECT_FLAG( gc_notexpacks_configured, "-gcnotexpacks" );
+	REINJECT_FLAG( gc_texdump_configured, "-gctexdump" );
 #undef REINJECT_FLAG
 #undef REINJECT_ARG
 

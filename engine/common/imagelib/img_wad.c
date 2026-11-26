@@ -305,7 +305,19 @@ qboolean Image_LoadSPR( const char *name, const byte *buffer, fs_offset_t filesi
 	{
 		// spr32 support
 		image.size = image.width * image.height * 4;
-		image.rgba = Mem_Malloc( host.imagepool, image.size );
+		image.rgba = NULL;
+#if XASH_GAMECUBE
+		/* 32-bit HUD art (MOHAA's compass and vitals) uploads straight into GX
+		 * texture storage. Decode it into the shared transient slab, which
+		 * FS_FreeImage releases after the upload, rather than into fragmented
+		 * MEM1. */
+		if( image.hud_sprite )
+			image.rgba = Image_GCAllocTransient( image.size );
+#endif
+		if( !image.rgba )
+			image.rgba = Mem_Malloc( host.imagepool, image.size );
+		if( !image.rgba )
+			return false;
 		memcpy( image.rgba, fin, image.size );
 		SetBits( image.flags, IMAGE_HAS_COLOR ); // Color. True Color!
 		return true;

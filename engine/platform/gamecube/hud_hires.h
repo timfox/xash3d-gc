@@ -29,9 +29,10 @@ typedef struct
 	char     name[GC_HUDHI_NAME_LEN]; /* texture name, e.g. #HUD/sprites/x(frame:00).spr */
 	uint16_t w, h;
 	int      texnum;                  /* renderer texture of the shrunk upload, 0 if none */
-	int      aram_index;              /* indices, then the 256-entry texel table */
+	int      aram_index;              /* indexed pixels+table or direct RGBA pixels */
 	uint8_t  used;
 	uint8_t  ia8;                     /* grey sheet: IA8 texels (8-bit intensity and alpha) */
+	uint8_t  rgba;                    /* direct 32-bit RGBA sheet */
 } gc_hudhi_sheet_t;
 
 typedef struct
@@ -76,6 +77,9 @@ int  GC_HudHiSheetIA8( const gc_hudhi_t *s, int handle );
  * handle, or -1 when ARAM or the table is full. */
 int  GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
 	const uint8_t *indices, const uint8_t *rgba_palette );
+/* Store a direct RGBA sprite sheet in ARAM for full-resolution HUD cells. */
+int  GC_HudHiRegisterRGBA( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
+	const uint8_t *rgba_pixels );
 void GC_HudHiSetTexnum( gc_hudhi_t *s, int handle, int texnum );
 /* Sheet for a renderer texture: texnum and name must both match. -1 if none. */
 int  GC_HudHiFind( const gc_hudhi_t *s, int texnum, const char *name );
