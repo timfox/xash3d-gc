@@ -679,6 +679,18 @@ int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, c
 	return handle;
 }
 
+int R_GXHudHiRegisterRGBA( const char *texname, int w, int h, const byte *rgba_pixels )
+{
+	int handle;
+
+	if( !R_GXHudHiEnsure() || w < 1 || h < 1 || w > GC_HUDHI_MAX_DIM || h > GC_HUDHI_MAX_DIM )
+		return -1;
+	handle = GC_HudHiRegisterRGBA( &r_hudhi, texname, (uint16_t)w, (uint16_t)h, rgba_pixels );
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: HUD hi-res %s %dx%d RGBA %s (sheet %d)\n",
+		texname, w, h, handle >= 0 ? "kept in ARAM" : "refused", handle );
+	return handle;
+}
+
 static qboolean R_GXHudHiArena( void );
 
 void R_GXHudHiSetTexnum( int handle, int texnum )
@@ -710,7 +722,7 @@ static qboolean r_hudhi_arena_lent;	/* the arena is the borrowed decode buffer *
 /* Half-Life's 640 HUD: cells in the lent decode buffer, token resident
  * copies (never drawn). Day of Defeat keeps its heap arena and 64 px
  * fallback copies. */
-#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK ) || ( defined( XASH_GC_MOHAA ) && XASH_GC_MOHAA )
 #define GC_HUDHI_LEND_DECODE 1
 #else
 #define GC_HUDHI_LEND_DECODE 0

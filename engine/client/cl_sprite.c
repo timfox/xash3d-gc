@@ -21,6 +21,9 @@ GNU General Public License for more details.
 #if XASH_GAMECUBE
 #include "platform/platform.h"
 #include "platform/gamecube/mem_gamecube.h"
+#ifndef XASH_GC_MOHAA
+#define XASH_GC_MOHAA 0
+#endif
 /* Client-side sprite loading cannot access the renderer's GC_GetVisualQuality()
  * because r_local.h is a renderer-local header. Use a compile-time consistent
  * low-memory guard instead. Runtime quality adjustments for sprites are handled
@@ -47,9 +50,10 @@ static int sprite_fx_cap;
  * their source size. */
 int gc_sprite_fx_prescale = 1;
 int R_GXHudHiRegister( const char *texname, int w, int h, const byte *indices, const byte *rgba_palette );
+int R_GXHudHiRegisterRGBA( const char *texname, int w, int h, const byte *rgba_pixels );
 /* Half-Life's 640 HUD keeps every sheet in ARAM with a token resident copy;
  * Day of Defeat keeps its own sizes (64 px fallback copies). */
-#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#if XASH_GC_MOHAA || !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
 #define GC_HUD_SHEETS_IN_ARAM 1
 #else
 #define GC_HUD_SHEETS_IN_ARAM 0
@@ -292,6 +296,51 @@ static dspriteframe_t Mod_GCSpriteShrinkFrame( const void *pin, dspriteframe_t p
 	memcpy( (void *)pin, &small, sizeof( small ));
 	return small;
 }
+
+/* Box-filter a direct RGBA HUD frame in place. Premultiplying RGB by alpha
+ * during the average avoids coloured fringes around transparent compass art. */
+static dspriteframe_t Mod_GCSpriteShrinkRGBA( const void *pin, dspriteframe_t pinframe, int f )
+{
+	dspriteframe_t small = pinframe;
+	byte *px = (byte *)pin + sizeof( dspriteframe_t );
+	int x, y;
+
+	small.width = pinframe.width / f;
+	small.height = pinframe.height / f;
+	for( y = 0; y < small.height; y++ )
+	{
+		for( x = 0; x < small.width; x++ )
+		{
+			uint32_t rgb[3] = { 0, 0, 0 }, alpha = 0;
+			int bx, by;
+			byte *dst = px + ( y * small.width + x ) * 4;
+
+			for( by = 0; by < f; by++ )
+			{
+				for( bx = 0; bx < f; bx++ )
+				{
+					const byte *src = px + (( y * f + by ) * pinframe.width + x * f + bx ) * 4;
+					const uint32_t a = src[3];
+
+					alpha += a;
+					rgb[0] += src[0] * a;
+					rgb[1] += src[1] * a;
+					rgb[2] += src[2] * a;
+				}
+			}
+			{
+				const uint32_t count = (uint32_t)f * (uint32_t)f;
+				int c;
+
+				for( c = 0; c < 3; c++ )
+					dst[c] = alpha ? (byte)( rgb[c] / alpha ) : 0;
+				dst[3] = (byte)( alpha / count );
+			}
+		}
+	}
+	memcpy( (void *)pin, &small, sizeof( small ));
+	return small;
+}
 #endif
 
 static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspriteframe_t **ppframe, int num )
@@ -334,7 +383,8 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 		 * holds only a token resident copy of it. */
 		if( bytes == 1 && ( gc_sprite_effect_load || !GC_HUD_SHEETS_IN_ARAM
 			? GC_MapLoadMemoryOpt() && ( pinframe.width >= 128 || pinframe.height >= 128 )
-			: ( pinframe.width >= 64 || pinframe.height >= 64 )))
+			: ( ( XASH_GC_MOHAA && Q_stristr( texname, "sprites/mohaa/" ))
+				|| pinframe.width >= 64 || pinframe.height >= 64 )))
 		{
 			/* 128 keeps the art at the size it is drawn, but its texture
 			 * needs contiguous heap: on dod_caen 101 KiB free still could not
@@ -371,6 +421,28 @@ static const byte *Mod_SpriteLoadFrame( model_t *mod, const void *pin, mspritefr
 				Con_Reportf( "Xash3D GameCube: HUD sprite %s %dx%d shrunk to %dx%d for upload (heap %s)\n",
 					texname, pinframe.width, pinframe.height, small.width, small.height,
 					Q_memprint( GC_MemHeapFreeBytes( )));
+			}
+		}
+		else if( bytes == 4 && XASH_GC_MOHAA && Q_stristr( texname, "sprites/mohaa/" ))
+		{
+			static int mohaa_rgba_logs;
+			const qboolean hires = ( hud_hires = R_GXHudHiRegisterRGBA( texname, pinframe.width,
+				pinframe.height, (const byte *)pin + sizeof( dspriteframe_t ))) >= 0;
+			const int cap = hires ? 8 : 32;
+			int f = 1;
+
+			while( pinframe.width / ( f * 2 ) >= 1 && pinframe.height / ( f * 2 ) >= 1
+				&& ( pinframe.width / f > cap || pinframe.height / f > cap ))
+				f *= 2;
+			if( f > 1 )
+			{
+				const dspriteframe_t small = Mod_GCSpriteShrinkRGBA( pin, pinframe, f );
+
+				load_bytes = small.width * small.height * 4;
+				if( mohaa_rgba_logs++ < 8 )
+					Con_Reportf( "Xash3D GameCube: MOHAA RGBA HUD %s %dx%d stored=%s upload=%dx%d (heap %s)\n",
+						texname, pinframe.width, pinframe.height, hires ? "ARAM" : "resident fallback",
+						small.width, small.height, Q_memprint( GC_MemHeapFreeBytes( )));
 			}
 		}
 		else if( bytes == 1 && sprite_fx_cap > 0 && ( pinframe.width > sprite_fx_cap || pinframe.height > sprite_fx_cap ))

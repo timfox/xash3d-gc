@@ -342,11 +342,18 @@ static GXRModeObj *GC_NetworkVideoMode( GXRModeObj *preferred )
 	gc_network_video_mode = *preferred;
 	/* VI scales the 320-pixel XFB to the mode's existing 640-pixel output.
 	 * Preserve its scanline count and television timing (480i/480p/PAL). */
-	/* 640 wide only for the menu build (hi-res GX menu text, #226). A boot straight into a
-	 * listen host or a connecting peer never shows that menu and falls back to the soft text
-	 * in a match anyway, and the 640 XFB costs 300 KiB of the BBA-linked heap that the
-	 * host needs (SV_InitGame / map load ran out of memory with it). */
+#if defined(XASH_MOHAA_GAMECUBE) && XASH_MOHAA_GAMECUBE
+	/* MOHAA reserves a 320-wide XFB before filesystem/game startup. Keep that
+	 * width through its retail menu and map path: switching back to 640 here
+	 * requests another 300 KiB after MEM1 has filled, frees the reserved buffer,
+	 * then leaves the game with no scanout buffer when the allocation fails. */
+	gc_network_video_mode.fbWidth = 320;
+#else
+	/* Day of Defeat keeps 640 wide for the menu build (hi-res GX menu text).
+	 * A boot straight into a listen host or a connecting peer never shows that
+	 * menu and uses the smaller buffer, saving 300 KiB for server/map startup. */
 	gc_network_video_mode.fbWidth = ( Sys_CheckParm( "-gclistenserver" ) || Sys_CheckParm( "-gcconnect" )) ? 320 : 640;
+#endif
 	return &gc_network_video_mode;
 }
 #endif
@@ -8377,6 +8384,14 @@ void GC_EarlyBootSplash( void )
 	rmode = VIDEO_GetPreferredMode( NULL );
 #if XASH_DODGC_NETWORK
 	rmode = GC_NetworkVideoMode( rmode );
+#if defined(XASH_MOHAA_GAMECUBE) && XASH_MOHAA_GAMECUBE
+	/* The early splash runs before disc boot arguments are installed, so the
+	 * network mode selector cannot see -gclistenserver yet. MOHAA's retail
+	 * framebuffer is 320 pixels wide and VI scales it to the TV output. Reserve
+	 * that 300 KiB buffer now; waiting until after filesystem/game init leaves
+	 * less than 300 KiB of MEM1 free and XFB allocation fails. */
+	if( rmode ) rmode->fbWidth = 320;
+#endif
 #endif
 	if( !rmode )
 		return;

@@ -56,6 +56,23 @@ uint16_t GC_HudHiPaletteEntryIA8( uint8_t i, uint8_t a )
 	return (uint16_t)(( a << 8 ) | i );
 }
 
+static uint16_t HH_RGBAEntry( uint8_t r, uint8_t g, uint8_t b, uint8_t a )
+{
+	const unsigned r5 = r >> 3, g5 = g >> 3, b5 = b >> 3;
+	unsigned a3;
+
+	if( a == 0 )
+		return HH_HOLE;
+	if( a == 255 )
+		return (uint16_t)( 0x8000u | ( r5 << 10 ) | ( g5 << 5 ) | b5 );
+	a3 = a >> 5;
+	if( a3 == 0 )
+		return 0;
+	if( a3 >= 7 )
+		return (uint16_t)( 0x8000u | ( r5 << 10 ) | ( g5 << 5 ) | b5 );
+	return (uint16_t)(( a3 << 12 ) | (( r >> 4 ) << 8 ) | (( g >> 4 ) << 4 ) | ( b >> 4 ));
+}
+
 static void HH_Key( char *out, size_t size, const char *name, uint16_t w, uint16_t h, int ia8 )
 {
 	uint32_t hash = 2166136261u;
@@ -66,7 +83,8 @@ static void HH_Key( char *out, size_t size, const char *name, uint16_t w, uint16
 		hash ^= *p++;
 		hash *= 16777619u;
 	}
-	snprintf( out, size, "hudhi:%08x:%ux%u%s", (unsigned)hash, (unsigned)w, (unsigned)h, ia8 ? ":ia" : "" );
+	snprintf( out, size, "hudhi:%08x:%ux%u%s", (unsigned)hash, (unsigned)w, (unsigned)h,
+		ia8 == 2 ? ":rgba" : ia8 ? ":ia" : "" );
 }
 
 int GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
@@ -138,6 +156,56 @@ int GC_HudHiRegister( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
 	s->sheets[slot].h = h;
 	s->sheets[slot].aram_index = index;
 	s->sheets[slot].ia8 = (uint8_t)ia8;
+	s->sheets[slot].used = 1;
+	return slot;
+}
+
+int GC_HudHiRegisterRGBA( gc_hudhi_t *s, const char *name, uint16_t w, uint16_t h,
+	const uint8_t *rgba_pixels )
+{
+	char key[GC_ARAM_NAME_LEN];
+	int i, slot = -1, index;
+	const uint32_t bytes = HH_Align( (uint32_t)w * h * 4u );
+
+	if( !s->cache || !name || !name[0] || !rgba_pixels || !w || !h
+		|| w > GC_HUDHI_MAX_DIM || h > GC_HUDHI_MAX_DIM
+		|| strlen( name ) >= GC_HUDHI_NAME_LEN )
+		return -1;
+	for( i = 0; i < GC_HUDHI_SHEETS; i++ )
+	{
+		gc_hudhi_sheet_t *sh = &s->sheets[i];
+
+		if( sh->used && sh->rgba && !strcmp( sh->name, name ) && sh->w == w && sh->h == h )
+			return i;
+		if( !sh->used && slot < 0 )
+			slot = i;
+	}
+	if( slot < 0 )
+	{
+		s->refusals++;
+		return -1;
+	}
+	HH_Key( key, sizeof( key ), name, w, h, 2 );
+	index = GC_AramCacheFind( s->cache, key );
+	if( index < 0 )
+	{
+		index = GC_AramCacheBegin( s->cache, key, bytes );
+		if( index < 0 || !GC_AramCacheWrite( s->cache, index, 0, rgba_pixels, (uint32_t)w * h * 4u )
+			|| !GC_AramCacheCommit( s->cache, index ))
+		{
+			if( index >= 0 )
+				GC_AramCacheAbort( s->cache, index );
+			s->refusals++;
+			return -1;
+		}
+	}
+	GC_AramCachePin( s->cache, index );
+	memset( &s->sheets[slot], 0, sizeof( s->sheets[slot] ));
+	strcpy( s->sheets[slot].name, name );
+	s->sheets[slot].w = w;
+	s->sheets[slot].h = h;
+	s->sheets[slot].aram_index = index;
+	s->sheets[slot].rgba = 1;
 	s->sheets[slot].used = 1;
 	return slot;
 }
@@ -251,12 +319,19 @@ static uint16_t HH_Rgb12( uint16_t v )
 }
 
 /* Holes take the colour of the nearest texel that is not a hole, alpha 0. */
-static uint16_t HH_Clear( uint16_t v, int ia8 )
+static uint16_t HH_Clear( uint16_t v, int ia8, int rgba )
 {
+	if( rgba )
+		return HH_Rgb12( v ); /* keep edge RGB while forcing alpha to zero */
 	return ia8 ? (uint16_t)( v & 0x00ffu ) : HH_Rgb12( v );
 }
 
-static void HH_CarryHoles( uint16_t *line, int n, int ia8 )
+static int HH_IsHole( uint16_t v, int rgba )
+{
+	return rgba ? ( v == HH_HOLE || ( !( v & 0x8000u ) && !( v & 0x7000u ))) : v == HH_HOLE;
+}
+
+static void HH_CarryHoles( uint16_t *line, int n, int ia8, int rgba )
 {
 	int dist[GC_HUDHI_MAX_DIM];
 	uint16_t col[GC_HUDHI_MAX_DIM];
@@ -265,9 +340,9 @@ static void HH_CarryHoles( uint16_t *line, int n, int ia8 )
 
 	for( i = 0; i < n; i++ )
 	{
-		if( line[i] != HH_HOLE )
+		if( !HH_IsHole( line[i], rgba ))
 		{
-			c = HH_Clear( line[i], ia8 );
+			c = HH_Clear( line[i], ia8, rgba );
 			d = 0;
 		}
 		else if( d >= 0 )
@@ -278,9 +353,9 @@ static void HH_CarryHoles( uint16_t *line, int n, int ia8 )
 	d = -1;
 	for( i = n - 1; i >= 0; i-- )
 	{
-		if( line[i] != HH_HOLE )
+		if( !HH_IsHole( line[i], rgba ))
 		{
-			c = HH_Clear( line[i], ia8 );
+			c = HH_Clear( line[i], ia8, rgba );
 			d = 0;
 			continue;
 		}
@@ -297,6 +372,7 @@ const uint16_t *GC_HudHiCell( gc_hudhi_t *s, int handle, int x, int y, int w, in
 {
 	const gc_hudhi_sheet_t *sh;
 	uint8_t row[GC_HUDHI_MAX_DIM];
+	uint8_t rgba_row[GC_HUDHI_MAX_DIM * 4];
 	uint16_t line[GC_HUDHI_MAX_DIM];
 	gc_hudhi_cell_t *cell;
 	uint16_t *dst;
@@ -357,7 +433,7 @@ const uint16_t *GC_HudHiCell( gc_hudhi_t *s, int handle, int x, int y, int w, in
 		return NULL;
 	}
 
-	if( s->pal_sheet != handle )
+	if( !sh->rgba && s->pal_sheet != handle )
 	{
 		if( !GC_AramCacheRead( s->cache, sh->aram_index, HH_Align( (uint32_t)sh->w * sh->h ),
 			s->pal, sizeof( s->pal )))
@@ -377,16 +453,21 @@ const uint16_t *GC_HudHiCell( gc_hudhi_t *s, int handle, int x, int y, int w, in
 		 * the border samples the cell itself. */
 		if( r < h )
 		{
+			const uint32_t pixel_off = (uint32_t)( y + r ) * sh->w + (uint32_t)x;
+			const uint32_t pixel_bytes = sh->rgba ? (uint32_t)w * 4u : (uint32_t)w;
+			void *row_data = sh->rgba ? (void *)rgba_row : (void *)row;
 			if( !GC_AramCacheRead( s->cache, sh->aram_index,
-				(uint32_t)( y + r ) * sh->w + (uint32_t)x, row, (uint32_t)w ))
+				pixel_off * ( sh->rgba ? 4u : 1u ), row_data, pixel_bytes ))
 			{
 				s->arena_used = off;
 				s->refusals++;
 				return NULL;
 			}
 			for( c = 0; c < w; c++ )
-				line[c] = s->pal[row[c]];
-			HH_CarryHoles( line, w, sh->ia8 );
+				line[c] = sh->rgba
+					? HH_RGBAEntry( rgba_row[c * 4], rgba_row[c * 4 + 1], rgba_row[c * 4 + 2], rgba_row[c * 4 + 3] )
+					: s->pal[row[c]];
+			HH_CarryHoles( line, w, sh->ia8, sh->rgba );
 			for( c = w; c < tws; c++ )
 				line[c] = line[w - 1];
 		}

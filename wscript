@@ -625,6 +625,10 @@ def configure(conf):
 
 	if conf.env.DEST_OS == 'gamecube':
 		conf.define('XASH_GAMECUBE', 1)
+		if conf.options.GAMEDIR == 'mohaa':
+			# MOHAA shares the DoD network build profile, but its retail HUD
+			# uses direct RGBA sprite sheets and the MOHAA-specific ARAM path.
+			conf.define('XASH_GC_MOHAA', 1)
 		if conf.options.GAMEDIR == 'lostcoast':
 			# Single player only, and the heap is down to a few KB in play:
 			# tables sized for a second player or for bots are cut to one
@@ -643,6 +647,8 @@ def configure(conf):
 		# mohaa (mohaa-gc) is DoD-GC's game code with MOHAA content: same tables and limits.
 		if conf.options.GAMEDIR in ('dod', 'mohaa'):
 			conf.define('XASH_DODGC_NETWORK', 1)
+			if conf.options.GAMEDIR == 'mohaa':
+				conf.define('XASH_MOHAA_GAMECUBE', 1)
 			# dod_charlie's own entities take ~422 of the 460, which leaves a scripted film cast
 			# about 30. A capture DOL (-gccapture, where frame rate matters less than what is on
 			# screen) can be built with a bigger table: XASH_GC_MAX_EDICTS=560 costs about

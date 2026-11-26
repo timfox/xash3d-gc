@@ -305,39 +305,16 @@ qboolean Image_LoadSPR( const char *name, const byte *buffer, fs_offset_t filesi
 	{
 		// spr32 support
 		image.size = image.width * image.height * 4;
-		image.rgba = Mem_Malloc( host.imagepool, image.size );
-		if( !image.rgba && image.hud_sprite && name
-			&& Q_stristr( name, "sprites/mohaa/" )
-			&& image.width >= 64 && image.height >= 64 )
-		{
-			const int source_width = image.width;
-			const int source_height = image.height;
-			const int small_width = source_width / 2;
-			const int small_height = source_height / 2;
-			int x, y, channel;
-
-			image.size = small_width * small_height * 4;
+		image.rgba = NULL;
+#if XASH_GAMECUBE
+		/* MOHAA's 32-bit HUD art uploads immediately into GX texture storage.
+		 * Keep its temporary RGBA decode in the shared scratch slab when MEM1
+		 * cannot fit the image; FS_FreeImage releases the slab after upload. */
+		if( image.hud_sprite                                               )
+			image.rgba = Image_GCAllocTransient( image.size );
+#endif
+		if( !image.rgba )
 			image.rgba = Mem_Malloc( host.imagepool, image.size );
-			if( image.rgba )
-			{
-				for( y = 0; y < small_height; y++ )
-				{
-					for( x = 0; x < small_width; x++ )
-					{
-						byte *out = image.rgba + ( y * small_width + x ) * 4;
-						const byte *src = fin + ( y * 2 * source_width + x * 2 ) * 4;
-						for( channel = 0; channel < 4; channel++ )
-							out[channel] = (byte)( ( src[channel] + src[4 + channel]
-								+ src[source_width * 4 + channel]
-								+ src[source_width * 4 + 4 + channel] + 2 ) / 4 );
-					}
-				}
-				image.width = small_width;
-				image.height = small_height;
-				Con_Reportf( "Xash3D GameCube: MOHAA HUD sprite %s reduced %dx%d to %dx%d under MEM1 pressure\n",
-					name, source_width, source_height, small_width, small_height );
-			}
-		}
 		if( !image.rgba )
 			return false;
 		if( image.width == pin.width && image.height == pin.height )

@@ -96,7 +96,11 @@ static qboolean Mod_GCIsWeaponModelPath( const char *path )
 static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
 {
 	return Q_stristr( model_path, "mapmodels/" ) != NULL
-		|| Q_stristr( model_path, "models/player" ) != NULL;
+		|| Q_stristr( model_path, "models/player" ) != NULL
+		/* MOHAA's opening vehicles are map-bound script models, not static props. */
+		|| Q_stristr( model_path, "models/vehicles/" ) != NULL
+		/* Scripted m1l1 actor remains resident for the whole opening. */
+		|| Q_stristr( model_path, "models/human/german_afrika_private" ) != NULL;
 }
 
 /* Real MDLs live in the 1 MiB studio BSS arena (lean meshes + viewweapons).
@@ -824,6 +828,8 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 		/* Xen's final encounters require these studio headers for boss AI,
 		 * animation and visible alien controllers. */
 		"nihilanth", "big_mom", "baby_headcrab", "controller",
+		/* MOHAA m1l1's manifest-precached opening ride and scripted cast. */
+		"german_afrika_private", "opeltruck", "gmctruck_opening",
 		/* Tiny lean world-weapon stub for Flipper studio draw admit. */
 		"w_crowbar",
 		/* Thrown grenade bodies: tiny lean meshes, no skin atlas. */

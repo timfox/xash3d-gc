@@ -156,7 +156,7 @@ void R_GXHudHiSetTexnum( int handle, int texnum );
 void *Image_GCAllocMdlDecode( size_t bytes );
 void Image_GCReleaseMdlDecode( void );
 
-#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK ) || ( defined( XASH_GC_MOHAA ) && XASH_GC_MOHAA )
 static qboolean CL_GCLoadAramHudFont( cl_font_t *font, float scale, convar_t *rendermode )
 {
 	static const char *const path = "gfx/gc_creditsfont256.fnt";
@@ -292,7 +292,7 @@ qboolean CL_GCLoadLeanHudFont( cl_font_t *font, float scale, convar_t *rendermod
 	if( font->valid )
 		return true;
 	font->gc_texw = font->gc_texh = 0;
-#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK )
+#if !( defined( XASH_DODGC_NETWORK ) && XASH_DODGC_NETWORK ) || ( defined( XASH_GC_MOHAA ) && XASH_GC_MOHAA )
 	/* Half-Life's HUD screen is 640x480 (CL_GetScreenInfo): the full font. */
 	if( CL_GCLoadAramHudFont( font, scale, rendermode ))
 		return true;

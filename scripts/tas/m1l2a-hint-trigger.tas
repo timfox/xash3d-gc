@@ -1,0 +1,8 @@
+# Cross the retail m1l2a hint_door trigger (BSP model *144).
+# Spawn (5349,-3867); the target bounds are x=5147..5230, y=-3535..-3443.
+# Format: frames buttons stickX stickY cstickX cstickY
+50 - 0 0 0 0
+50 - 0 127 0 0
+350 - 127 0 0 0
+1 B 0 0 0 0
+50 - 0 0 0 0

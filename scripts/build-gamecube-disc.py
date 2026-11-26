@@ -752,6 +752,10 @@ SMOKE_PRECACHE_MODELS = (
 
 SMOKE_CASE_ALIASES = (
 	("models/human/german_afrika_privatet.mdl", "models/human/german_afrika_privateT.mdl"),
+	# MOHAA TIKI surface aliases preserve a case-sensitive uppercase T.
+	("models/human/2nd-ranger_privatet.mdl", "models/human/2nd-ranger_privateT.mdl"),
+	("models/human/2nd-ranger_captaint.mdl", "models/human/2nd-ranger_captainT.mdl"),
+	("models/animal/german_shepherdt.mdl", "models/animal/german_shepherdT.mdl"),
 	("models/p_9mmar.mdl", "models/p_9mmAR.mdl"),
 	("models/v_9mmar.mdl", "models/v_9mmAR.mdl"),
 	("models/w_9mmar.mdl", "models/w_9mmAR.mdl"),
@@ -4199,6 +4203,22 @@ def stage_smoke_data(
 		copy_if_present(source, output, destination2_map_relative)
 	if destination3_map_relative:
 		copy_if_present(source, output, destination3_map_relative)
+	# MOHAA's mission VM loads maps/<map>.scr after the map entities spawn.
+	# Include the selected map(s) and the shared global scripts on smoke discs so
+	# direct-map and changelevel probes exercise the same mission logic as retail.
+	mission_maps = [map_name]
+	mission_maps.extend(Path(path).name for path in (
+		destination_map_relative, destination2_map_relative, destination3_map_relative
+	) if path)
+	has_mission_script = False
+	for mission_map in mission_maps:
+		script_relative = f"maps/{Path(mission_map).stem}.scr"
+		copy_if_present(source, output, script_relative)
+		has_mission_script = has_mission_script or (output / script_relative).is_file()
+	if has_mission_script:
+		global_scripts = sorted((source / "global").glob("*.scr")) if (source / "global").is_dir() else []
+		for script in global_scripts:
+			copy_if_present(source, output, f"global/{script.name}")
 	for relative in MENU_RESOURCE_ASSETS:
 		copy_if_present(source, output, relative)
 	for relative in MENU_RESOURCE_DIRS:
@@ -5089,8 +5109,15 @@ def main() -> None:
 					menu_lines.append(f"cvar {name} {value}")
 				if args.probe_fullphysics:
 					menu_lines.append("fullphysics")
+				if args.probe_tas:
+					menu_lines.append(f"tas {args.probe_tas}")
+					stage_probe_tas(smoke_data, args.probe_tas, scripts_root=script_dir)
 				if args.probe_dumpframes:
 					menu_lines.append("dumpframes")
+				if os.environ.get("XASH_GC_PROBE_STARTMAP"):
+					menu_lines.append("startmap " + os.environ["XASH_GC_PROBE_STARTMAP"])
+				if os.environ.get("XASH_GC_PROBE_CMD"):
+					menu_lines.extend(probe_cmd_cfg_lines(os.environ["XASH_GC_PROBE_CMD"]))
 				if os.environ.get("XASH_GC_PROBE_MEMREPORT") == "1":
 					menu_lines.append("memreport")
 				if os.environ.get("XASH_GC_PROBE_NOTEXPACKS") == "1":

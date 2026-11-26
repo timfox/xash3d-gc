@@ -40,6 +40,34 @@ GNU General Public License for more details.
 #include "vgui_draw.h"
 #include "sound.h"		// SND_STOP_LOOPING
 #include "platform/platform.h"
+
+#if XASH_GAMECUBE
+static convar_t *gc_mohaa_hint_draw;
+static cl_font_t gc_mohaa_hint_font;
+
+static cl_font_t *CL_GetConsoleDrawFont( void )
+{
+	cl_font_t *font = Con_GetFont( con_fontsize.value );
+	int i;
+	if( !gc_mohaa_hint_draw )
+		gc_mohaa_hint_draw = Cvar_Get( "gc_mohaa_hint_draw", "0", 0, "draw the active MOHAA tip with the compact retail font scale" );
+	if( !font || !font->valid )
+		font = &cls.creditsFont;
+	if( !gc_mohaa_hint_draw || !gc_mohaa_hint_draw->value || !font || !font->valid )
+		return font;
+	gc_mohaa_hint_font = *font;
+	gc_mohaa_hint_font.scale *= 0.43f;
+	gc_mohaa_hint_font.charHeight = Q_rint( font->charHeight * 0.43f );
+	if( gc_mohaa_hint_font.charHeight < 1 ) gc_mohaa_hint_font.charHeight = 1;
+	for( i = 0; i < 256; i++ )
+	{
+		const int width = font->charWidths[i] ? Q_rint( font->charWidths[i] * 0.43f ) : 0;
+		gc_mohaa_hint_font.charWidths[i] = width > 0 ? width : ( font->charWidths[i] ? 1 : 0 );
+	}
+	return &gc_mohaa_hint_font;
+}
+#endif
+
 #if XASH_GAMECUBE
 
 /* One contiguous allocation prevents the weapon HUD list cache from
@@ -3131,7 +3159,11 @@ drawing string like a console string
 int GAME_EXPORT pfnDrawConsoleString( int x, int y, char *string )
 {
 	GC_HUD_CALL( "DrawConsoleString x=%d y=%d", x, y );
+#if XASH_GAMECUBE
+	cl_font_t *font = CL_GetConsoleDrawFont();
+#else
 	cl_font_t *font = Con_GetFont( con_fontsize.value );
+#endif
 	rgba_t color;
 	Vector4Copy( clgame.ds.textColor, color );
 	Vector4Set( clgame.ds.textColor, 255, 255, 255, 255 );
@@ -3165,7 +3197,11 @@ compute string length in screen pixels
 void GAME_EXPORT pfnDrawConsoleStringLen( const char *pText, int *length, int *height )
 {
 	GC_HUD_CALL( "DrawConsoleStringLen" );
+#if XASH_GAMECUBE
+	cl_font_t *font = CL_GetConsoleDrawFont();
+#else
 	cl_font_t *font = Con_GetFont( con_fontsize.value );
+#endif
 
 	if( height ) *height = font->charHeight;
 	CL_DrawStringLen( font, pText, length, NULL, FONT_DRAW_UTF8 | FONT_DRAW_HUD );
