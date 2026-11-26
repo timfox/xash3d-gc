@@ -1969,6 +1969,7 @@ void GAME_EXPORT GL_FreeTexture( unsigned int texnum )
 		return;
 	R_GXReleaseCinematicTexture( texnum );
 	R_GXReleaseMenuBackgroundTexture( texnum );
+	R_GXForgetTexnum( texnum );
 
 	GL_DeleteTexture( &r_images[texnum] );
 }
