@@ -18,6 +18,8 @@ Starts the GameCube disc in the project's Dolphin with a mute toggle window.
   --no-toggle      do not open the mute toggle window
   --build          (re)build the play disc first (OUT/xash3d-gc-play.iso)
   --perf           build/launch a profiling play disc with the performance overlay
+  --map NAME       build/launch a play disc whose New Game opens maps/NAME.bsp
+                   from this repo (test maps such as gc_crabhall) instead of c0a0
   --local-cache    launch the completed ISO from the local build cache (no HDD copy)
   --install-desktop  add "Xash3D GameCube (Dolphin)" to the desktop app menu
   -h, --help       this help
@@ -64,6 +66,7 @@ FORCE_BUILD=0
 PERF=0
 PUBLISH=1
 BUILD_LOCK_HELD=0
+PLAY_MAP=""
 
 [[ -f "$CONF" ]] && source "$CONF"
 
@@ -78,6 +81,10 @@ while [[ $# -gt 0 ]]; do
 		--build) BUILD=1; FORCE_BUILD=1 ;;
 		--perf) PERF=1; BUILD=1; FORCE_BUILD=1; ISO="$ROOT/OUT/xash3d-gc-play-perf.iso" ;;
 		--local-cache) PUBLISH=0; BUILD=1; FORCE_BUILD=1 ;;
+		--map)
+			[[ $# -ge 2 ]] || { echo "--map needs a map name" >&2; exit 2; }
+			PLAY_MAP="$2"; shift
+			[[ "$PLAY_MAP" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "bad map name: $PLAY_MAP" >&2; exit 2; } ;;
 		--install-desktop)
 			apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 			mkdir -p "$apps"
@@ -111,6 +118,15 @@ if [[ -f "$ENGINE_BIN" && ( ! -f "$BOOT_DOL" || "$ENGINE_BIN" -nt "$BOOT_DOL" ) 
 	 echo "==> generating GameCube DOL from the current engine"
 	mkdir -p "$ROOT/OUT/bin"
 	python3 "$ROOT/scripts/elf-to-dol.py" "$ENGINE_BIN" "$BOOT_DOL"
+fi
+if [[ -n "$PLAY_MAP" ]]; then
+	PLAY_MAP_BSP="$ROOT/maps/$PLAY_MAP.bsp"
+	[[ -f "$PLAY_MAP_BSP" ]] || { echo "error: no test map $PLAY_MAP_BSP" >&2; exit 1; }
+	ISO="$ROOT/OUT/xash3d-gc-play-$PLAY_MAP.iso"
+	if [[ -f "$ISO" && "$PLAY_MAP_BSP" -nt "$ISO" ]]; then
+		BUILD=1
+		echo "==> $PLAY_MAP.bsp is newer than the play ISO; rebuilding"
+	fi
 fi
 if [[ -f "$BOOT_DOL" && -f "$ISO" && "$BOOT_DOL" -nt "$ISO" ]]; then
 	BUILD=1
@@ -152,13 +168,19 @@ if (( BUILD )) || [[ ! -f "$ISO" ]]; then
 		BUILD_DATA="$BUILD_CACHE/valve"
 		echo "==> synchronizing retail content to local build cache"
 		rsync -a --delete "$ROOT/Half-Life/valve/" "$BUILD_DATA/"
+		PLAY_MAP_ARGS=()
+		if [[ -n "$PLAY_MAP" ]]; then
+			# Repo test maps go into the cache copy only; the retail tree is untouched.
+			cp "$PLAY_MAP_BSP" "$BUILD_DATA/maps/$PLAY_MAP.bsp"
+			PLAY_MAP_ARGS=(--play-map "$PLAY_MAP")
+		fi
 		tmp_iso="$BUILD_CACHE/xash3d-gc-play-$$.iso"
 		trap 'rm -f "$tmp_iso"' EXIT
 		# build-gamecube-disc.py stages the retail tree through tempfile too.
 		# Point it at the same cache so neither staging nor xorriso can exhaust
 		# the tmpfs user quota.
 		TMPDIR="$BUILD_CACHE" python3 "$ROOT/scripts/build-gamecube-disc.py" --dol "$BOOT_DOL" --output "$tmp_iso" --data "$BUILD_DATA" \
-		--play $([[ $PERF == 1 ]] && echo --perf)
+		--play $([[ $PERF == 1 ]] && echo --perf) "${PLAY_MAP_ARGS[@]}"
 		if (( PUBLISH )); then
 			publish_free="$(free_bytes "$(dirname "$ISO")")"
 			if [[ "$publish_free" =~ ^[0-9]+$ ]] && (( publish_free < 1000000000 )); then

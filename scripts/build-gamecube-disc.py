@@ -4908,6 +4908,11 @@ def main() -> None:
 		help="stage gamecube.cfg retailnewgame: the menu New Game route with the real controller (for playing in Dolphin)",
 	)
 	parser.add_argument(
+		"--play-map",
+		metavar="MAP",
+		help="with --play, menu New Game starts maps/MAP.bsp (a test map in --data) instead of c0a0",
+	)
+	parser.add_argument(
 		"--perf",
 		action="store_true",
 		help="enable GameCube performance overlay/profiling in the interactive play config",
@@ -5018,6 +5023,11 @@ def main() -> None:
 			f"stale DOL: {args.dol} predates {elf_candidate}; run scripts/build-gamecube.sh first"
 		)
 			
+	if args.play_map:
+		if not args.play:
+			parser.error("--play-map requires --play")
+		if not (args.data / "maps" / f"{Path(args.play_map).stem}.bsp").is_file():
+			parser.error(f"--play-map: {args.data}/maps/{Path(args.play_map).stem}.bsp does not exist")
 	if args.smoke_map and args.intro_avi:
 		parser.error("--smoke-map and --intro-avi are mutually exclusive")
 	if args.probe_newsaveload and not (args.probe_newgame or args.smoke_map):
@@ -5281,6 +5291,10 @@ def main() -> None:
 				play_lines.append("gcplayerinput")
 				if args.world_render:
 					play_lines.append("gcworldrender")
+				if args.play_map:
+					# The player still boots the retail menu and picks New Game;
+					# sv_cmds.c play start then loads this map (-gcstartmap).
+					play_lines.append(f"startmap {Path(args.play_map).stem}")
 				if args.perf:
 					play_lines.extend(["profile", "gc_perf_enable 1", "gc_perf_draw 1"])
 				if os.environ.get("XASH_GC_PROBE_AUTOHOP") == "1":
