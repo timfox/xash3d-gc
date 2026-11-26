@@ -626,7 +626,7 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 	Q_strncpy( name, filename, sizeof( name ));
 	COM_FixSlashes( name );
 
-	fs_offset_t iLength;
+	fs_offset_t iLength = 0; // LoadFileMalloc leaves it alone when the file is missing
 	byte *pfile = g_fsapi.LoadFileMalloc( name, &iLength, false );
 #if XASH_GAMECUBE
 	/* The game DLL reads AI node graphs (maps/graphs/*.nod) this way at
