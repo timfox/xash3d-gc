@@ -2009,6 +2009,14 @@ G278: bounded post-G36 physics skips PUSH (doors stall Host_Frame). Admit only
 the c0a0 intro tram (*12 / func_tracktrain) so the ride can move.
 =============
 */
+/* The c0a0 intro tram only rides on Half-Life's tram maps (c0a0 .. c0a0e). Other games' maps have their own *12
+ * (m1l2a's is a func_wall at the player start), and treating it as the tram pinned the player to it: the
+ * MOHAA campaign player could not walk at all on m1l2a. */
+static qboolean SV_GCMapHasIntroTram( void )
+{
+	return !Q_strnicmp( sv.name, "c0a0", 4 );
+}
+
 static qboolean SV_GCIsIntroTrackTrain( edict_t *ent )
 {
 	const char *precache;
@@ -2040,6 +2048,8 @@ void SV_GCPlaceNewGameTrackTrains( void )
 	int e, found = 0;
 	int first_world;
 
+	if( !SV_GCMapHasIntroTram( ))
+		return;
 	if( !Sys_CheckParm( "-gcnewgame" ) && !Sys_CheckParm( "-gcmenuplaystart" ))
 		return;
 	/* G345: re-place after changelevel — static done previously stuck across
@@ -2199,6 +2209,8 @@ void SV_GCStepIntroTrain( void )
 	float dist, step, yaw;
 	int pe;
 
+	if( !SV_GCMapHasIntroTram( ))
+		return;
 	if( !Sys_CheckParm( "-gcnewgame" ) && !Sys_CheckParm( "-gcmenuplaystart" ))
 		return;
 

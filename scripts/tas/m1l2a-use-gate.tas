@@ -1,14 +1,17 @@
 # m1l2a: from the start (5349,-3867, facing west) to the first locked gate (door_locked *128,
-# x=5212..5215 y=-3683..-3634), pressing USE (B) on the way. Frames are input polls.
-# The first wait lets the intro (introclip, the truck doors) finish; ~70 polls a second.
+# x=5212..5215 y=-3683..-3634), pressing USE (B) on the way. Frames are input polls, about 85 a
+# second on the menu New Game route. The first wait lets the intro (introclip) finish.
 # Format: frames buttons stickX stickY cstickX cstickY
-3200 - 0 0 0 0
-60 - 127 0 0 0
+2600 - 0 0 0 0
+170 - 127 0 0 0
 1 B 0 0 0 0
-20 - 0 127 0 0
+40 - 0 0 0 0
+60 - 0 127 0 0
 1 B 0 0 0 0
-20 - 0 127 0 0
+40 - 0 0 0 0
+60 - 0 127 0 0
 1 B 0 0 0 0
-60 - 127 0 0 0
+40 - 0 0 0 0
+200 - 127 0 0 0
 1 B 0 0 0 0
-200 - 0 0 0 0
+400 - 0 0 0 0

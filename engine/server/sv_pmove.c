@@ -1189,10 +1189,16 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 	/* A match started from the in-game Create Server menu runs without -gclistenserver, but it
 	 * hosts several slots (bots and a human): the human must walk there too. Only the single-slot
 	 * capture/solo routes keep the skip. */
+	/* MOHAA's campaign is single-slot on the world-render route, and its player must walk: its maps collide
+	 * through mohaa-gc's mesh collision and the resident hull0 clipnodes, so PM_Move runs there. */
 	if( Sys_CheckParm( "-gcworldrender" ) && GC_UseGxWorldDraw()
 		&& !Sys_CheckParm( "-gclistenserver" ) && !Sys_CheckParm( "-gcconnect" )
 		&& svs.maxclients <= 1
-		&& !FBitSet( cl->flags, FCL_FAKECLIENT ))
+		&& !FBitSet( cl->flags, FCL_FAKECLIENT )
+#if defined( XASH_MOHAA_GAMECUBE ) && XASH_MOHAA_GAMECUBE
+		&& 0
+#endif
+		)
 	{
 		static qboolean gc_pm_skip_logged;
 
