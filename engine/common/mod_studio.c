@@ -2620,6 +2620,13 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 					boss_skins = true;
 			}
 
+#if defined( XASH_MOHAA_GAMECUBE ) && XASH_MOHAA_GAMECUBE
+			/* MOHAA runs at gc_quality 0, which strips studio skins; its
+			 * mission vehicles and cast (m1l1's trucks, the German private)
+			 * drew as untextured grey without them. */
+			if( Q_stristr( mod->name, "models/vehicles/" ) || Q_stristr( mod->name, "models/human/" ))
+				boss_skins = true;
+#endif
 			skip_studio_textures = Mod_GCStudioPreEntityMeshOnly()
 				|| (( GC_GetVisualQuality() == 0 ) && !boss_skins );
 			if( boss_skins && Q_stristr( mod->name, "models/player/" ))

@@ -697,6 +697,24 @@ static u16 GC_ProbeSyntheticHeldButtons( void )
 	 * (selection 0) and the difficulty prompt instead of Load/Options. */
 	if( Sys_CheckParm( "-gcmenuplaystart" ))
 	{
+		/* -gctas on the menu New Game route: once the game the menu started is
+		 * signed on, the replay drives the synthetic pad (buttons here, sticks in
+		 * GC_UpdateProbeSyntheticAxes) through the ordinary client usercmd path.
+		 * Before this only -gcnewgame boots played a replay. */
+		if( Sys_CheckParm( "-gctas" ) && SV_Active() && cls.state == ca_active && cls.signon == SIGNONS )
+		{
+			static qboolean gc_menu_tas_logged;
+
+			if( GC_TasTryLoad() || GC_TasComplete() )
+			{
+				if( !gc_menu_tas_logged )
+				{
+					gc_menu_tas_logged = true;
+					Con_Reportf( "Xash3D GameCube: probe gameplay input begin (menu New Game)\n" );
+				}
+				return GC_TasPollButtons();
+			}
+		}
 		if( Cvar_VariableValue( "gc_menu_ready" ) < 1.0f )
 		{
 			if( gc_probe_action_logged && host.realtime - gc_probe_action_diag_time >= 1.0 )
