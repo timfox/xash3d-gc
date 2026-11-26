@@ -348,7 +348,8 @@ probe_collect_exit_status "$child"
 		game = (ROOT / "engine/platform/gamecube/in_gamecube.c").read_text(encoding="utf-8")
 		vid = (ROOT / "engine/platform/gamecube/vid_gamecube.c").read_text(encoding="utf-8")
 		self.assertIn("low-res probe skips CapFaces", gx)
-		self.assertIn("if( gc_probe_synthetic )", game)
+		# Smoke probes stay buttons-only; only an explicit full-physics TAS run synthesizes movement.
+		self.assertIn('if( gc_probe_synthetic && !( Sys_CheckParm( "-gctas" ) && Sys_CheckParm( "-gcfullphysics" )))', game)
 		self.assertIn("low-memory post-present ServerFrame prime skipped", vid)
 		self.assertIn("next_try = gc_present_count +", vid)
 		self.assertIn("!Sys_CheckParm( \"-gcnewgame\" )", vid)

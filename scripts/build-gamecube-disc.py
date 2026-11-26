@@ -4249,9 +4249,22 @@ def stage_smoke_data(
 	) if path)
 	has_mission_script = False
 	for mission_map in mission_maps:
-		script_relative = f"maps/{Path(mission_map).stem}.scr"
+		stem = Path(mission_map).stem
+		script_relative = f"maps/{stem}.scr"
 		copy_if_present(source, output, script_relative)
 		has_mission_script = has_mission_script or (output / script_relative).is_file()
+		# The mission's sidecars from mohaa-gc's converter: collision (.mcol), path nodes
+		# (.nodes), sound table (.snd), cutscene tags (.tags and its .tags.NNN parts) and
+		# the precache script. Without the tags every cutscene tag sits at its entity's
+		# origin, so m1l1's opening ride never places the trucks or the player.
+		maps_dir = source / "maps"
+		if maps_dir.is_dir():
+			for sidecar in sorted(maps_dir.iterdir()):
+				name = sidecar.name
+				if not sidecar.is_file() or name.lower().endswith(".bsp"):
+					continue
+				if name.startswith(f"{stem}.") or name == f"{stem}_precache.scr":
+					copy_if_present(source, output, f"maps/{name}")
 	if has_mission_script:
 		global_scripts = sorted((source / "global").glob("*.scr")) if (source / "global").is_dir() else []
 		for script in global_scripts:
