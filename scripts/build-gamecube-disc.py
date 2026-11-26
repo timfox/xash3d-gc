@@ -1051,6 +1051,21 @@ def stage_gc_menu_assets(source: Path, output: Path) -> bool:
 		)
 		return True
 
+	# MOHAA: the war room comes from the player's own game data. tools/mohaa_sd.py
+	# (mohaa-gc) writes the finished sheet, tiles and mohaa_main.txt to
+	# resource/gc_menu. Baking over it from resource/BackgroundLayout.txt (DoD's,
+	# copied in by the lean ISO staging) replaced the war room with DoD's menu.
+	if (prebaked_menu / "mohaa_main.txt").is_file() and (prebaked_menu / "BackgroundLayout.txt").is_file():
+		menu_dir = output / "resource" / "gc_menu"
+		menu_dir.mkdir(parents=True, exist_ok=True)
+		for child in sorted(prebaked_menu.rglob("*")):
+			if child.is_file():
+				dest = menu_dir / child.relative_to(prebaked_menu)
+				dest.parent.mkdir(parents=True, exist_ok=True)
+				shutil.copy2(child, dest)
+		print("GameCube menu assets: keep the MOHAA converter's war room sheet")
+		return True
+
 	candidates = [
 		source / "resource" / "BackgroundLayout.txt",
 		source / "resource" / "HD_BackgroundLayout.txt",
