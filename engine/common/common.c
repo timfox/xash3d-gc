@@ -24,6 +24,7 @@ GNU General Public License for more details.
 #include "library.h"
 #if XASH_GAMECUBE
 #include "server.h"
+#include "platform/gamecube/mem_gamecube.h"
 #endif
 
 static const char *const file_exts[] =
@@ -605,6 +606,57 @@ void COM_HexConvert( const char *pszInput, int nInputLength, byte *pOutput )
 
 #if XASH_GAMECUBE
 static byte *com_gc_borrowed_file; // see COM_LoadFileForMe
+static byte *com_gc_script_scratch;
+static size_t com_gc_script_scratch_size;
+
+static void COM_GCResetScriptScratch( void )
+{
+	com_gc_script_scratch = NULL;
+	com_gc_script_scratch_size = 0;
+}
+
+static qboolean COM_GCIsMissionScript( const char *name )
+{
+	const size_t len = name ? Q_strlen( name ) : 0;
+	if( len < 5 || Q_stricmp( name + len - 4, ".scr" ))
+		return false;
+	return !Q_strnicmp( name, "maps/", 5 ) || !Q_strnicmp( name, "global/", 7 );
+}
+
+/* Mission scripts are compiled synchronously; their source buffer can be
+ * reused after COM_FreeFile while the bytecode/constants remain in the VM. */
+static byte *COM_GCLoadMissionScript( const char *name, fs_offset_t *length )
+{
+	const fs_offset_t want = FS_FileSize( name, false );
+	size_t capacity, at;
+	file_t *f;
+	fs_offset_t read;
+	if( want <= 0 || (uint64_t)want >= (uint64_t)INT_MAX )
+		return NULL;
+	capacity = (size_t)want + 1;
+	if( !com_gc_script_scratch || capacity > com_gc_script_scratch_size )
+	{
+		at = GC_MapArenaFind( capacity );
+		if( at == (size_t)-1 )
+			return NULL;
+		com_gc_script_scratch = (byte *)GC_MapLoadBufferTailAlloc( at, capacity );
+		if( !com_gc_script_scratch )
+			return NULL;
+		com_gc_script_scratch_size = capacity;
+		GC_SetMapArenaResetHook( COM_GCResetScriptScratch );
+	}
+	f = FS_Open( name, "rb", false );
+	if( !f )
+		return NULL;
+	read = FS_Read( f, com_gc_script_scratch, want );
+	FS_Close( f );
+	if( read != want )
+		return NULL;
+	com_gc_script_scratch[want] = 0;
+	*length = want;
+	Con_Reportf( "Xash3D GameCube: %s read into reusable map-arena script scratch (%s)\n", name, Q_memprint( (size_t)want ));
+	return com_gc_script_scratch;
+}
 #endif
 
 /*
@@ -627,7 +679,13 @@ byte *GAME_EXPORT COM_LoadFileForMe( const char *filename, int *pLength )
 	COM_FixSlashes( name );
 
 	fs_offset_t iLength = 0; // LoadFileMalloc leaves it alone when the file is missing
-	byte *pfile = g_fsapi.LoadFileMalloc( name, &iLength, false );
+	byte *pfile = NULL;
+#if XASH_GAMECUBE
+	if( COM_GCIsMissionScript( name ) )
+		pfile = COM_GCLoadMissionScript( name, &iLength );
+#endif
+	if( !pfile )
+		pfile = g_fsapi.LoadFileMalloc( name, &iLength, false );
 #if XASH_GAMECUBE
 	/* The game DLL reads AI node graphs (maps/graphs/*.nod) this way at
 	 * worldspawn. On c0a0e the 9.5 KiB file buffer failed on the
@@ -721,6 +779,8 @@ COM_FreeFile
 void GAME_EXPORT COM_FreeFile( void *buffer )
 {
 #if XASH_GAMECUBE
+	if( buffer && buffer == com_gc_script_scratch )
+		return;
 	if( buffer && buffer == com_gc_borrowed_file )
 	{
 		extern void R_GCReleaseSurfaceCacheStore( const char *owner );
