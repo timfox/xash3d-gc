@@ -2844,6 +2844,51 @@ static void R_GXCmprSlotsReset( void )
 	r_gx_cmpr_bounce_texnum = 0;
 }
 
+/* GL_FreeTexture hands the texnum back to the image table and the next
+ * GL_LoadTexture reuses it. Every cache here is keyed by texnum, so without
+ * this a picture loaded into a freed number drew the old picture: the MOHAA
+ * room menu frees each spot's hover art when focus leaves it, and every spot
+ * then lit up with the first one's art and sign. Backing memory stays with
+ * its slot; only the claim on the texnum goes. */
+void R_GXForgetTexnum( unsigned int texnum )
+{
+	int i;
+
+	if( !texnum )
+		return;
+	for( i = 0; i < GC_GX_TEX_SLOTS; i++ )
+	{
+		if( r_gx_tex[i].texnum != texnum )
+			continue;
+		r_gx_tex[i].valid = false;
+		r_gx_tex[i].texnum = 0;
+		r_gx_tex[i].is_font = false;
+		r_gx_tex_lru[i] = 0;
+	}
+	for( i = 0; i < GC_CMPR_SLOTS_MAX; i++ )
+	{
+		if( r_gx_cmpr_slot[i].texnum != texnum )
+			continue;
+		r_gx_cmpr_slot[i].valid = false;
+		r_gx_cmpr_slot[i].texnum = 0;
+		if( r_gx_cmpr_cur_slot == i )
+			r_gx_cmpr_cur_slot = -1;
+	}
+	if( texnum < MAX_TEXTURES )
+	{
+		r_gx_cmpr_hint[0][texnum] = 0;
+		r_gx_cmpr_hint[1][texnum] = 0;
+	}
+	if( r_gx_cmpr_bounce_texnum == texnum )
+		r_gx_cmpr_bounce_texnum = 0;
+	if( r_gx_bound_texnum == texnum )
+	{
+		r_gx_bound_texnum = 0;
+		r_gx_bound_fmt = 0;
+		r_gx_native_bound_pixels = NULL;
+	}
+}
+
 extern byte *Mod_GCWorldArraySpillBorrow( size_t bytes, const char *what );
 extern qboolean _Sys_GetParmFromCmdLine( const char *parm, char *out, size_t size );
 extern unsigned Mod_GCWorldArraySpillGeneration( void );
