@@ -1529,7 +1529,12 @@ static qboolean Image_Decompress( const byte *data )
 	byte *fin = (byte *)data;
 
 	int size = image.width * image.height * 4;
-	image.tempbuffer = Mem_Realloc( host.imagepool, image.tempbuffer, size );
+	/* Low-memory consoles soft-fail ImageLib reallocs (NULL, original buffer kept): fail the
+	 * picture instead of writing it to address 0 (MOHAA menu spot after a menu page, DSI DAR 0). */
+	byte *grown = (byte *)Mem_Realloc( host.imagepool, image.tempbuffer, size );
+	if( !grown )
+		return false;
+	image.tempbuffer = grown;
 	byte *fout = image.tempbuffer;
 
 	switch( PFDesc[image.type].format )
@@ -1597,7 +1602,8 @@ static rgbdata_t *Image_DecompressInternal( rgbdata_t *pic )
 	Image_CopyParms( pic );
 	image.size = image.ptr = 0;
 
-	Image_Decompress( pic->buffer );
+	if( !Image_Decompress( pic->buffer ))
+		return NULL;
 
 	{
 		/* Low-memory consoles soft-fail ImageLib reallocs (NULL, original

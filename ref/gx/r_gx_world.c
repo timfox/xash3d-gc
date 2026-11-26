@@ -1501,7 +1501,10 @@ static qboolean R_GXIsMenuBackgroundName( const char *name )
  * did.  Loaded on first bind into the boot arena (menu only; released with
  * the HUD pool at map load), else the heap.
  */
-#define GC_GX_MENU_CMPR_TILES	5 /* 4 background quadrants + the title banner */
+/* 4 background quadrants + the title banner, and 4 more for a menu page's own picture
+ * (resource/gc_menu/bg_<page>_<r>_<c>, mainui MohaaPage.cpp). The page frees its tiles as it
+ * closes (GL_FreeTexture -> R_GXReleaseMenuBackgroundTexture), so the slots come back. */
+#define GC_GX_MENU_CMPR_TILES	9
 typedef struct
 {
 	unsigned  texnum;
