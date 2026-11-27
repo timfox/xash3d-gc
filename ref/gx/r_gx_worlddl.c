@@ -3739,6 +3739,32 @@ static u16 gc_wd_mat_count[GC_WD_MAX_MATS * 2 + 1];
 static int gc_wd_defer_n;
 static int gc_wd_defer_on = -1;
 
+/* Water batches in the world DL (SURF_WARP faces kept in the display lists: MOHAA's harbours, canals and the
+ * Normandy sea) drew as a still picture. Their base texture coordinates go through a matrix that drifts and sways
+ * with time, so the surface moves as retail's scrolling water shaders do. Off for everything else. */
+static void R_GXWorldDLWaterGen( qboolean on )
+{
+	static qboolean gen_on;
+	Mtx tm;
+	float t, sway;
+
+	if( !on )
+	{
+		if( gen_on )
+			GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY );
+		gen_on = false;
+		return;
+	}
+	t = (float)gp_cl->time;
+	sway = 0.015f * sinf( t * 0.9f );
+	tm[0][0] = 1.0f; tm[0][1] = sway; tm[0][2] = 0.0f; tm[0][3] = fmodf( t * 0.035f, 1.0f );
+	tm[1][0] = -sway; tm[1][1] = 1.0f; tm[1][2] = 0.0f; tm[1][3] = fmodf( t * 0.021f, 1.0f ) + 0.02f * sinf( t * 0.7f );
+	tm[2][0] = 0.0f; tm[2][1] = 0.0f; tm[2][2] = 1.0f; tm[2][3] = 0.0f;
+	GX_LoadTexMtxImm( tm, GX_TEXMTX4, GX_MTX2x4 );
+	GX_SetTexCoordGen( GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX4 );
+	gen_on = true;
+}
+
 static int R_GXWorldDLMatTexnum( u32 mat )
 {
 	if( gc_wd_texnum[mat] <= 0 )
@@ -3972,7 +3998,14 @@ static void R_GXWorldDLDeferFlush( int *drawn )
 		}
 		if( !bound )
 			continue;
-		GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+		if( gc_wd_mats[mat].flags & GC_WD_MAT_WATER )
+		{
+			R_GXWorldDLWaterGen( true );
+			GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+			R_GXWorldDLWaterGen( false );
+		}
+		else
+			GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
 		( *drawn )++;
 		/* $envmap batches (most of Lost Coast) are grouped too: the reflection
 		 * pass is queued exactly as the in-place path queues it. */
@@ -4685,7 +4718,14 @@ int R_GXWorldDLDraw( void )
 					R_GXTevMatAppend( R_GXTevMatFlags( m->tevmat ) ? m->tevmat : 0, 1, 1 );
 					cur_mat = (int)b->mat;
 				}
-				GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+				if( m->flags & GC_WD_MAT_WATER )
+				{
+					R_GXWorldDLWaterGen( true );
+					GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
+					R_GXWorldDLWaterGen( false );
+				}
+				else
+					GX_CallDispList( chunk + b->dl_ofs, b->dl_bytes );
 				/* WorldVertexTransition (Lost Coast sand): layer 2 over layer 1,
 				 * weighted by the displacement vertex alpha. Same lit recipe,
 				 * drawn again with $basetexture2 and alpha blending, so it
