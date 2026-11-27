@@ -210,6 +210,14 @@ qboolean GC_VoiceLip( int ent, int *code_a, int *code_b, float *frac )
 	if( !gc_vs.f || gc_vs.ent != ent || !gc_vs.rate )
 		return false;
 	played = gc_vs.total - gc_vs.left - (uint32_t)( gc_vs.have - gc_vs.pos );
+	{
+		/* what has been mixed is ahead of what is heard by the mixer's
+		 * paint-ahead (60 to 100 ms): the mouth follows the speaker */
+		const int ahead = (int)( snd.paintedtime - snd.soundtime );
+		const uint32_t lag = ahead > 0 ? (uint32_t)(( (uint64_t)ahead * gc_vs.rate ) / SOUND_DMA_SPEED ) : 0;
+
+		played = played > lag ? played - lag : 0;
+	}
 	ms = (uint32_t)(( (uint64_t)played * 1000u ) / gc_vs.rate );
 	for( i = 0; i < gc_vs_lip.n; i++ )
 	{

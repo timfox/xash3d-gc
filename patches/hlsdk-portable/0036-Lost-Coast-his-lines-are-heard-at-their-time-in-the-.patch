@@ -1,0 +1,75 @@
+From b8ef3efb9499a1902817cfd1f3fc08eb73daae3d Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 26 Nov 2026 21:23:14 -0800
+Subject: [PATCH] Lost Coast: his lines are heard at their time in the scene
+
+Speak events start LC_SPEAK_LEAD (0.14 s) early, as Source starts them
+early by its sound latency (CChoreoScene::SetSoundFileStartupLatency),
+and he thinks again when a scene's next event is due instead of up to a
+tenth of a second after it. Measured in Dolphin over 12 lines: heard
+174 ms late on average (98 to 289) before, 25 ms (-83 to 132) after.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/lostcoast_npcs.cpp | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 75057382..1039f828 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -304,6 +304,13 @@ void CLCSeagull::GullThink( void )
+ #define LC_MAX_NODES	448	// the map has 438 (the route search keeps 11 bytes a node)
+ #define LC_MAX_LINKS	4096
+ #define LC_MAX_ROUTE	64
++// How long a voice line takes from EMIT_SOUND to the speaker on the
++// GameCube: the disc stream opens the file and reads its header on the next
++// two mixes, and the mixer paints ahead of the DMA (measured in Dolphin,
++// 73 to 194 ms, typically 140). Source starts a scene's speak events early
++// by its own sound latency (CChoreoScene::SetSoundFileStartupLatency) so the
++// line is heard at its time in the scene; so do we.
++#define LC_SPEAK_LEAD	0.14f
+ #define LC_MAX_CUES	4	// the map's other triggers of his scenes (2: the cliff shouts)
+ 
+ enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE, LCE_HINGE, LCE_BODY };
+@@ -1253,7 +1260,7 @@ void CLCFisherman::RunScene( float interval )
+ 	{
+ 		lc_event_t *ev = &sc->ev[i];
+ 
+-		if( t < ev->t0 )
++		if( t < ev->t0 - ( ev->type == LCE_SPEAK ? LC_SPEAK_LEAD : 0.0f ))
+ 			continue;
+ 		switch( ev->type )
+ 		{
+@@ -1683,7 +1690,7 @@ void CLCFisherman::FishThink( void )
+ 				{
+ 					lc_event_t *ev = &m_pScene->ev[i];
+ 
+-					if( t >= ev->t0 && !ev->started )
++					if( t >= ev->t0 - ( ev->type == LCE_SPEAK ? LC_SPEAK_LEAD : 0.0f ) && !ev->started )
+ 					{
+ 						ev->started = 1;
+ 						if( ev->type == LCE_GESTURE )
+@@ -1706,6 +1713,19 @@ void CLCFisherman::FishThink( void )
+ 		break;
+ 	}
+ 	UpdateLook( interval );
++	// Think again when the scene's next event is due rather than up to a
++	// tenth of a second after it (his lines came in late by that much).
++	if( m_pScene )
++	{
++		for( int i = 0; i < m_pScene->n; i++ )
++		{
++			const lc_event_t *ev = &m_pScene->ev[i];
++			float due = m_flSceneStart + ev->t0 - ( ev->type == LCE_SPEAK ? LC_SPEAK_LEAD : 0.0f );
++
++			if( !ev->started && due > gpGlobals->time && due < pev->nextthink )
++				pev->nextthink = due;
++		}
++	}
+ 	{
+ 		static int logs;
+ 		static float next;
+-- 
+2.53.0
+
