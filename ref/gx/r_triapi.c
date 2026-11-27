@@ -402,8 +402,14 @@ void GAME_EXPORT TriVertex3f( float x, float y, float z )
 		{
 			if( vertcount >= (int)( sizeof( gx_triv ) / sizeof( gx_triv[0] )))
 			{
-				R_GXStudioEmitTrianglesC( gx_triv, vertcount - ( vertcount % 3 ));
-				vertcount = 0;
+				/* Flush the whole triangles and carry the started one over. The 64-slot buffer holds 21
+				 * triangles and one vertex: dropping that vertex shifted every later triangle by one,
+				 * joining corners of different particles into long white shards (MOHAA MG42 impacts). */
+				const int whole = vertcount - ( vertcount % 3 );
+				R_GXStudioEmitTrianglesC( gx_triv, whole );
+				for( int k = whole; k < vertcount; k++ )
+					gx_triv[k - whole] = gx_triv[k];
+				vertcount -= whole;
 			}
 			gx_triv[vertcount].x = x;
 			gx_triv[vertcount].y = y;
