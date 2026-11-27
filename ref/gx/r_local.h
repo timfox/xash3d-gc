@@ -499,9 +499,19 @@ void R_GXStudioTexCoord( float u, float v );
 int GC_GetNewGameCapFaceVerts( int slot, float out[][3], int maxverts );
 #endif
 
+/* Every engine texture name is built in a 128-byte buffer (studio skins
+ * "#<mdl>/<skin>.mdl", sprite frames, remaps), so the GameCube keeps 128 bytes
+ * per slot instead of 256: 128 KiB of MEM1 back for 1024 slots. A longer name
+ * from a client DLL is folded to a unique hashed form (GL_GCFoldTexName). */
+#if XASH_GAMECUBE
+#define GC_IMAGE_NAME_LEN 128
+#else
+#define GC_IMAGE_NAME_LEN 256
+#endif
+
 typedef struct image_s
 {
-	char           name[256];       // game path, including extension (can be store image programs)
+	char           name[GC_IMAGE_NAME_LEN]; // game path, including extension (can be store image programs)
 	word           srcWidth;        // keep unscaled sizes
 	word           srcHeight;
 	word           width;           // upload width\height
@@ -533,6 +543,8 @@ typedef struct image_s
 	byte           gc_packed_alpha;
 	byte           gc_packed_queued;
 	qboolean       gc_gx_native;                            // pixels[0] now holds GX tiled RGB565 (or RGB5A3), not soft pixels
+	byte           gc_degraded;                             // upload ran out of MEM1: 1 fewer mips or no alpha, 2 a 2x2 stand-in
+	unsigned short gc_packed_gen;                           // world pack this packed slot was registered for (R_GCReclaimStaleSlots)
 	byte           gc_gx_native_alpha;                      // native texels are RGB5A3 with 1-bit alpha (masked skins)
 	byte           gc_gx_cmpr;                              // pixels[0] holds GX CMPR texels (studio skin, r_gx_cmpr.c)
 	short          gc_skin_handle;                          // skin_stream handle + 1, 0: no streamed full-resolution skin
@@ -588,6 +600,7 @@ void GL_UpdateCinematicTexture( int texnum, int width, int height, const byte *b
 void R_GXReleaseCinematicTexture( unsigned int texnum );
 void R_GXReleaseMenuBackgroundTexture( unsigned int texnum );
 void R_GXForgetTexnum( unsigned int texnum );
+void R_GCTextureSlotReport( const char *why ); /* r_image.c: slot table and degraded-texture summary */
 void R_GXReleaseHudPoolForMapLoad( void );
 pixel_t *R_GXAcquireCinematicSoftwarePixels( size_t bytes );
 void R_GXReleaseCinematicSoftwarePixels( void );
