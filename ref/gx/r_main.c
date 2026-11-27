@@ -2953,6 +2953,25 @@ void GAME_EXPORT R_EndFrame( void )
 
 	// blit pixels
 	R_BlitScreen();
+#if XASH_GAMECUBE
+	/* Not every route runs R_NewMap (listen -gccapture loads skip it): report
+	 * the texture slots once per world, 120 frames in, after the late loads. */
+	{
+		static const model_t *reported_world;
+		static int frames_in;
+		const model_t *world = WORLDMODEL;
+
+		if( world && world != reported_world )
+		{
+			if( ++frames_in >= 120 )
+			{
+				reported_world = world;
+				frames_in = 0;
+				R_GCTextureSlotReport( "120 frames in" );
+			}
+		}
+	}
+#endif
 }
 
 /*
@@ -3127,6 +3146,7 @@ void GAME_EXPORT R_NewMap( void )
 	gEngfuncs.Con_Printf( "Map sample size is %d\n", tr.sample_size );
 #if XASH_GAMECUBE
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: R_NewMap post-load quality=%d (sample_size=%d)\n", GC_GetVisualQuality(), tr.sample_size );
+	R_GCTextureSlotReport( "map loaded" );
 #endif
 }
 

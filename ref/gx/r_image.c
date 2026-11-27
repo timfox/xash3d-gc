@@ -371,6 +371,33 @@ static image_t *r_imagesHashTable[TEXTURES_HASH_SIZE];
 static uint    r_numImages;
 
 #if XASH_GAMECUBE
+/* Texture slot accounting (R_GCTextureSlotReport). A slot that is lost, a
+ * texture that comes up short of MEM1 or a table that fills is counted and
+ * reported, never dropped silently. */
+static struct
+{
+	uint peak;		/* highest r_numImages */
+	uint live_peak;		/* most named slots at once */
+	uint failed;		/* loads that gave up: slot handed back */
+	uint degraded;		/* uploads short of MEM1: fewer mips, no alpha or a 2x2 stand-in */
+	uint stub;		/* of those, 2x2 stand-ins */
+	uint reclaimed;		/* stale world-pack slots taken back when the table filled */
+	uint folded;		/* names too long for a slot, hashed */
+	uint warned;		/* near-full warnings printed */
+} r_gc_slots;
+/* R_GCPackedRelease moves this on: a packed slot stamped with an older one
+ * belongs to a world pack that is gone. */
+static unsigned short r_gc_pack_gen = 1;
+/* The first textures that came up short this map, for the report. */
+#define GC_DEGRADED_NAMES 8
+static char r_gc_degraded_names[GC_DEGRADED_NAMES][48];
+static byte r_gc_degraded_kind[GC_DEGRADED_NAMES];
+static int r_gc_degraded_count;
+static void R_GCNoteDegraded( image_t *tex, int kind );
+static void R_GCNoteFailedLoad( image_t *tex );
+#endif
+
+#if XASH_GAMECUBE
 #if XASH_GAMECUBE
 qboolean Mod_GCIsStudioBssCache( const void *ptr );
 byte *Mod_GCStudioBssAlloc( size_t size );
@@ -1199,9 +1226,13 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 				for( uint fallback = 0; fallback < 4; fallback++ )
 					tex->pixels[0][fallback] = (pixel_t)( buf[0] << 8 | buf[1] );
 				gEngfuncs.Con_Reportf( S_WARN "%s: %s using 2x2 fallback mip\n", __func__, tex->name );
+				R_GCNoteDegraded( tex, 2 );
 			}
 			if( tex->numMips )
+			{
 				gEngfuncs.Con_Reportf( S_WARN "%s: %s using %u mips after OOM\n", __func__, tex->name, tex->numMips );
+				R_GCNoteDegraded( tex, 1 );
+			}
 			if( tex->numMips == 0 )
 			{
 				tex->numMips = 1;
@@ -1246,6 +1277,9 @@ static qboolean GL_UploadTextureBody( image_t *tex, rgbdata_t *pic )
 			{
 				gEngfuncs.Con_Reportf( S_WARN "%s: OOM alpha_pixels %ux%ux%u, disabling alpha\n", __func__, width, height, tex->depth );
 				ClearBits( tex->flags, TF_HAS_ALPHA );
+#if XASH_GAMECUBE
+				R_GCNoteDegraded( tex, 1 );
+#endif
 			}
 		}
 
@@ -1443,12 +1477,49 @@ static qboolean GL_CheckTexName( const char *name )
 	// because multi-layered textures can exceed name string
 	if( len >= sizeof( r_images->name ))
 	{
+#if XASH_GAMECUBE
+		return true; /* GL_GCFoldTexName hashes it into a slot-sized name */
+#else
 		gEngfuncs.Con_Printf( S_ERROR "%s: too long name %s (%d)\n", __func__, name, len );
 		return false;
+#endif
 	}
 
 	return true;
 }
+
+#if XASH_GAMECUBE
+/* A name longer than a slot holds keeps its head and gets the hash of the
+ * whole name, so two long names that share a head stay two textures. */
+static const char *GL_GCFoldTexName( const char *name, char *out, size_t outsize )
+{
+	const size_t len = name ? Q_strlen( name ) : 0;
+	uint h1 = 2166136261u, h2 = 5381;
+	size_t i, keep;
+
+	if( len < sizeof( r_images->name ) || outsize < 24 )
+		return name;
+	for( i = 0; i < len; i++ )
+	{
+		h1 = ( h1 ^ (byte)name[i] ) * 16777619u;
+		h2 = h2 * 33 + (byte)name[i];
+	}
+	keep = Q_min( outsize, sizeof( r_images->name )) - 19;
+	memcpy( out, name, keep );
+	Q_snprintf( out + keep, outsize - keep, "~%08x%08x", h1, h2 );
+	if( r_gc_slots.folded++ < 4 )
+		gEngfuncs.Con_Reportf( "Xash3D GameCube: texture name %d chars folded to %s\n", (int)len, out );
+	return out;
+}
+#define GC_FOLD_TEXNAME( name ) char gc_fold_buf[sizeof( r_images->name )]; name = GL_GCFoldTexName( name, gc_fold_buf, sizeof( gc_fold_buf ))
+#else
+#define GC_FOLD_TEXNAME( name )
+#endif
+
+#if XASH_GAMECUBE
+void R_GCTextureSlotReport( const char *why );
+static int R_GCReclaimStaleSlots( void );
+#endif
 
 /*
 ================
@@ -1486,12 +1557,42 @@ static image_t *GL_AllocTexture( const char *name, texFlags_t flags )
 
 	if( i == r_numImages )
 	{
+#if XASH_GAMECUBE
+		if( r_numImages == MAX_TEXTURES && R_GCReclaimStaleSlots( ) > 0 )
+		{
+			for( i = 0, tex = r_images; i < r_numImages; i++, tex++ )
+				if( !tex->name[0] )
+					break;
+		}
+	}
+	if( i == r_numImages )
+	{
+		if( r_numImages == MAX_TEXTURES )
+		{
+			R_GCTextureSlotReport( "table full" );
+			gEngfuncs.Host_Error( "%s: MAX_TEXTURES limit exceeds (%d slots, loading %s)\n", __func__, MAX_TEXTURES, name );
+		}
+#else
 		if( r_numImages == MAX_TEXTURES )
 			gEngfuncs.Host_Error( "%s: MAX_TEXTURES limit exceeds\n", __func__ );
+#endif
 		r_numImages++;
 	}
 
 	tex = &r_images[i];
+#if XASH_GAMECUBE
+	if( r_numImages > r_gc_slots.peak )
+	{
+		r_gc_slots.peak = r_numImages;
+		/* Say so once at 7/8 full and again at 15/16, while there is still room. */
+		if(( r_gc_slots.peak == MAX_TEXTURES - MAX_TEXTURES / 8 && r_gc_slots.warned == 0 )
+			|| ( r_gc_slots.peak == MAX_TEXTURES - MAX_TEXTURES / 16 && r_gc_slots.warned == 1 ))
+		{
+			r_gc_slots.warned++;
+			R_GCTextureSlotReport( "nearly full" );
+		}
+	}
+#endif
 
 	// copy initial params
 	Q_strncpy( tex->name, name, sizeof( tex->name ));
@@ -1516,6 +1617,18 @@ static void GL_DeleteTexture( image_t *tex )
 {
 	ASSERT( tex != NULL );
 
+#if XASH_GAMECUBE
+	/* A slot with a name and no pixels is a load that failed (OOM, decode,
+	 * resample): it used to stay named and hashed, so the slot never came
+	 * back and every later load of that name found the empty slot and drew
+	 * nothing, even once MEM1 had room. Only free slots and world-pack
+	 * textures (no soft pixels by design, kept by name for the next map)
+	 * are left alone here. */
+	if( !tex->name[0] )
+		return;
+	if( !tex->pixels[0] && ( tex->gc_packed || tex->gc_packed_aram ))
+		return;
+#else
 	// already freed?
 	if( !tex->pixels[0] )
 		return;
@@ -1526,6 +1639,7 @@ static void GL_DeleteTexture( image_t *tex )
 		gEngfuncs.Con_Printf( S_ERROR "%s: trying to free unnamed texture\n", __func__ );
 		return;
 	}
+#endif
 
 	// remove from hash table
 	image_t **prev = &r_imagesHashTable[tex->hashValue];
@@ -1571,6 +1685,137 @@ static void GL_DeleteTexture( image_t *tex )
 
 	memset( tex, 0, sizeof( *tex ));
 }
+
+
+#if XASH_GAMECUBE
+/* Take a slot out of its hash bucket (it may already be out). */
+static void GL_GCUnlinkSlot( image_t *tex )
+{
+	image_t **prev = &r_imagesHashTable[tex->hashValue % TEXTURES_HASH_SIZE];
+
+	while( *prev && *prev != tex )
+		prev = &( *prev )->nextHash;
+	if( *prev )
+		*prev = tex->nextHash;
+	tex->nextHash = NULL;
+}
+
+static void R_GCNoteDegraded( image_t *tex, int kind )
+{
+	int i;
+
+	if( !tex )
+		return;
+	if( tex->gc_degraded < kind )
+	{
+		if( !tex->gc_degraded )
+			r_gc_slots.degraded++;
+		if( kind == 2 )
+			r_gc_slots.stub++;
+		tex->gc_degraded = (byte)kind;
+	}
+	for( i = 0; i < r_gc_degraded_count; i++ )
+	{
+		if( !Q_strnicmp( r_gc_degraded_names[i], tex->name, sizeof( r_gc_degraded_names[i] ) - 1 ))
+		{
+			if( kind > r_gc_degraded_kind[i] )
+				r_gc_degraded_kind[i] = (byte)kind;
+			return;
+		}
+	}
+	if( r_gc_degraded_count < GC_DEGRADED_NAMES )
+	{
+		Q_strncpy( r_gc_degraded_names[r_gc_degraded_count], tex->name, sizeof( r_gc_degraded_names[0] ));
+		r_gc_degraded_kind[r_gc_degraded_count++] = (byte)kind;
+	}
+}
+
+static void R_GCNoteFailedLoad( image_t *tex )
+{
+	static int failed_logs;
+
+	r_gc_slots.failed++;
+	if( tex && failed_logs++ < 8 )
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: texture %s did not load (MEM1 heap %s): slot %d handed back, a later load retries it\n",
+			tex->name, Q_memprint( GC_MemHeapFreeBytes( )), (int)( tex - r_images ));
+}
+
+/* The table is full: world-pack slots registered for a pack that has since
+ * been released (an earlier map of a multi-map episode) hold no texels and no
+ * world surface points at them any more. Hand them back. Returns how many. */
+static int R_GCReclaimStaleSlots( void )
+{
+	uint i;
+	int n = 0;
+
+	for( i = 1; i < r_numImages; i++ )
+	{
+		image_t *tex = &r_images[i];
+
+		if( !tex->name[0] || tex->pixels[0] || tex->gc_packed_gen == r_gc_pack_gen )
+			continue;
+		if( !tex->gc_packed && !tex->gc_packed_aram )
+			continue;
+		R_GXForgetTexnum( i );
+		GL_GCUnlinkSlot( tex );
+		memset( tex, 0, sizeof( *tex ));
+		n++;
+	}
+	while( r_numImages > 1 && !r_images[r_numImages - 1].name[0] )
+		r_numImages--;
+	r_gc_slots.reclaimed += n;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: texture table full: %d stale world-pack slots reclaimed\n", n );
+	return n;
+}
+
+/* One line on the slot table and on every texture that came up short of
+ * MEM1, so a capture log says when a texture lost its texels or its slot. */
+void R_GCTextureSlotReport( const char *why )
+{
+	uint i, live = 0, packed = 0, stub = 0, short_mips = 0;
+	size_t bytes = 0;
+	char names[256];
+	int used = 0, k;
+
+	for( i = 1; i < r_numImages; i++ )
+	{
+		const image_t *tex = &r_images[i];
+
+		if( !tex->name[0] )
+			continue;
+		live++;
+		if( !tex->pixels[0] && ( tex->gc_packed || tex->gc_packed_aram ))
+			packed++;
+		bytes += tex->size;
+		if( tex->gc_degraded == 2 )
+			stub++;
+		else if( tex->gc_degraded == 1 )
+			short_mips++;
+	}
+	if( live > r_gc_slots.live_peak )
+		r_gc_slots.live_peak = live;
+	gEngfuncs.Con_Reportf( "Xash3D GameCube: texture slots (%s) live=%u/%d table=%u peak=%u packed=%u "
+		"degraded now=%u (2x2=%u short=%u) total degraded=%u failed=%u reclaimed=%u folded=%u resident=%s heap=%s\n",
+		why, live, MAX_TEXTURES, r_numImages, r_gc_slots.peak, packed,
+		stub + short_mips, stub, short_mips, r_gc_slots.degraded, r_gc_slots.failed,
+		r_gc_slots.reclaimed, r_gc_slots.folded, Q_memprint( bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
+	names[0] = 0;
+	for( k = 0; k < r_gc_degraded_count && used < (int)sizeof( names ) - 1; k++ )
+		used += Q_snprintf( names + used, sizeof( names ) - used, "%s%s%s",
+			k ? ", " : "", r_gc_degraded_names[k], r_gc_degraded_kind[k] == 2 ? " (2x2)" : "" );
+	if( names[0] )
+		gEngfuncs.Con_Reportf( S_WARN "Xash3D GameCube: textures short of MEM1: %s%s\n",
+			names, r_gc_slots.degraded > (uint)r_gc_degraded_count ? ", ..." : "" );
+	/* Each map's list starts over; the totals stay for the session. */
+	if( !Q_strcmp( why, "map loaded" ))
+		r_gc_degraded_count = 0;
+}
+
+static void R_GCTextureSlots_f( void )
+{
+	R_GCTextureSlotReport( "console" );
+}
+#endif
 
 /*
 ================
@@ -1638,6 +1883,7 @@ int GAME_EXPORT GL_LoadTexture( const char *name, const byte *buf, size_t size, 
 {
 	image_t *tex;
 	uint    picFlags = 0;
+	GC_FOLD_TEXNAME( name );
 
 	if( !buf && !size && name && !Q_strcmp( name, REF_DEFAULT_TEXTURE ) && !tr.defaultTexture
 		&& !GL_TextureForName( name ))
@@ -1715,6 +1961,9 @@ int GAME_EXPORT GL_LoadTexture( const char *name, const byte *buf, size_t size, 
 	tex = GL_AllocTexture( name, flags );
 	if( !GL_ProcessImage( tex, pic ) || !GL_UploadTexture( tex, pic ))
 	{
+#if XASH_GAMECUBE
+		R_GCNoteFailedLoad( tex );
+#endif
 		GL_DeleteTexture( tex );
 		gEngfuncs.FS_FreeImage( pic ); // release source texture
 		return 0;
@@ -1756,6 +2005,7 @@ int R_GCPackedTexture( const char *name, int width, int height, int levels, qboo
 	tex->gc_packed_levels = (byte)levels;
 	tex->gc_packed_alpha = (byte)alpha;
 	tex->gc_packed_queued = false;
+	tex->gc_packed_gen = r_gc_pack_gen;
 	return tex - r_images;
 }
 
@@ -1775,6 +2025,7 @@ int R_GCBakedCmprSkin( const char *name, const byte *texels, int width, int heig
 	const qboolean in_arena = r_gc_studio_skins_in_arena;
 	image_t *tex;
 	byte *dst;
+	GC_FOLD_TEXNAME( name );
 
 	if( !GL_CheckTexName( name ) || !texels || width < 8 || height < 8
 		|| ( width & 7 ) || ( height & 7 ) || width > 1024 || height > 1024 )
@@ -1833,6 +2084,9 @@ void R_GCPackedRelease( void )
 {
 	uint i;
 
+	if( ++r_gc_pack_gen == 0 )
+		r_gc_pack_gen = 1;
+
 	for( i = 0; i < r_numImages; i++ )
 	{
 		r_images[i].gc_packed = NULL;
@@ -1860,6 +2114,7 @@ GL_LoadTextureFromBuffer
 int GAME_EXPORT GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update )
 {
 	image_t *tex;
+	GC_FOLD_TEXNAME( name );
 
 	if( !GL_CheckTexName( name ))
 		return 0;
@@ -1892,7 +2147,17 @@ int GAME_EXPORT GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texF
 
 	if( !GL_ProcessImage( tex, pic ) || !GL_UploadTexture( tex, pic ))
 	{
+#if XASH_GAMECUBE
+		/* The slot is still linked in the hash table: zeroing it in place cut
+		 * the bucket's chain at this slot, so every texture hashed behind it
+		 * was no longer found by name and loaded again into a new slot (and
+		 * new MEM1) on its next request. Unlink and free it properly. */
+		R_GCNoteFailedLoad( tex );
+		R_GXForgetTexnum( tex - r_images );
+		GL_DeleteTexture( tex );
+#else
 		memset( tex, 0, sizeof( image_t ));
+#endif
 		return 0;
 	}
 
@@ -2002,6 +2267,7 @@ GL_FindTexture
 int GAME_EXPORT GL_FindTexture( const char *name )
 {
 	image_t *tex;
+	GC_FOLD_TEXNAME( name );
 
 	if( !GL_CheckTexName( name ))
 		return 0;
@@ -2254,6 +2520,9 @@ void R_InitImages( void )
 #endif
 	gEngfuncs.Cmd_AddCommand( "texturelist", R_TextureList_f, "display loaded textures list" );
 #if XASH_GAMECUBE
+	gEngfuncs.Cmd_AddCommand( "gc_texslots", R_GCTextureSlots_f, "texture slot table and textures short of MEM1" );
+#endif
+#if XASH_GAMECUBE
 	gEngfuncs.Con_Reportf( "Xash3D GameCube: renderer images command ready\n" );
 #endif
 }
@@ -2320,6 +2589,9 @@ R_ShutdownImages
 void R_ShutdownImages( void )
 {
 	gEngfuncs.Cmd_RemoveCommand( "texturelist" );
+#if XASH_GAMECUBE
+	gEngfuncs.Cmd_RemoveCommand( "gc_texslots" );
+#endif
 
 	image_t *tex;
 	int     i;
