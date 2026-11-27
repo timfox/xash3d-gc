@@ -6,11 +6,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMON = ROOT / "engine/common"
-SOURCES = ["vehicle.c", "vehicle_car.c", "vehicle_tank.c", "vehicle_flight.c"]
+SOURCES = ["vehicle.c", "vehicle_car.c", "vehicle_tank.c", "vehicle_aircraft.c"]
 
 
 class VehicleCoreTest(unittest.TestCase):
-    """Car, tank and flight physics plus the chase camera, on a fake world."""
+    """Glide car, tank, plane and helicopter physics plus the chase camera, on a fake world."""
 
     def _build_and_run(self, extra):
         compiler = shutil.which("cc")

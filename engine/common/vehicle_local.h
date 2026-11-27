@@ -101,33 +101,104 @@ static inline float veh_yaw_of( const float fwd[3] )
 	return atan2f( fwd[1], fwd[0] ) * VEH_RAD2DEG;
 }
 
-/* first-order rotations of the body basis by small angles (radians); the
- * basis is re-orthonormalised once a step by veh_orthonormalize */
-void veh_rotate_yaw_world( veh_t *v, float a );	// about world Z, CCW positive
-void veh_rotate_body( veh_t *v, float pitch, float roll, float yaw );	// nose up, right wing down, nose left
+/* Glide's units (see vehicle.h): wheel and engine forces are impulses applied
+ * once a Source physics tick; a torque from a force at a point is r x F with
+ * r and F in inches turned into VPhysics' kg m^2 degrees. */
+#define VEH_GLIDE_TICK		0.015f
+#define VEH_TORQUE_SCALE	( 0.0254f * 0.0254f * VEH_RAD2DEG )
+#define VEH_TAU			( 2.0f * VEH_PI )
+#define VEH_RADS_TO_RPM		( 60.0f / VEH_TAU )
+
+// what a step pushes the body with, gathered before one integration
+typedef struct veh_forces_s
+{
+	float	lin[3];		// world acceleration, units/s^2 (gravity is added later)
+	float	ang[3];		// local angular acceleration, deg/s^2: roll, pitch, yaw
+	float	drag[3];	// extra angular drag on top of ang_drag (negative, Glide units)
+	float	drag_mult[3];	// multiplier on ang_drag (Glide's GetYawDragMultiplier)
+} veh_forces_t;
+
+static inline float veh_sign( float x )
+{
+	return x > 0.0f ? 1.0f : ( x < 0.0f ? -1.0f : 0.0f );
+}
+
+// Glide.ExpDecay: b + (a - b) * e^(-decay * dt)
+static inline float veh_expdecay( float a, float b, float decay, float dt )
+{
+	return b + ( a - b ) * expf( -decay * dt );
+}
+
+static inline float veh_remap( float x, float a, float b, float c, float d )
+{
+	if( b == a )
+		return c;
+	return c + ( d - c ) * ( x - a ) / ( b - a );
+}
+
+static inline void veh_right( const veh_t *v, float out[3] )
+{
+	veh_scale( v->left, -1.0f, out );
+}
+
+// world vector to body (forward, left, up) components
+static inline void veh_to_local( const veh_t *v, const float w[3], float out[3] )
+{
+	float x = veh_dot( w, v->fwd ), y = veh_dot( w, v->left ), z = veh_dot( w, v->up );
+	out[0] = x; out[1] = y; out[2] = z;
+}
+
+// body rotation as a world vector, rad/s
+static inline void veh_angvel_world( const veh_t *v, float out[3] )
+{
+	float w[3];
+
+	veh_scale( v->fwd, v->angvel[0] * VEH_DEG2RAD, w );
+	veh_ma( w, v->angvel[1] * VEH_DEG2RAD, v->left, w );
+	veh_ma( w, v->angvel[2] * VEH_DEG2RAD, v->up, out );
+}
+
+// body: rigid body integration and forces (vehicle.c)
+void veh_point_velocity( const veh_t *v, const float point[3], float out[3] );
+// a Glide wheel-style force: an impulse every Source tick, at a world point
+void veh_add_tick_impulse( const veh_t *v, veh_forces_t *f, const float point[3], const float imp[3], float dt );
+// a one-off impulse now (Glide's phys:ApplyForceOffset), at a world point
+void veh_apply_impulse( veh_t *v, const float point[3], const float imp[3] );
+// a Glide per-mass torque (outAng += x * mass) about a body axis
+static inline void veh_add_torque( const veh_t *v, veh_forces_t *f, int axis, float per_mass )
+{
+	f->ang[axis] += per_mass / v->p->c.inertia[axis];
+}
 void veh_orthonormalize( veh_t *v );
-// tilt the body so up approaches target_up at rate (1/s), keeping heading
-void veh_align_up( veh_t *v, const float target_up[3], float rate, float dt );
 
-// ground vehicles: wheel rays, suspension, slope alignment; returns wheels down
-int veh_ground_probe( veh_t *v, const veh_ground_params_t *g, const veh_world_t *world, float dt );
-// throttle/brake/reverse along the body forward axis
-void veh_ground_drive( veh_t *v, const veh_ground_params_t *g, float throttle, float accel_scale, float speed_scale, float traction, float dt );
-// lateral grip: kill sideways speed by at most grip*dt
-void veh_ground_grip( veh_t *v, float grip, float traction, float dt );
+// wheels (vehicle.c): rays, suspension, traction; returns wheels on the ground
+int veh_wheels_physics( veh_t *v, veh_forces_t *f, const veh_world_t *world, float dt );
+// glide_wheel Update for wheels off the ground: torque spins the fake mass
+void veh_wheels_think( veh_t *v, float dt );
+// Glide's slow-speed slope hold (base_glide PhysicsSimulate)
+void veh_anti_slide( const veh_t *v, veh_forces_t *f, float dt );
+// distance to the ground below the vehicle, up to 10000 (aircraft altitude)
+float veh_altitude( const veh_t *v, const veh_world_t *world );
 
-// swept hull move with sliding, bounce and impact events
-void veh_slide_move( veh_t *v, const veh_world_t *world, float dt );
-
+void veh_body_integrate( veh_t *v, const veh_forces_t *f, const veh_world_t *world, float dt );
 void veh_track_ground_events( veh_t *v, int was_on_ground );
+
+// car engine, shared with the tank (vehicle_car.c)
+void veh_engine_defaults( veh_engine_params_t *e );
+float veh_gear_ratio( const veh_engine_params_t *e, int gear );
+void veh_car_think( veh_t *v, const veh_engine_params_t *e, const veh_input_t *in, float dt );
+void veh_car_wheels( veh_t *v, const veh_engine_params_t *e, const veh_input_t *in );
+float veh_car_yaw_drag( const veh_t *v );
+void veh_car_air( veh_t *v, const veh_engine_params_t *e, const veh_input_t *in, float dt );
 
 // type modules
 void Veh_CarDefaults( veh_car_params_t *p );
 void Veh_TankDefaults( veh_tank_params_t *p );
-void Veh_FlightDefaults( veh_flight_params_t *p );
-void Veh_CarStep( veh_t *v, const veh_input_t *in, const veh_world_t *world );
-void Veh_TankStep( veh_t *v, const veh_input_t *in, const veh_world_t *world );
-void Veh_FlightStep( veh_t *v, const veh_input_t *in, const veh_world_t *world );
-void Veh_GroundInitWheels( veh_t *v, const veh_ground_params_t *g );
+void Veh_PlaneDefaults( veh_plane_params_t *p );
+void Veh_HeliDefaults( veh_heli_params_t *p );
+void Veh_CarStep( veh_t *v, const veh_input_t *in, const veh_world_t *world, veh_forces_t *f, float dt );
+void Veh_TankStep( veh_t *v, const veh_input_t *in, const veh_world_t *world, veh_forces_t *f, float dt );
+void Veh_PlaneStep( veh_t *v, const veh_input_t *in, const veh_world_t *world, veh_forces_t *f, float dt );
+void Veh_HeliStep( veh_t *v, const veh_input_t *in, const veh_world_t *world, veh_forces_t *f, float dt );
 
 #endif // VEHICLE_LOCAL_H
