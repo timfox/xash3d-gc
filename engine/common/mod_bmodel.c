@@ -3888,6 +3888,19 @@ static void Mod_MakeHull0( model_t *mod, const dbspmodel_t *bmod )
 				Con_Reportf( "Xash3D GameCube: world hull0 using static normalized reserve %s\n",
 					Q_memprint( hull0_bytes ));
 			}
+			/* A world with more nodes than the hull-0 reserve (MOHAA's m6l1c, m6l2a, m6l3a, m6l3c: 16.4k to
+			 * 19.1k) would need 130-150 KiB of heap here, which a loaded map no longer has. When hulls 1-3 sit
+			 * in the static clipnode table with room to spare behind them, hull 0 goes into that tail. */
+			if( !out && bmod->isworld && mod->clipnodes16 == gc_static_clipnodes && mod->numclipnodes > 0 )
+			{
+				const size_t first = ((size_t)mod->numclipnodes + 3u ) & ~(size_t)3u;	/* 32-byte aligned */
+				if( first + (size_t)mod->numnodes <= GC_STATIC_CLIPNODE_CAPACITY )
+				{
+					out = gc_static_clipnodes + first;
+					Con_Reportf( "Xash3D GameCube: world hull0 (%d nodes) using the static clipnode table tail %s\n",
+						mod->numnodes, Q_memprint( hull0_bytes ));
+				}
+			}
 #endif
 			if( !out )
 				out = Mem_Malloc( mod->mempool, mod->numnodes * sizeof( *hull->clipnodes16 ));
