@@ -2009,6 +2009,9 @@ def wt_wad_search_roots(source: Path) -> list[Path]:
 	# Dataset fallback used by local ISO builds.
 	add(Path("/mnt/datasets/dodgc-iso-build/dod"))
 	add(Path("/mnt/datasets/dodgc-iso-build/valve"))
+	# The prop bake's Valve tree (build_prop_packs): halflife.wad holds water
+	# DoD maps name (dod_merderet's !watergreen) when no valve/ sits beside dod.
+	add(Path("/home/tim/Desktop/dod-gc/content/valve"))
 	return roots
 
 
@@ -2452,8 +2455,11 @@ def build_world_texture_packs(
 	map_stems: set[str] | None = None,
 ) -> list[tuple[str, Path]]:
 	"""media/wt_<map>.gct: each map's world textures as GX CMPR with mip
-	chains, read in one go by the engine (mod_bmodel.c). Water and sky keep the
-	engine's own path, except MOHAA's water, which has none and is packed too."""
+	chains, read in one go by the engine (mod_bmodel.c). Sky keeps the engine's
+	own path. Water ("!" / "*") is packed for MOHAA and Day of Defeat maps: the
+	engine prefers the pack for water too, and the lean disc stages neither
+	MOHAA's water shaders nor halflife.wad (dod_merderet's !watergreen), so
+	without the pack those faces drew the pink/black checker."""
 	try:
 		import numpy  # noqa: F401
 		from PIL import Image  # noqa: F401
@@ -2466,10 +2472,11 @@ def build_world_texture_packs(
 	media.mkdir(parents=True, exist_ok=True)
 	total = 0
 	missed_total = 0
-	keep_water = source.name.lower() == "mohaa"
+	keep_water_game = source.name.lower() == "mohaa"
 	for bsp in sorted((source / "maps").glob("*.bsp")):
 		if map_stems is not None and bsp.stem.lower() not in map_stems:
 			continue
+		keep_water = keep_water_game or bsp.stem.lower().startswith("dod_")
 		rel = f"media/wt_{bsp.stem.lower()}.gct"
 		# Preserve host-prebaked GCWT packs (e.g. Lost Coast Source→GX bake).
 		# Re-deriving from a GoldSrc stub BSP would clobber CMPR world textures.
@@ -2537,8 +2544,9 @@ def build_world_texture_packs(
 				continue
 			raw = struct.unpack_from("<16s", data, off + o)[0]
 			name = raw.split(b"\0")[0].decode("latin-1").lower()
-			# MOHAA water ("!" textures from its own water shaders) has no packed water sheet and no other
-			# texture path, so it comes in the pack too (m2l2a's harbour drew the pink/black checker)
+			# MOHAA and DoD water has no packed water sheet and, on a lean disc, no WAD to load from
+			# (MOHAA's water shaders; dod_merderet's !watergreen lives in halflife.wad, which is read here
+			# at bake time but never staged), so it comes in the pack too, or it draws the pink/black checker
 			water_name = name[:1] in ("!", "*")
 			if name in seen or ( water_name and not keep_water ) or name.startswith("sky"):
 				continue
