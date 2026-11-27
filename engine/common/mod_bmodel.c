@@ -3901,6 +3901,14 @@ static void Mod_MakeHull0( model_t *mod, const dbspmodel_t *bmod )
 						mod->numnodes, Q_memprint( hull0_bytes ));
 				}
 			}
+			/* Neither (m6l2a: 19127 nodes beside 19856 clipnodes): the world array spill, where the raw BSP
+			 * nodes were just reclaimed from, usually has the room. It lives as long as the map, as hull 0 must. */
+			if( !out && bmod->isworld )
+			{
+				out = (mclipnode16_t *)Mod_GCWorldArraySpillAlloc( hull0_bytes, "hull0" );
+				if( out )
+					Con_Reportf( "Xash3D GameCube: world hull0 (%d nodes) using the world array spill\n", mod->numnodes );
+			}
 #endif
 			if( !out )
 				out = Mem_Malloc( mod->mempool, mod->numnodes * sizeof( *hull->clipnodes16 ));
