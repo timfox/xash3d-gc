@@ -1793,6 +1793,32 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 	return 0;
 }
 
+/* Where a film vehicle (a film-tagged models/film/ or mapmodels/ entity) stops on its way to the
+ * draw list, on every change and once a second: ep02 s125's Panzer and Sherman were loaded, placed
+ * and skinned from the start but drew only from 70-80% of the shot (ceres proof4/proof5). */
+static void CL_GCFilmPropTrace( int e, const edict_t *ed, const model_t *mod, const char *gate )
+{
+	static struct { int e; const char *gate; double next; } memo[8];
+	int i, slot = -1;
+
+	if( !ed || ed->v.iuser4 != 0x46494C4D /* GC_FILM_ACTOR_TAG, defined below */ || !mod || !Mod_GCIsPropModelPath( mod->name ))
+		return;
+	for( i = 0; i < 8; i++ )
+		if( memo[i].e == e || ( slot < 0 && !memo[i].e ))
+			slot = i;
+	if( slot < 0 )
+		slot = e & 7;
+	if( memo[slot].e == e && memo[slot].gate == gate && host.realtime < memo[slot].next )
+		return;
+	memo[slot].e = e;
+	memo[slot].gate = gate;
+	memo[slot].next = host.realtime + 1.0;
+	Con_Reportf( "Xash3D GameCube: film prop %d %s: %s org=(%.0f %.0f %.0f) abs=(%.0f %.0f %.0f)-(%.0f %.0f %.0f) view=(%.0f %.0f %.0f)\n",
+		e, mod->name, gate, ed->v.origin[0], ed->v.origin[1], ed->v.origin[2], ed->v.absmin[0], ed->v.absmin[1],
+		ed->v.absmin[2], ed->v.absmax[0], ed->v.absmax[1], ed->v.absmax[2], refState.vieworg[0],
+		refState.vieworg[1], refState.vieworg[2]);
+}
+
 static void CL_GCLeanPick( int *picks, float *dists, int *n, int cap, int id, float dist )
 {
 	int slot, worst = 0;
@@ -2661,6 +2687,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			scan_studio++;
 			if( mod->needload != NL_PRESENT || !mod->name[0] || !mod->cache.data )
 			{
+				CL_GCFilmPropTrace( e, ed, mod, "not resident" );
 				scan_studio_skip++;
 				continue;
 			}
@@ -2722,6 +2749,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			dist = VectorLength( delta );
 			if( dist > studio_max_dist )
 			{
+				CL_GCFilmPropTrace( e, ed, mod, "too far" );
 				scan_studio_skip++;
 				continue;
 			}
@@ -2746,6 +2774,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				if( !mohaa_script_asset
 					&& !R_GXWorldDLEntityVisible( e, bmin, bmax ))
 				{
+					CL_GCFilmPropTrace( e, ed, mod, "world DL not visible" );
 					scan_studio_skip++;
 					continue;
 				}
@@ -2768,6 +2797,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			 * of the men: ep02 s125's Panzer, behind a crowd of 30 nearer film
 			 * actors with 26 studio slots, lost its slot until the end of the
 			 * shot, when the camera had fewer men in view. */
+			CL_GCFilmPropTrace( e, ed, mod, "candidate" );
 			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e,
 				is_film ? ( Mod_GCIsPropModelPath( mod->name ) ? -1.0f : dist * 0.001f ) : dist );
 		}
@@ -2957,9 +2987,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			GC_LeanMoveLatch( ent );
 			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			{
+				CL_GCFilmPropTrace( picks[slot], ed, mod, "added" );
 				studios++;
 				studio_slots++;
 			}
+			else
+				CL_GCFilmPropTrace( picks[slot], ed, mod, "R_AddEntity refused" );
 		}
 		GC_ProfMark( "render: lean emit studio scan" );
 		/* Other players and bots. The scan above starts after the client slots
