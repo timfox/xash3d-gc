@@ -17702,6 +17702,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	int i;
 	static char gc_render_map_log[32];
 	qboolean cine_owns_eye = false;
+	qboolean vehicle_owns_eye = false;
 
 	/* Peer BBA join (-gcconnect) has no local SV — use client world. */
 	if( !ref.initialized || ( !SV_Active() && !Sys_CheckParm( "-gcconnect" )) )
@@ -18335,6 +18336,9 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 				gc_newgame_viewcluster, leaves, look_len );
 		}
 	}
+	/* Driving an engine vehicle (cl_vehicle.c): its chase camera owns the eye
+	 * and the PVS, as a cinematic shot does; a playing shot still wins. */
+	vehicle_owns_eye = CL_VehicleView( center, rvp.viewangles );
 	/* A playing cinematic shot (cl_cine.c) owns the eye on this route too,
 	 * after every probe aim above, and its PVS follows the camera. */
 	{
@@ -18354,7 +18358,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	/* G89: select multi-cluster PVS for camera; prove two-cluster switch once.
 	 * G199: during Flipper wall-aim, densest-cluster prove rewrites outdoor caps
 	 * back to indoor (drawn≈19). Keep outdoor refresh sticky until aim ends. */
-	if( !gc_dump_look_into_map || cine_owns_eye )
+	if( !gc_dump_look_into_map || cine_owns_eye || vehicle_owns_eye )
 	{
 		GC_UpdateNewGamePVSForOrigin( center );
 		GC_ProveNewGamePVSFollow();
@@ -18380,7 +18384,7 @@ qboolean GC_RenderNewGameWorldFrames( int count )
 	/* G149: dump/landmark path may force viewmodel on for DumpFrames evidence.
 	 * CapFaces listen gameplay also needs the first-person weapon mesh. */
 	{
-		const qboolean want_vm = !( cine_owns_eye && CL_CineHideViewModel( ))
+		const qboolean want_vm = !( cine_owns_eye && CL_CineHideViewModel( )) && !vehicle_owns_eye
 			&& ( gc_force_draw_viewmodel
 				|| ( Sys_CheckParm( "-gcworldrender" ) && Sys_CheckParm( "-gcplayerinput" )
 					&& cls.state == ca_active && cls.signon == SIGNONS ));

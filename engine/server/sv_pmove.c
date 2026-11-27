@@ -1174,6 +1174,12 @@ void SV_RunCmd( sv_client_t *cl, usercmd_t *ucmd, int random_seed )
 		}
 	}
 #endif
+	if( SV_VehicleRunCmd( cl, &cmd, (float)frametime ))
+	{
+		// a vehicle (sv_vehicle.c) moved its driver: no player movement this cmd
+		svgame.pmove->numtouch = 0;
+	}
+	else
 #if XASH_GAMECUBE
 	/* CapFaces remaps world clipnodes; PM_CatagorizePosition → PlayerTrace →
 	 * RecursiveHullCheck DSI after spawn (solo listen 20261107-123152). Keep
