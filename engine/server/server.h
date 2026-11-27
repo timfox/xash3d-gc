@@ -835,4 +835,20 @@ extern gc_static_prop_t gc_static_props[GC_STATIC_PROPS_MAX];
 extern int gc_num_static_props;
 #endif
 
+//
+// sv_vehicle.c
+//
+#include "vehicle.h"
+#if XASH_VEHICLES
+void SV_VehicleInit( void );
+qboolean SV_VehicleRunCmd( sv_client_t *cl, const usercmd_t *ucmd, float frametime );
+void SV_VehicleFrame( float frametime );
+qboolean SV_VehicleClientCommand( sv_client_t *cl );
+#else
+static inline void SV_VehicleInit( void ) { }
+static inline qboolean SV_VehicleRunCmd( sv_client_t *cl, const usercmd_t *ucmd, float frametime ) { (void)cl; (void)ucmd; (void)frametime; return false; }
+static inline void SV_VehicleFrame( float frametime ) { (void)frametime; }
+static inline qboolean SV_VehicleClientCommand( sv_client_t *cl ) { (void)cl; return false; }
+#endif
+
 #endif//SERVER_H

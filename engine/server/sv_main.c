@@ -1053,6 +1053,7 @@ void SV_Init( void )
 #endif
 
 	SV_InitHostCommands();
+	SV_VehicleInit();
 
 	Cvar_Getf( "protocol", FCVAR_READ_ONLY, "displays server protocol version", "%i", PROTOCOL_VERSION );
 	Cvar_Get( "suitvolume", "0.25", FCVAR_ARCHIVE, "HEV suit volume" );

@@ -2841,6 +2841,9 @@ void SV_Physics( void )
 	}
 #endif
 
+	// empty vehicles coast and settle; driven ones step with their driver's usercmds
+	SV_VehicleFrame( sv.frametime );
+
 	if( svgame.globals->force_retouch != 0.0f )
 		svgame.globals->force_retouch--;
 

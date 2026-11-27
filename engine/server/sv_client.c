@@ -3669,6 +3669,10 @@ static void SV_ExecuteClientCommand( sv_client_t *cl, const char *s )
 				return;
 		}
 
+		// engine vehicles (sv_vehicle.c), in every game
+		if( SV_VehicleClientCommand( cl ))
+			return;
+
 		// custom client commands
 		svgame.dllFuncs.pfnClientCommand( cl->edict );
 

@@ -738,6 +738,20 @@ static void V_ApplyCineCamera( ref_viewpass_t *rvp )
 
 /*
 ==================
+V_ApplyVehicleCamera
+
+driving an engine vehicle (cl_vehicle.c): the chase camera owns the eye
+==================
+*/
+static void V_ApplyVehicleCamera( ref_viewpass_t *rvp )
+{
+	if( !CL_VehicleView( rvp->vieworigin, rvp->viewangles ))
+		return;
+	clgame.viewent.model = NULL;
+}
+
+/*
+==================
 V_RenderView
 
 ==================
@@ -787,7 +801,10 @@ void V_RenderView( void )
 
 		V_GetRefParams( &rp, &rvp );
 		if( viewnum == 0 )
-			V_ApplyCineCamera( &rvp );
+		{
+			V_ApplyVehicleCamera( &rvp );
+			V_ApplyCineCamera( &rvp );	// a cinematic shot wins over the vehicle camera
+		}
 		V_RefApplyOverview( &rvp );
 		V_ApplyRefUnderwater( &rvp );
 

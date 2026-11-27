@@ -1034,6 +1034,22 @@ qboolean CL_CineView( vec3_t org, vec3_t ang, float *fov );
 qboolean CL_CineHideHUD( void );
 qboolean CL_GCCaptureMode( void );
 qboolean CL_CineHideViewModel( void );
+
+//
+// cl_vehicle.c
+//
+#include "vehicle.h"
+#if XASH_VEHICLES
+void CL_VehicleInit( void );
+qboolean CL_VehicleActive( void );
+qboolean CL_VehicleHideViewModel( void );
+qboolean CL_VehicleView( vec3_t org, vec3_t ang );
+#else
+static inline void CL_VehicleInit( void ) { }
+static inline qboolean CL_VehicleActive( void ) { return false; }
+static inline qboolean CL_VehicleHideViewModel( void ) { return false; }
+static inline qboolean CL_VehicleView( vec3_t org, vec3_t ang ) { (void)org; (void)ang; return false; }
+#endif
 void CL_CineDraw2D( void );
 #if XASH_GAMECUBE
 qboolean V_RenderViewBoundedGC( void );
