@@ -2764,8 +2764,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 			/* Insert into nearest-N picks. A film actor is what the shot is
-			 * about: it goes ahead of every map prop. */
-			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, is_film ? dist * 0.001f : dist );
+			 * about: it goes ahead of every map prop. A film vehicle goes ahead
+			 * of the men: ep02 s125's Panzer, behind a crowd of 30 nearer film
+			 * actors with 26 studio slots, lost its slot until the end of the
+			 * shot, when the camera had fewer men in view. */
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e,
+				is_film ? ( Mod_GCIsPropModelPath( mod->name ) ? -1.0f : dist * 0.001f ) : dist );
 		}
 		/* Static props (unnamed env_model / dod_object, no edict). */
 		for( e = 0; e < gc_num_static_props; e++ )
