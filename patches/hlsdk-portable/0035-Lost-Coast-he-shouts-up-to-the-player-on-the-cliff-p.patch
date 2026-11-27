@@ -1,0 +1,217 @@
+From de0a3695921719e96312655ff7ded427467dcb1f Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 26 Nov 2026 20:41:14 -0800
+Subject: [PATCH] Lost Coast: he shouts up to the player on the cliff path
+
+The map's other triggers of his scenes, lc_cueN from the bake: a
+trigger_once (lcs_fisherman_cliffclimb02) and a trigger_look on the
+rappelling soldiers' rope (lcs_fisherman_cliffclimb01). As Source's
+trigger_look, the player has to look at the target within the cosine for
+LookTime; once Timeout has run out it fires OnTimeout, which this map
+connects to nothing. A cue waits until he has sat down after the gate
+scene. Under -lcgatetest each cue plays in turn after the gate scene.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/lostcoast_npcs.cpp | 125 +++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 124 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 6b084b54..75057382 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -299,11 +299,12 @@ void CLCSeagull::GullThink( void )
+ #define LC_MAX_EVENTS	40	// in one scene
+ // (the map has 21 scenes of 109 events: static data is heap on the GameCube,
+ // and the engine spawns no actor at all once less than 8 KB of it is left)
+-#define LC_EVENT_POOL	120	// in all of them
++#define LC_EVENT_POOL	128	// in all of them (with his two cliff shouts, 115)
+ #define LC_MAX_SCENES	24	// intro, keys and every scene of the talker's concepts
+ #define LC_MAX_NODES	448	// the map has 438 (the route search keeps 11 bytes a node)
+ #define LC_MAX_LINKS	4096
+ #define LC_MAX_ROUTE	64
++#define LC_MAX_CUES	4	// the map's other triggers of his scenes (2: the cliff shouts)
+ 
+ enum { LCE_SPEAK, LCE_LOOKAT, LCE_FACE, LCE_MOVETO, LCE_GESTURE, LCE_FLEX, LCE_SEQUENCE, LCE_HINGE, LCE_BODY };
+ 
+@@ -329,6 +330,19 @@ typedef struct
+ 	lc_event_t	*ev;	// in g_lcEvents
+ } lc_scene_t;
+ 
++// A trigger_once or trigger_look of the map that starts one of his scenes
++// and nothing else (lc_cueN from the bake): the box, and for a look
++// trigger the target the player has to look at, the cosine he must look
++// within, for how long, and how long after he walks in it gives up.
++typedef struct
++{
++	float		box[6];
++	float		look[3], fov, looktime, timeout;
++	float		touched, looked;
++	string_t	scene;
++	BOOL		pending, done;
++} lc_cue_t;
++
+ // One fisherman per map: keep the bulky data out of entity private memory.
+ static lc_scene_t	g_lcScenes[LC_MAX_SCENES];
+ // The scenes share one run of events: forty to each scene was 13 KB for the
+@@ -730,6 +744,10 @@ private:
+ 	int		m_nRoute, m_iRoute;
+ 	float		m_flNextTalk;
+ 	float		m_flTest;
++	lc_cue_t	m_cue[LC_MAX_CUES];
++	int		m_nCues, m_iCueLook;	// m_iCueLook: the cue a probe's player stands in
++	float		m_flCueTest;		// -lcgatetest: when the probe fires the next cue
++	void RunCues( CBaseEntity *pl );
+ };
+ 
+ LINK_ENTITY_TO_CLASS( monster_lc_fisherman, CLCFisherman )
+@@ -799,6 +817,23 @@ void CLCFisherman::KeyValue( KeyValueData *pkvd )
+ 		m_iszScene = ALLOC_STRING( pkvd->szValue );
+ 		pkvd->fHandled = TRUE;
+ 	}
++	else if( !strncmp( pkvd->szKeyName, "lc_cue", 6 ) && m_nCues < LC_MAX_CUES )
++	{
++		lc_cue_t *c = &m_cue[m_nCues];
++		char scene[96];
++		float *b = c->box;
++		int n = sscanf( pkvd->szValue, "%f %f %f %f %f %f %95s %f %f %f %f %f %f", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5],
++			scene, &c->look[0], &c->look[1], &c->look[2], &c->fov, &c->looktime, &c->timeout );
++
++		if( n == 7 || n == 13 )
++		{
++			if( n == 7 )
++				c->fov = 0.0f; // a plain trigger_once
++			c->scene = ALLOC_STRING( scene );
++			m_nCues++;
++		}
++		pkvd->fHandled = TRUE;
++	}
+ 	else if( FStrEq( pkvd->szKeyName, "lc_nodes" ))
+ 	{
+ 		m_iszNodes = ALLOC_STRING( pkvd->szValue );
+@@ -851,6 +886,8 @@ void CLCFisherman::Precache( void )
+ 		LC_LoadScene( STRING( m_iszScene ));
+ 	if( !FStringNull( m_iszGateScene ))
+ 		LC_LoadScene( STRING( m_iszGateScene ));
++	for( int i = 0; i < m_nCues; i++ )
++		LC_LoadScene( STRING( m_cue[i].scene ));
+ 	if( !FStringNull( m_iszTalker ))
+ 	{
+ 		int len = 0;
+@@ -933,6 +970,7 @@ void CLCFisherman::Spawn( void )
+ 	// A probe of the gate scene with nobody at the controls: he starts at
+ 	// the lead's goal and the scene starts by itself.
+ 	m_flGateTest = 0.0f;
++	m_iCueLook = -1;
+ 	if( LC_BootSwitch( "lcgatetest" ) && m_bHaveLead )
+ 	{
+ 		UTIL_SetOrigin( pev, m_vLeadGoal );
+@@ -969,6 +1007,13 @@ Vector CLCFisherman::PlayerPos( void )
+ {
+ 	CBaseEntity *pl = Player();
+ 
++	if( m_flTest != 0.0f && m_iCueLook >= 0 )
++	{
++		// a probe of a cue: the player stands in the middle of its trigger
++		const float *b = m_cue[m_iCueLook].box;
++
++		return Vector(( b[0] + b[3] ) * 0.5f, ( b[1] + b[4] ) * 0.5f, b[2] + 36.0f );
++	}
+ 	if( m_flTest != 0.0f && m_bHaveTrigger )
+ 	{
+ 		// the edge of the trigger where he would walk in from where he is
+@@ -1441,6 +1486,83 @@ void CLCFisherman::RunLead( float interval )
+ 		m_iRoute++;
+ }
+ 
++// The map's other triggers of his scenes: his shouts up the cliff to the
++// player (trigger_once, and a trigger_look on the rappelling soldiers'
++// rope). As Source's trigger_look: the player has to look within the
++// cosine at the target for looktime seconds; once the timeout from when he
++// walked in has run out the trigger fires OnTimeout instead, which this map
++// connects to nothing, so the scene does not play. A cue that fires while he
++// is busy with his gate scene plays when it is over.
++void CLCFisherman::RunCues( CBaseEntity *pl )
++{
++	float now = gpGlobals->time;
++
++	for( int i = 0; i < m_nCues; i++ )
++	{
++		lc_cue_t *c = &m_cue[i];
++		BOOL in = FALSE;
++
++		if( c->done )
++			continue;
++		if( m_flGateTest > 0 )
++		{
++			// the gate probe: after the gate scene, each cue in turn, the
++			// player taken to stand in it (and to look where it wants)
++			if( !c->pending && m_bGateDone && m_state == FS_DONE )
++			{
++				if( m_flCueTest == 0.0f )
++					m_flCueTest = now + 4.0f;
++				if( now >= m_flCueTest )
++				{
++					c->pending = TRUE;
++					m_iCueLook = i;
++					m_flCueTest = now + 8.0f;
++				}
++			}
++		}
++		else if( pl && !c->pending )
++		{
++			const Vector &o = pl->pev->origin;
++
++			in = o.x >= c->box[0] && o.y >= c->box[1] && o.z >= c->box[2] - 36
++				&& o.x <= c->box[3] && o.y <= c->box[4] && o.z <= c->box[5] + 36;
++			if( !in )
++				c->touched = c->looked = 0.0f;
++			else if( c->fov <= 0.0f )
++				c->pending = TRUE;
++			else
++			{
++				Vector eye = o + pl->pev->view_ofs;
++				Vector d = ( Vector( c->look[0], c->look[1], c->look[2] ) - eye ).Normalize();
++
++				if( c->touched == 0.0f )
++					c->touched = now;
++				if( c->timeout > 0 && now - c->touched > c->timeout )
++				{
++					c->done = TRUE; // OnTimeout
++					ALERT( at_console, "Lost Coast: look trigger for %s timed out\n", STRING( c->scene ));
++					continue;
++				}
++				UTIL_MakeVectors( pl->pev->v_angle );
++				if( DotProduct( d, gpGlobals->v_forward ) < c->fov )
++					c->looked = 0.0f;
++				else if( c->looked == 0.0f )
++					c->looked = now;
++				else if( now - c->looked >= c->looktime )
++					c->pending = TRUE;
++			}
++		}
++		// (not over the gate scene itself, nor before he has sat down)
++		if( c->pending && m_bGateDone && !m_pszPost && ( m_state == FS_DONE
++			|| ( m_state == FS_SCENE && m_pScene != LC_LoadScene( STRING( m_iszGateScene )))))
++		{
++			c->done = TRUE;
++			m_pScene = NULL;
++			StartScene( LC_LoadScene( STRING( c->scene )));
++		}
++	}
++}
++
+ void CLCFisherman::FishThink( void )
+ {
+ 	float interval = gpGlobals->time - m_flLast;
+@@ -1524,6 +1646,7 @@ void CLCFisherman::FishThink( void )
+ 				m_flNagNext = 0; // OnEndTouch: the speaker is turned off
+ 		}
+ 	}
++	RunCues( pl );
+ 	switch( m_state )
+ 	{
+ 	case FS_WAIT:
+-- 
+2.53.0
+
