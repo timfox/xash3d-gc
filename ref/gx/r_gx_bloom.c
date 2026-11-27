@@ -862,6 +862,7 @@ static qboolean gc_fog_on;
 static char gc_mapfog_name[64];
 static float gc_mapfog_end;
 static GXColor gc_mapfog_col = { 51, 51, 77, 255 };
+static cvar_t *gc_scriptfog_cvar, *gc_scriptfog_col_cvar;	/* found again on each map */
 
 static const char *R_GXWorldspawnValue( const char *ents, const char *end, const char *key )
 {
@@ -917,6 +918,34 @@ float R_GXMapFarplane( void )
 				gEngfuncs.Con_Reportf( "Xash3D GameCube: map farplane %.0f colour %u %u %u\n", fp,
 					gc_mapfog_col.r, gc_mapfog_col.g, gc_mapfog_col.b );
 			}
+		}
+		gc_scriptfog_cvar = gEngfuncs.pfnGetCvarPointer( "mohaa_farplane" );
+		gc_scriptfog_col_cvar = gEngfuncs.pfnGetCvarPointer( "mohaa_farplane_color" );
+	}
+	/* A MOHAA level script's "$world farplane N" / "farplane_color (r g b)" (dod-gc sets these cvars, already in
+	 * map units; -1 = the script set none): m3l1a thickens the beach fog as the boats come in, 15 maps set it so. */
+	if( gc_scriptfog_cvar && gc_scriptfog_cvar->value >= 0.0f )
+	{
+		static float logged_end = -2.0f;
+
+		gc_mapfog_end = gc_scriptfog_cvar->value >= 64.0f ? gc_scriptfog_cvar->value : 0.0f;
+		if( gc_scriptfog_col_cvar && gc_scriptfog_col_cvar->string && gc_scriptfog_col_cvar->string[0] )
+		{
+			char *next = (char *)gc_scriptfog_col_cvar->string;
+			float rgb[3];
+			int k;
+
+			for( k = 0; k < 3; k++ )
+				rgb[k] = (float)strtod( next, &next );
+			gc_mapfog_col.r = (u8)( bound( 0.0f, rgb[0], 1.0f ) * 255.0f + 0.5f );
+			gc_mapfog_col.g = (u8)( bound( 0.0f, rgb[1], 1.0f ) * 255.0f + 0.5f );
+			gc_mapfog_col.b = (u8)( bound( 0.0f, rgb[2], 1.0f ) * 255.0f + 0.5f );
+		}
+		if( logged_end != gc_mapfog_end )
+		{
+			logged_end = gc_mapfog_end;
+			gEngfuncs.Con_Reportf( "Xash3D GameCube: script farplane %.0f colour %u %u %u\n", gc_mapfog_end,
+				gc_mapfog_col.r, gc_mapfog_col.g, gc_mapfog_col.b );
 		}
 	}
 	return gc_mapfog_end;
