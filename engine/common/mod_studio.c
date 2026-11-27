@@ -2624,7 +2624,8 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 			/* MOHAA runs at gc_quality 0, which strips studio skins; its
 			 * mission vehicles and cast (m1l1's trucks, the German private)
 			 * drew as untextured grey without them. */
-			if( Q_stristr( mod->name, "models/vehicles/" ) || Q_stristr( mod->name, "models/human/" ))
+			if( Q_stristr( mod->name, "models/vehicles/" ) || Q_stristr( mod->name, "models/human/" )
+				|| Q_stristr( mod->name, "models/statweapons/" ))	/* the turrets' MG42 */
 				boss_skins = true;
 #endif
 			skip_studio_textures = Mod_GCStudioPreEntityMeshOnly()
