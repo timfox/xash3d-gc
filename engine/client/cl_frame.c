@@ -2628,7 +2628,8 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			mohaa_script_asset = Q_stristr( mod->name, "models/vehicles/" )
 				|| Q_stristr( mod->name, "models/human/" )
 				|| Q_stristr( mod->name, "models/animal/" )
-				|| Q_stristr( mod->name, "models/statweapons/" );
+				|| Q_stristr( mod->name, "models/statweapons/" )
+				|| Q_stristr( mod->name, "models/miscobj/" );	/* spotlight.scr's searchlights */
 #else
 			mohaa_script_asset = false;
 #endif

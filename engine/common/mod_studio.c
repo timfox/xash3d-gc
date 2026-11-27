@@ -2625,7 +2625,8 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 			 * mission vehicles and cast (m1l1's trucks, the German private)
 			 * drew as untextured grey without them. */
 			if( Q_stristr( mod->name, "models/vehicles/" ) || Q_stristr( mod->name, "models/human/" )
-				|| Q_stristr( mod->name, "models/statweapons/" ))	/* the turrets' MG42 */
+				|| Q_stristr( mod->name, "models/statweapons/" )	/* the turrets' MG42 */
+				|| Q_stristr( mod->name, "models/miscobj/" ))	/* the searchlights */
 				boss_skins = true;
 #endif
 			skip_studio_textures = Mod_GCStudioPreEntityMeshOnly()
