@@ -4905,6 +4905,7 @@ static void Mod_LoadVertexes( model_t *mod, dbspmodel_t *bmod )
 #if XASH_GAMECUBE
 #define GC_WORLD_ARRAY_HOLE_FIRST_BYTES ( 64u * 1024u )
 #define GC_WORLD_ARRAY_HEAP_KEEP        ( 512u * 1024u )	/* heap a large world array must leave, else a hole first */
+#define GC_TEXINFO_PIN_HEAP_KEEP        ( 160u * 1024u )	/* heap the texinfo pin copy must leave, else the high carve */
 #endif
 
 /* World arrays the GameCube heap may be too fragmented to hold after a few
@@ -9703,8 +9704,12 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		 * leave the heap short takes the high carve, as it did whenever the
 		 * heap could not hold it (dod_charlie 156 KiB: heap-owned after #547
 		 * freed BSS, 37 KiB less heap after load and allied_gibs.mdl failed). */
+		/* Only when the heap could not spare it: the high carve takes the
+		 * end of the map-load buffer that the leaf spill and the entity text
+		 * use later (dod_avalanche, 81 KiB texinfo with 293 KiB of heap: a
+		 * carve sent its 143 KiB of leafs back to the disc and cost 71 KiB). */
 		const qboolean carve_first = texinfo_bytes >= GC_WORLD_ARRAY_HOLE_FIRST_BYTES
-			&& GC_MemHeapFreeBytes() < texinfo_bytes + GC_WORLD_ARRAY_HEAP_KEEP;
+			&& GC_MemHeapFreeBytes() < texinfo_bytes + GC_TEXINFO_PIN_HEAP_KEEP;
 
 		pinned = NULL;
 		if( !carve_first )
