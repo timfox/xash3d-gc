@@ -9699,20 +9699,34 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		size_t texinfo_bytes = mod->numtexinfo * sizeof( mtexinfo_t );
 		qboolean texinfo_heap_owned = false;
 
-		GC_WatchdogStage( "texinfo pin malloc" );
-		pinned = malloc( texinfo_bytes );
-		GC_WatchdogStage( "texinfo pin copy" );
-		if( pinned )
+		/* Same rule as Mod_GCWorldArrayTryAlloc: a large texinfo that would
+		 * leave the heap short takes the high carve, as it did whenever the
+		 * heap could not hold it (dod_charlie 156 KiB: heap-owned after #547
+		 * freed BSS, 37 KiB less heap after load and allied_gibs.mdl failed). */
+		const qboolean carve_first = texinfo_bytes >= GC_WORLD_ARRAY_HOLE_FIRST_BYTES
+			&& GC_MemHeapFreeBytes() < texinfo_bytes + GC_WORLD_ARRAY_HEAP_KEEP;
+
+		pinned = NULL;
+		if( !carve_first )
 		{
-			memcpy( pinned, mod->texinfo, texinfo_bytes );
-			texinfo_heap_owned = true;
-		}
+			GC_WatchdogStage( "texinfo pin malloc" );
+			pinned = malloc( texinfo_bytes );
+			GC_WatchdogStage( "texinfo pin copy" );
+			if( pinned )
+			{
+				memcpy( pinned, mod->texinfo, texinfo_bytes );
+				texinfo_heap_owned = true;
+			}
 			else
 			{
 				pinned = Mem_TryMalloc( mod->mempool, texinfo_bytes );
 				if( pinned )
 					memcpy( pinned, mod->texinfo, texinfo_bytes );
 			}
+		}
+		else
+			Con_Reportf( "Xash3D GameCube: texinfo %s kept off the heap (heap %s)\n",
+				Q_memprint( texinfo_bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
 
 		if( !pinned )
 		{
