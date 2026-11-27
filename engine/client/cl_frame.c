@@ -2624,9 +2624,11 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( !mod || mod->type != mod_studio )
 				continue;
 #if defined( XASH_MOHAA_GAMECUBE ) && XASH_MOHAA_GAMECUBE
+			/* statweapons: the MG42 on its turretweapon (it never made the lean list, so no gun drew) */
 			mohaa_script_asset = Q_stristr( mod->name, "models/vehicles/" )
 				|| Q_stristr( mod->name, "models/human/" )
-				|| Q_stristr( mod->name, "models/animal/" );
+				|| Q_stristr( mod->name, "models/animal/" )
+				|| Q_stristr( mod->name, "models/statweapons/" );
 #else
 			mohaa_script_asset = false;
 #endif
