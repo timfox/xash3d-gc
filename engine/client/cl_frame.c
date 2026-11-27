@@ -1723,6 +1723,12 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 		{
 			static int film_spawn = -1;
 			static long film_bytes, film_budget = -1;
+			/* Guns already charged this map. A gun asked for again (its handle not resident on a later
+			 * frame, or a retried load) is charged once: ep02 s125 charged p_spring, p_bazooka and
+			 * p_mg42pr twice, ran the 512 KB budget to 504 KB with seven guns (397 KB), and left the
+			 * Germans' p_k98 and p_mp40 unloaded. */
+			static byte film_charged[MAX_MODELS / 8];
+			qboolean charged;
 			static double film_last;
 			static int film_logs;
 			const fs_offset_t size = FS_FileSize( wpath, false );
@@ -1738,8 +1744,10 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 				film_spawn = svs.spawncount;
 				film_bytes = 0;
 				film_last = -1.0;
+				memset( film_charged, 0, sizeof( film_charged ));
 			}
-			if( size <= 0 || size > 131072 || film_bytes + size > film_budget )
+			charged = CHECKVISBIT( film_charged, widx ) ? true : false;
+			if( !charged && ( size <= 0 || size > 131072 || film_bytes + size > film_budget ))
 			{
 				if( film_logs < 16 && fails[wk] < 3 )
 				{
@@ -1753,9 +1761,11 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 			if( film_last == host.realtime )
 				return 0;	/* one gun read per frame */
 			if( fails[wk] < 3 && host.realtime >= next_try[wk] )
+				film_last = host.realtime;	/* a retry of a charged gun is still a read */
+			if( !charged && fails[wk] < 3 && host.realtime >= next_try[wk] )
 			{
+				SETVISBIT( film_charged, widx );
 				film_bytes += (long)size;
-				film_last = host.realtime;
 				Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) loading, %ld of %ld KB used\n",
 					wpath, (long)size, film_bytes / 1024, film_budget / 1024 );
 			}
