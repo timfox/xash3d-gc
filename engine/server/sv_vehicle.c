@@ -2,13 +2,13 @@
 sv_vehicle.c - server binding for the vehicle core (common/vehicle.c)
 
 Game agnostic: vehicles are engine-owned edicts with no game class, so the
-same car, tank and aircraft run in every GoldSrc game the engine loads. A
+same car, tank, plane and helicopter run in every GoldSrc game the engine loads. A
 driver's usercmds drive the vehicle instead of PM_Move (SV_VehicleRunCmd);
 empty vehicles coast and settle in SV_VehicleFrame until they sleep. The
 client builds the chase camera itself (client/cl_vehicle.c) from the vehicle
 entity it is told about with a "cl_vehicle" stufftext.
 
-	vehicle spawn <car|flight|tank> [model]	spawn one in front of you (single player or sv_cheats)
+	vehicle spawn <car|tank|plane|heli> [model]	spawn one in front of you (single player or sv_cheats)
 	vehicle use			get in the nearest vehicle, or out of yours (also +use)
 	vehicle enter / exit
 	vehicle remove			remove the vehicle you are in or the nearest one
@@ -18,7 +18,7 @@ entity it is told about with a "cl_vehicle" stufftext.
 	-vehicle <type>			launch option: spawn one and get in when the map starts
 
 Memory: nothing until the first vehicle command or -vehicle; then one block
-from the host pool (about 5 KB: slots, tunables, per-client buttons) that is
+from the host pool (about 10 KB: slots, tunables, per-client buttons) that is
 reused for every map. No per-frame allocation.
 */
 #include "common.h"
@@ -33,7 +33,8 @@ reused for every map. No per-frame allocation.
 
 static CVAR_DEFINE_AUTO( vehicle_input_scale, "400", FCVAR_SERVER, "move value that counts as full stick for vehicles (cl_forwardspeed)" );
 static CVAR_DEFINE_AUTO( vehicle_model_car, "", FCVAR_SERVER, "model for spawned cars (empty = the driver's own model)" );
-static CVAR_DEFINE_AUTO( vehicle_model_flight, "", FCVAR_SERVER, "model for spawned aircraft (empty = the driver's own model)" );
+static CVAR_DEFINE_AUTO( vehicle_model_plane, "", FCVAR_SERVER, "model for spawned planes (empty = the driver's own model)" );
+static CVAR_DEFINE_AUTO( vehicle_model_heli, "", FCVAR_SERVER, "model for spawned helicopters (empty = the driver's own model)" );
 static CVAR_DEFINE_AUTO( vehicle_model_tank, "", FCVAR_SERVER, "model for spawned tanks (empty = the driver's own model)" );
 static CVAR_DEFINE_AUTO( vehicle_tank_magnitude, "150", FCVAR_SERVER, "env_explosion magnitude of a tank shell (0 = effect only)" );
 
@@ -241,7 +242,8 @@ static const char *SV_VehModelFor( veh_type_t type, const char *requested, edict
 		{
 		case VEH_CAR: name = vehicle_model_car.string; break;
 		case VEH_TANK: name = vehicle_model_tank.string; break;
-		case VEH_FLIGHT: name = vehicle_model_flight.string; break;
+		case VEH_PLANE: name = vehicle_model_plane.string; break;
+		case VEH_HELI: name = vehicle_model_heli.string; break;
 		default: name = NULL; break;
 		}
 	}
@@ -284,7 +286,7 @@ static sv_vehicle_t *SV_VehSpawn( veh_type_t type, const vec3_t origin, float ya
 		return NULL;
 
 	memset( v, 0, sizeof( *v ));
-	ent->v.classname = SV_AllocString( type == VEH_CAR ? "vehicle_car" : type == VEH_TANK ? "vehicle_tank" : "vehicle_flight" );
+	ent->v.classname = SV_AllocString( va( "vehicle_%s", Veh_TypeName( type )));
 	mdl = SV_VehModelFor( type, model, driver );
 	if( mdl )
 		SV_SetModel( ent, mdl );
@@ -525,7 +527,7 @@ static void SV_VehAutospawn( sv_client_t *cl )
 	type = Veh_TypeForName( typename );
 	if( type == VEH_NONE )
 	{
-		Con_Printf( S_WARN "-vehicle: unknown type '%s' (car, flight, tank)\n", typename );
+		Con_Printf( S_WARN "-vehicle: unknown type '%s' (car, tank, plane, heli)\n", typename );
 		return;
 	}
 
@@ -676,7 +678,7 @@ static void SV_VehTune( sv_client_t *cl )
 
 	if( type == VEH_NONE )
 	{
-		SV_ClientPrintf( cl, "vehicle tune <car|flight|tank> [param [value]]\n" );
+		SV_ClientPrintf( cl, "vehicle tune <car|tank|plane|heli> [param [value]]\n" );
 		return;
 	}
 
@@ -702,12 +704,17 @@ static void SV_VehTune( sv_client_t *cl )
 			return;
 		}
 		*f = Q_atof( Cmd_Argv( 4 ));
-		// drivers' cameras pick up the new camera tunables
 		for( i = 0; i < SV_VEH_SLOTS; i++ )
 		{
 			sv_vehicle_t *v = &st->slots[i];
 
-			if( v->used && v->driver && v->sim.type == type )
+			if( !v->used || v->sim.type != type )
+				continue;
+			// wheel layout and torque split tunables take effect at once
+			Veh_LayoutWheels( &v->sim );
+			v->still_steps = 0;
+			// drivers' cameras pick up the new camera tunables
+			if( v->driver )
 				SV_VehTellClient( SV_VehDriver( v ), v );
 		}
 	}
@@ -741,7 +748,7 @@ qboolean SV_VehicleClientCommand( sv_client_t *cl )
 		}
 		if( type == VEH_NONE )
 		{
-			SV_ClientPrintf( cl, "vehicle spawn <car|flight|tank> [model]\n" );
+			SV_ClientPrintf( cl, "vehicle spawn <car|tank|plane|heli> [model]\n" );
 			return true;
 		}
 		fwd[0] = cosf( DEG2RAD( pl->v.v_angle[YAW] ));
@@ -789,15 +796,19 @@ qboolean SV_VehicleClientCommand( sv_client_t *cl )
 			v = &svv->slots[i];
 			if( !SV_VehEdict( v ))
 				continue;
-			SV_ClientPrintf( cl, "#%d %s at (%.0f %.0f %.0f) speed %.0f wheels %d %s%s\n", v->ent,
+			SV_ClientPrintf( cl, "#%d %s at (%.0f %.0f %.0f) speed %.0f wheels %d/%d %s%s\n", v->ent,
 				Veh_TypeName( v->sim.type ), v->sim.origin[0], v->sim.origin[1], v->sim.origin[2],
-				VectorLength( v->sim.velocity ), v->sim.wheels_down, v->driver ? "driven" : "empty",
+				VectorLength( v->sim.velocity ), v->sim.wheels_down, v->sim.num_wheels, v->driver ? "driven" : "empty",
 				v->still_steps >= SV_VEH_SLEEP_STEPS ? " asleep" : "" );
+			if( v->sim.type == VEH_CAR || v->sim.type == VEH_TANK )
+				SV_ClientPrintf( cl, "    gear %d, %.0f rpm, clutch %.2f, slip %.2f\n", v->sim.gear, Veh_EngineRPM( &v->sim ), v->sim.clutch, v->sim.avg_side_slip );
+			else
+				SV_ClientPrintf( cl, "    power %.2f, altitude %.0f\n", v->sim.power, v->sim.altitude );
 		}
 	}
 	else
 	{
-		SV_ClientPrintf( cl, "vehicle spawn <car|flight|tank> [model] | use | enter | exit | remove | info | tune <type> [param [value]]\n" );
+		SV_ClientPrintf( cl, "vehicle spawn <car|tank|plane|heli> [model] | use | enter | exit | remove | info | tune <type> [param [value]]\n" );
 	}
 	return true;
 }
@@ -806,7 +817,8 @@ void SV_VehicleInit( void )
 {
 	Cvar_RegisterVariable( &vehicle_input_scale );
 	Cvar_RegisterVariable( &vehicle_model_car );
-	Cvar_RegisterVariable( &vehicle_model_flight );
+	Cvar_RegisterVariable( &vehicle_model_plane );
+	Cvar_RegisterVariable( &vehicle_model_heli );
 	Cvar_RegisterVariable( &vehicle_model_tank );
 	Cvar_RegisterVariable( &vehicle_tank_magnitude );
 }

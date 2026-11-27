@@ -640,8 +640,8 @@ def configure(conf):
 			conf.define('DEFAULT_MAX_EDICTS', 256)
 			conf.define('GC_SP_EDICT_CAP', 256)
 			conf.define('GC_GCMAP_CLIENT_EDICTS', 256)
-		# Engine vehicles (car, flight, tank: engine/common/vehicle*.c, sv_vehicle.c,
-		# cl_vehicle.c) are ~20 KB of code, so a GameCube build only carries them
+		# Engine vehicles (Glide-style car, tank, plane, helicopter: engine/common/vehicle*.c,
+		# sv_vehicle.c, cl_vehicle.c) are ~40 KB of code, so a GameCube build only carries them
 		# when asked: XASH_GC_VEHICLES=1. HL1 has no vehicles and plays at the MEM1 edge.
 		if os.environ.get('XASH_GC_VEHICLES', '').lower() in ('1', 'yes', 'true', 'on'):
 			conf.define('XASH_VEHICLES', 1)
