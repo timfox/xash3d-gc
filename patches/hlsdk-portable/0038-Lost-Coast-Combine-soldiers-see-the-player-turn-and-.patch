@@ -1,0 +1,202 @@
+From 9464300fae4f636b4db5c18e43113ed188694d01 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 26 Nov 2026 22:57:18 -0800
+Subject: [PATCH] Lost Coast: Combine soldiers see the player, turn and fire
+ SMG bursts
+
+Once out of his template a soldier who can see the player (trace from his
+eyes, 2048 units) turns to face him at 180 degrees a second, holds
+CombatIdle1_SMG1 and fires bursts of 3 to 5 rounds (shootSMG1s, the
+SMG1's 0.075 s cycle, sk_npc_dmg_smg1 3, 5 degree cone), 1 to 2 s
+apart. Shot, he flinches and turns on the player; killed, he lies in
+deathpose_back. 50 health (sk_combine_s_health). He does not move or
+take cover yet. -lcsquadtest puts the player in the first squad's
+trigger.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/lostcoast_npcs.cpp | 130 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 126 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 5db9cde0..4e7f192b 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -15,6 +15,7 @@ Only Lost Coast's stub BSP spawns these classnames.
+ #include "util.h"
+ #include "cbase.h"
+ #include "animation.h"
++#include "weapons.h"	// bullet types and spreads (monster_lc_soldier)
+ 
+ // npc_crow.h
+ #define CROW_TAKEOFF_SPEED	170.0f
+@@ -1943,11 +1944,16 @@ public:
+ 	void KeyValue( KeyValueData *pkvd );
+ 	void EXPORT SoldierThink( void );
+ 	int ObjectCaps( void ) { return FCAP_DONT_SAVE; }
++	void Killed( entvars_t *pevAttacker, int iGib );
++	int TakeDamage( entvars_t *pevInflictor, entvars_t *pevAttacker, float flDamage, int bitsDamageType );
+ private:
++	void Fight( CBaseEntity *pl, float interval );
++	void Seq( const char *label, BOOL restart );
+ 	lc_cue_t	m_spawn;
+-	BOOL		m_bHaveSpawn, m_bOut;
++	BOOL		m_bHaveSpawn, m_bOut, m_bAlert;
+ 	string_t	m_iszSquad;
+-	float		m_flTest;
++	float		m_flTest, m_flLast;
++	float		m_flNextBurst, m_flBurstEnd, m_flNextShot, m_flFlinchEnd;
+ };
+ LINK_ENTITY_TO_CLASS( monster_lc_soldier, CLCSoldier )
+ 
+@@ -1975,6 +1981,8 @@ void CLCSoldier::Spawn( void )
+ 	pev->solid = SOLID_NOT;
+ 	pev->movetype = MOVETYPE_NONE;
+ 	pev->takedamage = DAMAGE_NO;
++	pev->health = 50;		// sk_combine_s_health
++	pev->yaw_speed = 180;
+ 	pev->effects |= EF_NODRAW;	// in the template until his squad is spawned
+ 	pev->sequence = LookupSequence( "idle" );
+ 	if( pev->sequence < 0 )
+@@ -1990,13 +1998,17 @@ void CLCSoldier::Spawn( void )
+ 
+ void CLCSoldier::SoldierThink( void )
+ {
+-	pev->nextthink = gpGlobals->time + ( m_bOut ? 0.1f : 0.2f );
++	CBaseEntity *pl = UTIL_PlayerByIndex( 1 );
++	float interval = gpGlobals->time - m_flLast;
++
++	m_flLast = gpGlobals->time;
++	pev->nextthink = gpGlobals->time + ( m_bOut ? 0.05f : 0.2f );
+ 	if( m_bOut )
+ 	{
+ 		StudioFrameAdvance();
++		Fight( pl, interval > 0.25f ? 0.25f : interval );
+ 		return;
+ 	}
+-	CBaseEntity *pl = UTIL_PlayerByIndex( 1 );
+ 
+ 	if( m_flTest > 0 && gpGlobals->time >= m_flTest )
+ 		m_spawn.pending = TRUE;
+@@ -2007,8 +2019,118 @@ void CLCSoldier::SoldierThink( void )
+ 	m_bOut = TRUE;
+ 	pev->effects &= ~EF_NODRAW;
+ 	pev->solid = SOLID_BBOX;
++	pev->takedamage = DAMAGE_YES;
++	pev->flags |= FL_MONSTER;
++	// A probe of the fight with nobody at the controls: the player is put
++	// where the squad's trigger would have caught him.
++	static BOOL s_placed;
++	// (the cliff path's first squad, soldier_set_3, the one a player meets first)
++	if( m_flTest > 0 && pl && m_bHaveSpawn && !s_placed && !FStringNull( m_iszSquad )
++		&& strstr( STRING( m_iszSquad ), "set_3" ) && ( s_placed = TRUE ))
++		UTIL_SetOrigin( pl->pev, Vector(( m_spawn.box[0] + m_spawn.box[3] ) * 0.5f,
++			( m_spawn.box[1] + m_spawn.box[4] ) * 0.5f, m_spawn.box[2] + 36.0f ));
+ 	UTIL_SetOrigin( pev, pev->origin );
+ 	pev->animtime = gpGlobals->time;
+ 	ALERT( at_console, "Lost Coast: soldier of %s spawns at %.0f %.0f %.0f\n",
+ 		FStringNull( m_iszSquad ) ? "?" : STRING( m_iszSquad ), pev->origin.x, pev->origin.y, pev->origin.z );
+ }
++
++void CLCSoldier::Seq( const char *label, BOOL restart )
++{
++	int seq = LookupSequence( label );
++
++	if( seq < 0 || ( seq == pev->sequence && !restart ))
++		return;
++	pev->sequence = seq;
++	pev->frame = 0;
++	pev->framerate = 1.0f;
++	ResetSequenceInfo();
++}
++
++// What an npc_combine_s does once he has seen the player, cut to its core:
++// he turns to face him, holds his SMG up (CombatIdle1_SMG1) and fires
++// bursts while he can see him (shootSMG1s), 3 to 5 rounds at sk_npc_dmg_smg1
++// (3) with the SMG's spread, a second or two apart. He does not move yet.
++void CLCSoldier::Fight( CBaseEntity *pl, float interval )
++{
++	if( pev->deadflag != DEAD_NO || !pl || !pl->IsAlive())
++		return;
++	Vector eye = pev->origin + Vector( 0, 0, 60 );
++	Vector target = pl->pev->origin + pl->pev->view_ofs * 0.8f;
++	Vector to = target - eye;
++	float dist = to.Length();
++	TraceResult tr;
++	BOOL sees = FALSE;
++
++	if( dist < 2048.0f )
++	{
++		UTIL_TraceLine( eye, target, ignore_monsters, ENT( pev ), &tr );
++		sees = tr.flFraction >= 1.0f || tr.pHit == pl->edict();
++	}
++	if( sees && !m_bAlert )
++	{
++		m_bAlert = TRUE;
++		m_flNextBurst = gpGlobals->time + RANDOM_FLOAT( 0.6f, 1.2f ); // his reaction time
++		ALERT( at_console, "Lost Coast: soldier at %.0f %.0f %.0f sees the player (%.0f units)\n",
++			pev->origin.x, pev->origin.y, pev->origin.z, dist );
++	}
++	if( !m_bAlert )
++		return;
++	pev->angles.y = UTIL_ApproachAngle( UTIL_VecToYaw( to ), pev->angles.y, pev->yaw_speed * interval );
++	if( gpGlobals->time < m_flFlinchEnd )
++		return;
++	float off = fabs( UTIL_AngleDiff( UTIL_VecToYaw( to ), pev->angles.y ));
++
++	if( m_flBurstEnd > gpGlobals->time )
++	{
++		if( gpGlobals->time >= m_flNextShot )
++		{
++			Vector dir = to.Normalize();
++
++			m_flNextShot = gpGlobals->time + 0.075f; // the SMG1's cycle
++			pev->effects |= EF_MUZZLEFLASH;
++			FireBullets( 1, eye, dir, VECTOR_CONE_5DEGREES, 2048, BULLET_MONSTER_MP5, 2, 3, pev );
++		}
++		return;
++	}
++	Seq( "combatidle", FALSE );
++	if( sees && off < 15.0f && gpGlobals->time >= m_flNextBurst )
++	{
++		Seq( "shoot", TRUE );
++		m_flBurstEnd = gpGlobals->time + RANDOM_LONG( 3, 5 ) * 0.075f;
++		m_flNextShot = gpGlobals->time;
++		m_flNextBurst = m_flBurstEnd + RANDOM_FLOAT( 1.0f, 2.0f );
++		static int s_logs;
++		if( s_logs < 24 )
++		{
++			s_logs++;
++			ALERT( at_console, "Lost Coast: soldier at %.0f %.0f %.0f fires a burst (player health %.0f)\n",
++				pev->origin.x, pev->origin.y, pev->origin.z, pl->pev->health );
++		}
++	}
++}
++
++int CLCSoldier::TakeDamage( entvars_t *pevInflictor, entvars_t *pevAttacker, float flDamage, int bitsDamageType )
++{
++	if( pev->deadflag != DEAD_NO )
++		return 0;
++	if( !m_bAlert )
++		m_flNextBurst = gpGlobals->time + 0.5f;
++	m_bAlert = TRUE; // shot at: he knows where you are
++	if( flDamage >= 10.0f )
++	{
++		Seq( "flinch", TRUE );
++		m_flFlinchEnd = gpGlobals->time + 0.5f;
++	}
++	return CBaseEntity::TakeDamage( pevInflictor, pevAttacker, flDamage, bitsDamageType );
++}
++
++void CLCSoldier::Killed( entvars_t *pevAttacker, int iGib )
++{
++	pev->deadflag = DEAD_DEAD;
++	pev->takedamage = DAMAGE_NO;
++	pev->solid = SOLID_NOT;
++	Seq( "dead", TRUE );
++	pev->framerate = 0;
++	ALERT( at_console, "Lost Coast: soldier at %.0f %.0f %.0f is down\n", pev->origin.x, pev->origin.y, pev->origin.z );
++}
+-- 
+2.53.0
+
