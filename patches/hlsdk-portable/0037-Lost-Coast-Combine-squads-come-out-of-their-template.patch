@@ -1,0 +1,242 @@
+From 00797fbdb3e57bc68469ec196ee54bdd45e3d638 Mon Sep 17 00:00:00 2001
+From: timfox <timfox@outlook.com>
+Date: Thu, 26 Nov 2026 22:16:45 -0800
+Subject: [PATCH] Lost Coast: Combine squads come out of their templates at
+ their triggers
+
+monster_lc_soldier stands hidden at his point_template spot until the
+trigger_once or trigger_look that ForceSpawns his squad fires (lc_spawn,
+lc_squad from the bake); then he is drawn, solid and at idle. The cue
+trigger test is shared with the fisherman's shouts (LC_CueWatch,
+LC_ParseCue). -lcsquadtest brings every squad out 3 s after spawn.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/lostcoast_npcs.cpp | 184 +++++++++++++++++++++++++++++++---------
+ 1 file changed, 145 insertions(+), 39 deletions(-)
+
+diff --git a/dlls/lostcoast_npcs.cpp b/dlls/lostcoast_npcs.cpp
+index 1039f828..5db9cde0 100644
+--- a/dlls/lostcoast_npcs.cpp
++++ b/dlls/lostcoast_npcs.cpp
+@@ -350,6 +350,62 @@ typedef struct
+ 	BOOL		pending, done;
+ } lc_cue_t;
+ 
++// A trigger_once box, or a trigger_look (box + look target), from the bake:
++// sets c->pending once it fires. TRUE when a look trigger has timed out
++// (Source fires OnTimeout then, which this map connects to nothing).
++static BOOL LC_CueWatch( lc_cue_t *c, CBaseEntity *pl )
++{
++	float now = gpGlobals->time;
++	const Vector &o = pl->pev->origin;
++	BOOL in = o.x >= c->box[0] && o.y >= c->box[1] && o.z >= c->box[2] - 36
++		&& o.x <= c->box[3] && o.y <= c->box[4] && o.z <= c->box[5] + 36;
++
++	if( !in )
++		c->touched = c->looked = 0.0f;
++	else if( c->fov <= 0.0f )
++		c->pending = TRUE;
++	else
++	{
++		Vector eye = o + pl->pev->view_ofs;
++		Vector d = ( Vector( c->look[0], c->look[1], c->look[2] ) - eye ).Normalize();
++
++		if( c->touched == 0.0f )
++			c->touched = now;
++		if( c->timeout > 0 && now - c->touched > c->timeout )
++		{
++			c->done = TRUE; // OnTimeout
++			ALERT( at_console, "Lost Coast: look trigger at %.0f %.0f %.0f timed out\n", c->look[0], c->look[1], c->look[2] );
++			return TRUE;
++		}
++		UTIL_MakeVectors( pl->pev->v_angle );
++		if( DotProduct( d, gpGlobals->v_forward ) < c->fov )
++			c->looked = 0.0f;
++		else if( c->looked == 0.0f )
++			c->looked = now;
++		else if( now - c->looked >= c->looktime )
++			c->pending = TRUE;
++	}
++	return FALSE;
++}
++
++static int LC_ParseCue( lc_cue_t *c, const char *v, char *scene, int scene_max )
++{
++	float *b = c->box;
++	char fmt[96];
++
++	memset( c, 0, sizeof( *c ));
++	if( scene )
++		snprintf( fmt, sizeof( fmt ), "%%f %%f %%f %%f %%f %%f %%%ds %%f %%f %%f %%f %%f %%f", scene_max - 1 );
++	int n = scene ? sscanf( v, fmt, &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], scene,
++			&c->look[0], &c->look[1], &c->look[2], &c->fov, &c->looktime, &c->timeout ) - 1
++		: sscanf( v, "%f %f %f %f %f %f %f %f %f %f %f %f", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5],
++			&c->look[0], &c->look[1], &c->look[2], &c->fov, &c->looktime, &c->timeout );
++	if( n == 6 )
++		c->fov = 0.0f; // a plain trigger_once
++	return n == 6 || n == 12;
++}
++
++
+ // One fisherman per map: keep the bulky data out of entity private memory.
+ static lc_scene_t	g_lcScenes[LC_MAX_SCENES];
+ // The scenes share one run of events: forty to each scene was 13 KB for the
+@@ -828,14 +884,9 @@ void CLCFisherman::KeyValue( KeyValueData *pkvd )
+ 	{
+ 		lc_cue_t *c = &m_cue[m_nCues];
+ 		char scene[96];
+-		float *b = c->box;
+-		int n = sscanf( pkvd->szValue, "%f %f %f %f %f %f %95s %f %f %f %f %f %f", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5],
+-			scene, &c->look[0], &c->look[1], &c->look[2], &c->fov, &c->looktime, &c->timeout );
+ 
+-		if( n == 7 || n == 13 )
++		if( LC_ParseCue( c, pkvd->szValue, scene, sizeof( scene )))
+ 		{
+-			if( n == 7 )
+-				c->fov = 0.0f; // a plain trigger_once
+ 			c->scene = ALLOC_STRING( scene );
+ 			m_nCues++;
+ 		}
+@@ -1507,7 +1558,6 @@ void CLCFisherman::RunCues( CBaseEntity *pl )
+ 	for( int i = 0; i < m_nCues; i++ )
+ 	{
+ 		lc_cue_t *c = &m_cue[i];
+-		BOOL in = FALSE;
+ 
+ 		if( c->done )
+ 			continue;
+@@ -1527,38 +1577,8 @@ void CLCFisherman::RunCues( CBaseEntity *pl )
+ 				}
+ 			}
+ 		}
+-		else if( pl && !c->pending )
+-		{
+-			const Vector &o = pl->pev->origin;
+-
+-			in = o.x >= c->box[0] && o.y >= c->box[1] && o.z >= c->box[2] - 36
+-				&& o.x <= c->box[3] && o.y <= c->box[4] && o.z <= c->box[5] + 36;
+-			if( !in )
+-				c->touched = c->looked = 0.0f;
+-			else if( c->fov <= 0.0f )
+-				c->pending = TRUE;
+-			else
+-			{
+-				Vector eye = o + pl->pev->view_ofs;
+-				Vector d = ( Vector( c->look[0], c->look[1], c->look[2] ) - eye ).Normalize();
+-
+-				if( c->touched == 0.0f )
+-					c->touched = now;
+-				if( c->timeout > 0 && now - c->touched > c->timeout )
+-				{
+-					c->done = TRUE; // OnTimeout
+-					ALERT( at_console, "Lost Coast: look trigger for %s timed out\n", STRING( c->scene ));
+-					continue;
+-				}
+-				UTIL_MakeVectors( pl->pev->v_angle );
+-				if( DotProduct( d, gpGlobals->v_forward ) < c->fov )
+-					c->looked = 0.0f;
+-				else if( c->looked == 0.0f )
+-					c->looked = now;
+-				else if( now - c->looked >= c->looktime )
+-					c->pending = TRUE;
+-			}
+-		}
++		else if( pl && !c->pending && LC_CueWatch( c, pl ))
++			continue; // timed out
+ 		// (not over the gate scene itself, nor before he has sat down)
+ 		if( c->pending && m_bGateDone && !m_pszPost && ( m_state == FS_DONE
+ 			|| ( m_state == FS_SCENE && m_pScene != LC_LoadScene( STRING( m_iszGateScene )))))
+@@ -1906,3 +1926,89 @@ void CLCCannon::CannonThink( void )
+ 		m_flNext = gpGlobals->time + RANDOM_FLOAT( m_lo, m_hi );
+ 	}
+ }
++
++//=========================================================
++// monster_lc_soldier: a Combine soldier the map keeps in a point_template
++// until a trigger_once or trigger_look ForceSpawns his squad (the cliff
++// path's first squads). He stands hidden at his template spot until then;
++// lc_spawn is the trigger (as the fisherman's lc_cueN, without a scene),
++// lc_squad the template's name. For now he appears and stands at idle:
++// his AI is the next step.
++//=========================================================
++class CLCSoldier : public CBaseAnimating
++{
++public:
++	void Spawn( void );
++	void Precache( void ) { PRECACHE_MODEL( STRING( pev->model )); }
++	void KeyValue( KeyValueData *pkvd );
++	void EXPORT SoldierThink( void );
++	int ObjectCaps( void ) { return FCAP_DONT_SAVE; }
++private:
++	lc_cue_t	m_spawn;
++	BOOL		m_bHaveSpawn, m_bOut;
++	string_t	m_iszSquad;
++	float		m_flTest;
++};
++LINK_ENTITY_TO_CLASS( monster_lc_soldier, CLCSoldier )
++
++void CLCSoldier::KeyValue( KeyValueData *pkvd )
++{
++	if( FStrEq( pkvd->szKeyName, "lc_spawn" ))
++	{
++		m_bHaveSpawn = LC_ParseCue( &m_spawn, pkvd->szValue, NULL, 0 );
++		pkvd->fHandled = TRUE;
++	}
++	else if( FStrEq( pkvd->szKeyName, "lc_squad" ))
++	{
++		m_iszSquad = ALLOC_STRING( pkvd->szValue );
++		pkvd->fHandled = TRUE;
++	}
++	else
++		CBaseAnimating::KeyValue( pkvd );
++}
++
++void CLCSoldier::Spawn( void )
++{
++	Precache();
++	SET_MODEL( ENT( pev ), STRING( pev->model ));
++	UTIL_SetSize( pev, Vector( -13, -13, 0 ), Vector( 13, 13, 72 ));
++	pev->solid = SOLID_NOT;
++	pev->movetype = MOVETYPE_NONE;
++	pev->takedamage = DAMAGE_NO;
++	pev->effects |= EF_NODRAW;	// in the template until his squad is spawned
++	pev->sequence = LookupSequence( "idle" );
++	if( pev->sequence < 0 )
++		pev->sequence = 0;
++	pev->frame = 0;
++	pev->framerate = 1.0f;
++	ResetSequenceInfo();
++	// A probe with nobody at the controls: the squad comes out by itself.
++	m_flTest = LC_BootSwitch( "lcsquadtest" ) ? gpGlobals->time + 3.0f : 0.0f;
++	SetThink( &CLCSoldier::SoldierThink );
++	pev->nextthink = gpGlobals->time + 0.2f;
++}
++
++void CLCSoldier::SoldierThink( void )
++{
++	pev->nextthink = gpGlobals->time + ( m_bOut ? 0.1f : 0.2f );
++	if( m_bOut )
++	{
++		StudioFrameAdvance();
++		return;
++	}
++	CBaseEntity *pl = UTIL_PlayerByIndex( 1 );
++
++	if( m_flTest > 0 && gpGlobals->time >= m_flTest )
++		m_spawn.pending = TRUE;
++	else if( m_bHaveSpawn && pl && !m_spawn.done && !m_spawn.pending && LC_CueWatch( &m_spawn, pl ))
++		return; // timed out: his squad stays in the template
++	if( !m_spawn.pending )
++		return;
++	m_bOut = TRUE;
++	pev->effects &= ~EF_NODRAW;
++	pev->solid = SOLID_BBOX;
++	UTIL_SetOrigin( pev, pev->origin );
++	pev->animtime = gpGlobals->time;
++	ALERT( at_console, "Lost Coast: soldier of %s spawns at %.0f %.0f %.0f\n",
++		FStringNull( m_iszSquad ) ? "?" : STRING( m_iszSquad ), pev->origin.x, pev->origin.y, pev->origin.z );
++}
+-- 
+2.53.0
+
