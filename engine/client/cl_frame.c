@@ -1794,7 +1794,7 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 }
 
 /* Where a film vehicle (a film-tagged models/film/ or mapmodels/ entity) stops on its way to the
- * draw list, on every change and once a second: ep02 s125's Panzer and Sherman were loaded, placed
+ * draw list (not resident, too far, world DL not visible, added, R_AddEntity refused), on every change and once a second: ep02 s125's Panzer and Sherman were loaded, placed
  * and skinned from the start but drew only from 70-80% of the shot (ceres proof4/proof5). */
 static void CL_GCFilmPropTrace( int e, const edict_t *ed, const model_t *mod, const char *gate )
 {
@@ -2797,7 +2797,6 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			 * of the men: ep02 s125's Panzer, behind a crowd of 30 nearer film
 			 * actors with 26 studio slots, lost its slot until the end of the
 			 * shot, when the camera had fewer men in view. */
-			CL_GCFilmPropTrace( e, ed, mod, "candidate" );
 			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e,
 				is_film ? ( Mod_GCIsPropModelPath( mod->name ) ? -1.0f : dist * 0.001f ) : dist );
 		}
@@ -2821,6 +2820,26 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( !R_GXWorldDLEntityVisible( GC_STATIC_PROP_KEY0 + e, bmin, bmax ))
 				continue;
 			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, -( e + 1 ), dist );
+		}
+		/* Film vehicles (picked at -1) first: the renderer draws a capped number of studio models in
+		 * list order, and the edict scan reaches a cast's vehicles after its men. */
+		{
+			int front = 0;
+
+			for( slot = 0; slot < n_picks; slot++ )
+			{
+				if( pick_dists[slot] < 0.0f )
+				{
+					const int id = picks[slot];
+					const float d = pick_dists[slot];
+
+					picks[slot] = picks[front];
+					pick_dists[slot] = pick_dists[front];
+					picks[front] = id;
+					pick_dists[front] = d;
+					front++;
+				}
+			}
 		}
 		for( slot = 0; slot < n_picks && studio_slots < studio_budget; slot++ )
 		{

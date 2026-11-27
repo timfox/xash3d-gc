@@ -951,7 +951,10 @@ static void R_DrawEntitiesOnList( void )
 	/* -gccapture films the map: every brush in view draws (a capture has no frame rate to keep). */
 	const int lean_max_brushes = gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 256
 		: gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 48 : 6;
-	const int lean_max_studios = (int)GC_EntCap( &gc_max_studios, gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 24 : 1 );
+	/* -gccapture: as many as the client emits (capture mode studio slots 72). At 24, ep02 s125's
+	 * Panzer and Sherman, last on a list of 26, were cut until the camera had fewer men in view. */
+	const int lean_max_studios = (int)GC_EntCap( &gc_max_studios, gEngfuncs.Sys_CheckParm( "-gccapture" ) ? 96
+		: gEngfuncs.Sys_CheckParm( "-gcworldrender" ) ? 24 : 1 );
 
 	if( GC_UseGxWorldDraw() && gEngfuncs.Sys_CheckParm( "-gcnewgame" ))
 	{
