@@ -167,6 +167,12 @@ poolhandle_t Mod_GameCubeSharedStudioPool( void );
 void Mod_GCLoadNewGameStudios( void );
 void Mod_GCLoadPreEntityStudios( void ); /* cast into studio BSS before Spawn */
 qboolean Mod_GCPromoteStudioPath( const char *path ); /* allowlisted MDL → studio BSS */
+/* A prop model: the map's own (models/mapmodels/) or a cinematic vehicle of ours (models/film/, dod-gc
+ * tools/vehicle/obj_to_mdl.py on a film disc). Both load, skin and draw the same way. */
+static inline qboolean Mod_GCIsPropModelPath( const char *name )
+{
+	return name && ( Q_stristr( name, "mapmodels/" ) || Q_stristr( name, "models/film/" ));
+}
 qboolean Mod_GCStudioPreEntityMeshOnly( void ); /* true during pre-entity mesh promote */
 qboolean Mod_GCStudioPreEntityMeshOnly( void ); /* true during pre-entity mesh promote */
 void Mod_GCTryDeferredStudios( void ); /* G287: post-present MDL promote */

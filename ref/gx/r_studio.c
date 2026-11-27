@@ -265,7 +265,25 @@ static qboolean R_StudioComputeBBox( vec3_t bbox[8] )
 		if( depth < -radius
 			|| fabsf( DotProduct( d, RI.vright )) - depth * tx > radius * sqrtf( 1.0f + tx * tx )
 			|| fabsf( DotProduct( d, RI.vup )) - depth * ty > radius * sqrtf( 1.0f + ty * ty ))
+		{
+			/* A film vehicle culled here: once a second, with what the test saw (ep02 s125). */
+			if( e && e->curstate.iuser4 == 0x46494C4D && RI.currentmodel
+				&& ( Q_stristr( RI.currentmodel->name, "models/film/" ) || Q_stristr( RI.currentmodel->name, "mapmodels/" )))
+			{
+				static double next_log;
+				const double now = gEngfuncs.pfnTime ? gEngfuncs.pfnTime( ) : 0.0;
+
+				if( now >= next_log || now + 2.0 < next_log )
+				{
+					next_log = now + 1.0;
+					gEngfuncs.Con_Reportf( "Xash3D GameCube: film prop %d %s culled by the studio frustum: box (%.0f %.0f %.0f)-(%.0f %.0f %.0f) model (%.0f %.0f %.0f)-(%.0f %.0f %.0f) depth %.0f radius %.0f fov %.1f/%.1f eye (%.0f %.0f %.0f)\n",
+						e->index, RI.currentmodel->name, studio_mins[0], studio_mins[1], studio_mins[2], studio_maxs[0],
+						studio_maxs[1], studio_maxs[2], mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2], depth, radius,
+						RI.rvp.fov_x, RI.rvp.fov_y, RI.rvp.vieworigin[0], RI.rvp.vieworigin[1], RI.rvp.vieworigin[2] );
+				}
+			}
 			return false;
+		}
 	}
 #endif
 	if( !bbox && R_CullModel( e, studio_mins, studio_maxs ))

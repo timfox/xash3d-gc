@@ -1723,6 +1723,12 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 		{
 			static int film_spawn = -1;
 			static long film_bytes, film_budget = -1;
+			/* Guns already charged this map. A gun asked for again (its handle not resident on a later
+			 * frame, or a retried load) is charged once: ep02 s125 charged p_spring, p_bazooka and
+			 * p_mg42pr twice, ran the 512 KB budget to 504 KB with seven guns (397 KB), and left the
+			 * Germans' p_k98 and p_mp40 unloaded. */
+			static byte film_charged[MAX_MODELS / 8];
+			qboolean charged;
 			static double film_last;
 			static int film_logs;
 			const fs_offset_t size = FS_FileSize( wpath, false );
@@ -1738,8 +1744,10 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 				film_spawn = svs.spawncount;
 				film_bytes = 0;
 				film_last = -1.0;
+				memset( film_charged, 0, sizeof( film_charged ));
 			}
-			if( size <= 0 || size > 131072 || film_bytes + size > film_budget )
+			charged = CHECKVISBIT( film_charged, widx ) ? true : false;
+			if( !charged && ( size <= 0 || size > 131072 || film_bytes + size > film_budget ))
 			{
 				if( film_logs < 16 && fails[wk] < 3 )
 				{
@@ -1753,9 +1761,11 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 			if( film_last == host.realtime )
 				return 0;	/* one gun read per frame */
 			if( fails[wk] < 3 && host.realtime >= next_try[wk] )
+				film_last = host.realtime;	/* a retry of a charged gun is still a read */
+			if( !charged && fails[wk] < 3 && host.realtime >= next_try[wk] )
 			{
+				SETVISBIT( film_charged, widx );
 				film_bytes += (long)size;
-				film_last = host.realtime;
 				Con_Reportf( "Xash3D GameCube: film actor weapon %s (%ld bytes) loading, %ld of %ld KB used\n",
 					wpath, (long)size, film_bytes / 1024, film_budget / 1024 );
 			}
@@ -1781,6 +1791,32 @@ static int CL_GCLeanWeaponIndex( const char *wpath, qboolean film )
 		return widx;
 	}
 	return 0;
+}
+
+/* Where a film vehicle (a film-tagged models/film/ or mapmodels/ entity) stops on its way to the
+ * draw list (not resident, too far, world DL not visible, added, R_AddEntity refused), on every change and once a second: ep02 s125's Panzer and Sherman were loaded, placed
+ * and skinned from the start but drew only from 70-80% of the shot (ceres proof4/proof5). */
+static void CL_GCFilmPropTrace( int e, const edict_t *ed, const model_t *mod, const char *gate )
+{
+	static struct { int e; const char *gate; double next; } memo[8];
+	int i, slot = -1;
+
+	if( !ed || ed->v.iuser4 != 0x46494C4D /* GC_FILM_ACTOR_TAG, defined below */ || !mod || !Mod_GCIsPropModelPath( mod->name ))
+		return;
+	for( i = 0; i < 8; i++ )
+		if( memo[i].e == e || ( slot < 0 && !memo[i].e ))
+			slot = i;
+	if( slot < 0 )
+		slot = e & 7;
+	if( memo[slot].e == e && memo[slot].gate == gate && host.realtime < memo[slot].next )
+		return;
+	memo[slot].e = e;
+	memo[slot].gate = gate;
+	memo[slot].next = host.realtime + 1.0;
+	Con_Reportf( "Xash3D GameCube: film prop %d %s: %s org=(%.0f %.0f %.0f) abs=(%.0f %.0f %.0f)-(%.0f %.0f %.0f) view=(%.0f %.0f %.0f)\n",
+		e, mod->name, gate, ed->v.origin[0], ed->v.origin[1], ed->v.origin[2], ed->v.absmin[0], ed->v.absmin[1],
+		ed->v.absmin[2], ed->v.absmax[0], ed->v.absmax[1], ed->v.absmax[2], refState.vieworg[0],
+		refState.vieworg[1], refState.vieworg[2]);
 }
 
 static void CL_GCLeanPick( int *picks, float *dists, int *n, int cap, int id, float dist )
@@ -2507,7 +2543,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			mod = SV_ModelHandle( ed->v.modelindex );
 			/* Before the type test: an unloaded handle is not mod_studio yet. */
 			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
-				&& Q_stristr( mod->name, "mapmodels/" ))
+				&& Mod_GCIsPropModelPath( mod->name ))
 			{
 				/* A map model precached by the game at spawn (DoD control
 				 * point flags) stays a registered, never-loaded handle on this
@@ -2549,7 +2585,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 			if( mod && mod->type == mod_studio && mod->needload == NL_PRESENT && mod->cache.data
-				&& Q_stristr( mod->name, "mapmodels/" ))
+				&& Mod_GCIsPropModelPath( mod->name ))
 			{
 				/* A promoted map model has its lean mesh only; attach its *t
 				 * skin atlas too, or it draws flat grey (ceres 3282517bd).
@@ -2654,6 +2690,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			scan_studio++;
 			if( mod->needload != NL_PRESENT || !mod->name[0] || !mod->cache.data )
 			{
+				CL_GCFilmPropTrace( e, ed, mod, "not resident" );
 				scan_studio_skip++;
 				continue;
 			}
@@ -2675,7 +2712,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				allow = false;
 				if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
 					allow = true;
-				else if( Q_stristr( mod->name, "mapmodels/" )
+				else if( Mod_GCIsPropModelPath( mod->name )
 					|| mohaa_script_asset
 					|| Q_stristr( mod->name, "hk_satchel" )
 					|| Q_stristr( mod->name, "sandbags" )
@@ -2715,6 +2752,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			dist = VectorLength( delta );
 			if( dist > studio_max_dist )
 			{
+				CL_GCFilmPropTrace( e, ed, mod, "too far" );
 				scan_studio_skip++;
 				continue;
 			}
@@ -2739,6 +2777,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				if( !mohaa_script_asset
 					&& !R_GXWorldDLEntityVisible( e, bmin, bmax ))
 				{
+					CL_GCFilmPropTrace( e, ed, mod, "world DL not visible" );
 					scan_studio_skip++;
 					continue;
 				}
@@ -2757,8 +2796,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 			/* Insert into nearest-N picks. A film actor is what the shot is
-			 * about: it goes ahead of every map prop. */
-			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e, is_film ? dist * 0.001f : dist );
+			 * about: it goes ahead of every map prop. A film vehicle goes ahead
+			 * of the men: ep02 s125's Panzer, behind a crowd of 30 nearer film
+			 * actors with 26 studio slots, lost its slot until the end of the
+			 * shot, when the camera had fewer men in view. */
+			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, e,
+				is_film ? ( Mod_GCIsPropModelPath( mod->name ) ? -1.0f : dist * 0.001f ) : dist );
 		}
 		/* Static props (unnamed env_model / dod_object, no edict). */
 		for( e = 0; e < gc_num_static_props; e++ )
@@ -2780,6 +2823,26 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			if( !R_GXWorldDLEntityVisible( GC_STATIC_PROP_KEY0 + e, bmin, bmax ))
 				continue;
 			CL_GCLeanPick( picks, pick_dists, &n_picks, pick_cap, -( e + 1 ), dist );
+		}
+		/* Film vehicles (picked at -1) first: the renderer draws a capped number of studio models in
+		 * list order, and the edict scan reaches a cast's vehicles after its men. */
+		{
+			int front = 0;
+
+			for( slot = 0; slot < n_picks; slot++ )
+			{
+				if( pick_dists[slot] < 0.0f )
+				{
+					const int id = picks[slot];
+					const float d = pick_dists[slot];
+
+					picks[slot] = picks[front];
+					pick_dists[slot] = pick_dists[front];
+					picks[front] = id;
+					pick_dists[front] = d;
+					front++;
+				}
+			}
 		}
 		for( slot = 0; slot < n_picks && studio_slots < studio_budget; slot++ )
 		{
@@ -2946,9 +3009,12 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			GC_LeanMoveLatch( ent );
 			if( ref.dllFuncs.R_AddEntity( ent, ET_NORMAL ))
 			{
+				CL_GCFilmPropTrace( picks[slot], ed, mod, "added" );
 				studios++;
 				studio_slots++;
 			}
+			else
+				CL_GCFilmPropTrace( picks[slot], ed, mod, "R_AddEntity refused" );
 		}
 		GC_ProfMark( "render: lean emit studio scan" );
 		/* Other players and bots. The scan above starts after the client slots

@@ -169,7 +169,7 @@ static qboolean Mod_GCMohaaKeepsStudio( const char *model_path )
 
 static qboolean Mod_GCStudioPrefersSpill( const char *model_path )
 {
-	return Q_stristr( model_path, "mapmodels/" ) != NULL
+	return Mod_GCIsPropModelPath( model_path )
 		|| Q_stristr( model_path, "models/player" ) != NULL
 		|| Mod_GCMohaaKeepsStudio( model_path );
 }
@@ -939,6 +939,9 @@ static qboolean Mod_GCStudioNameAllowed( const char *name, qboolean *is_viewmode
 	if( Mod_GCIsWeaponModelPath( name ))
 		return true;
 	if( Mod_GCMohaaKeepsStudio( name ))
+		return true;
+	/* Our own film vehicles: no allowlist entry each (the ep02 proof reel's panzer4 "load failed"). */
+	if( Q_stristr( name, "models/film/" ))
 		return true;
 
 	COM_FileBase( name, bare, sizeof( bare ));
