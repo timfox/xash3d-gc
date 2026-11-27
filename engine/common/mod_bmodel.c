@@ -4902,6 +4902,12 @@ static void Mod_LoadVertexes( model_t *mod, dbspmodel_t *bmod )
 	}
 }
 
+#if XASH_GAMECUBE
+#define GC_WORLD_ARRAY_HOLE_FIRST_BYTES ( 64u * 1024u )
+#define GC_WORLD_ARRAY_HEAP_KEEP        ( 512u * 1024u )	/* heap a large world array must leave, else a hole first */
+#define GC_TEXINFO_PIN_HEAP_KEEP        ( 160u * 1024u )	/* heap the texinfo pin copy must leave, else the high carve */
+#endif
+
 /* World arrays the GameCube heap may be too fragmented to hold after a few
  * changelevels (c0a0c's 87 KiB surfedges): try malloc, then the free tail of
  * the static map-load arena (as planes do), then the model pool. Scratch and
@@ -4912,12 +4918,32 @@ static void *Mod_GCWorldArrayTryAlloc( model_t *mod, dbspmodel_t *bmod, size_t b
 	if( GC_MapLoadMemoryOpt() && bmod->isworld && bytes > 0
 		&& gc_bsp_scratch_base && GC_IsMapLoadBuffer( gc_bsp_scratch_base ))
 	{
-		void *out = Mem_TryMalloc( mod->mempool, bytes );
+		void *out = NULL;
+		/* A large array that would leave the heap short goes to a BSP scratch
+		 * hole first. Heap-first took dod_charlie's 156 KiB texinfo out of the
+		 * heap as soon as the heap could fit it (xash3d-gc #547 freed 119 KiB
+		 * of BSS): free heap after load fell 37 KiB below the build before and
+		 * models/allied_gibs.mdl no longer loaded. The hole costs the heap
+		 * nothing and is released with the map-load arena like the rest. */
+		const qboolean hole_first = bytes >= GC_WORLD_ARRAY_HOLE_FIRST_BYTES
+			&& GC_MemHeapFreeBytes() < bytes + GC_WORLD_ARRAY_HEAP_KEEP;
 
+		if( hole_first )
+		{
+			out = Mod_GCAllocWorldScratch( mod, bmod, NULL, 0, bytes, 32 );
+			if( out )
+			{
+				Con_Reportf( "Xash3D GameCube: world %s using BSP scratch hole %s (keeps heap %s)\n",
+					what, Q_memprint( bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
+				return out;
+			}
+		}
+		out = Mem_TryMalloc( mod->mempool, bytes );
 		if( out )
 			return out;
 		/* Holes first: the high arena is reserved for the surface table. */
-		out = Mod_GCAllocWorldScratch( mod, bmod, NULL, 0, bytes, 32 );
+		if( !hole_first )
+			out = Mod_GCAllocWorldScratch( mod, bmod, NULL, 0, bytes, 32 );
 		if( out )
 		{
 			Con_Reportf( "Xash3D GameCube: world %s using BSP scratch hole %s\n", what, Q_memprint( bytes ));
@@ -9674,20 +9700,38 @@ static void Mod_GCReleaseGcmapPreSurfaceStaging( model_t *mod, dbspmodel_t *bmod
 		size_t texinfo_bytes = mod->numtexinfo * sizeof( mtexinfo_t );
 		qboolean texinfo_heap_owned = false;
 
-		GC_WatchdogStage( "texinfo pin malloc" );
-		pinned = malloc( texinfo_bytes );
-		GC_WatchdogStage( "texinfo pin copy" );
-		if( pinned )
+		/* Same rule as Mod_GCWorldArrayTryAlloc: a large texinfo that would
+		 * leave the heap short takes the high carve, as it did whenever the
+		 * heap could not hold it (dod_charlie 156 KiB: heap-owned after #547
+		 * freed BSS, 37 KiB less heap after load and allied_gibs.mdl failed). */
+		/* Only when the heap could not spare it: the high carve takes the
+		 * end of the map-load buffer that the leaf spill and the entity text
+		 * use later (dod_avalanche, 81 KiB texinfo with 293 KiB of heap: a
+		 * carve sent its 143 KiB of leafs back to the disc and cost 71 KiB). */
+		const qboolean carve_first = texinfo_bytes >= GC_WORLD_ARRAY_HOLE_FIRST_BYTES
+			&& GC_MemHeapFreeBytes() < texinfo_bytes + GC_TEXINFO_PIN_HEAP_KEEP;
+
+		pinned = NULL;
+		if( !carve_first )
 		{
-			memcpy( pinned, mod->texinfo, texinfo_bytes );
-			texinfo_heap_owned = true;
-		}
+			GC_WatchdogStage( "texinfo pin malloc" );
+			pinned = malloc( texinfo_bytes );
+			GC_WatchdogStage( "texinfo pin copy" );
+			if( pinned )
+			{
+				memcpy( pinned, mod->texinfo, texinfo_bytes );
+				texinfo_heap_owned = true;
+			}
 			else
 			{
 				pinned = Mem_TryMalloc( mod->mempool, texinfo_bytes );
 				if( pinned )
 					memcpy( pinned, mod->texinfo, texinfo_bytes );
 			}
+		}
+		else
+			Con_Reportf( "Xash3D GameCube: texinfo %s kept off the heap (heap %s)\n",
+				Q_memprint( texinfo_bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
 
 		if( !pinned )
 		{
