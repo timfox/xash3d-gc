@@ -2453,7 +2453,7 @@ def build_world_texture_packs(
 ) -> list[tuple[str, Path]]:
 	"""media/wt_<map>.gct: each map's world textures as GX CMPR with mip
 	chains, read in one go by the engine (mod_bmodel.c). Water and sky keep the
-	engine's own path."""
+	engine's own path, except MOHAA's water, which has none and is packed too."""
 	try:
 		import numpy  # noqa: F401
 		from PIL import Image  # noqa: F401
@@ -2466,6 +2466,7 @@ def build_world_texture_packs(
 	media.mkdir(parents=True, exist_ok=True)
 	total = 0
 	missed_total = 0
+	keep_water = source.name.lower() == "mohaa"
 	for bsp in sorted((source / "maps").glob("*.bsp")):
 		if map_stems is not None and bsp.stem.lower() not in map_stems:
 			continue
@@ -2484,7 +2485,7 @@ def build_world_texture_packs(
 				continue
 			raw = struct.unpack_from("<16s", data, off + o)[0]
 			name = raw.split(b"\0")[0].decode("latin-1").lower()
-			if name and name[:1] not in ("!", "*") and not name.startswith("sky"):
+			if name and ( keep_water or name[:1] not in ("!", "*") ) and not name.startswith("sky"):
 				bsp_names.append(name)
 		wads = wt_read_wads(source, bsp)
 		if prebaked.is_file() and prebaked.stat().st_size >= 32_000 and prebaked.read_bytes()[:4] == GC_WT_MAGIC:
@@ -2536,7 +2537,10 @@ def build_world_texture_packs(
 				continue
 			raw = struct.unpack_from("<16s", data, off + o)[0]
 			name = raw.split(b"\0")[0].decode("latin-1").lower()
-			if name in seen or name[:1] in ("!", "*") or name.startswith("sky"):
+			# MOHAA water ("!" textures from its own water shaders) has no packed water sheet and no other
+			# texture path, so it comes in the pack too (m2l2a's harbour drew the pink/black checker)
+			water_name = name[:1] in ("!", "*")
+			if name in seen or ( water_name and not keep_water ) or name.startswith("sky"):
 				continue
 			seen.add(name)
 			mip = wt_read_miptex(data, off + o)
