@@ -4902,6 +4902,11 @@ static void Mod_LoadVertexes( model_t *mod, dbspmodel_t *bmod )
 	}
 }
 
+#if XASH_GAMECUBE
+#define GC_WORLD_ARRAY_HOLE_FIRST_BYTES ( 64u * 1024u )
+#define GC_WORLD_ARRAY_HEAP_KEEP        ( 512u * 1024u )	/* heap a large world array must leave, else a hole first */
+#endif
+
 /* World arrays the GameCube heap may be too fragmented to hold after a few
  * changelevels (c0a0c's 87 KiB surfedges): try malloc, then the free tail of
  * the static map-load arena (as planes do), then the model pool. Scratch and
@@ -4912,12 +4917,32 @@ static void *Mod_GCWorldArrayTryAlloc( model_t *mod, dbspmodel_t *bmod, size_t b
 	if( GC_MapLoadMemoryOpt() && bmod->isworld && bytes > 0
 		&& gc_bsp_scratch_base && GC_IsMapLoadBuffer( gc_bsp_scratch_base ))
 	{
-		void *out = Mem_TryMalloc( mod->mempool, bytes );
+		void *out = NULL;
+		/* A large array that would leave the heap short goes to a BSP scratch
+		 * hole first. Heap-first took dod_charlie's 156 KiB texinfo out of the
+		 * heap as soon as the heap could fit it (xash3d-gc #547 freed 119 KiB
+		 * of BSS): free heap after load fell 37 KiB below the build before and
+		 * models/allied_gibs.mdl no longer loaded. The hole costs the heap
+		 * nothing and is released with the map-load arena like the rest. */
+		const qboolean hole_first = bytes >= GC_WORLD_ARRAY_HOLE_FIRST_BYTES
+			&& GC_MemHeapFreeBytes() < bytes + GC_WORLD_ARRAY_HEAP_KEEP;
 
+		if( hole_first )
+		{
+			out = Mod_GCAllocWorldScratch( mod, bmod, NULL, 0, bytes, 32 );
+			if( out )
+			{
+				Con_Reportf( "Xash3D GameCube: world %s using BSP scratch hole %s (keeps heap %s)\n",
+					what, Q_memprint( bytes ), Q_memprint( GC_MemHeapFreeBytes( )));
+				return out;
+			}
+		}
+		out = Mem_TryMalloc( mod->mempool, bytes );
 		if( out )
 			return out;
 		/* Holes first: the high arena is reserved for the surface table. */
-		out = Mod_GCAllocWorldScratch( mod, bmod, NULL, 0, bytes, 32 );
+		if( !hole_first )
+			out = Mod_GCAllocWorldScratch( mod, bmod, NULL, 0, bytes, 32 );
 		if( out )
 		{
 			Con_Reportf( "Xash3D GameCube: world %s using BSP scratch hole %s\n", what, Q_memprint( bytes ));
