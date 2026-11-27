@@ -2915,7 +2915,7 @@ void Mod_LoadStudioModel( model_t *mod, void *buffer, size_t buffersize, qboolea
 				 * (charlie: the flags copy left too little heap for its skin
 				 * merge; caen: the Enfield skins then ran out). Leaving it
 				 * resident lets the skin merge grow it in the spill. */
-				if( Q_stristr( mod->name, "mapmodels/" )
+				if(( Q_stristr( mod->name, "mapmodels/" ) || Q_stristr( mod->name, "models/film/" ))
 					&& Mod_GCIsWorldArraySpillCache( buffer ) && mesh <= buffersize )
 				{
 					mod->cache.data = NULL; /* taken below, as spill-resident */

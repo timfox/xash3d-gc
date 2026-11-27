@@ -2507,7 +2507,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 			mod = SV_ModelHandle( ed->v.modelindex );
 			/* Before the type test: an unloaded handle is not mod_studio yet. */
 			if( mod && ( mod->needload != NL_PRESENT || !mod->cache.data ) && mod->name[0]
-				&& Q_stristr( mod->name, "mapmodels/" ))
+				&& Mod_GCIsPropModelPath( mod->name ))
 			{
 				/* A map model precached by the game at spawn (DoD control
 				 * point flags) stays a registered, never-loaded handle on this
@@ -2549,7 +2549,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				}
 			}
 			if( mod && mod->type == mod_studio && mod->needload == NL_PRESENT && mod->cache.data
-				&& Q_stristr( mod->name, "mapmodels/" ))
+				&& Mod_GCIsPropModelPath( mod->name ))
 			{
 				/* A promoted map model has its lean mesh only; attach its *t
 				 * skin atlas too, or it draws flat grey (ceres 3282517bd).
@@ -2672,7 +2672,7 @@ void CL_GameCubeLeanEmitBrushEntities( void )
 				allow = false;
 				if( Q_stristr( mod->name, "w_" ) && !Q_stristr( mod->name, "v_" ))
 					allow = true;
-				else if( Q_stristr( mod->name, "mapmodels/" )
+				else if( Mod_GCIsPropModelPath( mod->name )
 					|| mohaa_script_asset
 					|| Q_stristr( mod->name, "hk_satchel" )
 					|| Q_stristr( mod->name, "sandbags" )

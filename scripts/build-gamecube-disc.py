@@ -2991,10 +2991,22 @@ def dod_bsp_prop_models(data: Path) -> tuple[str, ...]:
 	return tuple(sorted(refs))
 
 
+def film_vehicle_models(data: Path) -> tuple[str, ...]:
+	"""Our own cinematic vehicles on a film disc (dod-gc build-lean-iso.sh stages
+	content/gopex/models/film/*.mdl as models/film/). They go the way of the map's
+	tanks: a lean mesh plus a *t skin atlas in gc_studio/. Copied raw, the ep02
+	proof reel's panzer4 never loaded."""
+	film = data / "models" / "film"
+	if not film.is_dir():
+		return ()
+	return tuple(sorted(f"models/film/{p.name.lower()}" for p in film.glob("*.mdl")))
+
+
 def inject_gc_studio_into_bootstrap(archive: "zipfile.ZipFile", data: Path) -> int:
 	"""Add allowlisted MDLs into an existing bootstrap ZIP under gc_studio/."""
 	staged = 0
-	map_props = tuple(r for r in dod_bsp_prop_models(data) if r not in GC_STUDIO_MODELS)
+	map_props = tuple(r for r in dod_bsp_prop_models(data) + film_vehicle_models(data)
+		if r not in GC_STUDIO_MODELS)
 	map_prop_stems = {Path(r).stem.lower() for r in map_props}
 	if map_props:
 		print(f"  DoD map props from entity lumps: {len(map_props)} more models")

@@ -71,6 +71,17 @@ probe_collect_exit_status "$child"
 				for name in ("big_mom", "controller"):
 					self.assertEqual(len(z.read(f"gc_studio/{name}.mdl")), 256)
 
+	def test_film_vehicles_get_a_lean_mesh_and_skin_atlas(self) -> None:
+		# a film disc's own vehicles (models/film/*.mdl) are staged like the map's tanks
+		disc = load_script("disc_film_vehicles", "scripts/build-gamecube-disc.py")
+		with tempfile.TemporaryDirectory() as tmpdir:
+			root = Path(tmpdir)
+			self.assertEqual(disc.film_vehicle_models(root), ())
+			(root / "models" / "film").mkdir(parents=True)
+			(root / "models" / "film" / "Panzer4.mdl").write_bytes(b"IDST")
+			(root / "models" / "film" / "notes.txt").write_text("not a model")
+			self.assertEqual(disc.film_vehicle_models(root), ("models/film/panzer4.mdl",))
+
 	def test_dolphin_cleanup_only_stops_matching_profile(self) -> None:
 		import shutil
 		import subprocess
