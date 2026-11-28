@@ -1241,6 +1241,22 @@ static void R_GXFilmLegs( cl_entity_t *e, float pos[][3], vec4_t *q, int gait, f
 	}
 }
 
+/* How high a film actor's origin stands over his soles in a sequence: the lowest
+ * point of the sequence's box, the height dod-gc puts the origin at over the floor
+ * (dod_film_actor.cpp DodFilm_FootHeight, the same 4..48 range). 0: not known (the
+ * game kept its pose's own height). */
+static float R_GXFilmFootHeight( int seq )
+{
+	const mstudioseqdesc_t *sd;
+	float h;
+
+	if( seq < 0 || seq >= m_pStudioHeader->numseq )
+		return 0.0f;
+	sd = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex ) + seq;
+	h = -sd->bbmin[2];
+	return ( h >= 4.0f && h <= 48.0f ) ? h : 0.0f;
+}
+
 /* The film actor's pose so far (pos, q: its sequence at frame f) gets its gait's
  * legs now, and the fade from what it played before. */
 static void R_GXFilmBlend( cl_entity_t *e, float pos[][3], vec4_t *q, float f )
@@ -1296,8 +1312,258 @@ static void R_GXFilmBlend( cl_entity_t *e, float pos[][3], vec4_t *q, float f )
 			R_StudioCalcRotations( e, pos1b, q1b, pd, panim, l->prevframe );
 		if( l->prevgait )
 			R_GXFilmLegs( e, pos1b, q1b, l->prevgait, l->prevgaitframe );
+		/* The game moves the origin to the new sequence's height over the floor the
+		 * moment it changes (a man lying down: 36 units to 21), but the old pose fades
+		 * out over FILM_BLEND_TIME: drawn round the new origin, a standing man's boots
+		 * went 15 units into the ground for the first frames of every lie-down, kneel or
+		 * death, and floated over it on the way back up. The old pose keeps its own
+		 * height while it fades, so the soles stay where they were. */
+		{
+			const float hn = R_GXFilmFootHeight( gait > 0 ? gait : e->curstate.sequence );
+			const float ho = R_GXFilmFootHeight( l->prevgait > 0 ? l->prevgait : l->prevseq );
+			const mstudiobone_t *pb = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+			int i;
+
+			if( hn > 0.0f && ho > 0.0f && ho != hn )
+				for( i = 0; i < m_pStudioHeader->numbones; i++ )
+					if( pb[i].parent == -1 )
+						pos1b[i][2] += ho - hn;
+		}
 		s = s * s * ( 3.0f - 2.0f * s );	/* ease in and out */
 		R_StudioSlerpBones( m_pStudioHeader->numbones, q, pos, q1b, pos1b, 1.0f - s );
+	}
+}
+
+/* Feet on the floor, after the bones are set up (world space). The game stands a film
+ * actor's origin at his legs' sequence height over the floor, so the floor is that far
+ * under the origin. A fade between two poses, a donor clip retargeted onto DoD's longer
+ * legs, or an old transfer can still put an ankle or toe under it for a few frames:
+ * a leg whose foot is under is bent at the knee until the foot is back on the floor
+ * (two-bone IK: the knee folds in its own plane, the hip turns the leg onto the point),
+ * and only when the leg cannot fold that far (a knee or a hand down on the ground, a
+ * leg already folded flat) is the whole man lifted. Film actors only; -gcnofootik
+ * turns it off. */
+#define FILM_FOOT_CLEAR	0.5f	/* a foot or toe bone's least height over the floor (dod-gc's corpses: 0.4-0.7) */
+#define FILM_FOOT_MAX	24.0f	/* a correction past this is a wrong height, not a sunk foot: left alone */
+
+typedef struct
+{
+	const studiohdr_t *hdr;
+	int thigh[2], calf[2], foot[2], toe[2];
+	byte under[2][MAXSTUDIOBONES / 8];	/* bones below each thigh */
+} film_legs_t;
+
+static film_legs_t film_legs;
+
+static int R_GXFilmBone( const mstudiobone_t *pb, int n, const char *name )
+{
+	int i;
+
+	for( i = 0; i < n; i++ )
+		if( !Q_stricmp( pb[i].name, name ))
+			return i;
+	return -1;
+}
+
+static void R_GXFilmLegsIndex( void )
+{
+	const mstudiobone_t *pb = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+	const int n = m_pStudioHeader->numbones;
+	static const char *side[2] = { "L", "R" };
+	char name[32];
+	int k, i;
+
+	if( film_legs.hdr == m_pStudioHeader )
+		return;
+	memset( &film_legs, 0, sizeof( film_legs ));
+	film_legs.hdr = m_pStudioHeader;
+	for( k = 0; k < 2; k++ )
+	{
+		Q_snprintf( name, sizeof( name ), "Bip01 %s Thigh", side[k] );
+		film_legs.thigh[k] = R_GXFilmBone( pb, n, name );
+		Q_snprintf( name, sizeof( name ), "Bip01 %s Calf", side[k] );
+		film_legs.calf[k] = R_GXFilmBone( pb, n, name );
+		Q_snprintf( name, sizeof( name ), "Bip01 %s Foot", side[k] );
+		film_legs.foot[k] = R_GXFilmBone( pb, n, name );
+		Q_snprintf( name, sizeof( name ), "Bip01 %s Toe0", side[k] );
+		film_legs.toe[k] = R_GXFilmBone( pb, n, name );
+		if( film_legs.thigh[k] < 0 )
+			continue;
+		/* parents come before their children in a studio model */
+		for( i = 0; i < n; i++ )
+			if( i == film_legs.thigh[k] || ( pb[i].parent >= 0 && CHECKVISBIT( film_legs.under[k], pb[i].parent )))
+				SETVISBIT( film_legs.under[k], i );
+	}
+}
+
+/* Turn every bone of one leg (from bone first down) by rotation r about point p. */
+static void R_GXFilmTurnLeg( const byte *under, int first, const float r[3][3], const vec3_t p )
+{
+	int i, a, b;
+
+	for( i = first; i < m_pStudioHeader->numbones; i++ )
+	{
+		matrix3x4 *ms[2] = { &g_studio.bonestransform[i], &g_studio.lighttransform[i] };
+		int m;
+
+		if( !CHECKVISBIT( under, i ))
+			continue;
+		for( m = 0; m < 2; m++ )
+		{
+			float (*x)[4] = *ms[m];
+			float o[3][4];
+
+			for( a = 0; a < 3; a++ )
+				for( b = 0; b < 4; b++ )
+					o[a][b] = r[a][0] * x[0][b] + r[a][1] * x[1][b] + r[a][2] * x[2][b];
+			for( a = 0; a < 3; a++ )
+			{
+				/* the origin column turns about p, not about the world's origin */
+				o[a][3] = p[a] + r[a][0] * ( x[0][3] - p[0] ) + r[a][1] * ( x[1][3] - p[1] ) + r[a][2] * ( x[2][3] - p[2] );
+				for( b = 0; b < 4; b++ )
+					x[a][b] = o[a][b];
+			}
+		}
+	}
+}
+
+/* The rotation taking unit direction u onto unit direction v (Rodrigues). */
+static void R_GXFilmRotBetween( const vec3_t u, const vec3_t v, float r[3][3] )
+{
+	vec3_t ax;
+	float c = DotProduct( u, v ), s;
+	int a, b;
+
+	CrossProduct( u, v, ax );
+	s = VectorLength( ax );
+	for( a = 0; a < 3; a++ )
+		for( b = 0; b < 3; b++ )
+			r[a][b] = a == b ? 1.0f : 0.0f;
+	if( s < 1e-6f )
+		return;
+	VectorScale( ax, 1.0f / s, ax );
+	{
+		const float C = 1.0f - c, x = ax[0], y = ax[1], z = ax[2];
+
+		r[0][0] = c + x * x * C;     r[0][1] = x * y * C - z * s; r[0][2] = x * z * C + y * s;
+		r[1][0] = y * x * C + z * s; r[1][1] = c + y * y * C;     r[1][2] = y * z * C - x * s;
+		r[2][0] = z * x * C - y * s; r[2][1] = z * y * C + x * s; r[2][2] = c + z * z * C;
+	}
+}
+
+/* Raise leg k's foot by d with the knee: false when the leg cannot fold that far. */
+static qboolean R_GXFilmFootIK( int k, float d )
+{
+	const int th = film_legs.thigh[k], ca = film_legs.calf[k], fo = film_legs.foot[k];
+	vec3_t H, K, A, T, u, v, n, A2;
+	float a, b, c, c0, want, have, r[3][3];
+	int step;
+
+	if( th < 0 || ca < 0 || fo < 0 )
+		return false;
+	Matrix3x4_OriginFromMatrix( g_studio.bonestransform[th], H );
+	Matrix3x4_OriginFromMatrix( g_studio.bonestransform[ca], K );
+	Matrix3x4_OriginFromMatrix( g_studio.bonestransform[fo], A );
+	VectorCopy( A, T );
+	T[2] += d;
+	a = VectorDistance( H, K );
+	b = VectorDistance( K, A );
+	c0 = VectorDistance( H, A );
+	c = VectorDistance( H, T );
+	if( a < 1.0f || b < 1.0f || c <= fabsf( a - b ) + 0.5f || c >= a + b - 0.05f )
+		return false;
+	/* the knee folds about the leg's own plane, to the hip-foot length the point needs */
+	VectorSubtract( K, H, u );
+	VectorSubtract( A, H, v );
+	CrossProduct( u, v, n );
+	if( VectorLength( n ) < 1e-3f )
+		return false;	/* a dead straight leg has no plane to fold in */
+	VectorNormalize( n );
+	want = acosf( bound( -1.0f, ( a * a + b * b - c * c ) / ( 2.0f * a * b ), 1.0f ));
+	have = acosf( bound( -1.0f, ( a * a + b * b - c0 * c0 ) / ( 2.0f * a * b ), 1.0f ));
+	{
+		/* fold by have - want about n at the knee (the sign that shortens the leg) */
+		const float ang = have - want;
+
+		for( step = 0; step < 2; step++ )
+		{
+			const float t = step ? -ang : ang, cs = cosf( t ), sn = sinf( t ), C = 1.0f - cs;
+			const float x = n[0], y = n[1], z = n[2];
+			const float rr[3][3] = {
+				{ cs + x * x * C, x * y * C - z * sn, x * z * C + y * sn },
+				{ y * x * C + z * sn, cs + y * y * C, y * z * C - x * sn },
+				{ z * x * C - y * sn, z * y * C + x * sn, cs + z * z * C } };
+			vec3_t ka;
+
+			VectorSubtract( A, K, ka );
+			A2[0] = K[0] + rr[0][0] * ka[0] + rr[0][1] * ka[1] + rr[0][2] * ka[2];
+			A2[1] = K[1] + rr[1][0] * ka[0] + rr[1][1] * ka[1] + rr[1][2] * ka[2];
+			A2[2] = K[2] + rr[2][0] * ka[0] + rr[2][1] * ka[1] + rr[2][2] * ka[2];
+			if( fabsf( VectorDistance( H, A2 ) - c ) < 0.25f || step )
+			{
+				byte calf_under[MAXSTUDIOBONES / 8];
+				int i;
+
+				memset( calf_under, 0, sizeof( calf_under ));
+				for( i = 0; i < m_pStudioHeader->numbones; i++ )
+				{
+					const mstudiobone_t *pb = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
+
+					if( i == ca || ( pb[i].parent >= 0 && CHECKVISBIT( calf_under, pb[i].parent )))
+						SETVISBIT( calf_under, i );
+				}
+				R_GXFilmTurnLeg( calf_under, ca, rr, K );
+				break;
+			}
+		}
+	}
+	/* then the hip turns the folded leg onto the point */
+	Matrix3x4_OriginFromMatrix( g_studio.bonestransform[fo], A2 );
+	VectorSubtract( A2, H, u );
+	VectorSubtract( T, H, v );
+	VectorNormalize( u );
+	VectorNormalize( v );
+	R_GXFilmRotBetween( u, v, r );
+	R_GXFilmTurnLeg( film_legs.under[k], th, r, H );
+	return true;
+}
+
+static void R_GXFilmGround( cl_entity_t *e )
+{
+	static int noik = -1;
+	const film_latch_t *l = g_film_latch;
+	float h, floor, lift = 0.0f;
+	int k, i;
+
+	if( noik < 0 )
+		noik = gEngfuncs.Sys_CheckParm( "-gcnofootik" ) ? 1 : 0;
+	if( noik || !l )
+		return;
+	h = R_GXFilmFootHeight( l->gait > 0 ? l->gait : e->curstate.sequence );
+	if( h <= 0.0f )
+		return;
+	R_GXFilmLegsIndex( );
+	floor = g_studio.rotationmatrix[2][3] - h + FILM_FOOT_CLEAR;
+	for( k = 0; k < 2; k++ )
+	{
+		float low = 1e9f, d;
+
+		if( film_legs.foot[k] >= 0 )
+			low = Q_min( low, g_studio.bonestransform[film_legs.foot[k]][2][3] );
+		if( film_legs.toe[k] >= 0 )
+			low = Q_min( low, g_studio.bonestransform[film_legs.toe[k]][2][3] );
+		d = floor - low;
+		if( low > 1e8f || d <= 0.05f || d > FILM_FOOT_MAX )
+			continue;
+		if( !R_GXFilmFootIK( k, d ))
+			lift = Q_max( lift, d );
+	}
+	if( lift <= 0.0f )
+		return;
+	for( i = 0; i < m_pStudioHeader->numbones; i++ )
+	{
+		g_studio.bonestransform[i][2][3] += lift;
+		g_studio.lighttransform[i][2][3] += lift;
 	}
 }
 #endif
@@ -1553,6 +1819,8 @@ static void R_StudioSetupBones( cl_entity_t *e )
 		}
 	}
 #if XASH_GAMECUBE
+	if( g_film_latch )
+		R_GXFilmGround( e );
 	/* G377: rest-pose fallback when lean anim is empty/exploded.
 	 * Listen WorldDL uses -gclistenserver (not -gcnewgame), and lean
 	 * v_garand idle has numframes=0 — CalcRotations then smears the arms
