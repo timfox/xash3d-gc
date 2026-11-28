@@ -1355,6 +1355,9 @@ typedef struct
 
 static film_legs_t film_legs;
 
+#define FILM_BIT( v, b )	( (v)[(b) >> 3] & ( 1 << ( (b) & 7 )))
+#define FILM_SETBIT( v, b )	( (v)[(b) >> 3] |= ( 1 << ( (b) & 7 )))
+
 static int R_GXFilmBone( const mstudiobone_t *pb, int n, const char *name )
 {
 	int i;
@@ -1391,8 +1394,8 @@ static void R_GXFilmLegsIndex( void )
 			continue;
 		/* parents come before their children in a studio model */
 		for( i = 0; i < n; i++ )
-			if( i == film_legs.thigh[k] || ( pb[i].parent >= 0 && CHECKVISBIT( film_legs.under[k], pb[i].parent )))
-				SETVISBIT( film_legs.under[k], i );
+			if( i == film_legs.thigh[k] || ( pb[i].parent >= 0 && FILM_BIT( film_legs.under[k], pb[i].parent )))
+				FILM_SETBIT( film_legs.under[k], i );
 	}
 }
 
@@ -1406,7 +1409,7 @@ static void R_GXFilmTurnLeg( const byte *under, int first, const float r[3][3], 
 		matrix3x4 *ms[2] = { &g_studio.bonestransform[i], &g_studio.lighttransform[i] };
 		int m;
 
-		if( !CHECKVISBIT( under, i ))
+		if( !FILM_BIT( under, i ))
 			continue;
 		for( m = 0; m < 2; m++ )
 		{
@@ -1509,8 +1512,8 @@ static qboolean R_GXFilmFootIK( int k, float d )
 				{
 					const mstudiobone_t *pb = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex );
 
-					if( i == ca || ( pb[i].parent >= 0 && CHECKVISBIT( calf_under, pb[i].parent )))
-						SETVISBIT( calf_under, i );
+					if( i == ca || ( pb[i].parent >= 0 && FILM_BIT( calf_under, pb[i].parent )))
+						FILM_SETBIT( calf_under, i );
 				}
 				R_GXFilmTurnLeg( calf_under, ca, rr, K );
 				break;
